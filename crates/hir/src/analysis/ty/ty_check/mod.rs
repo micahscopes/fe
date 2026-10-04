@@ -117,8 +117,7 @@ use crate::analysis::semantic::{
     EvalOutcome, GenericSubst, ImplEnv, RuntimeSizeError, SemConstId, SemConstScalar,
     SemConstValue, SemOrigin, SemanticInstanceKey, const_computation_for_instance,
     describe_const_computation, eval_body_owner_const, get_or_build_semantic_instance,
-    reify_runtime_const_for_ty, resolve_trait_method_with_selections,
-    runtime_size_bytes_with_source,
+    reify_runtime_const_for_ty, runtime_size_bytes_with_source,
 };
 use crate::analysis::semantic::{CtfeError, SemanticCodeRegionRef};
 use crate::analysis::ty::ty_def::{TyBase, TyData};
@@ -2122,7 +2121,7 @@ impl<'db> TyChecker<'db> {
         TyCheckerSnapshot {
             table: self.table.snapshot(),
             deferred_len: self.env.deferred_len(),
-            trait_choices_len: self.env.trait_choices().len(),
+            trait_choices_len: self.env.trait_choices_len(),
             with_choices_len: self.env.with_choices().len(),
         }
     }
@@ -5622,16 +5621,17 @@ impl<'db> TypedBody<'db> {
         let CallableDef::Func(mut func) = callable.callable_def() else {
             return None;
         };
-        if let Some(inst) = callable.trait_inst()
+        if callable.trait_inst().is_some()
             && let Some(name) = func.name(db).to_opt()
-            && let Selection::Unique(method) = resolve_trait_method_with_selections(
-                db,
-                TraitSolveCx::new(db, body.scope()).with_assumptions(self.assumptions()),
-                inst,
-                name,
-                callable.context,
-            )
-            .ok()?
+            && let Selection::Unique(method) =
+                crate::analysis::semantic::instance::recorded_method_instance(
+                    db,
+                    TraitSolveCx::new(db, body.scope()).with_assumptions(self.assumptions()),
+                    self.decisions()
+                        .choice_ref(&DecisionSite::trait_reference(expr.span(body).into()))?,
+                    name,
+                )
+                .ok()?
             && let Some(body_func) = method.body()
         {
             func = body_func;

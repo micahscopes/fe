@@ -4,7 +4,7 @@ mod template;
 
 pub use const_ref::generated_callee_key;
 pub(crate) use const_ref::{
-    provisional_semantic_callee_key, resolve_semantic_const_ref,
+    provisional_semantic_callee_key, recorded_method_instance, resolve_semantic_const_ref,
     resolve_semantic_const_ref_in_instance, semantic_callee_key_with_effect_providers,
 };
 pub use semantic::{

@@ -958,11 +958,8 @@ impl<'db> TyCheckEnv<'db> {
         self.decisions.openings.truncate(len);
     }
 
-    pub(super) fn trait_choices(&self) -> impl ExactSizeIterator<Item = &TraitChoice<'db>> {
-        self.decisions
-            .choices
-            .values()
-            .map(|choice| choice.data(self.db))
+    pub(super) fn trait_choices_len(&self) -> usize {
+        self.decisions.choices.len()
     }
 
     pub(super) fn record_trait_choice(
@@ -1929,7 +1926,7 @@ impl<'db> Decisions<'db> {
         })
     }
 
-    /// Transport the accepted record itself, retaining its declared use identity.
+    /// Read the canonical answer referenced by the declared use site.
     pub fn choice_ref(&self, site: &DecisionSite<'db>) -> Option<TraitChoiceId<'db>> {
         self.choices.get(site).copied()
     }

@@ -535,7 +535,7 @@ fn source_method_choice<'db>(
     }
 }
 
-fn recorded_method_instance<'db>(
+pub(crate) fn recorded_method_instance<'db>(
     db: &'db dyn HirAnalysisDb,
     context: TraitSolveCx<'db>,
     choice: TraitChoiceId<'db>,

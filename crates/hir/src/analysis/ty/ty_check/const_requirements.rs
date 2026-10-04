@@ -3391,9 +3391,9 @@ fn use_it() -> u256 { read<7>() }";
             super::super::TraitObligationOutcome::Discharged
                 | super::super::TraitObligationOutcome::Progressed
         ));
-        assert_eq!(checker.env.trait_choices().len(), 1);
+        assert_eq!(checker.env.trait_choices_len(), 1);
         checker.rollback_state(snapshot);
-        assert!(checker.env.trait_choices().len() == 0);
+        assert!(checker.env.trait_choices_len() == 0);
     }
 
     #[test]
@@ -3440,22 +3440,18 @@ fn use_it() -> u256 { read<7>() }";
             super::super::TraitObligationOutcome::Discharged
                 | super::super::TraitObligationOutcome::Progressed
         ));
-        assert_eq!(checker.env.trait_choices().len(), 1);
+        assert_eq!(checker.env.trait_choices_len(), 1);
         let after_first = checker.snapshot_state();
         checker.process_trait_obligation(obligation.clone(), true);
-        assert_eq!(checker.env.trait_choices().len(), 1, "one answer per key");
+        assert_eq!(checker.env.trait_choices_len(), 1, "one answer per key");
         let mut other_site = obligation;
         other_site.span = checker.body().expr(&db).span(checker.body()).into();
         checker.process_trait_obligation(other_site, true);
-        assert_eq!(checker.env.trait_choices().len(), 2, "distinct use sites");
+        assert_eq!(checker.env.trait_choices_len(), 2, "distinct use sites");
         checker.rollback_state(after_first);
-        assert_eq!(
-            checker.env.trait_choices().len(),
-            1,
-            "prior answer survives"
-        );
+        assert_eq!(checker.env.trait_choices_len(), 1, "prior answer survives");
         checker.rollback_state(snapshot);
-        assert!(checker.env.trait_choices().len() == 0);
+        assert!(checker.env.trait_choices_len() == 0);
     }
 
     #[test]
