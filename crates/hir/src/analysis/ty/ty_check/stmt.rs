@@ -378,6 +378,7 @@ impl<'db> TyChecker<'db> {
                         TraitChoice {
                             goal: trait_inst,
                             via: TraitChoiceVia::Implementation(impl_id),
+                            premises: Vec::new(),
                         },
                     );
                     self.commit_state(snapshot);

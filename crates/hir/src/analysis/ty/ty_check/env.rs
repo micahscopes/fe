@@ -2053,6 +2053,7 @@ impl<'db> TraitChoiceId<'db> {
             TraitChoice {
                 goal: instance.trait_inst(),
                 via: TraitChoiceVia::Implementation(instance.selected()),
+                premises: Vec::new(),
             },
         )
     }
@@ -2074,6 +2075,7 @@ impl<'db> TraitChoiceId<'db> {
             TraitChoice {
                 goal,
                 via: TraitChoiceVia::Implementation(solved.implementor),
+                premises: Vec::new(),
             },
         )
     }
@@ -2086,6 +2088,7 @@ impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for TraitChoiceId<'db> 
     ) {
         let choice = self.data(visitor.db());
         choice.goal.visit_with(visitor);
+        choice.premises.visit_with(visitor);
         match choice.via {
             TraitChoiceVia::Implementation(implementor) => implementor.visit_with(visitor),
             TraitChoiceVia::Selected(selection) => selection.visit_with(visitor),
@@ -2097,6 +2100,7 @@ impl<'db> TyFoldable<'db> for TraitChoiceId<'db> {
     fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
         let mut choice = self.data(db).clone();
         choice.goal = choice.goal.fold_with(db, folder);
+        choice.premises = choice.premises.fold_with(db, folder);
         choice.via = match choice.via {
             TraitChoiceVia::Implementation(implementor) => {
                 TraitChoiceVia::Implementation(implementor.fold_with(db, folder))
@@ -2114,9 +2118,15 @@ impl<'db> TyFoldable<'db> for TraitChoiceId<'db> {
 pub struct TraitChoice<'db> {
     pub(super) goal: TraitInstId<'db>,
     pub(super) via: TraitChoiceVia<'db>,
+    pub(super) premises: Vec<TraitChoiceId<'db>>,
 }
 
 impl<'db> TraitChoice<'db> {
+    /// Accepted parent answers belong to this root obligation, not new use sites.
+    pub fn premises(&self) -> &[TraitChoiceId<'db>] {
+        &self.premises
+    }
+
     pub fn goal(&self) -> TraitInstId<'db> {
         self.goal
     }

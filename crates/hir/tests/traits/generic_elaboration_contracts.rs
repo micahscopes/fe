@@ -345,3 +345,32 @@ fn projection_normalization_does_not_commit_speculative_trait_arguments() {
         "possible equality or impl selection cannot assign a caller inference variable"
     );
 }
+
+#[test]
+fn accepted_supertrait_premises_are_retained_at_the_bound_site() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        Utf8PathBuf::from("retained_supertrait_premise.fe"),
+        "trait Base {}\ntrait Leaf: Base {}\nimpl Base for bool {}\nimpl Base for bool as Alternative {}\nimpl Leaf for bool {}\nfn target<T: Leaf>() {}\nfn selected() { with (Alternative) { target<bool>() } }\n",
+    );
+    let (module, _) = db.top_mod(file);
+    db.assert_no_diags(module);
+    let function = find_func(&db, module, "selected");
+    let (diagnostics, typed) = fe_hir::analysis::ty::ty_check::check_func_body(&db, function);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let choices = typed.trait_choices(&db).collect::<Vec<_>>();
+    let root = choices
+        .iter()
+        .find_map(|choice| {
+            choice
+                .call_constraint()
+                .map(|_| typed.decisions().choice_ref(&choice.site()).unwrap())
+        })
+        .expect("root bound record");
+    let premises = root.data(&db).premises();
+    assert_eq!(premises.len(), 1, "selected parent answer was discarded");
+    assert!(matches!(
+        premises[0].data(&db).via(),
+        fe_hir::analysis::ty::ty_check::TraitChoiceVia::Selected(_)
+    ));
+}
