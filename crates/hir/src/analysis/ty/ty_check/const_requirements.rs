@@ -1357,7 +1357,11 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 },
             ) {
                 self.entered.insert(unmet.ty);
-                self.check.report_type(unmet, false);
+                // Keep the position's decision, while an authored type owns
+                // the diagnostic for an application it already reports.
+                if !self.written.contains(&unmet.ty) {
+                    self.check.report_type(unmet, false);
+                }
             }
         }
         self.written
