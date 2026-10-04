@@ -76,6 +76,50 @@ fn second<Y: B>() { target(true) }
 }
 
 #[test]
+fn concrete_bound_callees_share_keys_across_impl_body_transport() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        Utf8PathBuf::from("concrete_bound_transport.fe"),
+        r#"
+trait Need {}
+impl Need for bool {}
+trait Runner<T> { fn run() }
+impl<T: Need> Runner<T> for bool { fn run() { target<T>() } }
+fn target<T: Need>() {}
+fn direct() { target<bool>() }
+fn through_impl() { <bool as Runner<bool>>::run() }
+"#,
+    );
+    let (module, _) = db.top_mod(file);
+    db.assert_no_diags(module);
+    let root =
+        |name| identity_semantic_instance_key(&db, BodyOwner::Func(find_func(&db, module, name)));
+    let direct = first_callee_key(&db, root("direct"));
+    let implementation = first_callee_key(&db, root("through_impl"));
+    let indirect = first_callee_key(&db, implementation);
+    let answers = |key: SemanticInstanceKey<'_>| {
+        key.impl_env(&db)
+            .bound_choices(&db)
+            .iter()
+            .map(|(slot, record)| {
+                (
+                    *slot,
+                    record.data(&db).goal().pretty_print(&db, true),
+                    format!("{:?}", record.data(&db).answer_origin(&db)),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        direct,
+        indirect,
+        "same concrete callee; direct bounds={:?}, indirect bounds={:?}",
+        answers(direct),
+        answers(indirect),
+    );
+}
+
+#[test]
 fn source_and_full_method_schemas_keep_inherited_keys_in_both_query_orders() {
     for source_first in [true, false] {
         let mut db = HirAnalysisTestDb::default();

@@ -2042,6 +2042,29 @@ pub struct TraitChoiceId<'db> {
     pub data: TraitChoice<'db>,
 }
 
+impl<'db> TraitChoiceId<'db> {
+    /// Reuse the answer from an existing context-independence proof.
+    pub(crate) fn for_satisfied_goal(
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+        solution: crate::analysis::ty::canonical::Solution<
+            crate::analysis::ty::trait_resolution::TraitGoalSolution<'db>,
+        >,
+    ) -> Self {
+        let solved = crate::analysis::ty::canonical::Canonicalized::new(db, goal).extract_solution(
+            &mut crate::analysis::ty::unify::UnificationTable::new(db),
+            solution,
+        );
+        Self::new(
+            db,
+            TraitChoice {
+                goal,
+                via: TraitChoiceVia::Implementation(solved.implementor),
+            },
+        )
+    }
+}
+
 impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for TraitChoiceId<'db> {
     fn visit_with<V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized>(
         &self,

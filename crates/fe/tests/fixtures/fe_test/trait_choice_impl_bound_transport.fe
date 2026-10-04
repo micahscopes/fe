@@ -1,0 +1,10 @@
+trait Need { const fn value() -> u256 }
+impl Need for bool { const fn value() -> u256 { 1 } }
+impl Need for bool as Alternative { const fn value() -> u256 { 2 } }
+trait Runner<T: Need> { const fn run() -> u256 }
+impl<T: Need> Runner<T> for bool { const fn run() -> u256 { target<T>() } }
+const fn target<T: Need>() -> u256 { T::value() }
+const fn run() -> u256 { with (Alternative) { <bool as Runner<bool>>::run() } }
+const R: u256 = run()
+#[test]
+fn selected_bound_keeps_its_answer() { assert(R == 2) }

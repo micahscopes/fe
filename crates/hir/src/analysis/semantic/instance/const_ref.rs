@@ -572,7 +572,7 @@ fn semantic_callee_key_with_assumptions<'db>(
     assumptions: PredicateListId<'db>,
     provider_resolution_mode: ProviderResolutionMode,
     inherit_trait_selection: bool,
-    source_choice: CalleeChoices<'db>,
+    mut source_choice: CalleeChoices<'db>,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
     let CallableDef::Func(nominal_func) = callable.callable_def() else {
         return Ok(None);
@@ -829,21 +829,61 @@ fn semantic_callee_key_with_assumptions<'db>(
         };
         let bounds = collect_func_decl_constraints(db, CallableDef::Func(nominal_func), true)
             .instantiate(db, &subst_args);
-        let independent = bounds.list(db).iter().copied().all(|bound| {
-            matches!(
-                is_goal_satisfiable(db, TraitSolveCx::new(db, scope), bound),
-                GoalSatisfiability::Satisfied(_)
-            )
-        }) && (0..nominal_func.arg_tys(db).len()).all(|idx| {
-            same_without_caller(
-                callable
-                    .arg_ty(db, idx)
-                    .expect("nominal input arity changed"),
-            )
-        }) && same_without_caller(callable.ret_ty(db))
+        let mut concrete_assumptions = Vec::new();
+        let independent = bounds
+            .list(db)
+            .iter()
+            .copied()
+            .enumerate()
+            .all(|(slot, bound)| {
+                match is_goal_satisfiable(db, TraitSolveCx::new(db, scope), bound) {
+                    GoalSatisfiability::Satisfied(solution) => {
+                        if callable.opened_provisions.is_empty()
+                            && !retained_selections
+                                .iter()
+                                .any(|selection| selection.matches(db, bound))
+                            && source_choice.bounds.iter().any(|&(index, choice)| {
+                                index == slot
+                                    && matches!(
+                                        choice.data(db).answer_origin(db),
+                                        ImplementorOrigin::Assumption
+                                    )
+                            })
+                        {
+                            concrete_assumptions.push((
+                                slot,
+                                TraitChoiceId::for_satisfied_goal(db, bound, solution),
+                            ));
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            })
+            && (0..nominal_func.arg_tys(db).len()).all(|idx| {
+                same_without_caller(
+                    callable
+                        .arg_ty(db, idx)
+                        .expect("nominal input arity changed"),
+                )
+            })
+            && same_without_caller(callable.ret_ty(db))
             && checked_effect_inputs
                 .iter()
                 .all(|&(_, ty)| same_without_caller(ty));
+        if independent {
+            // An unresolved assumption already uses ordinary dispatch. Reuse
+            // this proof's concrete answer; never replace an accepted selection.
+            for (slot, answer) in concrete_assumptions {
+                if let Some((_, choice)) = source_choice
+                    .bounds
+                    .iter_mut()
+                    .find(|(index, _)| *index == slot)
+                {
+                    *choice = answer;
+                }
+            }
+        }
         (independent, true)
     } else {
         (false, true)
