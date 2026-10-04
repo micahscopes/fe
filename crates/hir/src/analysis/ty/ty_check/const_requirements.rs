@@ -3025,7 +3025,7 @@ mod recording_tests {
                 .trait_choices(&db)
                 .filter(|choice| {
                     choice
-                        .goal
+                        .goal()
                         .def(&db)
                         .name(&db)
                         .to_opt()
@@ -3038,7 +3038,7 @@ mod recording_tests {
                 "{name}: one accepted choice per use"
             );
             assert!(choices.iter().all(|choice| matches!(
-                choice.via,
+                choice.via(),
                 super::super::env::TraitChoiceVia::Implementation(_)
             )));
             assert_eq!(typed.checked_conditions().len(), expected);
@@ -3249,7 +3249,7 @@ fn use_it() -> u256 { read<7>() }";
                 .trait_choices(&db)
                 .filter(|choice| {
                     choice
-                        .goal
+                        .goal()
                         .def(&db)
                         .name(&db)
                         .to_opt()
@@ -3266,11 +3266,11 @@ fn use_it() -> u256 { read<7>() }";
                     .outcome()
                     .expect("accepted binding");
                 assert_eq!(
-                    choices[0].via,
+                    choices[0].via(),
                     super::super::env::TraitChoiceVia::Selected(with_selection)
                 );
             }
-            match (name, choices[0].via) {
+            match (name, choices[0].via()) {
                 ("selected", super::super::env::TraitChoiceVia::Selected(_)) => {}
                 ("bound", super::super::env::TraitChoiceVia::Implementation(implementor)) => {
                     assert_eq!(

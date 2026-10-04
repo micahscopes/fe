@@ -965,8 +965,12 @@ impl<'db> TyCheckEnv<'db> {
             .map(|choice| choice.data(self.db))
     }
 
-    pub(super) fn record_trait_choice(&mut self, choice: TraitChoice<'db>) {
-        self.decisions.record_trait_choice(self.db, choice);
+    pub(super) fn record_trait_choice(
+        &mut self,
+        site: DecisionSite<'db>,
+        choice: TraitChoice<'db>,
+    ) {
+        self.decisions.record_trait_choice(self.db, site, choice);
     }
 
     pub(super) fn truncate_trait_choices(&mut self, len: usize) {
@@ -1877,8 +1881,8 @@ pub(super) enum TraitObligationOrigin<'db> {
 /// its answer, not separate decisions. Goals are data and folding leaves keys intact.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DecisionSite<'db> {
-    span: DynLazySpan<'db>,
-    origin: TraitObligationOrigin<'db>,
+    pub(super) span: DynLazySpan<'db>,
+    pub(super) origin: TraitObligationOrigin<'db>,
 }
 
 impl<'db> DecisionSite<'db> {
@@ -1906,8 +1910,23 @@ impl<'db> Decisions<'db> {
         &self,
         db: &'db dyn HirAnalysisDb,
         site: &DecisionSite<'db>,
-    ) -> Option<&'db TraitChoice<'db>> {
-        self.choice_ref(site).map(|choice| choice.data(db))
+    ) -> Option<TraitChoiceUse<'_, 'db>> {
+        self.choices
+            .get_key_value(site)
+            .map(|(site, record)| TraitChoiceUse {
+                site,
+                data: record.data(db),
+            })
+    }
+
+    pub fn choice_entries(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> impl ExactSizeIterator<Item = TraitChoiceUse<'_, 'db>> {
+        self.choices.iter().map(|(site, record)| TraitChoiceUse {
+            site,
+            data: record.data(db),
+        })
     }
 
     /// Transport the accepted record itself, retaining its declared use identity.
@@ -1928,9 +1947,9 @@ impl<'db> Decisions<'db> {
     pub(super) fn record_trait_choice(
         &mut self,
         db: &'db dyn HirAnalysisDb,
+        key: DecisionSite<'db>,
         choice: TraitChoice<'db>,
     ) {
-        let key = choice.site();
         if let Some(previous) = self.choices.get(&key) {
             assert_eq!(
                 previous.data(db),
@@ -1959,17 +1978,7 @@ impl<'db> Decisions<'db> {
         folder: &mut F,
     ) -> Self {
         for record in self.choices.values_mut() {
-            let mut choice = record.data(db).clone();
-            choice.goal = choice.goal.fold_with(db, folder);
-            choice.via = match choice.via {
-                TraitChoiceVia::Implementation(implementor) => {
-                    TraitChoiceVia::Implementation(implementor.fold_with(db, folder))
-                }
-                TraitChoiceVia::Selected(selection) => {
-                    TraitChoiceVia::Selected(selection.fold_with(db, folder))
-                }
-            };
-            *record = TraitChoiceId::new(db, choice);
+            *record = record.fold_with(db, folder);
         }
         for choice in self.openings.values_mut() {
             if let Ok(selection) = &mut choice.outcome {
@@ -1990,12 +1999,7 @@ impl<'db> Decisions<'db> {
         visitor: &mut V,
     ) {
         for record in self.choices.values() {
-            let choice = record.data(visitor.db());
-            choice.goal.visit_with(visitor);
-            match choice.via {
-                TraitChoiceVia::Implementation(implementor) => implementor.visit_with(visitor),
-                TraitChoiceVia::Selected(selection) => selection.visit_with(visitor),
-            }
+            record.visit_with(visitor);
         }
         for choice in self.openings.values() {
             if let Ok(selection) = choice.outcome {
@@ -2041,30 +2045,49 @@ pub struct TraitChoiceId<'db> {
     pub data: TraitChoice<'db>,
 }
 
+impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for TraitChoiceId<'db> {
+    fn visit_with<V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized>(
+        &self,
+        visitor: &mut V,
+    ) {
+        let choice = self.data(visitor.db());
+        choice.goal.visit_with(visitor);
+        match choice.via {
+            TraitChoiceVia::Implementation(implementor) => implementor.visit_with(visitor),
+            TraitChoiceVia::Selected(selection) => selection.visit_with(visitor),
+        }
+    }
+}
+
+impl<'db> TyFoldable<'db> for TraitChoiceId<'db> {
+    fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
+        let mut choice = self.data(db).clone();
+        choice.goal = choice.goal.fold_with(db, folder);
+        choice.via = match choice.via {
+            TraitChoiceVia::Implementation(implementor) => {
+                TraitChoiceVia::Implementation(implementor.fold_with(db, folder))
+            }
+            TraitChoiceVia::Selected(selection) => {
+                TraitChoiceVia::Selected(selection.fold_with(db, folder))
+            }
+        };
+        Self::new(db, choice)
+    }
+}
+
 /// An accepted obligation's actual solver answer, before final inference folding.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TraitChoice<'db> {
     pub(super) goal: TraitInstId<'db>,
     pub(super) via: TraitChoiceVia<'db>,
-    pub(super) origin: TraitObligationOrigin<'db>,
-    pub(super) span: DynLazySpan<'db>,
 }
 
 impl<'db> TraitChoice<'db> {
-    pub fn site(&self) -> DecisionSite<'db> {
-        DecisionSite {
-            span: self.span.clone(),
-            origin: self.origin,
-        }
-    }
     pub fn goal(&self) -> TraitInstId<'db> {
         self.goal
     }
     pub fn via(&self) -> TraitChoiceVia<'db> {
         self.via
-    }
-    pub fn span(&self) -> &DynLazySpan<'db> {
-        &self.span
     }
     pub fn answer_origin(
         &self,
@@ -2075,8 +2098,37 @@ impl<'db> TraitChoice<'db> {
             TraitChoiceVia::Selected(selection) => selection.origin(db),
         }
     }
+}
+
+/// Use metadata stays in the Decisions key, outside canonical answer identity.
+/// This borrowed view reads that key and the shared answer, owning neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraitChoiceUse<'body, 'db> {
+    site: &'body DecisionSite<'db>,
+    data: &'db TraitChoice<'db>,
+}
+
+impl<'db> TraitChoiceUse<'_, 'db> {
+    pub fn site(&self) -> DecisionSite<'db> {
+        self.site.clone()
+    }
+    pub fn span(&self) -> &DynLazySpan<'db> {
+        &self.site.span
+    }
+    pub fn goal(&self) -> TraitInstId<'db> {
+        self.data.goal()
+    }
+    pub fn via(&self) -> TraitChoiceVia<'db> {
+        self.data.via()
+    }
+    pub fn answer_origin(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> crate::analysis::ty::trait_def::ImplementorOrigin<'db> {
+        self.data.answer_origin(db)
+    }
     pub fn call_constraint(&self) -> Option<(ExprId, CallableDef<'db>, usize)> {
-        match self.origin {
+        match self.site.origin {
             TraitObligationOrigin::CallConstraint {
                 call_expr,
                 callable_def,

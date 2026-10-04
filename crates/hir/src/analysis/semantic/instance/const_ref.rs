@@ -337,7 +337,7 @@ pub(crate) fn semantic_callee_key_with_effect_providers<'db>(
         caller.assumptions(db),
         ProviderResolutionMode::Final,
         inherit_trait_selection,
-        source_trait_choice(db, caller_key, callable, inherit_trait_selection, origin),
+        source_trait_choices(db, caller_key, callable, inherit_trait_selection, origin),
     )
 }
 
@@ -360,7 +360,7 @@ pub(crate) fn provisional_semantic_callee_key<'db>(
         assumptions,
         ProviderResolutionMode::Provisional,
         inherit_trait_selection,
-        source_trait_choice(db, caller_key, callable, inherit_trait_selection, origin),
+        source_trait_choices(db, caller_key, callable, inherit_trait_selection, origin),
     )
 }
 
@@ -409,7 +409,10 @@ pub fn generated_callee_key<'db>(
         assumptions,
         ProviderResolutionMode::Final,
         false,
-        TraitCallChoice::Synthetic,
+        CalleeChoices {
+            method: TraitCallChoice::Synthetic,
+            bounds: Vec::new(),
+        },
     )?
     .expect("function callee");
     if !callee.concrete_dispatch {
@@ -427,7 +430,75 @@ enum TraitCallChoice<'db> {
     Synthetic,
 }
 
-fn source_trait_choice<'db>(
+struct CalleeChoices<'db> {
+    method: TraitCallChoice<'db>,
+    bounds: Vec<(usize, TraitChoiceId<'db>)>,
+}
+
+fn source_trait_choices<'db>(
+    db: &'db dyn HirAnalysisDb,
+    caller: SemanticInstanceKey<'db>,
+    callable: &Callable<'db>,
+    inherit_trait_selection: bool,
+    origin: SemOrigin<'db>,
+) -> CalleeChoices<'db> {
+    let bounds = match origin {
+        SemOrigin::Expr(expr) => {
+            let typed = caller.typed_body(db);
+            typed
+                .trait_choices(db)
+                .filter_map(|choice| {
+                    let (call_expr, definition, slot) = choice.call_constraint()?;
+                    if call_expr != expr || definition != callable.callable_def() {
+                        return None;
+                    }
+                    let record = typed.decisions().choice_ref(&choice.site())?;
+                    Some((
+                        slot,
+                        supplied_bound_choice(db, caller, &choice.site(), record).unwrap_or(record),
+                    ))
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    CalleeChoices {
+        method: source_method_choice(db, caller, callable, inherit_trait_selection, origin),
+        bounds,
+    }
+}
+
+// Bind against the unspecialized declaration. Never recover a slot from a folded
+// goal: two different declared bounds can become identical after substitution.
+fn supplied_bound_choice<'db>(
+    db: &'db dyn HirAnalysisDb,
+    caller: SemanticInstanceKey<'db>,
+    site: &DecisionSite<'db>,
+    record: TraitChoiceId<'db>,
+) -> Option<TraitChoiceId<'db>> {
+    let choice = record.data(db);
+    if !matches!(choice.answer_origin(db), ImplementorOrigin::Assumption) {
+        return Some(record);
+    }
+    let BodyOwner::Func(owner) = caller.owner(db) else {
+        return None;
+    };
+    let template = &crate::analysis::ty::ty_check::infer_body(db, caller.owner(db)).1;
+    let original = template.decisions().choice(db, site)?;
+    let declared =
+        collect_func_decl_constraints(db, CallableDef::Func(owner), true).instantiate_identity();
+    let slot = declared
+        .list(db)
+        .iter()
+        .position(|goal| *goal == original.goal())?;
+    caller
+        .impl_env(db)
+        .bound_choices(db)
+        .iter()
+        .find_map(|&(index, answer)| (index == slot).then_some(answer))
+}
+
+fn source_method_choice<'db>(
     db: &'db dyn HirAnalysisDb,
     caller: SemanticInstanceKey<'db>,
     callable: &Callable<'db>,
@@ -437,21 +508,31 @@ fn source_trait_choice<'db>(
     if callable.trait_inst().is_none() {
         return TraitCallChoice::NotTrait;
     }
-    if inherit_trait_selection {
-        return TraitCallChoice::UntransportedBound;
-    }
     let SemOrigin::Expr(expr) = origin else {
         return TraitCallChoice::Synthetic;
     };
     let typed = caller.typed_body(db);
     let body = typed.body().expect("a source trait call has a body");
     let site = DecisionSite::trait_reference(expr.span(body).into());
-    TraitCallChoice::Recorded(
-        typed
-            .decisions()
-            .choice_ref(&site)
-            .expect("a source trait call must retain its accepted choice"),
-    )
+    let record = typed
+        .decisions()
+        .choice_ref(&site)
+        .expect("a source trait call must retain its accepted choice");
+    if inherit_trait_selection {
+        match supplied_bound_choice(db, caller, &site, record) {
+            Some(answer)
+                if !matches!(
+                    answer.data(db).answer_origin(db),
+                    ImplementorOrigin::Assumption
+                ) =>
+            {
+                TraitCallChoice::Recorded(answer)
+            }
+            _ => TraitCallChoice::UntransportedBound,
+        }
+    } else {
+        TraitCallChoice::Recorded(record)
+    }
 }
 
 fn recorded_method_instance<'db>(
@@ -486,7 +567,7 @@ fn semantic_callee_key_with_assumptions<'db>(
     assumptions: PredicateListId<'db>,
     provider_resolution_mode: ProviderResolutionMode,
     inherit_trait_selection: bool,
-    source_choice: TraitCallChoice<'db>,
+    source_choice: CalleeChoices<'db>,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
     let CallableDef::Func(nominal_func) = callable.callable_def() else {
         return Ok(None);
@@ -537,7 +618,7 @@ fn semantic_callee_key_with_assumptions<'db>(
         && let Selection::Unique(method) = {
             let context = TraitSolveCx::new(db, impl_env.normalization_scope(db))
                 .with_assumptions(assumptions);
-            match source_choice {
+            match source_choice.method {
                 TraitCallChoice::Recorded(choice) => {
                     recorded_method_instance(db, context, choice, name)
                 }
@@ -797,7 +878,15 @@ fn semantic_callee_key_with_assumptions<'db>(
         },
         witnesses.into_iter().collect::<Vec<_>>(),
     )
-    .with_selections(db, retained_selections);
+    .with_selections(db, retained_selections)
+    .with_bound_choices(
+        db,
+        if body_func == nominal_func {
+            source_choice.bounds
+        } else {
+            Vec::new()
+        },
+    );
 
     if matches!(provider_resolution_mode, ProviderResolutionMode::Final)
         && let Some((resolved, nominal_inst)) = selected_trait_method

@@ -1,0 +1,17 @@
+// Declared slots retain their checked answers when substitution merges goals.
+trait Read<T> { const fn read() -> u256 }
+struct S {}
+impl<T> Read<T> for S { const fn read() -> u256 { 1 } }
+impl Read<u8> for S as Alternative { const fn read() -> u256 { 2 } }
+const fn consume<A, T>() -> u256 where A: Read<T>, A: Read<u8> {
+    <A as Read<T>>::read() * 10 + <A as Read<u8>>::read()
+}
+const fn run<T>() -> u256 { with (Alternative) { consume<S, T>() } }
+const R: u256 = run<u8>()
+#[test]
+fn t() { assert(R == 12) }
+
+#[test]
+fn concrete_call_checks_both_slots_at_its_own_site() {
+    with (Alternative) { assert(consume<S, u8>() == 22) }
+}

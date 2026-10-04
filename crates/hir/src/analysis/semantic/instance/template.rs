@@ -11,7 +11,7 @@ use crate::{
                 resolved_method_instance,
             },
             trait_resolution::{PredicateListId, Selection, TraitSolveCx},
-            ty_check::{BodyOwner, TypedBody, infer_body},
+            ty_check::{BodyOwner, TraitChoiceId, TypedBody, infer_body},
             ty_def::TyId,
             ty_lower::CompleteSubst,
         },
@@ -209,7 +209,7 @@ impl<'db> TyFoldable<'db> for SelectedApplication<'db> {
     }
 }
 
-#[salsa::interned(constructor = new_with_selections)]
+#[salsa::interned(constructor = new_with_choices)]
 #[derive(Debug)]
 pub struct ImplEnv<'db> {
     pub normalization_scope: ScopeId<'db>,
@@ -218,9 +218,38 @@ pub struct ImplEnv<'db> {
     pub witnesses: Vec<TraitInstId<'db>>,
     #[return_ref]
     pub selections: Vec<SelectedApplication<'db>>,
+    /// Arguments to the owner's declared bound slots refer to accepted records.
+    /// Slot keys survive substitution even when their goals become identical.
+    #[return_ref]
+    pub bound_choices: Vec<(usize, TraitChoiceId<'db>)>,
 }
 
 impl<'db> ImplEnv<'db> {
+    pub fn new_with_selections(
+        db: &'db dyn HirAnalysisDb,
+        scope: ScopeId<'db>,
+        assumptions: PredicateListId<'db>,
+        witnesses: Vec<TraitInstId<'db>>,
+        selections: Vec<SelectedApplication<'db>>,
+    ) -> Self {
+        Self::new_with_choices(db, scope, assumptions, witnesses, selections, Vec::new())
+    }
+
+    pub(crate) fn with_bound_choices(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        choices: Vec<(usize, TraitChoiceId<'db>)>,
+    ) -> Self {
+        Self::new_with_choices(
+            db,
+            self.normalization_scope(db),
+            self.assumptions(db),
+            self.witnesses(db).clone(),
+            self.selections(db).clone(),
+            choices,
+        )
+    }
+
     pub fn new(
         db: &'db dyn HirAnalysisDb,
         scope: ScopeId<'db>,
@@ -251,7 +280,7 @@ impl<'db> ImplEnv<'db> {
         }
         let mut selections = by_goal.into_iter().collect::<Vec<_>>();
         selections.sort_by_key(|(goal, _)| goal.as_id());
-        Self::new_with_selections(
+        Self::new_with_choices(
             db,
             self.normalization_scope(db),
             self.assumptions(db),
@@ -260,6 +289,7 @@ impl<'db> ImplEnv<'db> {
                 .into_iter()
                 .map(|(_, selection)| selection)
                 .collect::<Vec<_>>(),
+            self.bound_choices(db).clone(),
         )
     }
 
@@ -293,17 +323,24 @@ impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for ImplEnv<'db> {
         self.assumptions(visitor.db()).visit_with(visitor);
         self.witnesses(visitor.db()).visit_with(visitor);
         self.selections(visitor.db()).visit_with(visitor);
+        for (_, choice) in self.bound_choices(visitor.db()) {
+            choice.visit_with(visitor);
+        }
     }
 }
 
 impl<'db> TyFoldable<'db> for ImplEnv<'db> {
     fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
-        Self::new_with_selections(
+        Self::new_with_choices(
             db,
             self.normalization_scope(db),
             self.assumptions(db).fold_with(db, folder),
             self.witnesses(db).clone().fold_with(db, folder),
             self.selections(db).clone().fold_with(db, folder),
+            self.bound_choices(db)
+                .iter()
+                .map(|&(slot, choice)| (slot, choice.fold_with(db, folder)))
+                .collect::<Vec<_>>(),
         )
     }
 }

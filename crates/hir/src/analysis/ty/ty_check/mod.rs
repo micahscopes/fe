@@ -9,7 +9,9 @@ pub use const_requirements::{
 pub(crate) use const_requirements::{
     comparable_const_predicate_key, normalize_comparable_const_predicate_key,
 };
-pub use env::{DecisionSite, Decisions, TraitChoice, TraitChoiceId, TraitChoiceVia, WithChoice};
+pub use env::{
+    DecisionSite, Decisions, TraitChoice, TraitChoiceId, TraitChoiceUse, TraitChoiceVia, WithChoice,
+};
 mod contract;
 mod effect_env;
 pub(crate) mod env;
@@ -2583,12 +2585,16 @@ impl<'db> TyChecker<'db> {
             }
             if let Some(selection) = directly_selected {
                 let answered_goal = goal.fold_with(db, &mut self.table);
-                self.env.record_trait_choice(env::TraitChoice {
-                    goal: answered_goal,
-                    via: env::TraitChoiceVia::Selected(selection),
-                    origin: obligation.origin,
-                    span: obligation.span.clone(),
-                });
+                self.env.record_trait_choice(
+                    env::DecisionSite {
+                        origin: obligation.origin,
+                        span: obligation.span.clone(),
+                    },
+                    env::TraitChoice {
+                        goal: answered_goal,
+                        via: env::TraitChoiceVia::Selected(selection),
+                    },
+                );
                 return if answered_goal != goal {
                     TraitObligationOutcome::Progressed
                 } else {
@@ -2640,14 +2646,18 @@ impl<'db> TyChecker<'db> {
                     self.env.register_const_obligation(pending);
                 }
                 let answered_goal = self.normalize_trait_goal(goal);
-                self.env.record_trait_choice(env::TraitChoice {
-                    goal: answered_goal,
-                    via: env::TraitChoiceVia::Implementation(
-                        solved.implementor.fold_with(db, &mut self.table),
-                    ),
-                    origin: obligation.origin,
-                    span: obligation.span.clone(),
-                });
+                self.env.record_trait_choice(
+                    env::DecisionSite {
+                        origin: obligation.origin,
+                        span: obligation.span.clone(),
+                    },
+                    env::TraitChoice {
+                        goal: answered_goal,
+                        via: env::TraitChoiceVia::Implementation(
+                            solved.implementor.fold_with(db, &mut self.table),
+                        ),
+                    },
+                );
                 if answered_goal != goal {
                     TraitObligationOutcome::Progressed
                 } else {
@@ -4294,11 +4304,8 @@ impl<'db> TypedBody<'db> {
     pub fn trait_choices(
         &self,
         db: &'db dyn HirAnalysisDb,
-    ) -> impl ExactSizeIterator<Item = &'db TraitChoice<'db>> {
-        self.decisions
-            .choices
-            .values()
-            .map(|choice| choice.data(db))
+    ) -> impl ExactSizeIterator<Item = TraitChoiceUse<'_, 'db>> {
+        self.decisions.choice_entries(db)
     }
 
     pub fn decisions(&self) -> &Decisions<'db> {
