@@ -1,6 +1,7 @@
 // Documented limit (RD104): master deliberately accepts where-clause-only impl
 // parameters. Follow master's behavior; whether witness choice should be
-// independent of clause visitation remains an open question for Sean.
+// independent of clause visitation remains a documented limit; Micah decided
+// not to ask Sean about it (2026-10-04).
 // The parked Rust probe on local/l19-witness-order-park-20261004 finds different
 // Child<A>/Child<B> witnesses. Unread premise records were removed under RD105;
 // the retained Root answer is independent of those child witnesses.
