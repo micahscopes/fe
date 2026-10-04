@@ -896,3 +896,29 @@ trait Tr {
         ),
     ]);
 }
+
+#[test]
+fn family_parameter_bounds_hold_for_types_written_in_bodies() {
+    let template = r#"
+trait Allowed {}
+impl Allowed for bool {}
+trait Factory { type Out<T: Allowed> }
+struct Provider {}
+impl Factory for Provider { type Out<T> = u256 }
+USE
+"#;
+    for use_site in [
+        "fn local() { let _x: Provider::Out<ARG> = 1 }",
+        "fn cast() -> u256 { 1 as Provider::Out<ARG> }",
+        "fn generic_local<B: Factory>(x: B::Out<bool>) { let _y: B::Out<ARG> = x }",
+    ] {
+        let template = template.replace("USE", use_site);
+        let valid = template.replace("ARG", "bool");
+        let invalid = template.replace("ARG", "u256");
+        check_cases(&[
+            (&valid, None),
+            (&invalid, Some("trait bound is not satisfied")),
+            (&valid, None),
+        ]);
+    }
+}

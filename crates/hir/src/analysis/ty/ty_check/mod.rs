@@ -3724,6 +3724,22 @@ impl<'db> TyChecker<'db> {
                 // Avoid cascading kind errors for already-invalid types
                 return TyId::invalid(self.db, InvalidCause::Other);
             }
+        } else {
+            // Lowering normalizes, which can remove a family application and
+            // with it the bounds on its parameters; check the written type.
+            let diags = super::ty_error::collect_application_requirement_errors(
+                self.db,
+                self.env.scope(),
+                hir_ty,
+                span.clone(),
+                self.env.assumptions(),
+            );
+            if !diags.is_empty() {
+                for d in diags {
+                    self.push_diag(d);
+                }
+                return TyId::invalid(self.db, InvalidCause::Other);
+            }
         }
 
         if let Some(diag) = ty.emit_diag(self.db, span.clone().into()) {
