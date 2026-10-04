@@ -405,7 +405,8 @@ fn need<const B: bool>() -> u256 where B { 0 }
 fn exercise() -> u256 {
     let _a: Word = Word {}
     let _b: bool = <Word as Read>::OK
-    let _c: u256 = need<{<Word as Read>::OK}>()
+    let _c: u256 = need<<Word as Read>::OK>()
+    let _f: u256 = Word::read()
     let _d: u256 = with (Other) {
         let _e: u256 = <Word as Read>::read()
         0
@@ -425,7 +426,7 @@ fn exercise() -> u256 {
         .find(|r| r["item"] == "fn" && r["name"] == "exercise")
         .unwrap_or_else(|| panic!("{records:#?}"));
     let uses = function["body"].as_array().unwrap();
-    assert_eq!(uses.len(), 4);
+    assert_eq!(uses.len(), 5);
     assert_eq!(uses[0]["use"], "type");
     assert_eq!(uses[1]["use"], "const");
     let goal = json!({"self":{"con":"Word","args":[]},"trait":"Read","args":[]});
@@ -434,12 +435,14 @@ fn exercise() -> u256 {
         uses[2]["args"],
         json!([{"assoc":goal["self"],"trait":"Read","targs":[],"c":"OK"}])
     );
-    assert_eq!(uses[3]["use"], "with");
-    assert_eq!(uses[3]["name"], "Other");
-    assert_eq!(uses[3]["body"][0]["goal"], goal);
-    assert_eq!(uses[3]["body"][0]["qualified"], true);
+    assert_eq!(uses[3]["goal"], goal);
+    assert_eq!(uses[3]["qualified"], false);
+    assert_eq!(uses[4]["use"], "with");
+    assert_eq!(uses[4]["name"], "Other");
+    assert_eq!(uses[4]["body"][0]["goal"], goal);
+    assert_eq!(uses[4]["body"][0]["qualified"], true);
     assert_eq!(uses[0]["span"], json!({"line":11,"col":20}));
-    assert_eq!(uses[3]["body"][0]["span"], json!({"line":15,"col":24}));
+    assert_eq!(uses[4]["body"][0]["span"], json!({"line":16,"col":24}));
 }
 
 #[test]

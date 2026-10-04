@@ -42,7 +42,8 @@ fn declaration<'db>(
                 return Err("function value parameters are outside this v1 projection".into());
             }
             let body = function.body(db).ok_or("function has no body")?;
-            let uses = body_uses(db, body, body.expr(db), &env, 0)?;
+            let (_, typed) = hir::analysis::ty::ty_check::check_func_body(db, function);
+            let uses = body_uses(db, body, body.expr(db), &env, typed, 0)?;
             Ok(
                 json!({"v":1,"kind":"item","item":"fn","name":function.name(db).to_opt().ok_or("unnamed function")?.data(db),"params":params,"const":function.is_const(db),"bounds":bounds,"conds":conds,"body":uses}),
             )
@@ -301,12 +302,13 @@ fn syntax_type<'db>(
     }
     match ty.data(db) {
         TypeKind::Path(path) => {
-            let (name, args) = simple_path(
-                db,
-                path.to_opt().ok_or("missing type path")?,
-                env,
-                depth + 1,
-            )?;
+            let path = path.to_opt().ok_or("missing type path")?;
+            if let Some((goal, name)) = qualified_member(db, path, env, depth + 1)? {
+                return Ok(
+                    json!({"assoc":goal["self"],"trait":goal["trait"],"targs":goal["args"],"c":name}),
+                );
+            }
+            let (name, args) = simple_path(db, path, env, depth + 1)?;
             if let Some(kind) = env.get(&name) {
                 if !args.is_empty() {
                     return Err("applied parameter is outside format v1".into());
@@ -412,6 +414,7 @@ fn body_uses<'db>(
     body: Body<'db>,
     expr: hir::hir_def::ExprId,
     env: &Parameters,
+    typed: &TypedBody<'db>,
     depth: usize,
 ) -> Result<Vec<Value>, String> {
     if depth >= MAX_TERM_DEPTH {
@@ -426,7 +429,7 @@ fn body_uses<'db>(
                     | hir::hir_def::Partial::Present(hir::hir_def::Stmt::Expr(value)) => *value,
                     _ => return Err("statement is outside the v1 use fragment".into()),
                 };
-                uses.extend(body_uses(db, body, value, env, depth + 1)?);
+                uses.extend(body_uses(db, body, value, env, typed, depth + 1)?);
             }
         }
         hir::hir_def::Partial::Present(Expr::Lit(_)) => {}
@@ -440,6 +443,13 @@ fn body_uses<'db>(
             let path = path.to_opt().ok_or("missing call path")?;
             if let Some((goal, name)) = qualified_member(db, path, env, 0)? {
                 uses.push(json!({"use":"method","goal":goal,"method":name,"qualified":true}));
+            } else if path.parent(db).is_some() {
+                let instance = typed
+                    .callable_expr(expr)
+                    .and_then(|callable| callable.trait_inst)
+                    .ok_or("unqualified call has no checked trait instance")?;
+                let name = path.ident(db).to_opt().ok_or("unnamed method")?.data(db);
+                uses.push(json!({"use":"method","goal":goal(db,instance)?,"method":name,"qualified":false}));
             } else {
                 let (name, args) = simple_path(db, path, env, 0)?;
                 uses.push(json!({"use":"call","fn":name,"args":args}));
@@ -479,7 +489,7 @@ fn body_uses<'db>(
                     Ok(name)
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            let inner = body_uses(db, body, *inner, env, depth + 1)?;
+            let inner = body_uses(db, body, *inner, env, typed, depth + 1)?;
             if names.len() == 1 {
                 uses.push(json!({"use":"with","name":names[0],"body":inner}));
             } else {
