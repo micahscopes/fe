@@ -1226,6 +1226,16 @@ pub(crate) fn checked_body_allows_evaluation<'db>(
     diags_allow_evaluation(db, &checked_body(db, owner).diags)
 }
 
+/// Callee evaluation must reject inference errors before reading accepted
+/// choices. Use inference here: evaluating a condition cannot re-enter its
+/// enclosing requirement-discharge query.
+pub(crate) fn inferred_body_allows_evaluation<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: BodyOwner<'db>,
+) -> bool {
+    diags_allow_evaluation(db, &infer_body(db, owner).0)
+}
+
 /// Inference and const-language checking, without requirement discharge.
 /// CTFE consumes this completed template. It must not re-enter the enclosing
 /// discharge query by requesting a checked body while evaluating a predicate.

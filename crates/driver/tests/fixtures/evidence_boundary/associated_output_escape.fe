@@ -1,0 +1,17 @@
+// Q2: as a2, with Output = u256 ordinarily and bool under Flag (both one word at run time).
+// Sound result: rejected at compile time. If accepted, the run-time read shows a bool read as u256.
+trait Compute { type Output
+    fn compute() -> Self::Output }
+struct Subject {}
+impl Compute for Subject { type Output = u256
+    fn compute() -> u256 { 42 } }
+impl Compute for Subject as Flag { type Output = bool
+    fn compute() -> bool { true } }
+struct Box<T: Compute> { v: <T as Compute>::Output }
+fn make<T: Compute>() -> Box<T> { Box { v: T::compute() } }
+fn leak() -> u256 {
+    let b = with (Flag) { make<Subject>() }
+    b.v
+}
+#[test]
+fn what_does_leak_read() { assert!(leak() == 1) }

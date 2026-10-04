@@ -221,3 +221,37 @@ fn carrier_validity_edits_do_not_survive_from_a_warm_database() {
         }
     }
 }
+
+#[test]
+fn opening_unproven_evidence_in_a_constant_reports_the_missing_impl() {
+    let mut db = database();
+    let source = include_str!("fixtures/evidence_boundary/open_unproven_const.fe");
+    for source in [
+        source.to_owned(),
+        source.replace("const X: u64 = run()", ""),
+    ] {
+        let file = input(&mut db, "open-unproven", &source);
+        let errors = diagnostics(&db, file);
+        assert!(errors.contains("error[6-0003]"), "{errors}");
+        assert!(
+            errors.contains("`Subject` doesn't implement `Produce`"),
+            "{errors}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "pending q02/a3: associated-type selection rule awaits Micah"]
+fn selected_associated_output_cannot_escape_as_the_ordinary_field_type() {
+    let mut db = database();
+    let file = input(
+        &mut db,
+        "associated-output-escape",
+        include_str!("fixtures/evidence_boundary/associated_output_escape.fe"),
+    );
+    let errors = diagnostics(&db, file);
+    assert!(
+        !errors.is_empty(),
+        "a selected bool field escaped as an ordinary u256 field"
+    );
+}

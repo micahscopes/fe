@@ -1,0 +1,10 @@
+// Q5 BUG (crash): opening an Evidence<G> value for a goal that has no impl, from a function that
+// never returns normally, and using the result in a constant. Expected: the type error
+// "Subject doesn't implement Produce" (reported when the constant is absent). Actual: the compiler
+// panics ("a source trait call must retain its accepted choice") and prints no diagnostic.
+use core::obligations::Evidence
+trait Produce { const fn produce() -> u64 }
+struct Subject {}
+const fn forged() -> Evidence<Produce<Subject>> { forged() }
+const fn run() -> u64 { with (forged()) { Subject::produce() } }
+const X: u64 = run()

@@ -37,7 +37,7 @@ use crate::{
             ty_check::{
                 BodyOwner, EffectArgLayoutView, EffectParamSite, EffectPassMode, LocalBinding,
                 ParamSite, checked_body_allows_evaluation, infer_body,
-                inference_met_lowering_cycle,
+                inference_met_lowering_cycle, inferred_body_allows_evaluation,
             },
             ty_def::{InvalidCause, PrimTy, TyBase, TyData, TyId},
         },
@@ -1371,7 +1371,9 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             }
             owner
             @ (BodyOwner::Func(_) | BodyOwner::Const(_) | BodyOwner::AnonConstBody { .. }) => {
-                if inference_met_lowering_cycle(self.db, infer_body(self.db, owner)) {
+                if inference_met_lowering_cycle(self.db, infer_body(self.db, owner))
+                    || !inferred_body_allows_evaluation(self.db, owner)
+                {
                     return Err(CtfeError::InvalidBody { origin });
                 }
                 instance
