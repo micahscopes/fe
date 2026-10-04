@@ -922,3 +922,13 @@ USE
         ]);
     }
 }
+
+#[test]
+fn growing_projections_stop_at_the_normalization_limit() {
+    for source in [
+        "trait Tr { type Out }\nstruct W<T> { t: T }\nimpl<T> Tr for W<T> { type Out = <W<(T, T)> as Tr>::Out }\nfn f(x: <W<u8> as Tr>::Out) {}",
+        "trait Tr { type Out }\nstruct W<T> { t: T }\nimpl<T> Tr for W<T> { type Out = <W<(T,)> as Tr>::Out }\nfn f(x: <W<u8> as Tr>::Out) {}",
+    ] {
+        check_cases(&[(source, Some("type normalization limit exceeded"))]);
+    }
+}

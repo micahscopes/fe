@@ -68,6 +68,50 @@ impl ReductionBudget {
     }
 }
 
+/// The number of nodes in `ty` read as a tree, if at most `limit`. Interned
+/// types share subtrees, so a type can be small as a DAG and exponentially
+/// large as a tree; resolving a projection walks its trait arguments as a tree
+/// (canonicalization, containment), so this is what it costs.
+fn tree_size_within<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>, limit: usize) -> Option<usize> {
+    struct Children<'db> {
+        db: &'db dyn HirAnalysisDb,
+        children: Vec<TyId<'db>>,
+    }
+    impl<'db> TyVisitor<'db> for Children<'db> {
+        fn db(&self) -> &'db dyn HirAnalysisDb {
+            self.db
+        }
+        fn visit_ty(&mut self, ty: TyId<'db>) {
+            self.children.push(ty);
+        }
+    }
+    fn size<'db>(
+        db: &'db dyn HirAnalysisDb,
+        ty: TyId<'db>,
+        limit: usize,
+        memo: &mut FxHashMap<TyId<'db>, usize>,
+    ) -> Option<usize> {
+        if let Some(&known) = memo.get(&ty) {
+            return Some(known);
+        }
+        let mut children = Children {
+            db,
+            children: Vec::new(),
+        };
+        walk_ty(&mut children, ty);
+        let mut total = 1usize;
+        for child in children.children {
+            total = total.checked_add(size(db, child, limit, memo)?)?;
+            if total > limit {
+                return None;
+            }
+        }
+        memo.insert(ty, total);
+        Some(total)
+    }
+    size(db, ty, limit, &mut FxHashMap::default())
+}
+
 // Checked constant occurrences carry a source tree as well as a canonical
 // term. Substituting an occurrence can traverse that tree many times before
 // the reducer reaches another type node, so count the transport work in the
@@ -656,6 +700,12 @@ impl<'db> TypeNormalizer<'db> {
 
         if let TyData::AssocTy(assoc) = ty.data(db) {
             if depth.saturating_add(PROJECTION_DEPTH_COST) >= NORMALIZATION_DEPTH_LIMIT {
+                return Err(InvalidCause::TypeNormalizationLimit);
+            }
+            // A projection whose replacement grows never repeats, so the
+            // depth limit alone does not bound its work: charge its size.
+            let remaining = NORMALIZATION_WORK_LIMIT - self.budget.work;
+            if !tree_size_within(db, ty, remaining).is_some_and(|size| self.budget.charge(size)) {
                 return Err(InvalidCause::TypeNormalizationLimit);
             }
             let saved = (self.nested_depth, self.nested_policy);

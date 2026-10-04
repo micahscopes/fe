@@ -2281,6 +2281,7 @@ pub(crate) fn ty_flags<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyFlag
     struct Collector<'db> {
         db: &'db dyn HirAnalysisDb,
         flags: TyFlags,
+        /// Families whose bodies are being walked; their parameters are bound.
         bound: Vec<ScopeId<'db>>,
     }
 
@@ -2290,35 +2291,19 @@ pub(crate) fn ty_flags<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyFlag
         }
 
         fn visit_ty(&mut self, ty: TyId<'db>) {
-            if matches!(ty.data(self.db), TyData::TyApp(..)) {
-                let (head, args) = ty.decompose_ty_app(self.db);
-                if let TyData::TypeFamily { owner, .. } = head.data(self.db)
-                    && args.len() >= owner.generic_params(self.db).data(self.db).len()
-                {
-                    self.flags.insert(TyFlags::HAS_PROJECTION);
-                }
-                if let TyData::TyBase(TyBase::TypeFn(def)) = head.data(self.db)
-                    && args.len() == def.generic_params(self.db).data(self.db).len()
-                {
-                    self.flags.insert(TyFlags::HAS_PROJECTION);
-                }
-            }
-            if let TyData::TypeFamily { owner, args, body } = ty.data(self.db) {
-                for arg in args {
-                    self.visit_ty(*arg);
-                }
-                self.bound.push(owner.scope());
-                self.visit_ty(*body);
-                self.bound.pop();
+            if self.bound.is_empty() {
+                // Types form an interned DAG. Reuse each child's cached flags
+                // so a repeated subtree is not walked once per occurrence.
+                self.flags |= ty.flags(self.db);
                 return;
             }
-            if matches!(
-                ty.data(self.db),
-                TyData::AssocTy(_) | TyData::QualifiedTy(_)
-            ) {
-                self.flags.insert(TyFlags::HAS_PROJECTION);
+            // Cached flags cannot tell a family's own parameters from free ones.
+            self.flags |= projection_flag(self.db, ty);
+            if let TyData::TypeFamily { owner, args, body } = ty.data(self.db) {
+                self.visit_family(*owner, args, *body);
+            } else {
+                walk_ty(self, ty);
             }
-            walk_ty(self, ty);
         }
 
         fn visit_var(&mut self, _: &TyVar) {
@@ -2349,13 +2334,58 @@ pub(crate) fn ty_flags<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyFlag
         }
     }
 
+    impl<'db> Collector<'db> {
+        fn visit_family(
+            &mut self,
+            owner: AssocTypeOwner<'db>,
+            args: &[TyId<'db>],
+            body: TyId<'db>,
+        ) {
+            for &arg in args {
+                self.visit_ty(arg);
+            }
+            self.bound.push(owner.scope());
+            self.visit_ty(body);
+            self.bound.pop();
+        }
+    }
+
+    /// Projections, including a family or a computed type applied to all of
+    /// its parameters.
+    fn projection_flag<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyFlags {
+        let is_projection = match ty.data(db) {
+            TyData::AssocTy(_) | TyData::QualifiedTy(_) => true,
+            TyData::TyApp(..) => {
+                let (head, args) = ty.decompose_ty_app(db);
+                match head.data(db) {
+                    TyData::TypeFamily { owner, .. } => {
+                        args.len() >= owner.generic_params(db).data(db).len()
+                    }
+                    TyData::TyBase(TyBase::TypeFn(def)) => {
+                        args.len() == def.generic_params(db).data(db).len()
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        if is_projection {
+            TyFlags::HAS_PROJECTION
+        } else {
+            TyFlags::empty()
+        }
+    }
+
     let mut collector = Collector {
         db,
-        flags: TyFlags::empty(),
+        flags: projection_flag(db, ty),
         bound: Vec::new(),
     };
-
-    ty.visit_with(&mut collector);
+    if let TyData::TypeFamily { owner, args, body } = ty.data(db) {
+        collector.visit_family(*owner, args, *body);
+    } else {
+        walk_ty(&mut collector, ty);
+    }
     collector.flags
 }
 
