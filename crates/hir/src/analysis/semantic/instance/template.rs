@@ -235,21 +235,6 @@ impl<'db> ImplEnv<'db> {
         Self::new_with_choices(db, scope, assumptions, witnesses, selections, Vec::new())
     }
 
-    pub(crate) fn with_bound_choices(
-        self,
-        db: &'db dyn HirAnalysisDb,
-        choices: Vec<(usize, TraitChoiceId<'db>)>,
-    ) -> Self {
-        Self::new_with_choices(
-            db,
-            self.normalization_scope(db),
-            self.assumptions(db),
-            self.witnesses(db).clone(),
-            self.selections(db).clone(),
-            choices,
-        )
-    }
-
     pub fn new(
         db: &'db dyn HirAnalysisDb,
         scope: ScopeId<'db>,

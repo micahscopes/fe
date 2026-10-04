@@ -913,7 +913,7 @@ fn semantic_callee_key_with_assumptions<'db>(
     } else {
         impl_env.normalization_scope(db)
     };
-    let impl_env = ImplEnv::new(
+    let impl_env = ImplEnv::new_with_choices(
         db,
         normalization_scope,
         if context_independent {
@@ -922,16 +922,14 @@ fn semantic_callee_key_with_assumptions<'db>(
             assumptions
         },
         witnesses.into_iter().collect::<Vec<_>>(),
-    )
-    .with_selections(db, retained_selections)
-    .with_bound_choices(
-        db,
+        Vec::new(),
         if body_func == nominal_func {
             source_choice.bounds
         } else {
             Vec::new()
         },
-    );
+    )
+    .with_selections(db, retained_selections);
 
     if matches!(provider_resolution_mode, ProviderResolutionMode::Final)
         && let Some((resolved, nominal_inst)) = selected_trait_method
