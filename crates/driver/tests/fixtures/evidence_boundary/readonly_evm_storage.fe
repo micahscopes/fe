@@ -1,0 +1,10 @@
+// Q11: a function with only read access to the EVM effect (`uses (evm: Evm)`, not `mut Evm`) makes a
+// storage handle and writes through it. Sound result if read-only access is meant to forbid writes:
+// rejected. If accepted, read-only access can be turned into write access.
+use std::evm::{Evm, StorPtr}
+struct Cell { value: u256 }
+fn write_cell(_ value: u256) uses (cell: mut Cell) { cell.value = value }
+fn read_only(_ slot: u256) uses (evm: Evm) {
+    let p: StorPtr<Cell> = evm.stor_ptr(slot)
+    with (p) { write_cell(5) }
+}

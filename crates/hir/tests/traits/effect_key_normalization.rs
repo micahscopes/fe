@@ -5158,13 +5158,29 @@ fn effect_handle_values_preserve_direct_carrier_roles_without_constructor_calls(
         ),
     );
     let body = instance.body(&db);
-    let fe_hir::analysis::semantic::SStmtKind::Assign {
-        expr: fe_hir::analysis::semantic::SExpr::Call { callee, .. },
-        ..
-    } = &body.blocks[0].stmts[0].kind
-    else {
-        panic!("{body:#?}");
-    };
+    // A mutable receiver may require a borrow before the call. Select the
+    // constructor by its semantic target, not by statement position.
+    let callee = body
+        .blocks
+        .iter()
+        .flat_map(|block| &block.stmts)
+        .find_map(|stmt| {
+            let fe_hir::analysis::semantic::SStmtKind::Assign {
+                expr: fe_hir::analysis::semantic::SExpr::Call { callee, .. },
+                ..
+            } = &stmt.kind
+            else {
+                return None;
+            };
+            let BodyOwner::Func(func) = callee.key.owner(&db) else {
+                return None;
+            };
+            func.name(&db)
+                .to_opt()
+                .is_some_and(|name| name.data(&db) == "stor_ptr")
+                .then_some(callee)
+        })
+        .expect("storage handle constructor call");
     let callee = get_or_build_semantic_instance(&db, callee.key);
     let callee_body = callee.body(&db);
     assert!(

@@ -288,3 +288,38 @@ fn matching_or_named_only_associated_types_remain_allowed() {
         assert!(errors.is_empty(), "{errors}");
     }
 }
+
+#[test]
+fn read_only_evm_cannot_construct_writable_storage_handles() {
+    let source = include_str!("fixtures/evidence_boundary/readonly_evm_storage.fe");
+    for source in [
+        source.to_owned(),
+        source
+            .replace("StorPtr", "TStorPtr")
+            .replace(".stor_ptr(", ".tstor_ptr("),
+    ] {
+        let mut db = database();
+        let file = input(&mut db, "readonly-storage", &source);
+        let errors = diagnostics(&db, file);
+        assert!(
+            errors.contains("error[8-0066]: mutable borrow requires a mutable place"),
+            "read-only EVM access produced a writable storage handle: {errors}"
+        );
+    }
+}
+
+#[test]
+fn storage_write_capability_and_read_only_operations_remain_available() {
+    let source = include_str!("fixtures/evidence_boundary/readonly_evm_storage.fe")
+        .replace("uses (evm: Evm)", "uses (evm: mut Evm)");
+    for source in [
+        source.clone(),
+        source.replace("StorPtr", "TStorPtr").replace(".stor_ptr(", ".tstor_ptr("),
+        "use std::evm::{Evm, CalldataPtr}\nstruct Cell { value: u256 }\nfn read(_ slot: u256) -> u256 uses (evm: Evm) { evm.sload(slot) }\nfn input(_ offset: u256) -> CalldataPtr<Cell> uses (evm: Evm) { evm.calldata_ptr(offset) }".to_owned(),
+    ] {
+        let mut db = database();
+        let file = input(&mut db, "storage-controls", &source);
+        let errors = diagnostics(&db, file);
+        assert!(errors.is_empty(), "{errors}");
+    }
+}

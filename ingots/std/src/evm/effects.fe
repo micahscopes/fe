@@ -306,7 +306,8 @@ pub trait RawMem: EvmCapabilitySeal {
 pub trait RawStorage: EvmCapabilitySeal {
     fn sload(self, _: u256) -> u256
     fn sstore(mut self, slot: u256, value: u256)
-    fn stor_ptr<T>(self, _ slot: u256) -> StorPtr<T> {
+    /// Creates a writable storage handle, requiring write access to the EVM effect.
+    fn stor_ptr<T>(mut self, _ slot: u256) -> StorPtr<T> {
         StorPtr { handle: slot }
     }
 }
@@ -318,7 +319,8 @@ pub trait RawOps: RawMem + RawStorage {
     fn calldata_ptr<T>(self, _ offset: u256) -> CalldataPtr<T> {
         CalldataPtr { offset }
     }
-    fn tstor_ptr<T>(self, _ slot: u256) -> TStorPtr<T> {
+    /// Creates a writable transient handle, requiring write access to the EVM effect.
+    fn tstor_ptr<T>(mut self, _ slot: u256) -> TStorPtr<T> {
         TStorPtr { slot }
     }
     fn calldatacopy(

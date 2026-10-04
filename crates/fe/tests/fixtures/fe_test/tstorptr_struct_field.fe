@@ -1,3 +1,4 @@
+// RD111: constructing writable storage handles requires the EVM write capability.
 // A runtime `TStorPtr` handle stored as an ordinary struct field: the handle
 // value lives in persistent storage (written by `init`, read back in later
 // transactions) while the flag it points at lives in transient storage.
@@ -14,7 +15,7 @@ struct Flagged {
 }
 
 impl Flagged {
-    fn attach(mut self, slot: u256) uses (evm: Evm) {
+    fn attach(mut self, slot: u256) uses (evm: mut Evm) {
         self.flag = evm.tstor_ptr<bool>(slot)
     }
 }
@@ -29,7 +30,7 @@ msg CMsg {
 pub contract C {
     mut state: Flagged,
 
-    init() uses (mut state, evm: Evm) {
+    init() uses (mut state, evm: mut Evm) {
         state.attach(slot: 0xfe)
     }
 

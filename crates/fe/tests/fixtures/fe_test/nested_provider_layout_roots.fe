@@ -1,3 +1,4 @@
+// RD111: constructing writable storage handles requires the EVM write capability.
 use std::evm::{Evm, RawStorage, StorageMap, StorPtr}
 
 struct Holder<T> {
@@ -7,7 +8,7 @@ struct Holder<T> {
 impl<T> Copy for Holder<T> {}
 
 impl<T> Holder<T> {
-    fn attach(mut self, slot: u256) uses (evm: Evm) {
+    fn attach(mut self, slot: u256) uses (evm: mut Evm) {
         self.ptr = evm.stor_ptr(slot)
     }
 }
@@ -34,7 +35,7 @@ struct TaggedHolder<T> {
 impl<T> Copy for TaggedHolder<T> {}
 
 impl<T> TaggedHolder<T> {
-    fn attach(mut self, slot: u256) uses (evm: Evm) {
+    fn attach(mut self, slot: u256) uses (evm: mut Evm) {
         self.ptr = TaggedStorPtr { tag: 19, ptr: evm.stor_ptr(slot) }
     }
 }
@@ -78,7 +79,7 @@ pub contract NestedProviderMaps {
     mut direct: StorageMap<u256, u256>,
     mut tagged: TaggedHolder<StorageMap<u256, u256>>,
 
-    init() uses (mut inferred, mut explicit, mut tagged, evm: Evm) {
+    init() uses (mut inferred, mut explicit, mut tagged, evm: mut Evm) {
         inferred.attach(slot: 0)
         explicit.attach(slot: 0)
         tagged.attach(slot: 0)
