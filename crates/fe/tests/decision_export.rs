@@ -547,3 +547,80 @@ fn export_keeps_written_type_conditions_in_generic_const_paths() {
         );
     }
 }
+
+#[test]
+fn export_pairs_annotation_conditions_with_their_initializer_use() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///annotation_export.fe").unwrap();
+    db.workspace().touch(&mut db,url.clone(),Some("struct Bounded<const N: usize> where N > 0 {}\nfn bad() { let _x: Bounded<0> = Bounded<0> {} }\nfn good() { let _x: Bounded<1> = Bounded<1> {} }\n".into()));
+    let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
+    let diagnostics = db.run_on_top_mod(module);
+    let completed = diagnostics.complete_diags(&db);
+    let program = fe::decision_export::declaration_records(&db, module, &completed);
+    for (name, outcome) in [("bad", "eval-false"), ("good", "eval-true")] {
+        let function = module
+            .all_funcs(&db)
+            .iter()
+            .find(|f| f.name(&db).to_opt().unwrap().data(&db) == name)
+            .copied()
+            .unwrap();
+        let (_, typed) = check_func_body(&db, function);
+        let conditions = fe::decision_export::condition_records(&db, typed).unwrap();
+        let record = program
+            .iter()
+            .find(|r| r["item"] == "fn" && r["name"] == name)
+            .unwrap();
+        let use_ = &record["body"][0];
+        assert_eq!(use_["use"], "type");
+        assert!(conditions.iter().any(|c| c["outcome"] == outcome));
+        assert!(conditions.iter().all(|c| {
+            use_["span_aliases"]
+                .as_array()
+                .unwrap()
+                .contains(&c["site"])
+        }));
+        assert!(
+            conditions
+                .iter()
+                .any(|c| c["site"]["col"].as_u64() < use_["span"]["col"].as_u64()),
+            "fixture must check the annotation before the initializer"
+        );
+    }
+}
+
+#[test]
+fn export_pairs_override_errors_with_impl_without_capturing_body_errors() {
+    use hir::span::LazySpan;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///override_alias_export.fe").unwrap();
+    db.workspace().touch(&mut db,url.clone(),Some("trait Read { fn read() -> u256 }\nstruct Word {}\nimpl Read for Word { fn read() -> u256 where false { missing } }\n".into()));
+    let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
+    let completed = db.run_on_top_mod(module).complete_diags(&db);
+    let records = fe::decision_export::declaration_records(&db, module, &completed);
+    let impl_ = records.iter().find(|r| r["item"] == "impl").unwrap();
+    let aliases = impl_["span_aliases"].as_array().unwrap();
+    let override_ = completed
+        .iter()
+        .find(|d| d.error_code.to_string() == "6-0024")
+        .unwrap();
+    let errors =
+        fe::decision_export::diagnostic_records(&db, std::slice::from_ref(override_)).unwrap();
+    assert!(aliases.contains(&errors[0]["site"]));
+    let function = module
+        .all_funcs(&db)
+        .iter()
+        .find(|f| f.body(&db).is_some())
+        .copied()
+        .unwrap();
+    let body_span = function.body(&db).unwrap().span().resolve(&db).unwrap();
+    let body_error = completed
+        .iter()
+        .find(|d| {
+            d.primary_span()
+                .is_some_and(|span| body_span.range.contains(span.range.start()))
+        })
+        .unwrap();
+    let errors =
+        fe::decision_export::diagnostic_records(&db, std::slice::from_ref(body_error)).unwrap();
+    assert!(!aliases.contains(&errors[0]["site"]));
+}

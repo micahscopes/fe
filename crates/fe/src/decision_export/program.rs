@@ -24,7 +24,7 @@ pub fn declaration_records<'db>(
             };
             let excluded = match item {
                 ItemKind::Trait(trait_) => trait_.methods(db).map(|m|m.span().into()).collect(),
-                ItemKind::ImplTrait(impl_) => impl_.methods(db).map(|m|m.span().into()).collect(),
+                ItemKind::ImplTrait(impl_) => impl_.methods(db).filter_map(|m|m.body(db).map(|b|b.span().into())).collect(),
                 _ => vec![],
             };
             record["span_aliases"] = json!(span_aliases(db,region,&excluded,diagnostics,None)?);
@@ -451,15 +451,29 @@ fn body_uses<'db>(
                     | hir::hir_def::Partial::Present(hir::hir_def::Stmt::Expr(value)) => *value,
                     _ => return Err("statement is outside the v1 use fragment".into()),
                 };
-                uses.extend(body_uses(
-                    db,
-                    body,
-                    value,
-                    env,
-                    typed,
-                    diagnostics,
-                    depth + 1,
-                )?);
+                let mut children = body_uses(db, body, value, env, typed, diagnostics, depth + 1)?;
+                if matches!(
+                    statement.data(db, body),
+                    hir::hir_def::Partial::Present(hir::hir_def::Stmt::Let(_, Some(_), _))
+                ) && let [use_] = children.as_mut_slice()
+                {
+                    let aliases = span_aliases(
+                        db,
+                        statement.span(body).into_let_stmt().ty().into(),
+                        &[],
+                        diagnostics,
+                        Some(typed),
+                    )?;
+                    let current = use_["span_aliases"]
+                        .as_array_mut()
+                        .ok_or("authored use has no span aliases")?;
+                    for alias in aliases {
+                        if !current.contains(&alias) {
+                            current.push(alias);
+                        }
+                    }
+                }
+                uses.extend(children);
             }
         }
         hir::hir_def::Partial::Present(Expr::Lit(_)) => {}
