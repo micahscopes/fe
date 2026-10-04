@@ -439,6 +439,17 @@ fn exercise() -> u256 {
     assert_eq!(uses[3]["qualified"], false);
     assert_eq!(uses[4]["use"], "with");
     assert_eq!(uses[4]["name"], "Other");
+    assert_eq!(uses[4]["construct_span"], json!({"line":15,"col":20}));
+    let function = module
+        .all_funcs(&db)
+        .iter()
+        .find(|f| f.name(&db).to_opt().unwrap().data(&db) == "exercise")
+        .copied()
+        .unwrap();
+    let (_, typed) = check_func_body(&db, function);
+    let openings =
+        fe::decision_export::with_records(&db, function.body(&db).unwrap(), typed).unwrap();
+    assert_eq!(uses[4]["span"], openings[0]["site"]);
     assert_eq!(uses[4]["body"][0]["goal"], goal);
     assert_eq!(uses[4]["body"][0]["qualified"], true);
     assert_eq!(uses[0]["span"], json!({"line":11,"col":20}));

@@ -502,8 +502,18 @@ fn body_uses<'db>(
         expr.data(db, body),
         hir::hir_def::Partial::Present(Expr::Block(_))
     ) {
+        let construct_span = source_site(db, &expr.span(body).into())?;
+        let span = match expr.data(db, body) {
+            hir::hir_def::Partial::Present(Expr::With(bindings, _)) if bindings.len() == 1 => {
+                source_site(db, &bindings[0].value.span(body).into())?
+            }
+            _ => construct_span.clone(),
+        };
         for use_ in &mut uses {
-            use_["span"] = source_site(db, &expr.span(body).into())?;
+            use_["span"] = span.clone();
+            if use_["use"] == "with" {
+                use_["construct_span"] = construct_span.clone();
+            }
         }
     }
     Ok(uses)
