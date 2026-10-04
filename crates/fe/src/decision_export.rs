@@ -177,6 +177,13 @@ fn source_site<'db>(
     span: &DynLazySpan<'db>,
 ) -> Result<Value, String> {
     let span = span.resolve(db).ok_or("decision has no source span")?;
+    span_site(db, &span)
+}
+
+fn span_site(
+    db: &dyn SpannedHirAnalysisDb,
+    span: &common::diagnostics::Span,
+) -> Result<Value, String> {
     let prefix = span
         .file
         .text(db)
@@ -248,14 +255,17 @@ pub fn write_module(
     db: &driver::DriverDataBase,
     module: hir::hir_def::TopLevelMod<'_>,
     file: common::file::File,
+    diagnostics: &[common::diagnostics::CompleteDiagnostic],
     output: &std::path::Path,
 ) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     let mut records = vec![
         json!({"v":1,"kind":"header","schema":"fe-decisions/1","compiler_commit":option_env!("FE_GIT_COMMIT").unwrap_or("unknown"),"source_sha256":format!("{:x}",Sha256::digest(file.text(db).as_bytes()))}),
-        json!({"v":1,"kind":"note","text":"Diagnostics and overlap records are pending; unsupported program shapes are explicit out_of_fragment items. This is not a complete model export."}),
+        json!({"v":1,"kind":"note","text":"Unsupported program shapes are explicit out_of_fragment items; corpus acceptance is pending."}),
     ];
     records.extend(declaration_records(db, module));
+    records.extend(diagnostic_records(db, diagnostics)?);
+    records.extend(overlap_records(db, module, diagnostics)?);
     for func in module.all_funcs(db) {
         let Some(owner) = func.body(db) else { continue };
         let (_, body) = hir::analysis::ty::ty_check::check_func_body(db, *func);
@@ -270,6 +280,79 @@ pub fn write_module(
     }
     std::fs::write(output, bytes)
         .map_err(|error| format!("cannot write decision export {}: {error}", output.display()))
+}
+
+/// Encode the same completed errors that the check command reports.
+pub fn diagnostic_records(
+    db: &dyn SpannedHirAnalysisDb,
+    diagnostics: &[common::diagnostics::CompleteDiagnostic],
+) -> Result<Vec<Value>, String> {
+    diagnostics.iter().filter(|d| d.severity == common::diagnostics::Severity::Error).map(|d| {
+        let span = d.primary_span().ok_or("reported error has no source span")?;
+        Ok(json!({"v":1,"kind":"diagnostic","code":d.error_code.to_string(),"site":span_site(db,&span)?}))
+    }).collect()
+}
+
+/// Pair declarations without repeating the compiler's overlap search.
+/// A pair conflicts precisely when the checked diagnostics report that pair.
+pub fn overlap_records<'db>(
+    db: &'db dyn SpannedHirAnalysisDb,
+    module: hir::hir_def::TopLevelMod<'db>,
+    diagnostics: &[common::diagnostics::CompleteDiagnostic],
+) -> Result<Vec<Value>, String> {
+    let impls = module
+        .children_non_nested(db)
+        .filter_map(|item| {
+            let ItemKind::ImplTrait(impl_) = item else {
+                return None;
+            };
+            let name = impl_
+                .hir_trait_ref(db)
+                .to_opt()?
+                .path(db)
+                .to_opt()?
+                .ident(db)
+                .to_opt()?;
+            Some((impl_, name))
+        })
+        .collect::<Vec<_>>();
+    let mut records = vec![];
+    for (i, (a, trait_a)) in impls.iter().enumerate() {
+        let span_a = a
+            .span()
+            .resolve(db)
+            .ok_or("implementation has no source span")?;
+        for (b, trait_b) in &impls[i + 1..] {
+            if trait_a != trait_b {
+                continue;
+            }
+            let span_b = b
+                .span()
+                .resolve(db)
+                .ok_or("implementation has no source span")?;
+            let conflict = diagnostics
+                .iter()
+                .filter(|d| d.error_code.to_string() == "5-0001")
+                .any(|d| {
+                    let contains = |declaration: &common::diagnostics::Span| {
+                        d.sub_diagnostics
+                            .iter()
+                            .filter_map(|s| s.span.as_ref())
+                            .any(|s| {
+                                s.file == declaration.file
+                                    && declaration.range.contains_range(s.range)
+                            })
+                    };
+                    contains(&span_a) && contains(&span_b)
+                });
+            let a = a.declaration_index(db);
+            let b = b.declaration_index(db);
+            records.push(
+                json!({"v":1,"kind":"overlap","a":a.min(b),"b":a.max(b),"conflict":conflict}),
+            );
+        }
+    }
+    Ok(records)
 }
 
 fn binary_operator(op: BinOp) -> Result<&'static str, String> {

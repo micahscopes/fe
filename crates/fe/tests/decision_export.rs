@@ -441,3 +441,30 @@ fn exercise() -> u256 {
     assert_eq!(uses[0]["span"], json!({"line":11,"col":20}));
     assert_eq!(uses[3]["body"][0]["span"], json!({"line":15,"col":24}));
 }
+
+#[test]
+fn export_overlap_uses_reported_pairs_and_keeps_disjoint_pairs() {
+    for (second, conflict) in [("Word", true), ("Other", false)] {
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///overlap_export.fe").unwrap();
+        let source = format!(
+            "trait Read {{}}\nstruct Word {{}}\nstruct Other {{}}\nimpl Read for Word {{}}\nimpl Read for {second} {{}}\n"
+        );
+        db.workspace().touch(&mut db, url.clone(), Some(source));
+        let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
+        let completed = db.run_on_top_mod(module).complete_diags(&db);
+        let pairs = fe::decision_export::overlap_records(&db, module, &completed).unwrap();
+        assert_eq!(
+            pairs,
+            json!([{"v":1,"kind":"overlap","a":0,"b":1,"conflict":conflict}])
+                .as_array()
+                .unwrap()
+                .clone()
+        );
+        let errors = fe::decision_export::diagnostic_records(&db, &completed).unwrap();
+        assert_eq!(errors.iter().any(|e| e["code"] == "5-0001"), conflict);
+        if conflict {
+            assert_eq!(errors[0]["site"]["line"], 4);
+        }
+    }
+}

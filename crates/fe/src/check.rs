@@ -506,12 +506,19 @@ fn check_single_file(
             has_errors = true;
         }
 
-        if let Some(output) = decisions_out
-            && let Err(error) =
-                fe::decision_export::write_module(db, top_mod, file, output.as_std_path())
-        {
-            eprintln!("Error: {error}");
-            return true;
+        if let Some(output) = decisions_out {
+            let mut completed = diagnostics.hir.complete_diags(db);
+            completed.extend(diagnostics.mir.iter().cloned());
+            if let Err(error) = fe::decision_export::write_module(
+                db,
+                top_mod,
+                file,
+                &completed,
+                output.as_std_path(),
+            ) {
+                eprintln!("Error: {error}");
+                return true;
+            }
         }
         if has_errors {
             return true;
