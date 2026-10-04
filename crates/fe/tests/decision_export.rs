@@ -341,7 +341,8 @@ trait OutsideTrait: Base {}
     let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
     let diagnostics = db.run_on_top_mod(module);
     assert!(diagnostics.is_empty(), "{}", diagnostics.format_diags(&db));
-    let records = fe::decision_export::declaration_records(&db, module);
+    let records =
+        fe::decision_export::declaration_records(&db, module, &diagnostics.complete_diags(&db));
     let requirement = json!({"op":">","a":{"var":"N"},"b":{"nat":0}});
     for kind in ["trait", "struct", "impl"] {
         let record = records
@@ -420,7 +421,8 @@ fn exercise() -> u256 {
     let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
     let diagnostics = db.run_on_top_mod(module);
     assert!(diagnostics.is_empty(), "{}", diagnostics.format_diags(&db));
-    let records = fe::decision_export::declaration_records(&db, module);
+    let records =
+        fe::decision_export::declaration_records(&db, module, &diagnostics.complete_diags(&db));
     let function = records
         .iter()
         .find(|r| r["item"] == "fn" && r["name"] == "exercise")
@@ -450,6 +452,20 @@ fn exercise() -> u256 {
     let openings =
         fe::decision_export::with_records(&db, function.body(&db).unwrap(), typed).unwrap();
     assert_eq!(uses[4]["span"], openings[0]["site"]);
+    assert!(
+        uses[4]["span_aliases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|span| span["line"] == 15)
+    );
+    assert!(
+        uses[4]["body"][0]["span_aliases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|span| span["line"] == 16)
+    );
     assert_eq!(uses[4]["body"][0]["goal"], goal);
     assert_eq!(uses[4]["body"][0]["qualified"], true);
     assert_eq!(uses[0]["span"], json!({"line":11,"col":20}));
@@ -510,6 +526,19 @@ fn export_keeps_written_type_conditions_in_generic_const_paths() {
         );
         let (_, typed) = check_func_body(&db, function);
         let conditions = fe::decision_export::condition_records(&db, typed).unwrap();
+        let program =
+            fe::decision_export::declaration_records(&db, module, &diagnostics.complete_diags(&db));
+        let function = program
+            .iter()
+            .find(|r| r["item"] == "fn" && r["name"] == name)
+            .unwrap();
+        let aliases = function["body"][0]["span_aliases"].as_array().unwrap();
+        assert!(
+            conditions
+                .iter()
+                .all(|condition| aliases.contains(&condition["site"])),
+            "nested condition coordinate was not paired with its authored call"
+        );
         assert!(
             conditions
                 .iter()

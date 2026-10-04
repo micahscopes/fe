@@ -263,7 +263,7 @@ pub fn write_module(
         json!({"v":1,"kind":"header","schema":"fe-decisions/1","compiler_commit":option_env!("FE_GIT_COMMIT").unwrap_or("unknown"),"source_sha256":format!("{:x}",Sha256::digest(file.text(db).as_bytes()))}),
         json!({"v":1,"kind":"note","text":"Unsupported program shapes are explicit out_of_fragment items; corpus acceptance is pending."}),
     ];
-    records.extend(declaration_records(db, module));
+    records.extend(declaration_records(db, module, diagnostics));
     records.extend(diagnostic_records(db, diagnostics)?);
     records.extend(overlap_records(db, module, diagnostics)?);
     for func in module.all_funcs(db) {

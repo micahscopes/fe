@@ -13,10 +13,23 @@ const MAX_TERM_DEPTH: usize = 64;
 pub fn declaration_records<'db>(
     db: &'db dyn SpannedHirAnalysisDb,
     module: TopLevelMod<'db>,
+    diagnostics: &[common::diagnostics::CompleteDiagnostic],
 ) -> Vec<Value> {
     module.children_non_nested(db).filter_map(|item| {
         if matches!(item, ItemKind::Use(_)) { return None; }
-        let result = declaration(db,item);
+        let result = declaration(db,item,diagnostics).and_then(|mut record| {
+            let region: DynLazySpan = match item {
+                ItemKind::Func(function) => function.span().sig().into(),
+                _ => item.span().into(),
+            };
+            let excluded = match item {
+                ItemKind::Trait(trait_) => trait_.methods(db).map(|m|m.span().into()).collect(),
+                ItemKind::ImplTrait(impl_) => impl_.methods(db).map(|m|m.span().into()).collect(),
+                _ => vec![],
+            };
+            record["span_aliases"] = json!(span_aliases(db,region,&excluded,diagnostics,None)?);
+            Ok(record)
+        });
         Some(match result {
             Ok(record) => record,
             Err(reason) => json!({"v":1,"kind":"item","item":"out_of_fragment","what":item.kind_name(),"reason":reason}),
@@ -27,6 +40,7 @@ pub fn declaration_records<'db>(
 fn declaration<'db>(
     db: &'db dyn SpannedHirAnalysisDb,
     item: ItemKind<'db>,
+    diagnostics: &[common::diagnostics::CompleteDiagnostic],
 ) -> Result<Value, String> {
     if let ItemKind::Const(value) = item {
         return Ok(
@@ -43,7 +57,7 @@ fn declaration<'db>(
             }
             let body = function.body(db).ok_or("function has no body")?;
             let (_, typed) = hir::analysis::ty::ty_check::check_func_body(db, function);
-            let uses = body_uses(db, body, body.expr(db), &env, typed, 0)?;
+            let uses = body_uses(db, body, body.expr(db), &env, typed, diagnostics, 0)?;
             Ok(
                 json!({"v":1,"kind":"item","item":"fn","name":function.name(db).to_opt().ok_or("unnamed function")?.data(db),"params":params,"const":function.is_const(db),"bounds":bounds,"conds":conds,"body":uses}),
             )
@@ -71,7 +85,7 @@ fn declaration<'db>(
             }).collect::<Result<Vec<_>,&str>>()?;
             let methods = trait_
                 .methods(db)
-                .map(|method| method_record(db, method))
+                .map(|method| method_record(db, method, diagnostics))
                 .collect::<Result<Vec<_>, _>>()?;
             if !bounds.is_empty() || !conds.is_empty() {
                 return Err("trait-level requirements are outside format v1".into());
@@ -98,7 +112,7 @@ fn declaration<'db>(
             }).collect::<Result<Vec<_>,String>>()?;
             let methods = impl_
                 .methods(db)
-                .map(|method| method_record(db, method))
+                .map(|method| method_record(db, method, diagnostics))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(
                 json!({"v":1,"kind":"item","item":"impl","index":impl_.declaration_index(db),"name":impl_.selection_name(db).map(|name|name.data(db)),"params":params,"trait":name,"targs":args,"self":self_ty,"bounds":bounds,"conds":conds,"consts":consts,"methods":methods}),
@@ -111,6 +125,7 @@ fn declaration<'db>(
 fn method_record<'db>(
     db: &'db dyn SpannedHirAnalysisDb,
     method: hir::hir_def::Func<'db>,
+    diagnostics: &[common::diagnostics::CompleteDiagnostic],
 ) -> Result<Value, String> {
     let owner = GenericParamOwner::Func(method);
     let (params, env) = parameters(db, owner)?;
@@ -121,7 +136,13 @@ fn method_record<'db>(
     if !bounds.is_empty() {
         return Err("method bounds are outside format v1".into());
     }
-    Ok(json!({"name":method.name(db).to_opt().ok_or("unnamed method")?.data(db),"conds":conds}))
+    let mut record =
+        json!({"name":method.name(db).to_opt().ok_or("unnamed method")?.data(db),"conds":conds});
+    let aliases = span_aliases(db, method.span().sig().into(), &[], diagnostics, None)?;
+    if !aliases.is_empty() {
+        record["span_aliases"] = json!(aliases);
+    }
+    Ok(record)
 }
 
 fn parameters<'db>(
@@ -415,6 +436,7 @@ fn body_uses<'db>(
     expr: hir::hir_def::ExprId,
     env: &Parameters,
     typed: &TypedBody<'db>,
+    diagnostics: &[common::diagnostics::CompleteDiagnostic],
     depth: usize,
 ) -> Result<Vec<Value>, String> {
     if depth >= MAX_TERM_DEPTH {
@@ -429,7 +451,15 @@ fn body_uses<'db>(
                     | hir::hir_def::Partial::Present(hir::hir_def::Stmt::Expr(value)) => *value,
                     _ => return Err("statement is outside the v1 use fragment".into()),
                 };
-                uses.extend(body_uses(db, body, value, env, typed, depth + 1)?);
+                uses.extend(body_uses(
+                    db,
+                    body,
+                    value,
+                    env,
+                    typed,
+                    diagnostics,
+                    depth + 1,
+                )?);
             }
         }
         hir::hir_def::Partial::Present(Expr::Lit(_)) => {}
@@ -489,7 +519,7 @@ fn body_uses<'db>(
                     Ok(name)
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            let inner = body_uses(db, body, *inner, env, typed, depth + 1)?;
+            let inner = body_uses(db, body, *inner, env, typed, diagnostics, depth + 1)?;
             if names.len() == 1 {
                 uses.push(json!({"use":"with","name":names[0],"body":inner}));
             } else {
@@ -511,10 +541,77 @@ fn body_uses<'db>(
         };
         for use_ in &mut uses {
             use_["span"] = span.clone();
+            let excluded = match expr.data(db, body) {
+                hir::hir_def::Partial::Present(Expr::With(_, inner)) => {
+                    vec![inner.span(body).into()]
+                }
+                _ => vec![],
+            };
+            use_["span_aliases"] = json!(span_aliases(
+                db,
+                expr.span(body).into(),
+                &excluded,
+                diagnostics,
+                Some(typed)
+            )?);
             if use_["use"] == "with" {
                 use_["construct_span"] = construct_span.clone();
             }
         }
     }
     Ok(uses)
+}
+
+// Alias actual reported/retained coordinates to the smallest authored use
+// region. Nested with bodies are handled by their own use records.
+fn span_aliases<'db>(
+    db: &'db dyn SpannedHirAnalysisDb,
+    region: DynLazySpan<'db>,
+    excluded: &[DynLazySpan<'db>],
+    diagnostics: &[common::diagnostics::CompleteDiagnostic],
+    typed: Option<&TypedBody<'db>>,
+) -> Result<Vec<Value>, String> {
+    let region = region
+        .resolve(db)
+        .ok_or("authored region has no source span")?;
+    let excluded = excluded
+        .iter()
+        .filter_map(|s| s.resolve(db))
+        .collect::<Vec<_>>();
+    let mut points = diagnostics
+        .iter()
+        .filter_map(|d| d.primary_span())
+        .collect::<Vec<_>>();
+    if let Some(typed) = typed {
+        points.extend(
+            typed
+                .decisions()
+                .condition_entries()
+                .filter_map(|(_, c)| c.span().resolve(db)),
+        );
+        points.extend(
+            typed
+                .decisions()
+                .choice_entries(db)
+                .filter_map(|c| c.span().resolve(db)),
+        );
+        if let Some(body) = typed.body() {
+            points.extend(
+                typed
+                    .with_choices()
+                    .filter_map(|c| c.expression().span(body).resolve(db)),
+            );
+        }
+    }
+    let mut offsets = std::collections::BTreeSet::new();
+    let mut result = vec![];
+    for point in points {
+        let inside = |r: &common::diagnostics::Span| {
+            point.file == r.file && r.range.contains(point.range.start())
+        };
+        if inside(&region) && !excluded.iter().any(inside) && offsets.insert(point.range.start()) {
+            result.push(span_site(db, &point)?);
+        }
+    }
+    Ok(result)
 }
