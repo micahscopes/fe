@@ -2043,6 +2043,20 @@ pub struct TraitChoiceId<'db> {
 }
 
 impl<'db> TraitChoiceId<'db> {
+    /// Record an implementation already accepted by a generated-call producer.
+    pub fn for_resolved_implementation(
+        db: &'db dyn HirAnalysisDb,
+        instance: crate::analysis::ty::trait_def::ResolvedImplInstance<'db>,
+    ) -> Self {
+        Self::new(
+            db,
+            TraitChoice {
+                goal: instance.trait_inst(),
+                via: TraitChoiceVia::Implementation(instance.selected()),
+            },
+        )
+    }
+
     /// Reuse the answer from an existing context-independence proof.
     pub(crate) fn for_satisfied_goal(
         db: &'db dyn HirAnalysisDb,

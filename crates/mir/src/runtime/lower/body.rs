@@ -31,7 +31,7 @@ use hir::analysis::{
         trait_resolution::{
             GoalSatisfiability, PredicateListId, TraitSolveCx, is_goal_satisfiable,
         },
-        ty_check::BodyOwner,
+        ty_check::{BodyOwner, TraitChoiceId},
         ty_def::{TyData, TyId},
     },
 };
@@ -5215,7 +5215,10 @@ impl<'db> RmirEmitter<'db> {
             scope,
             self.env.assumptions,
             func,
-            Some(trait_inst),
+            Some(TraitChoiceId::for_resolved_implementation(
+                self.db,
+                impl_instance,
+            )),
             &[],
         )
         .unwrap_or_else(|error| panic!("{}", generated_call_error(self.db, func, error)));

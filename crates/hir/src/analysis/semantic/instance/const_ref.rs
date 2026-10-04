@@ -366,7 +366,7 @@ pub(crate) fn provisional_semantic_callee_key<'db>(
 
 /// Finalizes a compiler-generated call that has no caller body through the
 /// same selection, argument mapping, signature check, and context pruning as
-/// source calls. Inherited arguments come from `trait_inst`; `own_args` are the
+/// source calls. Inherited arguments come from the recorded choice; `own_args` are the
 /// callee's own source generic arguments. Generated calls must dispatch to a
 /// concrete body and cannot carry hidden layout or effect-provider slots.
 pub fn generated_callee_key<'db>(
@@ -374,9 +374,10 @@ pub fn generated_callee_key<'db>(
     scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
     func: Func<'db>,
-    trait_inst: Option<TraitInstId<'db>>,
+    trait_choice: Option<TraitChoiceId<'db>>,
     own_args: &[TyId<'db>],
 ) -> Result<SemanticInstanceKey<'db>, MethodArgMapError<'db>> {
+    let trait_inst = trait_choice.map(|choice| choice.data(db).goal());
     let keys = ParamSchemaId::full(db, func.into()).keys(db);
     let inherited = trait_inst.map_or(&[][..], |inst| inst.args(db));
     let inherited_len = GenericParamOwner::Func(func)
@@ -410,7 +411,7 @@ pub fn generated_callee_key<'db>(
         ProviderResolutionMode::Final,
         false,
         CalleeChoices {
-            method: TraitCallChoice::Synthetic,
+            method: trait_choice.map_or(TraitCallChoice::NotTrait, TraitCallChoice::Recorded),
             bounds: Vec::new(),
         },
     )?
@@ -427,7 +428,6 @@ enum TraitCallChoice<'db> {
     NotTrait,
     Recorded(TraitChoiceId<'db>),
     UntransportedBound,
-    Synthetic,
 }
 
 struct CalleeChoices<'db> {
@@ -508,15 +508,12 @@ fn source_method_choice<'db>(
     if callable.trait_inst().is_none() {
         return TraitCallChoice::NotTrait;
     }
-    if !matches!(origin, SemOrigin::Expr(_) | SemOrigin::Stmt(_)) {
-        return TraitCallChoice::Synthetic;
-    }
     let typed = caller.typed_body(db);
     let body = typed.body().expect("a source trait call has a body");
     let span = match origin {
         SemOrigin::Expr(expr) => expr.span(body).into(),
         SemOrigin::Stmt(stmt) => stmt.span(body).into(),
-        _ => unreachable!(),
+        _ => panic!("a source trait call must have an expression or statement site"),
     };
     let site = DecisionSite::trait_reference(span);
     let record = typed
@@ -628,19 +625,17 @@ fn semantic_callee_key_with_assumptions<'db>(
                     recorded_method_instance(db, context, choice, name)
                 }
                 TraitCallChoice::NotTrait => unreachable!("trait call requires a choice"),
-                TraitCallChoice::UntransportedBound | TraitCallChoice::Synthetic => {
-                    resolve_trait_method_with_selections(
-                        db,
-                        context,
-                        inst,
-                        name,
-                        if inherit_trait_selection {
-                            impl_env
-                        } else {
-                            callable.context
-                        },
-                    )
-                }
+                TraitCallChoice::UntransportedBound => resolve_trait_method_with_selections(
+                    db,
+                    context,
+                    inst,
+                    name,
+                    if inherit_trait_selection {
+                        impl_env
+                    } else {
+                        callable.context
+                    },
+                ),
             }
         }
         .map_err(MethodArgMapError::SelectedEvidence)?
@@ -725,6 +720,7 @@ fn semantic_callee_key_with_assumptions<'db>(
         *arg = canonicalize_ty_for_mode(db, *arg, canon_env, ConstCanonMode::Identity);
     }
 
+    let independent_context = TraitSolveCx::new(db, owner.scope());
     // A fully concrete implementation can shed caller context only when the
     // same implementation is selected without it. Symbolic calls and
     // assumption-selected defaults keep the caller's proof environment.
@@ -744,7 +740,7 @@ fn semantic_callee_key_with_assumptions<'db>(
             && matches!(
                 resolve_trait_method_instance(
                     db,
-                    TraitSolveCx::new(db, owner.scope()),
+                    independent_context,
                     resolved.trait_inst(),
                     name,
                 ),
@@ -835,8 +831,8 @@ fn semantic_callee_key_with_assumptions<'db>(
             .iter()
             .copied()
             .enumerate()
-            .all(|(slot, bound)| {
-                match is_goal_satisfiable(db, TraitSolveCx::new(db, scope), bound) {
+            .all(
+                |(slot, bound)| match is_goal_satisfiable(db, independent_context, bound) {
                     GoalSatisfiability::Satisfied(solution) => {
                         if callable.opened_provisions.is_empty()
                             && !retained_selections
@@ -858,8 +854,8 @@ fn semantic_callee_key_with_assumptions<'db>(
                         true
                     }
                     _ => false,
-                }
-            })
+                },
+            )
             && (0..nominal_func.arg_tys(db).len()).all(|idx| {
                 same_without_caller(
                     callable
@@ -1295,6 +1291,21 @@ fn selected() -> u256 { with (Alternative) { <S as Read>::read() } }
             recorded.resolved().selected().origin(&db),
             accepted.answer_origin(&db),
             "the consumer reads the accepted answer"
+        );
+        let nominal = accepted.goal().def(&db).method_defs(&db)[&name];
+        let generated = super::generated_callee_key(
+            &db,
+            function.scope(),
+            crate::analysis::ty::trait_resolution::PredicateListId::empty_list(&db),
+            nominal,
+            Some(record),
+            &[],
+        )
+        .expect("generated call transports the accepted answer");
+        assert_eq!(
+            generated.owner(&db),
+            crate::analysis::ty::ty_check::BodyOwner::Func(recorded.body().expect("selected body")),
+            "generation must not substitute ordinary lookup's different implementation"
         );
     }
 

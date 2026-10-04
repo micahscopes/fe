@@ -11,9 +11,9 @@ use hir::{
             CallableLayoutParamPort, LayoutEvidencePathStep,
             const_ty::{CallableInputLayoutHoleOrigin, ConstTyData},
             corelib::{resolve_core_trait, resolve_lib_func_path, resolve_lib_type_path},
-            trait_def::{MethodArgMapError, TraitInstId},
-            trait_resolution::PredicateListId,
-            ty_check::{BodyOwner, EffectParamSite, LocalBinding},
+            trait_def::{MethodArgMapError, TraitInstId, resolve_trait_method_instance},
+            trait_resolution::{PredicateListId, Selection, TraitSolveCx},
+            ty_check::{BodyOwner, EffectParamSite, LocalBinding, TraitChoiceId},
             ty_def::{TyData, TyId},
         },
     },
@@ -1630,12 +1630,20 @@ pub(crate) fn resolve_trait_runtime_instance<'db>(
                 "missing trait method `{method}` for runtime package"
             ))
         })?;
+    let Selection::Unique(implementation) =
+        resolve_trait_method_instance(db, TraitSolveCx::new(db, scope), inst, name)
+    else {
+        return Err(LowerError::Unsupported(format!(
+            "no unique implementation for generated `{method}` call"
+        )));
+    };
+    let choice = TraitChoiceId::for_resolved_implementation(db, implementation.resolved());
     let key = generated_callee_key(
         db,
         scope,
         PredicateListId::empty_list(db),
         func,
-        Some(inst),
+        Some(choice),
         &own_args,
     )
     .map_err(|error| generated_call_error(db, func, error))?;

@@ -13,7 +13,7 @@ import sys
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'crates/hir/src/analysis/semantic/instance/const_ref.rs'
-BASELINE = 2
+BASELINE = 1
 spec = importlib.util.spec_from_file_location(
     'solver_budget', ROOT / '.github/check_trait_solver_setup_budget.py'
 )
