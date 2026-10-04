@@ -377,3 +377,60 @@ trait OutsideTrait: Base {}
     assert!(records.iter().any(|row| row["item"] == "out_of_fragment"
         && row["reason"].as_str().unwrap().contains("super-traits")));
 }
+
+#[test]
+fn export_program_uses_preserve_structure_terms_and_spans() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///program_use_export.fe").unwrap();
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(
+            r#"
+trait Read { const OK: bool
+ fn read() -> u256 }
+struct Word {}
+impl Read for Word { const OK: bool = true
+ fn read() -> u256 { 1 } }
+impl Read for Word as Other { const OK: bool = true
+ fn read() -> u256 { 2 } }
+fn need<const B: bool>() -> u256 where B { 0 }
+fn exercise() -> u256 {
+    let _a: Word = Word {}
+    let _b: bool = <Word as Read>::OK
+    let _c: u256 = need<{<Word as Read>::OK}>()
+    let _d: u256 = with (Other) {
+        let _e: u256 = <Word as Read>::read()
+        0
+    }
+    0
+}
+"#
+            .into(),
+        ),
+    );
+    let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
+    let diagnostics = db.run_on_top_mod(module);
+    assert!(diagnostics.is_empty(), "{}", diagnostics.format_diags(&db));
+    let records = fe::decision_export::declaration_records(&db, module);
+    let function = records
+        .iter()
+        .find(|r| r["item"] == "fn" && r["name"] == "exercise")
+        .unwrap_or_else(|| panic!("{records:#?}"));
+    let uses = function["body"].as_array().unwrap();
+    assert_eq!(uses.len(), 4);
+    assert_eq!(uses[0]["use"], "type");
+    assert_eq!(uses[1]["use"], "const");
+    let goal = json!({"self":{"con":"Word","args":[]},"trait":"Read","args":[]});
+    assert_eq!(uses[1]["goal"], goal);
+    assert_eq!(
+        uses[2]["args"],
+        json!([{"assoc":goal["self"],"trait":"Read","targs":[],"c":"OK"}])
+    );
+    assert_eq!(uses[3]["use"], "with");
+    assert_eq!(uses[3]["name"], "Other");
+    assert_eq!(uses[3]["body"][0]["goal"], goal);
+    assert_eq!(uses[3]["body"][0]["qualified"], true);
+    assert_eq!(uses[0]["span"], json!({"line":11,"col":20}));
+    assert_eq!(uses[3]["body"][0]["span"], json!({"line":15,"col":24}));
+}

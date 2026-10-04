@@ -15,7 +15,7 @@ pub fn declaration_records<'db>(
     module: TopLevelMod<'db>,
 ) -> Vec<Value> {
     module.children_non_nested(db).filter_map(|item| {
-        if matches!(item, ItemKind::Func(_) | ItemKind::Use(_)) { return None; }
+        if matches!(item, ItemKind::Use(_)) { return None; }
         let result = declaration(db,item);
         Some(match result {
             Ok(record) => record,
@@ -37,6 +37,16 @@ fn declaration<'db>(
     let (params, env) = parameters(db, owner)?;
     let (bounds, conds) = clause(db, owner, &env)?;
     match item {
+        ItemKind::Func(function) => {
+            if function.params(db).next().is_some() {
+                return Err("function value parameters are outside this v1 projection".into());
+            }
+            let body = function.body(db).ok_or("function has no body")?;
+            let uses = body_uses(db, body, body.expr(db), &env, 0)?;
+            Ok(
+                json!({"v":1,"kind":"item","item":"fn","name":function.name(db).to_opt().ok_or("unnamed function")?.data(db),"params":params,"const":function.is_const(db),"bounds":bounds,"conds":conds,"body":uses}),
+            )
+        }
         ItemKind::Struct(struct_) => {
             if !struct_.hir_fields(db).data(db).is_empty() {
                 return Err("struct fields are outside the v1 model fragment".into());
@@ -323,6 +333,14 @@ fn syntax_expr<'db>(
         return Err("v1 source term exceeds depth 64".into());
     }
     match expr.data(db, body) {
+        hir::hir_def::Partial::Present(Expr::Block(statements)) if statements.len() == 1 => {
+            let hir::hir_def::Partial::Present(hir::hir_def::Stmt::Expr(value)) =
+                statements[0].data(db, body)
+            else {
+                return Err("constant block is outside the v1 source fragment".into());
+            };
+            syntax_expr(db, body, *value, env, depth + 1)
+        }
         hir::hir_def::Partial::Present(Expr::Lit(LitKind::Bool(value))) => {
             Ok(json!({"bool":value}))
         }
@@ -330,12 +348,13 @@ fn syntax_expr<'db>(
             json!({"nat":value.data(db).to_string().parse::<u64>().map_err(|_|"natural literal exceeds encoder range")?}),
         ),
         hir::hir_def::Partial::Present(Expr::Path(path)) => {
-            let (name, args) = simple_path(
-                db,
-                path.to_opt().ok_or("missing expression path")?,
-                env,
-                depth + 1,
-            )?;
+            let path = path.to_opt().ok_or("missing expression path")?;
+            if let Some((goal, name)) = qualified_member(db, path, env, depth + 1)? {
+                return Ok(
+                    json!({"assoc":goal["self"],"trait":goal["trait"],"targs":goal["args"],"c":name}),
+                );
+            }
+            let (name, args) = simple_path(db, path, env, depth + 1)?;
             if !args.is_empty() {
                 return Err("applied expression name is outside format v1".into());
             }
@@ -352,4 +371,130 @@ fn syntax_expr<'db>(
         }
         _ => Err("expression is outside the v1 source fragment".into()),
     }
+}
+
+fn qualified_member<'db>(
+    db: &'db dyn SpannedHirAnalysisDb,
+    path: PathId<'db>,
+    env: &Parameters,
+    depth: usize,
+) -> Result<Option<(Value, String)>, String> {
+    let Some(parent) = path.parent(db) else {
+        return Ok(None);
+    };
+    let PathKind::QualifiedType { type_, trait_ } = parent.kind(db) else {
+        return Ok(None);
+    };
+    let PathKind::Ident {
+        ident,
+        generic_args,
+    } = path.kind(db)
+    else {
+        return Err("missing qualified member".into());
+    };
+    if !generic_args.data(db).is_empty() {
+        return Err("generic member is outside format v1".into());
+    }
+    let (trait_name, args) = trait_reference(db, trait_, env, depth)?;
+    let self_ty = syntax_type(db, type_, env, depth)?;
+    Ok(Some((
+        json!({"self":self_ty,"trait":trait_name,"args":args}),
+        ident
+            .to_opt()
+            .ok_or("unnamed qualified member")?
+            .data(db)
+            .clone(),
+    )))
+}
+
+fn body_uses<'db>(
+    db: &'db dyn SpannedHirAnalysisDb,
+    body: Body<'db>,
+    expr: hir::hir_def::ExprId,
+    env: &Parameters,
+    depth: usize,
+) -> Result<Vec<Value>, String> {
+    if depth >= MAX_TERM_DEPTH {
+        return Err("v1 use nesting exceeds depth 64".into());
+    }
+    let mut uses = vec![];
+    match expr.data(db, body) {
+        hir::hir_def::Partial::Present(Expr::Block(statements)) => {
+            for statement in statements {
+                let value = match statement.data(db, body) {
+                    hir::hir_def::Partial::Present(hir::hir_def::Stmt::Let(_, _, Some(value)))
+                    | hir::hir_def::Partial::Present(hir::hir_def::Stmt::Expr(value)) => *value,
+                    _ => return Err("statement is outside the v1 use fragment".into()),
+                };
+                uses.extend(body_uses(db, body, value, env, depth + 1)?);
+            }
+        }
+        hir::hir_def::Partial::Present(Expr::Lit(_)) => {}
+        hir::hir_def::Partial::Present(Expr::Call(callee, args)) => {
+            if !args.is_empty() {
+                return Err("value arguments are outside the v1 use fragment".into());
+            }
+            let hir::hir_def::Partial::Present(Expr::Path(path)) = callee.data(db, body) else {
+                return Err("non-path call is outside format v1".into());
+            };
+            let path = path.to_opt().ok_or("missing call path")?;
+            if let Some((goal, name)) = qualified_member(db, path, env, 0)? {
+                uses.push(json!({"use":"method","goal":goal,"method":name,"qualified":true}));
+            } else {
+                let (name, args) = simple_path(db, path, env, 0)?;
+                uses.push(json!({"use":"call","fn":name,"args":args}));
+            }
+        }
+        hir::hir_def::Partial::Present(Expr::Path(path)) => {
+            let (goal, name) =
+                qualified_member(db, path.to_opt().ok_or("missing constant path")?, env, 0)?
+                    .ok_or("unqualified value use is outside this v1 projection")?;
+            uses.push(json!({"use":"const","goal":goal,"c":name}));
+        }
+        hir::hir_def::Partial::Present(Expr::RecordInit(path, fields)) => {
+            if !fields.is_empty() {
+                return Err("record fields are outside format v1".into());
+            }
+            let (name, args) =
+                simple_path(db, path.to_opt().ok_or("missing record path")?, env, 0)?;
+            uses.push(json!({"use":"type","type":{"con":name,"args":args}}));
+        }
+        hir::hir_def::Partial::Present(Expr::With(bindings, inner)) => {
+            let names = bindings
+                .iter()
+                .map(|binding| {
+                    if binding.key_path.is_some() {
+                        return Err("keyed opening is outside format v1".into());
+                    }
+                    let hir::hir_def::Partial::Present(Expr::Path(path)) =
+                        binding.value.data(db, body)
+                    else {
+                        return Err("evidence opening requires the Step 2 record".into());
+                    };
+                    let (name, args) =
+                        simple_path(db, path.to_opt().ok_or("missing opening path")?, env, 0)?;
+                    if !args.is_empty() {
+                        return Err("applied opening is outside format v1".into());
+                    }
+                    Ok(name)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let inner = body_uses(db, body, *inner, env, depth + 1)?;
+            if names.len() == 1 {
+                uses.push(json!({"use":"with","name":names[0],"body":inner}));
+            } else {
+                uses.push(json!({"use":"with_list","names":names,"body":inner}));
+            }
+        }
+        _ => return Err("expression is outside the v1 use fragment".into()),
+    }
+    if !matches!(
+        expr.data(db, body),
+        hir::hir_def::Partial::Present(Expr::Block(_))
+    ) {
+        for use_ in &mut uses {
+            use_["span"] = source_site(db, &expr.span(body).into())?;
+        }
+    }
+    Ok(uses)
 }
