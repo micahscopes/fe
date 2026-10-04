@@ -24,7 +24,7 @@ use crate::{
     analysis::ty::{
         trait_resolution::{PredicateListId, constraint::collect_constraints},
         ty_check::{
-            LocalBinding, RecordLike, TypedBody, check_contract_init_body,
+            LocalBinding, RecordLike, TraitChoiceId, TypedBody, check_contract_init_body,
             check_contract_recv_arm_body, check_func_body,
         },
         ty_def::TyId,
@@ -302,6 +302,19 @@ pub struct PathView<'db> {
 }
 
 impl<'db> PathView<'db> {
+    /// Read the accepted choice for this reference from its checked body.
+    /// Taking the body explicitly also permits reads during const checking.
+    pub fn decision(&self, typed_body: &TypedBody<'db>) -> Option<TraitChoiceId<'db>> {
+        let body = self.scope.body()?;
+        let span = match self.body_ctx? {
+            BodyPathContext::Expr(expr) => expr.span(body).into(),
+            BodyPathContext::PatBinding(pat) | BodyPathContext::PatReference(pat) => {
+                pat.span(body).into()
+            }
+        };
+        body.decision_at(typed_body, span)
+    }
+
     pub fn new(path: PathId<'db>, scope: ScopeId<'db>, span: LazyPathSpan<'db>) -> Self {
         Self {
             path,
@@ -480,6 +493,12 @@ pub struct MethodCallView<'db> {
 }
 
 impl<'db> MethodCallView<'db> {
+    /// Read this call's accepted choice without resolving its goal again.
+    pub fn decision(&self, typed_body: &TypedBody<'db>) -> Option<TraitChoiceId<'db>> {
+        self.body
+            .decision_at(typed_body, self.expr.span(self.body).into())
+    }
+
     /// Resolve this method call to its target scope.
     ///
     /// Uses the typed body's callable information to find the resolved method.

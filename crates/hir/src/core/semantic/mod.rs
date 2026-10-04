@@ -892,6 +892,14 @@ pub enum CallSiteKind<'db> {
 }
 
 impl<'db> CallSiteView<'db> {
+    /// Read this call's retained choice from an already checked body.
+    pub fn decision(
+        &self,
+        typed_body: &crate::analysis::ty::ty_check::TypedBody<'db>,
+    ) -> Option<crate::analysis::ty::ty_check::TraitChoiceId<'db>> {
+        self.body.decision_at(typed_body, self.call_span())
+    }
+
     /// Resolve the callee of this call site via type checking.
     pub fn target(&self, db: &'db dyn HirAnalysisDb) -> Option<CallableDef<'db>> {
         use crate::analysis::ty::ty_check::check_func_body;
@@ -925,6 +933,20 @@ impl<'db> CallSiteView<'db> {
 }
 
 impl<'db> Body<'db> {
+    /// Read the choice at an exact semantic reference site, without solving.
+    pub fn decision_at(
+        self,
+        typed_body: &crate::analysis::ty::ty_check::TypedBody<'db>,
+        span: crate::span::DynLazySpan<'db>,
+    ) -> Option<crate::analysis::ty::ty_check::TraitChoiceId<'db>> {
+        if typed_body.body()? != self {
+            return None;
+        }
+        typed_body
+            .decisions()
+            .choice_ref(&crate::analysis::ty::ty_check::DecisionSite::trait_reference(span))
+    }
+
     /// Enumerate all call sites (function calls and method calls) in this body.
     pub fn call_sites(self, db: &'db dyn HirDb) -> Vec<CallSiteView<'db>> {
         let mut sites = Vec::new();

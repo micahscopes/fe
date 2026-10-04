@@ -77,3 +77,58 @@ fn body_references(fixture: Fixture<&str>) {
     let res = prop_formatter.finish(&db);
     snap_test!(res, fixture.path());
 }
+
+#[test]
+fn reference_views_read_accepted_trait_choices() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "reference_decisions.fe".into(),
+        "trait Get { fn get(self) -> u256 }\nstruct S {}\nimpl Get for S { fn get(self) -> u256 { 1 } }\nfn method() -> u256 { S {}.get() }\nfn path() { let f = <S as Get>::get }\nfn unrelated() {}\n",
+    );
+    let (module, _) = db.top_mod(file);
+    db.assert_no_diags(module);
+    let unrelated = fe_hir::test_db::find_func(&db, module, "unrelated");
+    let (_, other_body) = fe_hir::analysis::ty::ty_check::check_func_body(&db, unrelated);
+    for name in ["method", "path"] {
+        let function = fe_hir::test_db::find_func(&db, module, name);
+        let (_, typed) = fe_hir::analysis::ty::ty_check::check_func_body(&db, function);
+        let body = function.body(&db).unwrap();
+        if name == "method" {
+            let call_answer = body
+                .call_sites(&db)
+                .iter()
+                .find_map(|call| {
+                    assert!(call.decision(other_body).is_none());
+                    call.decision(typed)
+                })
+                .expect("whole-call accepted answer");
+            assert_eq!(
+                call_answer.data(&db).goal().pretty_print(&db, true),
+                "S: Get"
+            );
+        }
+        let mut found = false;
+        for reference in body.references(&db) {
+            let answer = match reference {
+                ReferenceView::MethodCall(view) if name == "method" => {
+                    assert!(view.decision(other_body).is_none());
+                    view.decision(typed)
+                }
+                ReferenceView::Path(view) if name == "path" => {
+                    assert!(view.decision(other_body).is_none());
+                    view.decision(typed)
+                }
+                _ => None,
+            };
+            if let Some(answer) = answer {
+                assert_eq!(answer.data(&db).goal().pretty_print(&db, true), "S: Get");
+                assert!(matches!(
+                    answer.data(&db).answer_origin(&db),
+                    fe_hir::analysis::ty::trait_def::ImplementorOrigin::Hir(_)
+                ));
+                found = true;
+            }
+        }
+        assert!(found, "{name} view did not read its accepted answer");
+    }
+}

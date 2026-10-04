@@ -1,9 +1,9 @@
 use crate::analysis::HirAnalysisDb;
-use crate::analysis::semantic::resolve_trait_method_with_selections;
+use crate::analysis::semantic::instance::recorded_method_instance;
 use crate::analysis::ty::diagnostics::{BodyDiag, FuncBodyDiag};
 use crate::analysis::ty::trait_resolution::{Selection, TraitSolveCx};
 use crate::analysis::ty::ty_check::{
-    Callable, EffectArgLayoutView, EffectParamSite, EffectPassMode, TypedBody,
+    Callable, EffectArgLayoutView, EffectParamSite, EffectPassMode, TraitChoiceId, TypedBody,
 };
 use crate::hir_def::{
     Body, CallableDef, Cond, CondId, Expr, ExprId, Func, Partial, Pat, Stmt, StmtId,
@@ -76,7 +76,8 @@ impl<'db> ConstFnChecker<'db, '_> {
     /// Reports a callee that a `const fn` cannot call, and returns whether it
     /// reported one.
     fn check_callable(&mut self, primary: DynLazySpan<'db>, callable: &Callable<'db>) -> bool {
-        let Some(callee) = self.callable_func(callable) else {
+        let choice = self.body.decision_at(self.typed_body, primary.clone());
+        let Some(callee) = self.callable_func(callable, choice) else {
             return false;
         };
 
@@ -122,20 +123,35 @@ impl<'db> ConstFnChecker<'db, '_> {
         true
     }
 
-    fn callable_func(&self, callable: &Callable<'db>) -> Option<Func<'db>> {
+    fn callable_func(
+        &self,
+        callable: &Callable<'db>,
+        choice: Option<TraitChoiceId<'db>>,
+    ) -> Option<Func<'db>> {
         let CallableDef::Func(func) = callable.callable_def() else {
             return None;
         };
+        // An assumption authorizes the trait declaration, rather than a
+        // concrete implementation body. Check its const contract directly.
+        if callable.trait_inst().is_some()
+            && choice.is_some_and(|answer| {
+                matches!(
+                    answer.data(self.db).answer_origin(self.db),
+                    super::trait_def::ImplementorOrigin::Assumption,
+                )
+            })
+        {
+            return Some(func);
+        }
         if callable.opened_obligation(self.db).is_none()
-            && let Some(inst) = callable.trait_inst()
+            && callable.trait_inst().is_some()
             && let Some(name) = func.name(self.db).to_opt()
-            && let Selection::Unique(method) = resolve_trait_method_with_selections(
+            && let Selection::Unique(method) = recorded_method_instance(
                 self.db,
                 TraitSolveCx::new(self.db, self.body.scope())
                     .with_assumptions(self.typed_body.assumptions()),
-                inst,
+                choice?,
                 name,
-                callable.context,
             )
             .ok()?
             && let Some(impl_func) = method.body()
