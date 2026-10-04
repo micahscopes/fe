@@ -5976,6 +5976,33 @@ impl DiagnosticVoucher for ImplDiag<'_> {
                 error_code,
             ),
 
+            Self::NamedAssociatedTypeMismatch {
+                primary,
+                ordinary,
+                type_name,
+                expected,
+                given,
+            } => {
+                let mut diag = primary_diag(
+                    severity,
+                    "named implementation changes associated type",
+                    format!(
+                        "associated type `{}` must remain `{}`, but this implementation defines `{}`",
+                        type_name.data(db),
+                        expected.pretty_print(db),
+                        given.pretty_print(db),
+                    ),
+                    primary.resolve(db),
+                    error_code,
+                );
+                diag.sub_diagnostics.push(SubDiagnostic::new(
+                    LabelStyle::Secondary,
+                    "ordinary implementation defines the associated type here".to_string(),
+                    ordinary.resolve(db),
+                ));
+                diag
+            }
+
             Self::MissingAssociatedType {
                 primary,
                 type_name,

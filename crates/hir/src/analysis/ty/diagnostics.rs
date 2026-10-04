@@ -1369,6 +1369,14 @@ pub enum ImplDiag<'db> {
         type_name: IdentId<'db>,
     },
 
+    NamedAssociatedTypeMismatch {
+        primary: DynLazySpan<'db>,
+        ordinary: DynLazySpan<'db>,
+        type_name: IdentId<'db>,
+        expected: TyId<'db>,
+        given: TyId<'db>,
+    },
+
     MissingAssociatedType {
         primary: DynLazySpan<'db>,
         type_name: IdentId<'db>,
@@ -1452,6 +1460,7 @@ impl ImplDiag<'_> {
             Self::MethodEffectMismatch { .. } => 24,
             Self::InvalidSelfType { .. } => 10,
             Self::InherentImplIsNotAllowed { .. } => 11,
+            Self::NamedAssociatedTypeMismatch { .. } => 25,
             Self::MissingAssociatedType { .. } => 12,
             Self::MissingAssociatedConstValue { .. } => 13,
             Self::ConstNotDefinedInTrait { .. } => 14,

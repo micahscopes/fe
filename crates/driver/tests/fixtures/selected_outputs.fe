@@ -1,3 +1,4 @@
+// RD108: named implementations preserve associated types; selected values still differ.
 trait Compute { type Output
     const fn compute() -> Self::Output
 }
@@ -7,21 +8,21 @@ impl Compute for Subject {
     const fn compute() -> u256 { 42 }
 }
 impl Compute for Subject as Flag {
-    type Output = bool
-    const fn compute() -> bool { true }
+    type Output = u256
+    const fn compute() -> u256 { 1 }
 }
 const fn first<T: Compute<Output=O>, O>() -> O { second<T, O>() }
 const fn second<T: Compute<Output=O>, O>() -> O { T::compute() }
-const fn selected() -> bool { with (Flag) { first<Subject, bool>() } }
-const fn selected_direct() -> bool { with (Flag) { Subject::compute() } }
+const fn selected() -> u256 { with (Flag) { first<Subject, u256>() } }
+const fn selected_direct() -> u256 { with (Flag) { Subject::compute() } }
 const fn ordinary() -> u256 { first<Subject, u256>() }
 const fn projected_first<T: Compute>() -> <T as Compute>::Output { projected_second<T>() }
 const fn projected_second<T: Compute>() -> <T as Compute>::Output { T::compute() }
-const fn projected_selected() -> bool { with (Flag) { projected_first<Subject>() } }
+const fn projected_selected() -> u256 { with (Flag) { projected_first<Subject>() } }
 const fn projected_ordinary() -> u256 { projected_first<Subject>() }
 const fn unrelated_choice<T: Compute>() -> <T as Compute>::Output {
     with (Flag) { T::compute() }
 }
 const fn unrelated_ordinary() -> u256 { unrelated_choice<Subject>() }
-const fn unrelated_selected() -> bool { with (Flag) { unrelated_choice<Subject>() } }
+const fn unrelated_selected() -> u256 { with (Flag) { unrelated_choice<Subject>() } }
 fn target() -> Subject { Subject {} }

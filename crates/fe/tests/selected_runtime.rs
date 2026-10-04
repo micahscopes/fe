@@ -61,18 +61,18 @@ fn selected_receiver_calls() {{
     execute(&format!(
         r#"
 {outputs}
-pub fn main() -> bool {{ selected() }}
+pub fn main() -> u256 {{ selected() }}
 #[test]
 fn distinct_returned_outputs() {{
     let flag = selected()
     let number = ordinary()
-    assert!(flag)
-    assert!(selected_direct())
+    assert!(flag == 1)
+    assert!(selected_direct() == 1)
     assert!(number == 42)
-    assert!(projected_selected())
+    assert!(projected_selected() == 1)
     assert!(projected_ordinary() == 42)
     assert!(unrelated_ordinary() == 42)
-    assert!(unrelated_selected())
+    assert!(unrelated_selected() == 1)
 }}
 "#
     ));

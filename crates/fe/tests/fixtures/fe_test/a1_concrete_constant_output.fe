@@ -1,3 +1,4 @@
+// RD108: associated types stay canonical; this fixture still checks lexical dispatch.
 trait Compute {
     type Output
     const ID: u256
@@ -8,7 +9,7 @@ impl Compute for Subject {
     const ID: u256 = 1
 }
 impl Compute for Subject as Flag {
-    type Output = bool
+    type Output = u256
     const ID: u256 = 2
 }
 

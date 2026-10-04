@@ -1257,6 +1257,62 @@ impl<'db> ImplTrait<'db> {
             return diags;
         }
 
+        if !implementor.types(db).is_empty()
+            && matches!(
+                ty::trait_def::impl_selection_class(db, self),
+                ty::trait_def::ImplSelectionClass::Named(_)
+            )
+            && let trait_resolution::Selection::Unique(ordinary) =
+                ty::trait_def::resolve_trait_impl_instance(db, solve_cx, trait_inst)
+            && let ty::trait_def::ImplementorOrigin::Hir(ordinary_impl) =
+                ordinary.selected().origin(db)
+        {
+            for declaration in trait_def.assoc_types(db) {
+                let Some(name) = declaration.name(db) else {
+                    continue;
+                };
+                let (Some(mut expected), Some(mut given)) = (
+                    ordinary.instantiated_assoc_ty(db, name),
+                    implementor.types(db).get(&name).copied(),
+                ) else {
+                    continue;
+                };
+                if expected == given {
+                    continue;
+                }
+                // Compare families under the same binder, independent of the
+                // parameter names and owning impl identities.
+                for idx in 0..declaration.generic_params(db).data(db).len() {
+                    let arg = ty::ty_lower::assoc_type_param(
+                        db,
+                        declaration.scope().assoc_type_owner().unwrap(),
+                        idx,
+                    );
+                    expected = TyId::app(db, expected, arg);
+                    given = TyId::app(db, given, arg);
+                }
+                let expected = normalize_ty(db, expected, self.scope(), solve_cx.assumptions());
+                let given = normalize_ty(db, given, self.scope(), solve_cx.assumptions());
+                if expected != given && !expected.has_invalid(db) && !given.has_invalid(db) {
+                    diags.push(
+                        ty::diagnostics::ImplDiag::NamedAssociatedTypeMismatch {
+                            primary: self
+                                .associated_type_span(db, name)
+                                .map_or_else(|| self.span().ty().into(), |span| span.ty().into()),
+                            ordinary: ordinary_impl.associated_type_span(db, name).map_or_else(
+                                || ordinary_impl.span().ty().into(),
+                                |span| span.ty().into(),
+                            ),
+                            type_name: name,
+                            expected,
+                            given,
+                        }
+                        .into(),
+                    );
+                }
+            }
+        }
+
         let is_satisfied = |goal, span: DynLazySpan<'db>, out: &mut Vec<_>| {
             match trait_resolution::is_goal_satisfiable(db, solve_cx, goal) {
                 GoalSatisfiability::Satisfied(_) | GoalSatisfiability::ContainsInvalid => {}

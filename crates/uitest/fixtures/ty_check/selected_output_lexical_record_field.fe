@@ -31,3 +31,5 @@ const fn leak() -> u256 {
     let h = with (Flag) { Holder { v: true } }
     h.v
 }
+
+// RD108: changing ordinary Output is rejected at the named impl; body diagnostics remain covered.

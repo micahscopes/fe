@@ -28,3 +28,5 @@ fn target() -> Subject { Subject {} }
 
 const fn plain() -> <Subject as Compute>::Output { Subject::compute() }
 const fn leak() -> bool { with (Flag) { plain() } }
+
+// RD108: changing ordinary Output is rejected at the named impl; body diagnostics remain covered.

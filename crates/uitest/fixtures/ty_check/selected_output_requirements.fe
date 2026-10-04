@@ -25,3 +25,5 @@ const fn wrong_selected_output() -> u256 {
 const fn missing_independent_bound() -> bool {
     with (Flag) { guarded<Subject, bool>() }
 }
+
+// RD108: changing ordinary Output is rejected at the named impl; body diagnostics remain covered.

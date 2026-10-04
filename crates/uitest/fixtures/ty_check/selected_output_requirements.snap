@@ -13,6 +13,15 @@ error[6-0003]: trait bound is not satisfied
 26 │     with (Flag) { guarded<Subject, bool>() }
    │                   ^^^^^^^^^^^^^^^^^^^^^^ `bool` doesn't implement `Gate`
 
+error[6-0025]: named implementation changes associated type
+   ┌─ selected_output_requirements.fe:14:19
+   │
+10 │     type Output = u256
+   │                   ---- ordinary implementation defines the associated type here
+   ·
+14 │     type Output = bool
+   │                   ^^^^ associated type `Output` must remain `u256`, but this implementation defines `bool`
+
 error[8-0097]: trait evidence opening failed
    ┌─ selected_output_requirements.fe:22:19
    │

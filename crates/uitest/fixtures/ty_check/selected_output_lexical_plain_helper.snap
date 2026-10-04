@@ -4,6 +4,15 @@ assertion_line: 27
 expression: diags
 input_file: fixtures/ty_check/selected_output_lexical_plain_helper.fe
 ---
+error[6-0025]: named implementation changes associated type
+   ┌─ selected_output_lexical_plain_helper.fe:10:19
+   │
+ 6 │     type Output = u256
+   │                   ---- ordinary implementation defines the associated type here
+   ·
+10 │     type Output = bool
+   │                   ^^^^ associated type `Output` must remain `u256`, but this implementation defines `bool`
+
 error[8-0000]: type mismatch
    ┌─ selected_output_lexical_plain_helper.fe:30:41
    │

@@ -241,7 +241,6 @@ fn opening_unproven_evidence_in_a_constant_reports_the_missing_impl() {
 }
 
 #[test]
-#[ignore = "pending q02/a3: associated-type selection rule awaits Micah"]
 fn selected_associated_output_cannot_escape_as_the_ordinary_field_type() {
     let mut db = database();
     let file = input(
@@ -251,7 +250,41 @@ fn selected_associated_output_cannot_escape_as_the_ordinary_field_type() {
     );
     let errors = diagnostics(&db, file);
     assert!(
-        !errors.is_empty(),
-        "a selected bool field escaped as an ordinary u256 field"
+        errors.contains("error[6-0025]"),
+        "a selected bool field escaped as an ordinary u256 field: {errors}"
     );
+}
+
+#[test]
+fn named_associated_types_must_match_the_ordinary_definition() {
+    for source in [
+        "trait Value { type Output }\nstruct Subject {}\nimpl Value for Subject { type Output = u256 }\nimpl Value for Subject as Flag { type Output = bool }",
+        "trait Value { type Output }\nstruct Holder<T> {}\nimpl<T> Value for Holder<T> { type Output = T }\nimpl<U> Value for Holder<U> as Flag { type Output = u8 }",
+        "trait Value { type Output<T> }\nstruct Subject {}\nimpl Value for Subject { type Output<T> = T }\nimpl Value for Subject as Flag { type Output<U> = bool }",
+    ] {
+        let mut db = database();
+        let file = input(&mut db, "named-output-change", source);
+        let errors = diagnostics(&db, file);
+        assert!(errors.contains("error[6-0025]"), "{errors}");
+        assert!(
+            errors.contains("named implementation changes associated type"),
+            "{errors}"
+        );
+    }
+}
+
+#[test]
+fn matching_or_named_only_associated_types_remain_allowed() {
+    for source in [
+        "trait Value { type Output }\nstruct Subject {}\nimpl Value for Subject as Flag { type Output = bool }",
+        "trait Value { type Output }\nimpl<T: Value> Value for T as Forward { type Output = T::Output }",
+        "type Word = u256\ntrait Value { type Output }\nstruct Subject {}\nimpl Value for Subject { type Output = Word }\nimpl Value for Subject as Flag { type Output = u256 }",
+        "trait Value { type Output }\nstruct Holder<T> {}\nimpl<T> Value for Holder<T> { type Output = T }\nimpl<U> Value for Holder<U> as Flag { type Output = U }",
+        "trait Value { type Output<T> }\nstruct Subject {}\nimpl Value for Subject { type Output<T> = T }\nimpl Value for Subject as Flag { type Output<U> = U }",
+    ] {
+        let mut db = database();
+        let file = input(&mut db, "matching-output", source);
+        let errors = diagnostics(&db, file);
+        assert!(errors.is_empty(), "{errors}");
+    }
 }

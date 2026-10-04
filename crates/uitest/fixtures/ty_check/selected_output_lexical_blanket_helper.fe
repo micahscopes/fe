@@ -36,3 +36,5 @@ impl<T: Compute> Wrap for T {
 }
 const fn h<T: Wrap>() -> <T as Wrap>::Out { T::get() }
 const fn leak() -> bool { with (Flag) { h<Subject>() } }
+
+// RD108: changing ordinary Output is rejected at the named impl; body diagnostics remain covered.
