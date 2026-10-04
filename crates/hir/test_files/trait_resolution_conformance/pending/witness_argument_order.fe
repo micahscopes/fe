@@ -1,0 +1,14 @@
+// Pending H11/P4: reversing solver clause visitation must retain equal premise records.
+// The parked Rust probe on local/l19-witness-order-park-20261004 demonstrates
+// different Child<A>/Child<B> witnesses for the same root and child declarations.
+trait Pick<T> {}
+trait Child<T> {}
+trait Root {}
+struct A {}
+struct B {}
+impl Pick<A> for () {}
+impl Pick<B> for () {}
+impl<T> Child<T> for () where (): Pick<T> {}
+impl<T> Root for () where (): Child<T> {}
+fn requires_root<T: Root>() {}
+fn probe() { requires_root::<()>() }

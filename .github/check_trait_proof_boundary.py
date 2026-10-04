@@ -4,6 +4,9 @@ from pathlib import Path
 import re
 import sys
 
+sys.dont_write_bytecode = True
+from check_trait_solver_setup_budget import production_code
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TY = ROOT / "crates/hir/src/analysis/ty"
@@ -34,7 +37,7 @@ DISCHARGE = re.compile(
 
 
 def production(source: str) -> str:
-    return source.split("#[cfg(test)]", 1)[0]
+    return production_code(source)
 
 
 def guarded_entry(source: str, signature: str, guard: str) -> bool:
@@ -137,6 +140,21 @@ def main() -> int:
         errors.append("self-check: indirect obligation discharge was not rejected")
     if guarded_entry("fn solve() { work(); }", "fn solve()", "enter_proof_search()"):
         errors.append("self-check: missing runtime guard was not rejected")
+    if not guarded_entry(
+        "struct A { #[cfg(test)] test_only: bool, } fn solve() { enter_proof_search(); }",
+        "fn solve()", "enter_proof_search()",
+    ):
+        errors.append("self-check: test-only field hid a later guarded production entry")
+    if not violations(
+        {"table_solver.rs": "struct A { #[cfg(test)] t: bool, } fn after() { check_impl_const_requirements(db); }"},
+        {},
+    ):
+        errors.append("self-check: test-only field hid later production discharge")
+    if violations(
+        {"table_solver.rs": "#[cfg(test)] mod tests { fn test() { check_impl_const_requirements(db); } } fn after() {}"},
+        {},
+    ):
+        errors.append("self-check: test-only discharge treated as production")
     for name in ("discharge_selected_requirement", "discharge_selected_requirement_query"):
         if not violations({"table_solver.rs": f"{name}(db);"}, {}):
             errors.append(f"self-check: direct {name} hook was not rejected")
