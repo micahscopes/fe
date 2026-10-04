@@ -1543,9 +1543,7 @@ impl<'db> TyChecker<'db> {
         expected: TyId<'db>,
         result_discarded: bool,
     ) -> ExprProp<'db> {
-        self.env.effect_env_mut().push_frame();
-        let saved_assumptions = self.env.assumptions();
-        self.env.enter_provision_frame();
+        self.env.enter_context_frame();
 
         for binding in bindings {
             if binding.key_path.is_none()
@@ -1596,11 +1594,6 @@ impl<'db> TyChecker<'db> {
                         ) {
                             continue;
                         }
-                        let mut premises = self.env.assumptions().list(self.db).to_vec();
-                        premises.push(*goal);
-                        let assumptions =
-                            PredicateListId::new(self.db, premises).extend_all_bounds(self.db);
-                        self.env.replace_assumptions(assumptions);
                         continue;
                     }
                     self.push_diag(BodyDiag::ObligationOpening {
@@ -1672,9 +1665,7 @@ impl<'db> TyChecker<'db> {
         } else {
             self.check_expr(body_expr, expected)
         };
-        self.env.effect_env_mut().pop_frame();
-        self.env.replace_assumptions(saved_assumptions);
-        self.env.leave_provision_frame();
+        self.env.leave_context_frame();
         result
     }
 

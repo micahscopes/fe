@@ -2288,9 +2288,16 @@ impl<'db> TyChecker<'db> {
     }
 
     pub(super) fn normalize_trait_goal(&mut self, goal: TraitInstId<'db>) -> TraitInstId<'db> {
+        self.normalize_trait_goal_with_assumptions(goal, self.env.assumptions())
+    }
+
+    fn normalize_trait_goal_with_assumptions(
+        &mut self,
+        goal: TraitInstId<'db>,
+        assumptions: PredicateListId<'db>,
+    ) -> TraitInstId<'db> {
         let db = self.db;
         let scope = self.env.scope();
-        let assumptions = self.env.assumptions();
         let goal = goal.fold_with(db, &mut self.table);
         let args: Vec<_> = goal
             .args(db)
@@ -2532,24 +2539,12 @@ impl<'db> TyChecker<'db> {
 
     fn process_trait_obligation(
         &mut self,
-        obligation: env::TraitObligation<'db>,
-        final_pass: bool,
-    ) -> TraitObligationOutcome<'db> {
-        let previous = self.env.assumptions();
-        self.env.replace_assumptions(obligation.assumptions);
-        let outcome = self.process_trait_obligation_in_context(obligation, final_pass);
-        self.env.replace_assumptions(previous);
-        outcome
-    }
-
-    fn process_trait_obligation_in_context(
-        &mut self,
         mut obligation: env::TraitObligation<'db>,
         final_pass: bool,
     ) -> TraitObligationOutcome<'db> {
         let db = self.db;
         let scope = self.env.scope();
-        let assumptions = self.env.assumptions();
+        let assumptions = obligation.assumptions;
 
         if self.has_dead_inference_keys(&obligation.goal) {
             return TraitObligationOutcome::Discharged;
@@ -2567,7 +2562,7 @@ impl<'db> TyChecker<'db> {
             obligation.goal = obligation.goal.fold_with(db, &mut prober);
         }
 
-        obligation.goal = self.normalize_trait_goal(obligation.goal);
+        obligation.goal = self.normalize_trait_goal_with_assumptions(obligation.goal, assumptions);
         let goal = obligation.goal;
         let flags = collect_flags(db, goal);
         if flags.contains(TyFlags::HAS_INVALID) || self.has_dead_inference_keys(&goal) {
@@ -2580,7 +2575,7 @@ impl<'db> TyChecker<'db> {
             let snapshot = self.table.snapshot();
             let mut directly_selected = None;
             for &required in requirements.list(db) {
-                let required = self.normalize_trait_goal(required);
+                let required = self.normalize_trait_goal_with_assumptions(required, assumptions);
                 let Some(selection) = obligation.context.selection_for(db, required) else {
                     continue;
                 };
@@ -2625,7 +2620,7 @@ impl<'db> TyChecker<'db> {
             }
             // Selected parent equalities may have constrained the root goal,
             // but proving those parents does not establish the root impl.
-            obligation.goal = self.normalize_trait_goal(goal);
+            obligation.goal = self.normalize_trait_goal_with_assumptions(goal, assumptions);
         }
         let goal = obligation.goal;
         let query = CanonicalGoalQuery::new(db, goal, assumptions);
@@ -2771,6 +2766,7 @@ impl<'db> TyChecker<'db> {
         let db = self.db;
         let scope = self.env.scope();
         let goal = obligation.goal;
+        let assumptions = obligation.assumptions;
         if goal.self_ty(db).has_var(db) {
             let outcome = if final_pass {
                 // Don't invent the self type at the end either; leave it alone
@@ -2807,7 +2803,7 @@ impl<'db> TyChecker<'db> {
         ) {
             self.env.register_const_obligation(pending);
         }
-        let answered_goal = self.normalize_trait_goal(goal);
+        let answered_goal = self.normalize_trait_goal_with_assumptions(goal, assumptions);
         self.env.record_trait_choice(
             env::DecisionSite {
                 origin: obligation.origin,

@@ -32,12 +32,13 @@ impl<'db> Provision<'db> {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct Frame<'db> {
+#[derive(Clone, Default)]
+pub(crate) struct Frame<'db, Data = ()> {
     provisions: Vec<Provision<'db>>,
+    data: Data,
 }
 
-impl<'db> Frame<'db> {
+impl<'db, Data> Frame<'db, Data> {
     /// Associated equalities constrain an answer; they do not create another slot.
     pub fn insert(
         &mut self,
@@ -56,11 +57,12 @@ impl<'db> Frame<'db> {
     }
 }
 
-pub(crate) struct Chain<'db> {
-    frames: Vec<Frame<'db>>,
+#[derive(Clone)]
+pub(crate) struct Chain<'db, Data = ()> {
+    frames: Vec<Frame<'db, Data>>,
 }
 
-impl Default for Chain<'_> {
+impl<Data: Default> Default for Chain<'_, Data> {
     fn default() -> Self {
         Self {
             frames: vec![Frame::default()],
@@ -68,9 +70,9 @@ impl Default for Chain<'_> {
     }
 }
 
-impl<'db> Chain<'db> {
+impl<'db, Data> Chain<'db, Data> {
     /// Enter a lexical frame. This is the sole frame-push operation.
-    pub fn within(&mut self, frame: Frame<'db>) {
+    pub fn within(&mut self, frame: Frame<'db, Data>) {
         self.frames.push(frame);
     }
 
@@ -80,6 +82,14 @@ impl<'db> Chain<'db> {
             "cannot leave the item provision frame"
         );
         self.frames.pop();
+    }
+
+    pub fn current_data_mut(&mut self) -> &mut Data {
+        &mut self.frames.last_mut().expect("item context frame").data
+    }
+
+    pub fn frame_data(&self) -> impl DoubleEndedIterator<Item = &Data> + '_ {
+        self.frames.iter().map(|frame| &frame.data)
     }
 
     pub fn insert(

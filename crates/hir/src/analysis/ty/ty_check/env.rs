@@ -76,11 +76,10 @@ pub(crate) struct TyCheckEnv<'db> {
     deferred: Vec<DeferredTask<'db>>,
     decisions: Decisions<'db>,
 
-    effect_env: keyed_effect_env::EffectEnv<'db>,
     effect_bounds: ThinVec<TraitInstId<'db>>,
     base_assumptions: PredicateListId<'db>,
     assumptions: PredicateListId<'db>,
-    provisions: Chain<'db>,
+    provisions: keyed_effect_env::EffectEnv<'db>,
     var_env: Vec<BlockEnv<'db>>,
     pending_vars: FxHashMap<IdentId<'db>, LocalBinding<'db>>,
     loop_stack: Vec<StmtId>,
@@ -154,7 +153,6 @@ impl<'db> TyCheckEnv<'db> {
             quotes: Default::default(),
             deferred: Vec::new(),
             decisions: Decisions::default(),
-            effect_env: keyed_effect_env::EffectEnv::new(),
             effect_bounds: ThinVec::new(),
             base_assumptions,
             assumptions: base_assumptions,
@@ -589,16 +587,22 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     pub(crate) fn assumptions(&self) -> PredicateListId<'db> {
-        // Return the assumptions we computed in new, which includes
-        // both generic bounds (if any) AND the effect parameter bounds.
-        self.assumptions
+        // Item and effect-parameter bounds are stable. Evidence contributes
+        // premises through the visible frame entries, never by editing this list.
+        let mut opened = self.opened_obligations().peekable();
+        if opened.peek().is_none() {
+            return self.assumptions;
+        }
+        let mut premises = self.assumptions.list(self.db).to_vec();
+        premises.extend(opened.map(|(_, goal)| goal));
+        PredicateListId::new(self.db, premises).extend_all_bounds(self.db)
     }
 
-    pub(super) fn enter_provision_frame(&mut self) {
+    pub(super) fn enter_context_frame(&mut self) {
         self.provisions.within(Frame::default());
     }
 
-    pub(super) fn leave_provision_frame(&mut self) {
+    pub(super) fn leave_context_frame(&mut self) {
         self.provisions.leave();
     }
 
@@ -671,16 +675,12 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     pub(super) fn method_lookup_assumptions(&self) -> PredicateListId<'db> {
-        let mut premises = self.assumptions.list(self.db).to_vec();
+        let mut premises = self.assumptions().list(self.db).to_vec();
         for selection in self.selections() {
             premises.retain(|goal| !selection.matches(self.db, *goal));
             premises.push(selection.goal());
         }
         PredicateListId::new(self.db, premises).extend_all_bounds(self.db)
-    }
-
-    pub(super) fn replace_assumptions(&mut self, assumptions: PredicateListId<'db>) {
-        self.assumptions = assumptions;
     }
 
     pub(crate) fn base_assumptions(&self) -> PredicateListId<'db> {
@@ -792,11 +792,11 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     pub(super) fn effect_env_mut(&mut self) -> &mut keyed_effect_env::EffectEnv<'db> {
-        &mut self.effect_env
+        &mut self.provisions
     }
 
     pub(crate) fn effect_env(&self) -> &keyed_effect_env::EffectEnv<'db> {
-        &self.effect_env
+        &self.provisions
     }
 
     pub(super) fn push_call_effect_arg(
@@ -1086,7 +1086,7 @@ impl<'db> TyCheckEnv<'db> {
                         .map(|ty| ty.fold_with(self.db, &mut prober));
                 }
             });
-        let assumptions = self.assumptions.fold_with(self.db, &mut prober);
+        let assumptions = self.assumptions().fold_with(self.db, &mut prober);
         let pattern_store = self.pattern_store.fold_with(self.db, &mut prober);
         let scope = prober.scope;
         let implicit_moves = self

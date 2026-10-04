@@ -422,3 +422,30 @@ const fn answer() -> u256 {
     let file = checked(&mut db, "distinct-provision-slots", source);
     assert_eq!(evaluate(&db, file, "answer"), "1020");
 }
+
+#[test]
+fn trait_and_effect_provisions_share_nested_frame_lifetimes() {
+    for (outer, inner, expected) in [
+        ("Flag, outer", "inner, Flag2", "2312"),
+        ("outer, Flag2", "Flag, inner", "1322"),
+    ] {
+        let source = format!(
+            "{PROVISION_CONTROLS}
+struct Counter {{ value: u256 }}
+trait View {{ const fn get(ref self) -> u256 }}
+impl View for Counter {{ const fn get(ref self) -> u256 {{ self.value }} }}
+const fn read<T: Compute>() -> u256 uses (counter: View) {{ T::compute() + counter.get() }}
+const fn answer() -> u256 {{
+    let outer = Counter {{ value: 2 }}
+    let inner = Counter {{ value: 3 }}
+    with ({outer}) {{
+        let nested = with ({inner}) {{ read<Subject>() }}
+        nested * 100 + read<Subject>()
+    }}
+}}"
+        );
+        let mut db = database();
+        let file = checked(&mut db, "combined-provision-frames", &source);
+        assert_eq!(evaluate(&db, file, "answer"), expected);
+    }
+}

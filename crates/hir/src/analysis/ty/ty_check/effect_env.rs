@@ -60,32 +60,13 @@ pub struct EffectFrame<'db> {
     unkeyed: SmallVec<[ProvidedEffect<'db>; 2]>,
 }
 
-#[derive(Clone)]
-pub struct EffectEnv<'db> {
-    frames: Vec<EffectFrame<'db>>,
-}
+// Effect matching reads the same lexical frames as trait provisions.
+// This alias owns no independent frame vector or push/pop operations.
+pub(crate) type EffectEnv<'db> = crate::core::semantic::Chain<'db, EffectFrame<'db>>;
 
 impl<'db> EffectEnv<'db> {
-    pub fn new() -> Self {
-        Self {
-            frames: vec![EffectFrame::default()],
-        }
-    }
-
-    pub fn push_frame(&mut self) {
-        self.frames.push(EffectFrame::default());
-    }
-
-    pub fn pop_frame(&mut self) {
-        if self.frames.len() > 1 {
-            self.frames.pop();
-        }
-    }
-
     fn current_frame_mut(&mut self) -> &mut EffectFrame<'db> {
-        self.frames
-            .last_mut()
-            .expect("effect env must have at least one frame")
+        self.current_data_mut()
     }
 
     fn insert_keyed_entry(
@@ -170,7 +151,7 @@ impl<'db> EffectEnv<'db> {
             "precise effect lookup requires a fully resolved query",
         );
         let mut out = Vec::new();
-        for frame in self.frames.iter().rev() {
+        for frame in self.frame_data().rev() {
             let mut entries = SmallVec::new();
             let mut blocked_by_barrier = false;
             let mut barrier_reason = None;
@@ -227,7 +208,7 @@ impl<'db> EffectEnv<'db> {
 
     fn lookup_family_fallback(&self, query: &EffectQuery<'db>) -> Vec<FrameLookupResult<'db>> {
         let mut out = Vec::new();
-        for frame in self.frames.iter().rev() {
+        for frame in self.frame_data().rev() {
             let entries = frame
                 .keyed_by_family
                 .get(&query.key.clone().family())
