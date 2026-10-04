@@ -3,7 +3,10 @@ use salsa::Update;
 use crate::analysis::HirAnalysisDb;
 use crate::core::hir_def::{ExprId, IdentId, Partial, Pat, PatId, Stmt, StmtId};
 
-use super::{Callable, LocalBinding, TyChecker, instantiate_trait_method};
+use super::{
+    Callable, DecisionSite, LocalBinding, TraitChoice, TraitChoiceVia, TyChecker,
+    instantiate_trait_method,
+};
 use crate::analysis::ty::{
     LayoutBundlePathStep,
     canonical::Canonical,
@@ -232,7 +235,7 @@ impl<'db> TyChecker<'db> {
         &mut self,
         iterable_ty: TyId<'db>,
         expr: ExprId,
-        _stmt: StmtId,
+        stmt: StmtId,
     ) -> (TyId<'db>, Option<ForLoopSeq<'db>>) {
         let (base, _args) = iterable_ty.decompose_ty_app(self.db);
 
@@ -370,6 +373,13 @@ impl<'db> TyChecker<'db> {
                         element_layout_backing_source: false,
                     };
 
+                    self.env.record_trait_choice(
+                        DecisionSite::trait_reference(stmt.span(self.body()).into()),
+                        TraitChoice {
+                            goal: trait_inst,
+                            via: TraitChoiceVia::Implementation(impl_id),
+                        },
+                    );
                     self.commit_state(snapshot);
                     return (elem_ty, Some(for_loop_seq));
                 }

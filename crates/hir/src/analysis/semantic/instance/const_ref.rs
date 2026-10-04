@@ -508,12 +508,17 @@ fn source_method_choice<'db>(
     if callable.trait_inst().is_none() {
         return TraitCallChoice::NotTrait;
     }
-    let SemOrigin::Expr(expr) = origin else {
+    if !matches!(origin, SemOrigin::Expr(_) | SemOrigin::Stmt(_)) {
         return TraitCallChoice::Synthetic;
-    };
+    }
     let typed = caller.typed_body(db);
     let body = typed.body().expect("a source trait call has a body");
-    let site = DecisionSite::trait_reference(expr.span(body).into());
+    let span = match origin {
+        SemOrigin::Expr(expr) => expr.span(body).into(),
+        SemOrigin::Stmt(stmt) => stmt.span(body).into(),
+        _ => unreachable!(),
+    };
+    let site = DecisionSite::trait_reference(span);
     let record = typed
         .decisions()
         .choice_ref(&site)
