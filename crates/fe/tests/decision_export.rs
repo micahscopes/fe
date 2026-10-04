@@ -659,3 +659,26 @@ fn export_keeps_successful_path_receiver_conditions() {
         "each receiver site must retain its check: {conditions:#?}"
     );
 }
+
+#[test]
+fn retained_evidence_opening_is_explicitly_outside_format_v1() {
+    use common::stdlib::HasBuiltinCore;
+    let mut db = DriverDataBase::default();
+    db.initialize_builtin_core();
+    let url = Url::parse("file:///evidence_opening_export.fe").unwrap();
+    let file = db.workspace().touch(&mut db, url, Some("use core::obligations::Evidence\ntrait Compute { const fn compute() -> u256 }\nconst fn opening<T>(_ e: Evidence<Compute<T>>) { with (e) {} }".into()));
+    let module = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(module);
+    assert!(diagnostics.is_empty(), "{}", diagnostics.format_diags(&db));
+    let function = module
+        .all_funcs(&db)
+        .iter()
+        .copied()
+        .find(|f| f.name(&db).to_opt().unwrap().data(&db) == "opening")
+        .unwrap();
+    let (_, typed) = check_func_body(&db, function);
+    assert_eq!(typed.with_choices().len(), 1);
+    let error =
+        fe::decision_export::with_records(&db, function.body(&db).unwrap(), typed).unwrap_err();
+    assert_eq!(error, "evidence opening is outside format v1");
+}

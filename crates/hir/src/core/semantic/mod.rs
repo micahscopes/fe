@@ -22,7 +22,8 @@
 
 pub mod index;
 mod provision;
-pub(crate) use provision::{Chain, Frame, Provision, ProvisionSource};
+pub use provision::Provision;
+pub(crate) use provision::{Chain, Frame};
 pub mod reference;
 mod storage_layout;
 pub mod symbol;

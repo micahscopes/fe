@@ -49,7 +49,7 @@ use crate::analysis::{
     },
 };
 use crate::core::semantic::{
-    Chain, EffectEnvView, EffectRequirement, Frame, ProviderBinding, Provision, ProvisionSource,
+    Chain, EffectEnvView, EffectRequirement, Frame, ProviderBinding, Provision,
     ResolvedEffectBindingInfo,
 };
 
@@ -625,9 +625,9 @@ impl<'db> TyCheckEnv<'db> {
     ) -> impl DoubleEndedIterator<Item = (ExprId, TraitInstId<'db>)> + '_ {
         self.provisions
             .visible(self.db)
-            .filter_map(|provision| match provision.source {
-                ProvisionSource::Evidence(value) => Some((value, provision.goal)),
-                ProvisionSource::Named(_) => None,
+            .filter_map(|provision| match provision {
+                Provision::Evidence(value, goal) => Some((value, goal)),
+                Provision::Named(_) => None,
             })
     }
 
@@ -637,9 +637,9 @@ impl<'db> TyCheckEnv<'db> {
     {
         self.provisions
             .visible(self.db)
-            .filter_map(|provision| match provision.source {
-                ProvisionSource::Evidence(..) => None,
-                ProvisionSource::Named(selection) => Some(selection),
+            .filter_map(|provision| match provision {
+                Provision::Evidence(..) => None,
+                Provision::Named(selection) => Some(selection),
             })
     }
 
@@ -656,20 +656,14 @@ impl<'db> TyCheckEnv<'db> {
         goal: TraitInstId<'db>,
     ) -> Option<crate::analysis::semantic::SelectedApplication<'db>> {
         match self.provision_for_goal(goal) {
-            Some(Provision {
-                source: ProvisionSource::Named(selection),
-                ..
-            }) => Some(selection),
+            Some(Provision::Named(selection)) => Some(selection),
             _ => None,
         }
     }
 
     pub(super) fn opened_for_goal(&self, goal: TraitInstId<'db>) -> Option<ExprId> {
         match self.provision_for_goal(goal) {
-            Some(Provision {
-                source: ProvisionSource::Evidence(value),
-                ..
-            }) => Some(value),
+            Some(Provision::Evidence(value, _)) => Some(value),
             _ => None,
         }
     }
@@ -934,7 +928,7 @@ impl<'db> TyCheckEnv<'db> {
     pub(super) fn record_with_choice(
         &mut self,
         expression: ExprId,
-        outcome: Result<crate::analysis::semantic::SelectedApplication<'db>, BodyDiag<'db>>,
+        outcome: Result<Provision<'db>, BodyDiag<'db>>,
     ) {
         self.decisions.record_with_choice(WithChoice {
             expression,
@@ -2004,16 +1998,14 @@ impl<'db> Decisions<'db> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WithChoice<'db> {
     expression: ExprId,
-    outcome: Result<crate::analysis::semantic::SelectedApplication<'db>, BodyDiag<'db>>,
+    outcome: Result<Provision<'db>, BodyDiag<'db>>,
 }
 
 impl<'db> WithChoice<'db> {
     pub fn expression(&self) -> ExprId {
         self.expression
     }
-    pub fn outcome(
-        &self,
-    ) -> Result<crate::analysis::semantic::SelectedApplication<'db>, &BodyDiag<'db>> {
+    pub fn outcome(&self) -> Result<Provision<'db>, &BodyDiag<'db>> {
         self.outcome.as_ref().copied()
     }
     pub fn error_code(&self) -> Option<u16> {

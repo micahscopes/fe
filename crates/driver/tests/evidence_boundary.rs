@@ -449,3 +449,46 @@ const fn answer() -> u256 {{
         assert_eq!(evaluate(&db, file, "answer"), expected);
     }
 }
+
+#[test]
+fn both_evidence_opening_spellings_retain_their_successful_record() {
+    let source = format!(
+        "{PROVISION_CONTROLS}
+use core::obligations::Evidence
+const fn parameter<T>(_ e: Evidence<Compute<T>>) -> u256 {{ with (e) {{ T::compute() }} }}
+const fn local() -> u256 {{
+    let e = prove<Compute<Subject>>()
+    with (e) {{ h<Subject>() }}
+}}"
+    );
+    let mut db = database();
+    let file = checked(&mut db, "retained-evidence-openings", &source);
+    for name in ["parameter", "local"] {
+        let (errors, typed) =
+            hir::analysis::ty::ty_check::check_func_body(&db, named(&db, file, name));
+        assert!(errors.is_empty(), "{name}: {errors:?}");
+        assert_eq!(
+            typed.with_choices().len(),
+            1,
+            "{name}: opening was not retained"
+        );
+        let record = typed.with_choices().next().unwrap();
+        let hir::core::semantic::Provision::Evidence(value, goal) = record.outcome().unwrap()
+        else {
+            panic!("{name}: expected evidence provision");
+        };
+        assert_eq!(value, record.expression());
+        assert_eq!(
+            goal.def(&db).name(&db).to_opt().unwrap().data(&db),
+            "Compute"
+        );
+        if name == "parameter" {
+            assert!(matches!(
+                goal.self_ty(&db).data(&db),
+                hir::analysis::ty::ty_def::TyData::TyParam(_)
+            ));
+        } else {
+            assert_eq!(goal.self_ty(&db).pretty_print(&db), "Subject");
+        }
+    }
+}

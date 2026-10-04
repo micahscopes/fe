@@ -1557,7 +1557,8 @@ impl<'db> TyChecker<'db> {
                         self.env
                             .type_expr(binding.value, ExprProp::new(TyId::unit(self.db), false));
                         self.env.static_selection_exprs.insert(binding.value);
-                        self.env.record_with_choice(binding.value, Ok(selection));
+                        self.env
+                            .record_with_choice(binding.value, Ok(Provision::named(selection)));
                     }
                     Err(diag) => {
                         self.env
@@ -1594,6 +1595,10 @@ impl<'db> TyChecker<'db> {
                         ) {
                             continue;
                         }
+                        self.env.record_with_choice(
+                            binding.value,
+                            Ok(Provision::evidence(binding.value, *goal)),
+                        );
                         continue;
                     }
                     self.push_diag(BodyDiag::ObligationOpening {

@@ -4,30 +4,51 @@ use crate::{
     hir_def::ExprId,
 };
 
-#[derive(Clone, Copy)]
-pub(crate) enum ProvisionSource<'db> {
-    Evidence(ExprId),
+/// One retained trait provision, shared by lexical frames and body openings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Provision<'db> {
+    Evidence(ExprId, TraitInstId<'db>),
     Named(SelectedApplication<'db>),
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct Provision<'db> {
-    pub goal: TraitInstId<'db>,
-    pub source: ProvisionSource<'db>,
-}
-
 impl<'db> Provision<'db> {
-    pub fn named(selection: SelectedApplication<'db>) -> Self {
-        Self {
-            goal: selection.goal(),
-            source: ProvisionSource::Named(selection),
-        }
+    pub(crate) fn named(selection: SelectedApplication<'db>) -> Self {
+        Self::Named(selection)
     }
 
-    pub fn evidence(value: ExprId, goal: TraitInstId<'db>) -> Self {
-        Self {
-            goal,
-            source: ProvisionSource::Evidence(value),
+    pub(crate) fn evidence(value: ExprId, goal: TraitInstId<'db>) -> Self {
+        Self::Evidence(value, goal)
+    }
+
+    pub fn goal(self) -> TraitInstId<'db> {
+        match self {
+            Self::Evidence(_, goal) => goal,
+            Self::Named(selection) => selection.goal(),
+        }
+    }
+}
+
+impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for Provision<'db> {
+    fn visit_with<V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized>(
+        &self,
+        visitor: &mut V,
+    ) {
+        match self {
+            Self::Evidence(_, goal) => goal.visit_with(visitor),
+            Self::Named(selection) => selection.visit_with(visitor),
+        }
+    }
+}
+
+impl<'db> crate::analysis::ty::fold::TyFoldable<'db> for Provision<'db> {
+    fn super_fold_with<F: crate::analysis::ty::fold::TyFolder<'db>>(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        folder: &mut F,
+    ) -> Self {
+        match self {
+            Self::Evidence(value, goal) => Self::Evidence(value, goal.fold_with(db, folder)),
+            Self::Named(selection) => Self::Named(selection.fold_with(db, folder)),
         }
     }
 }
@@ -45,8 +66,8 @@ impl<'db, Data> Frame<'db, Data> {
         db: &'db dyn HirAnalysisDb,
         provision: Provision<'db>,
     ) -> Result<(), ()> {
-        if super::lookup_trait_goal(db, provision.goal, self.provisions.iter().copied(), |p| {
-            p.goal
+        if super::lookup_trait_goal(db, provision.goal(), self.provisions.iter().copied(), |p| {
+            p.goal()
         })
         .is_some()
         {
@@ -129,7 +150,7 @@ impl<'db, Data> Chain<'db, Data> {
     ) -> impl DoubleEndedIterator<Item = Provision<'db>> + '_ {
         self.entries()
             .filter(move |(position, provision)| {
-                super::lookup_trait_goal(db, provision.goal, self.entries(), |(_, p)| p.goal)
+                super::lookup_trait_goal(db, provision.goal(), self.entries(), |(_, p)| p.goal())
                     .is_some_and(|(winner, _)| winner == *position)
             })
             .map(|(_, provision)| provision)
@@ -140,6 +161,6 @@ impl<'db, Data> Chain<'db, Data> {
         db: &'db dyn HirAnalysisDb,
         goal: TraitInstId<'db>,
     ) -> Option<Provision<'db>> {
-        super::lookup_trait_goal(db, goal, self.iter(), |p| p.goal)
+        super::lookup_trait_goal(db, goal, self.iter(), |p| p.goal())
     }
 }

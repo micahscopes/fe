@@ -1,5 +1,6 @@
 //! Format-v1 projections of retained compiler decisions. No decision is solved
 //! again here: unsupported terms must be reported instead of silently omitted.
+use hir::core::semantic::Provision;
 use hir::{
     analysis::{
         diagnostics::SpannedHirAnalysisDb,
@@ -234,7 +235,7 @@ pub fn with_records<'db>(
         let span: DynLazySpan<'db> = expression.span(owner).into();
         let file = span.resolve(db).ok_or("opening has no source span")?.file;
         let outcome = match choice.outcome() {
-            Ok(selection) => match selection.origin(db) {
+            Ok(Provision::Named(selection)) => match selection.origin(db) {
                 ImplementorOrigin::Hir(impl_) => {
                     if impl_.span().resolve(db).is_none_or(|declaration| declaration.file != file) {
                         return Err("opening from another file is outside format v1".into());
@@ -243,6 +244,7 @@ pub fn with_records<'db>(
                 }
                 _ => return Err("non-HIR opening is outside format v1".into()),
             },
+            Ok(Provision::Evidence(..)) => return Err("evidence opening is outside format v1".into()),
             Err(_) => json!({"error":format!("8-{:04}",choice.error_code().ok_or("opening failure has no code")?)}),
         };
         Ok(json!({"v":1,"kind":"with","site":source_site(db,&span)?,"name":name.data(db),"outcome":outcome}))

@@ -3396,6 +3396,9 @@ fn use_it() -> u256 { read<7>() }";
                     .expect("with choice")
                     .outcome()
                     .expect("accepted binding");
+                let crate::core::semantic::Provision::Named(with_selection) = with_selection else {
+                    panic!("expected named provision");
+                };
                 assert_eq!(
                     choices[0].via(),
                     super::super::env::TraitChoiceVia::Selected(with_selection)
