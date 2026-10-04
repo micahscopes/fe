@@ -482,3 +482,39 @@ fn export_overlap_uses_reported_pairs_and_keeps_disjoint_pairs() {
         }
     }
 }
+
+#[test]
+fn export_keeps_written_type_conditions_in_generic_const_paths() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///written_condition_export.fe").unwrap();
+    db.workspace().touch(&mut db,url.clone(),Some("trait HasL { const L: usize }\nstruct Bounded<const N: usize> where N > 0 {}\nimpl<T> HasL for T { const L: usize = 1 }\nfn g<const M: usize>() {}\nfn failing() { g<<Bounded<0> as HasL>::L>() }\nfn passing() { g<<Bounded<1> as HasL>::L>() }\n".into()));
+    let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
+    let diagnostics = db.run_on_top_mod(module);
+    assert!(diagnostics.has_errors(&db));
+    for (name, outcome) in [("failing", "eval-false"), ("passing", "eval-true")] {
+        let function = module
+            .all_funcs(&db)
+            .iter()
+            .find(|f| f.name(&db).to_opt().unwrap().data(&db) == name)
+            .copied()
+            .unwrap();
+        let owner = function.body(&db).unwrap();
+        let written = hir::analysis::ty::ty_check::written_condition_uses(
+            &db,
+            hir::hir_def::ItemKind::Body(owner),
+        )
+        .count();
+        assert!(
+            written > 0,
+            "authored check did not retain a condition for {name}"
+        );
+        let (_, typed) = check_func_body(&db, function);
+        let conditions = fe::decision_export::condition_records(&db, typed).unwrap();
+        assert!(
+            conditions
+                .iter()
+                .any(|r| r["source"] == "struct Bounded" && r["outcome"] == outcome),
+            "{name}: {conditions:#?}"
+        );
+    }
+}

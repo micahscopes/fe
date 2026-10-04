@@ -1199,6 +1199,19 @@ pub(super) fn checked_body<'db>(
         diags.extend(requirements.diagnostics());
         Arc::make_mut(&mut typed.decisions).condition_uses = requirements.conditions;
     }
+    // Function bodies are complete use regions. Anonymous constants may be
+    // checked while forming a written type; querying that formation's written
+    // checks here would re-enter the query that is currently producing them.
+    if matches!(owner, BodyOwner::Func(_))
+        && let Some(body) = typed.body()
+    {
+        for use_ in written_condition_uses(db, ItemKind::Body(body)) {
+            const_requirements::record_condition(
+                &mut Arc::make_mut(&mut typed.decisions).condition_uses,
+                use_.clone(),
+            );
+        }
+    }
     CheckedBody {
         diags,
         typed,

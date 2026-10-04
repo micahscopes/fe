@@ -160,7 +160,10 @@ impl<'db> ConstConditionUse<'db> {
     }
 }
 
-fn record_condition<'db>(conditions: &mut ConditionDecisions<'db>, use_: ConstConditionUse<'db>) {
+pub(super) fn record_condition<'db>(
+    conditions: &mut ConditionDecisions<'db>,
+    use_: ConstConditionUse<'db>,
+) {
     assert!(
         use_.discharge.is_some(),
         "unchecked conditions are absent from Decisions"
