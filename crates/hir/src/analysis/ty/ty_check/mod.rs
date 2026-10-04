@@ -2608,60 +2608,7 @@ impl<'db> TyChecker<'db> {
         let query = CanonicalGoalQuery::new(db, goal, assumptions);
         match is_goal_query_satisfiable(db, solve_cx, &query) {
             GoalSatisfiability::Satisfied(solution) => {
-                if goal.self_ty(db).has_var(db) {
-                    let outcome = if final_pass {
-                        // Don't invent the self type at the end either; leave it alone
-                        TraitObligationOutcome::Discharged
-                    } else {
-                        TraitObligationOutcome::Requeue(obligation)
-                    };
-                    return outcome;
-                }
-                let solved = query.extract_solution(&mut self.table, solution);
-                if self.has_dead_inference_keys(&solved.inst) {
-                    return TraitObligationOutcome::Discharged;
-                }
-                self.table.unify(goal, solved.inst).unwrap();
-                let conditions = solved.impl_conditions.fold_with(db, &mut self.table);
-                if !final_pass
-                    && (conditions
-                        .instances(db)
-                        .iter()
-                        .any(|instance| instance.params(db).iter().any(|ty| ty.has_var(db)))
-                        || conditions
-                            .trait_goals(db)
-                            .iter()
-                            .any(|goal| goal.args(db).iter().any(|ty| ty.has_var(db))))
-                {
-                    return TraitObligationOutcome::Requeue(obligation);
-                }
-                for pending in const_requirements::selected_impl_condition_uses(
-                    db,
-                    conditions,
-                    scope,
-                    obligation.span.clone(),
-                    obligation.context.selections(db),
-                ) {
-                    self.env.register_const_obligation(pending);
-                }
-                let answered_goal = self.normalize_trait_goal(goal);
-                self.env.record_trait_choice(
-                    env::DecisionSite {
-                        origin: obligation.origin,
-                        span: obligation.span.clone(),
-                    },
-                    env::TraitChoice {
-                        goal: answered_goal,
-                        via: env::TraitChoiceVia::Implementation(
-                            solved.implementor.fold_with(db, &mut self.table),
-                        ),
-                    },
-                );
-                if answered_goal != goal {
-                    TraitObligationOutcome::Progressed
-                } else {
-                    TraitObligationOutcome::Discharged
-                }
+                self.accept_trait_answer(obligation, final_pass, &query, solution)
             }
             GoalSatisfiability::NeedsConfirmation {
                 solutions: ambiguous,
@@ -2698,17 +2645,25 @@ impl<'db> TyChecker<'db> {
                 candidates.retain(|candidate| !self.has_dead_inference_keys(candidate));
                 let candidates = self.dedup_equivalent_trait_insts(candidates);
 
-                if let [solution] = candidates.as_slice()
+                if let [_] = candidates.as_slice()
                     && answers_complete_for_inference
                     && !goal.self_ty(db).has_var(db)
                 {
-                    if self.table.unify(goal, *solution).is_ok()
-                        && self.normalize_trait_goal(goal) != goal
-                    {
-                        TraitObligationOutcome::Progressed
-                    } else {
-                        TraitObligationOutcome::Discharged
-                    }
+                    // An assumed bound already establishes this goal; a blanket
+                    // impl is another derivation of it, not a reason to lose the
+                    // call decision. Retain the actual answer and check its
+                    // conditions through the same path as a unique proof.
+                    let answer = ambiguous
+                        .iter()
+                        .find(|answer| {
+                            matches!(
+                                answer.value.implementor.origin(db),
+                                crate::analysis::ty::trait_def::ImplementorOrigin::Assumption,
+                            )
+                        })
+                        .copied()
+                        .unwrap_or(ambiguous[0]);
+                    self.accept_trait_answer(obligation, final_pass, &query, answer)
                 } else {
                     if final_pass && self.trait_goal_is_concrete_for_diagnostics(goal) {
                         let required_by = match obligation.origin {
@@ -2778,6 +2733,74 @@ impl<'db> TyChecker<'db> {
                 ));
                 TraitObligationOutcome::Rejected
             }
+        }
+    }
+
+    fn accept_trait_answer(
+        &mut self,
+        obligation: env::TraitObligation<'db>,
+        final_pass: bool,
+        query: &CanonicalGoalQuery<'db>,
+        solution: crate::analysis::ty::canonical::Solution<
+            crate::analysis::ty::trait_resolution::TraitGoalSolution<'db>,
+        >,
+    ) -> TraitObligationOutcome<'db> {
+        let db = self.db;
+        let scope = self.env.scope();
+        let goal = obligation.goal;
+        if goal.self_ty(db).has_var(db) {
+            let outcome = if final_pass {
+                // Don't invent the self type at the end either; leave it alone
+                TraitObligationOutcome::Discharged
+            } else {
+                TraitObligationOutcome::Requeue(obligation)
+            };
+            return outcome;
+        }
+        let solved = query.extract_solution(&mut self.table, solution);
+        if self.has_dead_inference_keys(&solved.inst) {
+            return TraitObligationOutcome::Discharged;
+        }
+        self.table.unify(goal, solved.inst).unwrap();
+        let conditions = solved.impl_conditions.fold_with(db, &mut self.table);
+        if !final_pass
+            && (conditions
+                .instances(db)
+                .iter()
+                .any(|instance| instance.params(db).iter().any(|ty| ty.has_var(db)))
+                || conditions
+                    .trait_goals(db)
+                    .iter()
+                    .any(|goal| goal.args(db).iter().any(|ty| ty.has_var(db))))
+        {
+            return TraitObligationOutcome::Requeue(obligation);
+        }
+        for pending in const_requirements::selected_impl_condition_uses(
+            db,
+            conditions,
+            scope,
+            obligation.span.clone(),
+            obligation.context.selections(db),
+        ) {
+            self.env.register_const_obligation(pending);
+        }
+        let answered_goal = self.normalize_trait_goal(goal);
+        self.env.record_trait_choice(
+            env::DecisionSite {
+                origin: obligation.origin,
+                span: obligation.span.clone(),
+            },
+            env::TraitChoice {
+                goal: answered_goal,
+                via: env::TraitChoiceVia::Implementation(
+                    solved.implementor.fold_with(db, &mut self.table),
+                ),
+            },
+        );
+        if answered_goal != goal {
+            TraitObligationOutcome::Progressed
+        } else {
+            TraitObligationOutcome::Discharged
         }
     }
 

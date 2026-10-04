@@ -345,3 +345,28 @@ fn projection_normalization_does_not_commit_speculative_trait_arguments() {
         "possible equality or impl selection cannot assign a caller inference variable"
     );
 }
+
+#[test]
+fn equivalent_copy_clone_answers_retain_the_call_choice() {
+    for source in [
+        "fn dup<T>(_ x: T) -> T where T: Copy + Clone { x.clone() }",
+        include_str!("../../../uitest/fixtures/ty_check/clone_copy_blanket.fe"),
+    ] {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("copy_clone_choices.fe".into(), source);
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        let func = find_func(&db, module, "dup");
+        let (diagnostics, typed) = fe_hir::analysis::ty::ty_check::check_func_body(&db, func);
+        assert!(diagnostics.is_empty());
+        assert!(
+            typed.trait_choices(&db).next().is_some(),
+            "the accepted clone call must retain its choice"
+        );
+        let key = identity_semantic_instance_key(&db, BodyOwner::Func(func));
+        first_callee_key(&db, key);
+        let instance = get_or_build_semantic_instance(&db, key);
+        check_semantic_borrows(&db, instance)
+            .expect("accepted clone call must pass borrow checking");
+    }
+}
