@@ -1108,15 +1108,6 @@ pub struct TraitGoalSolution<'db> {
     pub(crate) implementor: ImplementorId<'db>,
     /// Const conditions left for the use-site checker after structural proof.
     pub(crate) impl_conditions: ImplConditionsId<'db>,
-    /// Direct accepted premises, indexed before goal substitution.
-    pub(crate) premises: TraitGoalPremisesId<'db>,
-}
-
-#[salsa::interned]
-#[derive(Debug)]
-pub(crate) struct TraitGoalPremisesId<'db> {
-    #[return_ref]
-    pub choices: Vec<(usize, TraitInstId<'db>, ImplementorId<'db>)>,
 }
 
 #[salsa::interned]
@@ -1784,46 +1775,6 @@ impl<SelfT, T> Goal<T> for SelfT where SelfT: Accept<T>, SelfT: Choose<T> {}
         let expected = TraitInstId::new(&db, goal_trait, vec![subject, a], IndexMap::new());
 
         assert_eq!(Canonical::new(&db, actual), Canonical::new(&db, expected));
-    }
-
-    #[test]
-    fn solver_retains_premise_slots_when_substitution_merges_goals() {
-        let mut db = HirAnalysisTestDb::default();
-        let file = db.new_stand_alone(
-            "solver_retains_premise_slots.fe".into(),
-            r#"
-trait Need {}
-trait Pair<T, U> {}
-impl Need for bool {}
-impl<T: Need, U: Need> Pair<T, U> for () {}
-"#,
-        );
-        let (top_mod, _) = db.top_mod(file);
-        let goal = TraitInstId::new(
-            &db,
-            named_trait(&db, top_mod, "Pair"),
-            vec![TyId::unit(&db), TyId::bool(&db), TyId::bool(&db)],
-            IndexMap::new(),
-        );
-        let query = CanonicalGoalQuery::new(&db, goal, PredicateListId::empty_list(&db));
-        let GoalSatisfiability::Satisfied(solution) =
-            is_goal_query_satisfiable(&db, TraitSolveCx::new(&db, top_mod.scope()), &query)
-        else {
-            panic!("Pair<bool, bool> must have one root answer");
-        };
-        let mut table = UnificationTable::new(&db);
-        let answer = query.extract_solution(&mut table, solution);
-        let premises = answer.premises.choices(&db);
-        assert_eq!(premises.len(), 2);
-        assert_eq!((premises[0].0, premises[1].0), (0, 1));
-        assert_eq!(premises[0].1, premises[1].1);
-        assert_eq!(premises[0].2, premises[1].2);
-        assert_eq!(premises[0].1.def(&db), named_trait(&db, top_mod, "Need"));
-        assert_eq!(premises[0].1.args(&db), &[TyId::bool(&db)]);
-        assert!(matches!(
-            premises[0].2.origin(&db),
-            ImplementorOrigin::Hir(_)
-        ));
     }
 
     #[test]

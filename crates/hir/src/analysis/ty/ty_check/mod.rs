@@ -2552,7 +2552,6 @@ impl<'db> TyChecker<'db> {
         }
 
         let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
-        let mut selected_premises = Vec::new();
         if !obligation.context.selections(db).is_empty() {
             let requirements = PredicateListId::new(db, vec![goal]).extend_all_bounds(db);
             let snapshot = self.table.snapshot();
@@ -2570,15 +2569,6 @@ impl<'db> TyChecker<'db> {
                 if compatible && selection.revalidate(db, solve_cx, instantiated).is_ok() {
                     if required == goal {
                         directly_selected = Some(selection);
-                    } else {
-                        selected_premises.push(env::TraitChoiceId::new(
-                            db,
-                            env::TraitChoice {
-                                goal: instantiated,
-                                via: env::TraitChoiceVia::Selected(selection),
-                                premises: Vec::new(),
-                            },
-                        ));
                     }
                     continue;
                 }
@@ -2602,7 +2592,6 @@ impl<'db> TyChecker<'db> {
                     env::TraitChoice {
                         goal: answered_goal,
                         via: env::TraitChoiceVia::Selected(selection),
-                        premises: selected_premises,
                     },
                 );
                 return if answered_goal != goal {
@@ -2666,7 +2655,6 @@ impl<'db> TyChecker<'db> {
                         via: env::TraitChoiceVia::Implementation(
                             solved.implementor.fold_with(db, &mut self.table),
                         ),
-                        premises: selected_premises,
                     },
                 );
                 if answered_goal != goal {

@@ -6,9 +6,7 @@ use common::indexmap::{IndexMap, IndexSet};
 
 use super::{
     trait_def::{ImplementorId, TraitInstId, TraitRefId},
-    trait_resolution::{
-        ImplConditionsId, PredicateListId, TraitGoalPremisesId, TraitGoalSolution, TraitSolverQuery,
-    },
+    trait_resolution::{ImplConditionsId, PredicateListId, TraitGoalSolution, TraitSolverQuery},
     ty_check::{EffectArg, ExprProp, LocalBinding, ResolvedEffectArg},
     ty_def::{TyData, TyId},
     visitor::TyVisitable,
@@ -496,29 +494,7 @@ impl<'db> TyFoldable<'db> for TraitGoalSolution<'db> {
             inst: self.inst.fold_with(db, folder),
             implementor: self.implementor.fold_with(db, folder),
             impl_conditions: self.impl_conditions.fold_with(db, folder),
-            premises: self.premises.fold_with(db, folder),
         }
-    }
-}
-
-impl<'db> TyFoldable<'db> for TraitGoalPremisesId<'db> {
-    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
-    where
-        F: TyFolder<'db>,
-    {
-        Self::new(
-            db,
-            self.choices(db)
-                .iter()
-                .map(|&(slot, goal, implementor)| {
-                    (
-                        slot,
-                        goal.fold_with(db, folder),
-                        implementor.fold_with(db, folder),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        )
     }
 }
 
