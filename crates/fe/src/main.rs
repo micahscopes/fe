@@ -229,6 +229,9 @@ pub enum Command {
         profile: String,
         #[arg(long)]
         dump_mir: bool,
+        /// Write format-v1 decisions from this standalone module.
+        #[arg(long, value_name = "FILE.jsonl")]
+        decisions_out: Option<Utf8PathBuf>,
         /// Write a debugging report as a `.tar.gz` file (includes sources and diagnostics).
         #[arg(long)]
         report: bool,
@@ -701,6 +704,7 @@ pub fn run(opts: &Options) {
             standalone,
             profile,
             dump_mir,
+            decisions_out,
             report,
             report_out,
             report_failed_only,
@@ -712,6 +716,7 @@ pub fn run(opts: &Options) {
                 *standalone,
                 profile,
                 *dump_mir,
+                decisions_out.as_ref(),
                 (*report).then_some(report_out),
                 *report_failed_only,
                 *recovery_mode,

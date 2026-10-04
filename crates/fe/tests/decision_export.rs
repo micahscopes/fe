@@ -236,3 +236,71 @@ fn unknown() { with (Missing) {} }
         assert!(records[0]["site"]["col"].as_u64().unwrap() > 20);
     }
 }
+
+#[test]
+fn cli_export_preserves_check_results_and_source_provenance() {
+    use sha2::{Digest, Sha256};
+    use std::process::Command;
+    for (source, expected_status, outcome) in [
+        (
+            "fn need<const N: usize>() where N > 0 {}\nfn call() { need<7>() }\n",
+            0,
+            "eval-true",
+        ),
+        (
+            "fn need<const N: usize>() where N > 0 {}\nfn call() { need<0>() }\n",
+            1,
+            "eval-false",
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("program.fe");
+        let output = temp.path().join("decisions.jsonl");
+        std::fs::write(&input, source).unwrap();
+        let baseline = Command::new(env!("CARGO_BIN_EXE_fe"))
+            .arg("check")
+            .arg("--standalone")
+            .arg(&input)
+            .output()
+            .unwrap();
+        let exported = Command::new(env!("CARGO_BIN_EXE_fe"))
+            .arg("check")
+            .arg("--standalone")
+            .arg("--decisions-out")
+            .arg(&output)
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert_eq!(baseline.status.code(), Some(expected_status));
+        assert_eq!(
+            exported.status.code(),
+            baseline.status.code(),
+            "{}",
+            String::from_utf8_lossy(&exported.stderr)
+        );
+        assert_eq!(exported.stdout, baseline.stdout);
+        assert_eq!(exported.stderr, baseline.stderr);
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(&output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records[0]["schema"], json!("fe-decisions/1"));
+        assert_eq!(
+            records[0]["source_sha256"],
+            json!(format!("{:x}", Sha256::digest(source.as_bytes())))
+        );
+        assert_ne!(records[0]["compiler_commit"], json!("unknown"));
+        assert!(
+            records
+                .iter()
+                .any(|row| row["kind"] == "condition" && row["outcome"] == outcome)
+        );
+        assert!(records.iter().all(|row| row["v"] == 1));
+        assert!(
+            records
+                .iter()
+                .all(|row| row["kind"] != "select_impl" && row["kind"] != "read_impl_choice")
+        );
+    }
+}

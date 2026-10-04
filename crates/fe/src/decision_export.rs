@@ -248,3 +248,32 @@ pub fn with_records<'db>(
         Ok(json!({"v":1,"kind":"with","site":source_site(db,&span)?,"name":name.data(db),"outcome":outcome}))
     }).collect()
 }
+
+/// Write the checked module's retained body records. Program/item encoding is
+/// still being completed; the explicit v1 note keeps that limitation visible.
+pub fn write_module(
+    db: &driver::DriverDataBase,
+    module: hir::hir_def::TopLevelMod<'_>,
+    file: common::file::File,
+    output: &std::path::Path,
+) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let mut records = vec![
+        json!({"v":1,"kind":"header","schema":"fe-decisions/1","compiler_commit":option_env!("FE_GIT_COMMIT").unwrap_or("unknown"),"source_sha256":format!("{:x}",Sha256::digest(file.text(db).as_bytes()))}),
+        json!({"v":1,"kind":"note","text":"Body decisions only: program items, diagnostics and overlap records are pending; this is not a complete model export."}),
+    ];
+    for func in module.all_funcs(db) {
+        let Some(owner) = func.body(db) else { continue };
+        let (_, body) = hir::analysis::ty::ty_check::check_func_body(db, *func);
+        records.extend(goal_records(db, body)?);
+        records.extend(condition_records(db, body)?);
+        records.extend(with_records(db, owner, body)?);
+    }
+    let mut bytes = Vec::new();
+    for record in records {
+        serde_json::to_writer(&mut bytes, &record).map_err(|error| error.to_string())?;
+        bytes.push(b'\n');
+    }
+    std::fs::write(output, bytes)
+        .map_err(|error| format!("cannot write decision export {}: {error}", output.display()))
+}

@@ -42,6 +42,7 @@ pub fn check(
     force_standalone: bool,
     profile: &str,
     dump_mir: bool,
+    decisions_out: Option<&Utf8PathBuf>,
     report_out: Option<&Utf8PathBuf>,
     report_failed_only: bool,
     recovery_mode: bool,
@@ -125,10 +126,22 @@ pub fn check(
                 eprintln!("Error: {INGOT_REQUIRES_WORKSPACE_ROOT}");
                 true
             } else {
-                check_single_file(&mut db, &file_path, dump_mir, report_ctx.as_ref())
+                check_single_file(
+                    &mut db,
+                    &file_path,
+                    dump_mir,
+                    report_ctx.as_ref(),
+                    decisions_out,
+                )
             }
         }
         CliTarget::Directory(dir_path) => {
+            if decisions_out.is_some() {
+                return Err(
+                    "format-v1 decision export currently requires a standalone file (--standalone)"
+                        .into(),
+                );
+            }
             check_directory(&mut db, &dir_path, ingot, dump_mir, report_ctx.as_ref())
         }
     };
@@ -423,6 +436,7 @@ fn check_single_file(
     file_path: &Utf8PathBuf,
     dump_mir: bool,
     report: Option<&ReportContext>,
+    decisions_out: Option<&Utf8PathBuf>,
 ) -> bool {
     // Create a file URL for the single .fe file
     let canonical = match file_path.canonicalize_utf8() {
@@ -492,6 +506,13 @@ fn check_single_file(
             has_errors = true;
         }
 
+        if let Some(output) = decisions_out
+            && let Err(error) =
+                fe::decision_export::write_module(db, top_mod, file, output.as_std_path())
+        {
+            eprintln!("Error: {error}");
+            return true;
+        }
         if has_errors {
             return true;
         }
