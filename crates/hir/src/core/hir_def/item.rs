@@ -380,7 +380,8 @@ impl<'db> WhereClauseOwner<'db> {
         ItemKind::from(self).top_mod(db)
     }
 
-    pub(crate) fn where_clause(self, db: &'db dyn HirDb) -> WhereClauseId<'db> {
+    /// The authored clause, available to structural readers without lowering.
+    pub fn where_clause(self, db: &'db dyn HirDb) -> WhereClauseId<'db> {
         match self {
             Self::Func(func) => func.where_clause(db),
             Self::Struct(struct_) => struct_.where_clause(db),

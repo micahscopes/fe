@@ -304,3 +304,76 @@ fn cli_export_preserves_check_results_and_source_provenance() {
         );
     }
 }
+
+#[test]
+fn export_program_declarations_preserve_binders_and_requirements() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///declaration_export.fe").unwrap();
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(
+            r#"
+trait Read<const N: usize> {
+    const OK: bool
+    fn read() -> u256 where N > 0
+}
+struct Word<const N: usize> where N > 0 {}
+impl<const N: usize> Read<N> for Word<N> where N > 0 {
+    const OK: bool = true
+    fn read() -> u256 where N > 0 { 1 }
+}
+const Value: u32 = 7
+struct Outside { field: u8 }
+trait Base {}
+trait OutsideTrait: Base {}
+"#
+            .into(),
+        ),
+    );
+    let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
+    let diagnostics = db.run_on_top_mod(module);
+    assert!(diagnostics.is_empty(), "{}", diagnostics.format_diags(&db));
+    let records = fe::decision_export::declaration_records(&db, module);
+    let requirement = json!({"op":">","a":{"var":"N"},"b":{"nat":0}});
+    for kind in ["trait", "struct", "impl"] {
+        let record = records
+            .iter()
+            .find(|row| row["item"] == kind && row["name"] != "Outside")
+            .unwrap();
+        assert_eq!(record["params"], json!([{ "name":"N","kind":"nat" }]));
+        if kind != "trait" {
+            assert_eq!(record["conds"], json!([requirement]));
+        }
+    }
+    let trait_ = records.iter().find(|row| row["item"] == "trait").unwrap();
+    assert_eq!(
+        trait_["assoc_consts"],
+        json!([{ "name":"OK","kind":"bool" }])
+    );
+    assert_eq!(
+        trait_["methods"],
+        json!([{ "name":"read","conds":[requirement] }])
+    );
+    let impl_ = records.iter().find(|row| row["item"] == "impl").unwrap();
+    assert_eq!(impl_["index"], json!(0));
+    assert_eq!(impl_["trait"], json!("Read"));
+    assert_eq!(impl_["targs"], json!([{ "var":"N","kind":"nat" }]));
+    assert_eq!(
+        impl_["self"],
+        json!({"con":"Word","args":[{ "var":"N","kind":"nat" }]})
+    );
+    assert_eq!(
+        impl_["consts"],
+        json!([{ "name":"OK","value":{ "bool":true } }])
+    );
+    assert!(
+        records
+            .iter()
+            .any(|row| row["item"] == "value" && row["name"] == "Value")
+    );
+    assert!(records.iter().any(|row| row["item"] == "out_of_fragment"
+        && row["reason"].as_str().unwrap().contains("struct fields")));
+    assert!(records.iter().any(|row| row["item"] == "out_of_fragment"
+        && row["reason"].as_str().unwrap().contains("super-traits")));
+}

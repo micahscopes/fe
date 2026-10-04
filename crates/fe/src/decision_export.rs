@@ -20,6 +20,8 @@ use hir::{
     span::{DynLazySpan, LazySpan},
 };
 use serde_json::{Value, json};
+mod program;
+pub use program::declaration_records;
 
 /// Encode the body's accepted goal answers, including their authored use spans.
 /// The answer's implementation identity comes only from the retained record.
@@ -202,16 +204,7 @@ fn predicate<'db>(
             )
         }
         PredicateTerm::Binary(op, a, b) => {
-            let op = match op {
-                BinOp::Comp(op) => op.symbol(),
-                BinOp::Logical(LogicalBinOp::And) => "&&",
-                BinOp::Logical(LogicalBinOp::Or) => "||",
-                BinOp::Arith(ArithBinOp::Add) => "+",
-                BinOp::Arith(ArithBinOp::Sub) => "-",
-                BinOp::Arith(ArithBinOp::Mul) => "*",
-                BinOp::Arith(ArithBinOp::Div) => "/",
-                _ => return Err("predicate operator is outside format v1".into()),
-            };
+            let op = binary_operator(*op)?;
             Ok(json!({"op":op,"a":predicate(db,a)?,"b":predicate(db,b)?}))
         }
         PredicateTerm::Unary(UnOp::Not, value) => Ok(json!({"not":predicate(db,value)?})),
@@ -276,4 +269,17 @@ pub fn write_module(
     }
     std::fs::write(output, bytes)
         .map_err(|error| format!("cannot write decision export {}: {error}", output.display()))
+}
+
+fn binary_operator(op: BinOp) -> Result<&'static str, String> {
+    match op {
+        BinOp::Comp(op) => Ok(op.symbol()),
+        BinOp::Logical(LogicalBinOp::And) => Ok("&&"),
+        BinOp::Logical(LogicalBinOp::Or) => Ok("||"),
+        BinOp::Arith(ArithBinOp::Add) => Ok("+"),
+        BinOp::Arith(ArithBinOp::Sub) => Ok("-"),
+        BinOp::Arith(ArithBinOp::Mul) => Ok("*"),
+        BinOp::Arith(ArithBinOp::Div) => Ok("/"),
+        _ => Err("operator is outside format v1".into()),
+    }
 }
