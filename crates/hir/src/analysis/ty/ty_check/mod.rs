@@ -5628,7 +5628,8 @@ impl<'db> TypedBody<'db> {
                     db,
                     TraitSolveCx::new(db, body.scope()).with_assumptions(self.assumptions()),
                     self.decisions()
-                        .choice_ref(&DecisionSite::trait_reference(expr.span(body).into()))?,
+                        .choice_ref(&DecisionSite::trait_reference(expr.span(body).into()))
+                        .expect("a source trait call must retain its accepted choice"),
                     name,
                 )
                 .ok()?
