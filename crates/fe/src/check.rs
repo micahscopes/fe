@@ -539,6 +539,7 @@ fn check_single_file(
         if let Some(output) = decisions_out {
             let mut completed = diagnostics.hir.complete_diags(db);
             completed.extend(diagnostics.mir.iter().cloned());
+            completed.extend(diagnostics.dependencies.complete_diagnostics(db));
             let records = fe::decision_export::module_records(db, top_mod, file, &completed);
             if let Err(error) = fe::decision_export::write_records(&records, output.as_std_path()) {
                 eprintln!("Error: {error}");

@@ -131,10 +131,10 @@ fn term<'db>(db: &'db dyn SpannedHirAnalysisDb, ty: TyId<'db>) -> Result<Term> {
         }),
         TyData::ConstTy(constant) => match constant.data(db) {
             ConstTyData::TyParam(param, ty) => {
-                let kind = if matches!(ty.data(db), TyData::TyBase(TyBase::Prim(PrimTy::Bool))) {
-                    Kind::Bool
-                } else {
-                    Kind::Nat
+                let kind = match ty.data(db) {
+                    TyData::TyBase(TyBase::Prim(PrimTy::Bool)) => Kind::Bool,
+                    TyData::TyBase(TyBase::Prim(PrimTy::Usize)) => Kind::Nat,
+                    _ => return Err("constant kind is outside the v1 fragment (bool/usize)".into()),
                 };
                 Ok(Term::Var {
                     var: param.name.data(db).clone(),
@@ -404,7 +404,7 @@ pub fn module_records(
         }
     };
     records.extend(
-        diagnostic_records(db, diagnostics)
+        diagnostic_records(db, file, diagnostics)
             .into_iter()
             .map(outside("diagnostic", None)),
     );
@@ -445,7 +445,7 @@ pub fn generation_failure_records(
 ) -> Vec<Record> {
     let mut records = preamble(db, file);
     let errors = error.map_or_else(Vec::new, |error| {
-        diagnostic_records(db, std::slice::from_ref(error))
+        diagnostic_records(db, file, std::slice::from_ref(error))
     });
     if errors.is_empty() {
         let reason = "generation error has no source span";
@@ -502,23 +502,31 @@ pub fn write_records(
     Ok(())
 }
 
-/// Encode the same completed errors that the check command reports.
+/// Encode the same completed errors that the check command reports, including
+/// errors in dependencies, whose sites name their file.
 pub fn diagnostic_records(
     db: &dyn SpannedHirAnalysisDb,
+    checked: common::file::File,
     diagnostics: &[common::diagnostics::CompleteDiagnostic],
 ) -> Vec<Decision> {
     diagnostics
         .iter()
         .filter(|d| d.severity == common::diagnostics::Severity::Error)
         .map(|d| {
-            let site = d
-                .primary_span()
+            let span = d.primary_span();
+            let site = span
+                .as_ref()
                 .ok_or("reported error has no source span".into())
-                .and_then(|span| span_site(db, &span));
+                .and_then(|span| span_site(db, span));
             locate(site, |site| {
+                let file = span
+                    .filter(|span| span.file != checked)
+                    .map(|span| span.file.url(db).ok_or("dependency error has no file URL"))
+                    .transpose()?
+                    .map(|url| url.to_string());
                 Ok(Record::Diagnostic {
                     code: d.error_code.to_string(),
-                    site,
+                    site: records::DiagnosticSite { site, file },
                 })
             })
         })

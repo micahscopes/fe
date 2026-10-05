@@ -119,6 +119,61 @@ fn call<T, const B: bool>(_ x: T) where T: Test<B> { x.test() }
 }
 
 #[test]
+fn export_does_not_call_a_non_usize_constant_parameter_nat() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///byte_parameter_export.fe").unwrap();
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(
+            "trait Test<const N: u8> { fn test(self) }\n\
+             fn call<T, const N: u8>(_ x: T) where T: Test<N> { x.test() }\n"
+                .into(),
+        ),
+    );
+    let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
+    let diagnostics = db.run_on_top_mod(module);
+    assert!(diagnostics.is_empty(), "{}", diagnostics.format_diags(&db));
+    let func = module
+        .all_funcs(&db)
+        .iter()
+        .copied()
+        .find(|func| func.name(&db).to_opt().unwrap().data(&db) == "call")
+        .unwrap();
+    let (_, body) = check_func_body(&db, func);
+    let gap = fe::decision_export::goal_records(&db, body)
+        .into_iter()
+        .find_map(Result::err)
+        .expect("a u8 parameter is outside format v1");
+    assert!(gap.reason.contains("constant kind"), "{gap:?}");
+}
+
+#[test]
+fn export_names_the_file_of_a_dependency_error() {
+    let mut db = DriverDataBase::default();
+    let checked_url = Url::parse("file:///checked.fe").unwrap();
+    let other_url = Url::parse("file:///other.fe").unwrap();
+    let checked = db
+        .workspace()
+        .touch(&mut db, checked_url, Some("fn ok() {}\n".into()));
+    let other = db.workspace().touch(
+        &mut db,
+        other_url.clone(),
+        Some("fn f() -> u8 { true }\n".into()),
+    );
+    let completed = db.run_on_top_mod(db.top_mod(other)).complete_diags(&db);
+    let records = decided(fe::decision_export::diagnostic_records(
+        &db, checked, &completed,
+    ));
+    assert_eq!(records[0]["site"]["file"], other_url.to_string());
+    assert_eq!(records[0]["site"]["line"], 1);
+    let local = decided(fe::decision_export::diagnostic_records(
+        &db, other, &completed,
+    ));
+    assert!(local[0]["site"].get("file").is_none());
+}
+
+#[test]
 fn export_marks_external_impl_answers_outside_v1_instead_of_numbering_them() {
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///external_decision_export.fe").unwrap();
@@ -461,7 +516,7 @@ trait OutsideTrait: Base {}
         module,
         &diagnostics.complete_diags(&db),
     ));
-    let requirement = json!({"op":">","a":{"var":"N"},"b":{"nat":0}});
+    let requirement = json!({"op":">","a":{"var":"N","kind":"nat"},"b":{"nat":0}});
     for kind in ["trait", "struct", "impl"] {
         let record = records
             .iter()
@@ -499,6 +554,7 @@ trait OutsideTrait: Base {}
             .any(|row| row["item"] == "value" && row["name"] == "Value")
     );
     assert!(records.iter().any(|row| row["item"] == "out_of_fragment"
+        && row["name"] == "Outside"
         && row["reason"].as_str().unwrap().contains("struct fields")));
     assert!(records.iter().any(|row| row["item"] == "out_of_fragment"
         && row["reason"].as_str().unwrap().contains("super-traits")));
@@ -604,8 +660,8 @@ fn export_overlap_uses_reported_pairs_and_keeps_disjoint_pairs() {
         let source = format!(
             "trait Read {{}}\nstruct Word {{}}\nstruct Other {{}}\nimpl Read for Word {{}}\nimpl Read for {second} {{}}\n"
         );
-        db.workspace().touch(&mut db, url.clone(), Some(source));
-        let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
+        let file = db.workspace().touch(&mut db, url.clone(), Some(source));
+        let module = db.top_mod(file);
         let completed = db.run_on_top_mod(module).complete_diags(&db);
         let pairs = decided(fe::decision_export::overlap_records(
             &db, module, &completed,
@@ -617,7 +673,9 @@ fn export_overlap_uses_reported_pairs_and_keeps_disjoint_pairs() {
                 .unwrap()
                 .clone()
         );
-        let errors = decided(fe::decision_export::diagnostic_records(&db, &completed));
+        let errors = decided(fe::decision_export::diagnostic_records(
+            &db, file, &completed,
+        ));
         assert_eq!(errors.iter().any(|e| e["code"] == "5-0001"), conflict);
         if conflict {
             assert_eq!(errors[0]["site"]["line"], 4);
@@ -729,7 +787,7 @@ fn export_pairs_override_errors_with_impl_without_capturing_body_errors() {
     use hir::span::LazySpan;
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///override_alias_export.fe").unwrap();
-    db.workspace().touch(&mut db,url.clone(),Some("trait Read { fn read() -> u256 }\nstruct Word {}\nimpl Read for Word { fn read() -> u256 where false { missing } }\n".into()));
+    let file = db.workspace().touch(&mut db,url.clone(),Some("trait Read { fn read() -> u256 }\nstruct Word {}\nimpl Read for Word { fn read() -> u256 where false { missing } }\n".into()));
     let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
     let completed = db.run_on_top_mod(module).complete_diags(&db);
     let records = rows(fe::decision_export::declaration_records(
@@ -743,6 +801,7 @@ fn export_pairs_override_errors_with_impl_without_capturing_body_errors() {
         .unwrap();
     let errors = decided(fe::decision_export::diagnostic_records(
         &db,
+        file,
         std::slice::from_ref(override_),
     ));
     assert!(aliases.contains(&errors[0]["site"]));
@@ -762,6 +821,7 @@ fn export_pairs_override_errors_with_impl_without_capturing_body_errors() {
         .unwrap();
     let errors = decided(fe::decision_export::diagnostic_records(
         &db,
+        file,
         std::slice::from_ref(body_error),
     ));
     assert!(!aliases.contains(&errors[0]["site"]));

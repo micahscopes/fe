@@ -9,6 +9,16 @@ pub struct Site {
     pub col: usize,
 }
 
+/// The site of a reported error, which may lie in a dependency.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiagnosticSite {
+    #[serde(flatten)]
+    pub site: Site,
+    /// The file, when it is not the checked one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
 /// The kind of a generic parameter or associated constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -282,7 +292,7 @@ pub enum Record {
     },
     Diagnostic {
         code: String,
-        site: Site,
+        site: DiagnosticSite,
     },
 }
 

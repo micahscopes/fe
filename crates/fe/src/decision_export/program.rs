@@ -33,7 +33,10 @@ pub fn declaration_records<'db>(
                 })
             });
             record.map_or_else(
-                |ExportGap(reason)| Record::outside(item.kind_name(), None, None, reason),
+                |ExportGap(reason)| {
+                    let name = item.name(db).map(|name| name.data(db).clone());
+                    Record::outside(item.kind_name(), name, None, reason)
+                },
                 Record::Item,
             )
         })
@@ -462,10 +465,8 @@ fn syntax_expr<'db>(
             if !args.is_empty() {
                 return Err("applied expression name is outside format v1".into());
             }
-            Ok(Term::Var {
-                var: name,
-                kind: None,
-            })
+            let kind = env.get(&name).copied();
+            Ok(Term::Var { var: name, kind })
         }
         Expr::Bin(a, b, op) => Ok(Term::Op {
             op: binary_operator(*op)?,
