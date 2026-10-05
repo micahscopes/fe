@@ -4683,20 +4683,26 @@ fn rd111_storage_write_capability_at_o0_and_o2() {
 
 #[test]
 fn rd114_named_impl_self_paths_at_o0_and_o2() {
-    rd114_named_impl_self_items_at_o0_and_o2("named_impl_self_paths.fe");
+    evidence_boundary_runtime_at_o0_and_o2("named_impl_self_paths.fe");
 }
 
 #[test]
 fn rd114_named_impl_self_const_ctfe_at_o0_and_o2() {
-    rd114_named_impl_self_items_at_o0_and_o2("named_impl_self_const_ctfe.fe");
+    evidence_boundary_runtime_at_o0_and_o2("named_impl_self_const_ctfe.fe");
 }
 
 #[test]
 fn rd114_named_impl_self_pattern_at_o0_and_o2() {
-    rd114_named_impl_self_items_at_o0_and_o2("named_impl_self_pattern.fe");
+    evidence_boundary_runtime_at_o0_and_o2("named_impl_self_pattern.fe");
 }
 
-fn rd114_named_impl_self_items_at_o0_and_o2(name: &str) {
+#[test]
+#[ignore = "RD103 Q9: runtime evidence transport must replace the MIR provision rejection"]
+fn rd103_evidence_ordinary_function_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_ordinary_function.fe");
+}
+
+fn evidence_boundary_runtime_at_o0_and_o2(name: &str) {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/evidence_boundary_runtime")
         .join(name);
@@ -4709,6 +4715,6 @@ fn rd114_named_impl_self_items_at_o0_and_o2(name: &str) {
             level,
             fixture.to_str().expect("fixture path utf8"),
         ]);
-        assert_eq!(exit_code, 0, "RD114 {name} failed at -O{level}:\n{output}");
+        assert_eq!(exit_code, 0, "{name} failed at -O{level}:\n{output}");
     }
 }

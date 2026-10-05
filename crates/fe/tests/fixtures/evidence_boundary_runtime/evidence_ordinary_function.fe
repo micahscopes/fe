@@ -1,0 +1,43 @@
+// RD103 Q9 pending: preserve evidence choice through runtime lowering.
+use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+impl Read for Subject as Alternative { const fn read() -> u256 { 2 } }
+impl Read for Subject as Third { const fn read() -> u256 { 3 } }
+fn read_with<T>(_ e: Evidence<Read<T>>) -> u256 {
+    with (e) { <T as Read>::read() }
+}
+#[test]
+fn ordinary_function_reads_the_opened_choice() {
+    let evidence = with (Alternative) { prove<Read<Subject>>() }
+    assert(read_with<Subject>(evidence) == 2)
+}
+
+#[test]
+fn ordinary_evidence_keeps_the_ordinary_choice() {
+    let evidence = prove<Read<Subject>>()
+    assert(read_with<Subject>(evidence) == 1)
+}
+#[test]
+fn copied_evidence_keeps_the_selected_choice() {
+    let evidence = with (Alternative) { prove<Read<Subject>>() }
+    assert(read_with<Subject>(evidence) == 2)
+    assert(read_with<Subject>(evidence) == 2)
+}
+
+fn read_nested(_ e: Evidence<Read<Subject>>) -> u256 {
+    with (e) {
+        let before = <Subject as Read>::read()
+        let inner = with (Third) { <Subject as Read>::read() }
+        let after = <Subject as Read>::read()
+        before * 100 + inner * 10 + after
+    }
+}
+#[test]
+fn nested_choice_restores_the_opened_evidence() {
+    let ordinary = prove<Read<Subject>>()
+    let selected = with (Alternative) { prove<Read<Subject>>() }
+    assert(read_nested(ordinary) == 131)
+    assert(read_nested(selected) == 232)
+}
