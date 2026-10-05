@@ -381,8 +381,8 @@ fn quoted_function_generics<'db>(
     paths: QuotePathContext<'db>,
     budget: &QuoteBudget,
     function: &crate::hir_def::QuoteFunc<'db>,
-    func_index: u32,
     inherited: GenericParamListId<'db>,
+    owner_names: &[IdentId<'db>],
     function_types: &crate::core::meta::FrozenQuoteFunctionTypes,
     roots: &[FrozenQuoteTrait],
 ) -> Result<(GenericParamListId<'db>, Vec<IdentId<'db>>), QuoteConstructionError> {
@@ -392,6 +392,33 @@ fn quoted_function_generics<'db>(
     let const_types = &function_types.generic_const_types;
     let mut params = inherited.data(db).to_vec();
     let mut names = Vec::new();
+    // Each parameter keeps its authored name unless a parameter of the
+    // function's owner, an inherited parameter or an earlier parameter already
+    // has it.
+    let inherited_names: Vec<IdentId<'db>> = params
+        .iter()
+        .filter_map(|param| param.name().to_opt())
+        .chain(owner_names.iter().copied())
+        .collect();
+    let authored_names: Vec<IdentId<'db>> = function
+        .generic_params
+        .data(db)
+        .iter()
+        .filter_map(|param| param.name().to_opt())
+        .collect();
+    let generic_name = |authored: IdentId<'db>, chosen: &[IdentId<'db>]| {
+        if !inherited_names.contains(&authored) && !chosen.contains(&authored) {
+            return authored;
+        }
+        (1usize..)
+            .map(|suffix| IdentId::new(db, format!("{}{suffix}", authored.data(db))))
+            .find(|name| {
+                !inherited_names.contains(name)
+                    && !authored_names.contains(name)
+                    && !chosen.contains(name)
+            })
+            .expect("an unused suffix exists")
+    };
     if bound_sites.len() != function.generic_params.data(db).len()
         || type_defaults.len() != function.generic_params.data(db).len()
         || const_types.len() != function.generic_params.data(db).len()
@@ -415,7 +442,7 @@ fn quoted_function_generics<'db>(
             let primitive = const_ty
                 .and_then(quote_hir_primitive)
                 .ok_or(QuoteConstructionFault::ConstParameterTypeIsNotACheckedScalar)?;
-            let name = IdentId::new(db, format!("<quote-function-const-{func_index}-{index}>"));
+            let name = generic_name(param.name.unwrap(), &names);
             let mut param = param.clone();
             param.name = Partial::Present(name);
             param.ty = Partial::Present(TypeId::new(db, TypeKind::Primitive(primitive)));
@@ -444,7 +471,7 @@ fn quoted_function_generics<'db>(
             .zip(sites)
             .map(|(bound, site)| quoted_trait_bound(paths, bound, *site, roots, budget))
             .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
-        let name = IdentId::new(db, format!("<quote-function-type-{func_index}-{index}>"));
+        let name = generic_name(param.name.unwrap(), &names);
         let mut param = param.clone();
         param.name = Partial::Present(name);
         param.bounds = bounds;
@@ -1478,8 +1505,8 @@ fn emit_quoted_function<'db>(
         paths,
         budget,
         function,
-        func_index,
         generic_params,
+        generic_names,
         function_types,
         &emit.node.rooted_traits,
     )?;
@@ -1494,15 +1521,14 @@ fn emit_quoted_function<'db>(
             .data(db)
             .iter()
             .zip(&function_types.effects)
-            .enumerate()
-            .map(|(index, (effect, frozen))| {
+            .map(|(effect, frozen)| {
                 let ty = frozen
                     .as_ref()
                     .ok_or(QuoteConstructionFault::EffectKeyNeedsCheckedReification)?;
                 let ty = quoted_signature_type(paths, &type_budget, ty, &function_generic_names)?;
-                let name = effect
-                    .name
-                    .map(|_| IdentId::new(db, format!("<quote-effect-{func_index}-{index}>")));
+                // Effect uses are bound by position, so the authored name
+                // cannot be captured.
+                let name = effect.name;
                 effect_names.push(name);
                 let mut copied = effect.clone();
                 copied.name = name;
@@ -1683,14 +1709,14 @@ fn emit_quoted_function<'db>(
     let locals: Vec<(PatId, IdentId<'db>, Vec<ExprId>)> = member
         .locals
         .iter()
-        .map(|(index, local)| {
-            (
+        .map(|(_, local)| {
+            Ok((
                 local.binder,
-                IdentId::new(db, format!("<quote-local-{}-{index}>", emit.code_root)),
+                super::hir_builder::authored_binder_name(db, emit.quote.template, local.binder)?,
                 local.uses.clone(),
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_, QuoteConstructionFault>>()?;
     let variants = member
         .rooted_constructors
         .iter()

@@ -585,7 +585,7 @@ impl std::fmt::Display for ConstructionError {
                 "quoted Self constructor `{name}` does not match the impl self type"
             ),
             Self::UnsupportedConstructorInstantiation => {
-                f.write_str("quoted constructor alias arguments need checked reification")
+                f.write_str("constructor alias arguments are not supported in a quote yet")
             }
             Self::MissingItemPath => f.write_str("quoted item has no ingot-relative path"),
             Self::Authority => f.write_str("generated declaration exceeds its owner's authority"),

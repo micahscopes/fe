@@ -3,7 +3,7 @@ source: crates/driver/tests/read_back.rs
 expression: rendered
 input_file: tests/fixtures/quote_request_budget/large_signature.fe
 ---
-error[19-0004]: invalid generated declaration: quotation request node limit exceeded: 65537 > 65536
+error[19-0003]: invalid generated declaration: quotation request node limit exceeded: 65537 > 65536
      ┌─ large_signature.fe:1009:19
      │
 1009 │                 ${items}

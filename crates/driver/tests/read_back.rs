@@ -2794,11 +2794,7 @@ fn generation_request_has_one_node_budget(fixture: Fixture<&str>) {
         Err(error) => error,
         Ok(_) => panic!("over-budget generation request was admitted before publication"),
     };
-    assert_eq!(
-        error.code(),
-        4,
-        "request budget is a typed output-construction failure"
-    );
+    assert_eq!(error.code(), 3, "the request budget is a limit");
     let rendered = error.render(&authored);
     assert!(
         rendered.contains("quotation request node limit"),
@@ -3042,7 +3038,7 @@ fn quoted_function_copy_has_its_own_node_limit(fixture: Fixture<&str>) {
     let Err(error) = prepare(&authored) else {
         panic!("large body needs a function diagnostic");
     };
-    assert_eq!(error.code(), 4);
+    assert_eq!(error.code(), 3);
     let rendered = error.render(&authored);
     assert!(
         rendered.contains("quoted function node limit exceeded: 8193 > 8192"),
@@ -3396,7 +3392,10 @@ fn expanded_signature_types_share_the_freezing_budget() {
             };
             assert_eq!(error.code(), 3);
             let rendered = error.render(&db);
-            assert!(rendered.contains("frozen meta nodes limit"), "{rendered}");
+            assert!(
+                rendered.contains("generation result node limit"),
+                "{rendered}"
+            );
         }
     }
 }
@@ -3456,7 +3455,7 @@ fn expanded_alias_types_fail_during_bounded_freezing() {
     };
     let rendered = error.render(&db);
     assert!(
-        rendered.contains("quoted type nodes") && rendered.contains("65537 > 65536"),
+        rendered.contains("quoted type node limit") && rendered.contains("65537 > 65536"),
         "{rendered}"
     );
 }
@@ -3563,7 +3562,7 @@ fn reflected_field_types_share_the_freezing_budget() {
             assert_eq!(error.code(), 3);
             let rendered = error.render(&db);
             assert!(
-                rendered.contains("frozen meta nodes limit exceeded: 65537 > 65536"),
+                rendered.contains("generation result node limit exceeded: 65537 > 65536"),
                 "{rendered}"
             );
         }
@@ -3652,7 +3651,7 @@ fn shared_reflected_types_are_charged_on_item_replay() {
     };
     assert_eq!(
         error.code(),
-        4,
+        3,
         "freezing fits; output replay needs the limit"
     );
     let rendered = error.render(&db);
@@ -3786,7 +3785,7 @@ fn copied_kind_bounds_have_a_pre_recursion_limit() {
             let Err(error) = prepare(&db) else {
                 panic!("deep copied kind needs a quotation diagnostic")
             };
-            assert_eq!(error.code(), 4);
+            assert_eq!(error.code(), 3);
             let rendered = error.render(&db);
             assert!(
                 rendered.contains("quoted type nesting limit exceeded: 257 > 256"),

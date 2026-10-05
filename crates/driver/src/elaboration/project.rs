@@ -56,32 +56,6 @@ fn invocation_span(
     .map(|span| span.range.into())
 }
 
-fn evaluation_error(
-    db: &DriverDataBase,
-    failure: &hir::analysis::semantic::ctfe::EvalFailure<'_>,
-) -> ElaborationErrorKind {
-    use hir::analysis::semantic::ctfe::{CtfeError, EvalFailure};
-    let error = match failure {
-        EvalFailure::Invariant { message, .. } => {
-            return ElaborationErrorKind::EvaluationFailed {
-                fault: EvaluationFault::Invariant(message.clone()),
-                calls: Vec::new(),
-            };
-        }
-        EvalFailure::Ctfe(error) => error,
-    };
-    let mut root = error;
-    let mut calls = Vec::new();
-    while let CtfeError::CalleeError { callee, source, .. } = root {
-        if let Some(name) = callee.key(db).owner(db).scope().pretty_path(db) {
-            calls.push(name);
-        }
-        root = source;
-    }
-    let fault = root.kind();
-    ElaborationErrorKind::EvaluationFailed { fault, calls }
-}
-
 fn source_span(db: &DriverDataBase, url: &Url, range: &std::ops::Range<usize>) -> Option<Span> {
     let file = db.workspace().get(db, url)?;
     if range.end > file.text(db).len() || range.start > range.end {
@@ -97,17 +71,28 @@ fn source_span(db: &DriverDataBase, url: &Url, range: &std::ops::Range<usize>) -
     ))
 }
 
-fn evaluation_operation_diagnostic<'db>(
+/// A failed provider evaluation, located at the faulting expression. A fault
+/// inside a core wrapper is located at the provider's call of that wrapper.
+fn evaluation_failure<'db>(
     db: &'db DriverDataBase,
     mut owner: BodyOwner<'db>,
     failure: &hir::analysis::semantic::ctfe::EvalFailure<'db>,
-) -> Option<(String, FrozenQuoteSpan)> {
+) -> (ElaborationErrorKind, Option<FrozenQuoteSpan>) {
     use hir::analysis::semantic::{
         SemOrigin,
         ctfe::{CtfeError, EvalFailure},
     };
-    let EvalFailure::Ctfe(error) = failure else {
-        return None;
+    let error = match failure {
+        EvalFailure::Invariant { message, .. } => {
+            return (
+                ElaborationErrorKind::EvaluationFailed {
+                    fault: EvaluationFault::Invariant(message.clone()),
+                    calls: Vec::new(),
+                },
+                None,
+            );
+        }
+        EvalFailure::Ctfe(error) => error,
     };
     let origin_span = |owner: BodyOwner<'db>, origin: SemOrigin<'db>| {
         let body = owner.body(db)?;
@@ -122,6 +107,7 @@ fn evaluation_operation_diagnostic<'db>(
     };
     let mut error = error;
     let mut caller_span = None;
+    let mut calls: Vec<(String, usize)> = Vec::new();
     while let CtfeError::CalleeError {
         origin,
         callee,
@@ -132,25 +118,37 @@ fn evaluation_operation_diagnostic<'db>(
             caller_span = origin_span(owner, *origin);
         }
         owner = callee.key(db).owner(db);
+        if let Some(name) = owner.scope().pretty_path(db) {
+            // Recursion repeats one frame; report it once with its count.
+            match calls.last_mut() {
+                Some((last, count)) if *last == name => *count += 1,
+                _ => calls.push((name, 1)),
+            }
+        }
         error = source;
     }
-    let CtfeError::InvalidOperation { origin, message } = error else {
-        return None;
-    };
-    // Core wrappers implement structural operations; authors act on the call
-    // in their own provider. Ordinary helper failures retain their leaf span.
+    let origin = error.origin();
     let span = if in_core(owner) {
-        caller_span.or_else(|| origin_span(owner, *origin))?
+        caller_span.or_else(|| origin_span(owner, origin))
     } else {
-        origin_span(owner, *origin)?
+        origin_span(owner, origin)
     };
-    Some((
-        message.clone(),
-        FrozenQuoteSpan {
+    let location = span.and_then(|span| {
+        Some(FrozenQuoteSpan {
             file: span.file.url(db)?,
             range: span.range.into(),
+        })
+    });
+    let kind = match error {
+        CtfeError::InvalidOperation { message, .. } => {
+            ElaborationErrorKind::Operation(message.clone())
+        }
+        _ => ElaborationErrorKind::EvaluationFailed {
+            fault: error.kind(),
+            calls,
         },
-    ))
+    };
+    (kind, location)
 }
 
 impl ElaborationError {
@@ -551,14 +549,11 @@ fn prepare_selected<'db>(
                     return Err(error(ElaborationErrorKind::EvaluationBlocked(info.demand)));
                 }
                 EvalOutcome::Failed(failure) => {
-                    if let Some((message, location)) =
-                        evaluation_operation_diagnostic(db, BodyOwner::Func(*provider), &failure)
-                    {
-                        let mut diagnostic = error(ElaborationErrorKind::Operation(message));
-                        diagnostic.quote = Some(Box::new(location));
-                        return Err(diagnostic);
-                    }
-                    return Err(error(evaluation_error(db, &failure)));
+                    let (kind, location) =
+                        evaluation_failure(db, BodyOwner::Func(*provider), &failure);
+                    let mut diagnostic = error(kind);
+                    diagnostic.quote = location.map(Box::new);
+                    return Err(diagnostic);
                 }
             };
             // Freeze the checked value before the output HIR query reads it.

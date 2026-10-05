@@ -1,4 +1,4 @@
-error[19-0003]: invalid generated declaration: frozen meta nodes limit exceeded: 65537 > 65536
+error[19-0003]: invalid generated declaration: generation result node limit exceeded: 65537 > 65536
    ┌─ quote_budget.fe:7:17
    │
  7 │           items = quote {
@@ -6,7 +6,7 @@ error[19-0003]: invalid generated declaration: frozen meta nodes limit exceeded:
  8 │ │             ${items}
  9 │ │             pub const fn ${name}() -> u256 { 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 }
 10 │ │         }
-   │ ╰─────────^ invalid generated declaration: frozen meta nodes limit exceeded: 65537 > 65536
+   │ ╰─────────^ invalid generated declaration: generation result node limit exceeded: 65537 > 65536
    · │
 15 │   #[generate(many)]
    │   ----------------- generated here

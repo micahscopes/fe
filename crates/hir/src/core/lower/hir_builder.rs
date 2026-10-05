@@ -215,6 +215,25 @@ where
 /// `__fe_{name}`, or `__fe_{name}_{n}` for the first `n` that the desugared
 /// source does not mention. Generated code then cannot capture a name that a
 /// field type refers to, whichever namespace it is in.
+/// The output name of a quoted local binder: the name it was written with,
+/// marked with `'` so that no item can have it. Fragments are closed and
+/// compiler-issued pattern binders have their own names, so a use resolves by
+/// spelling to the binder the template meant, and no destination constant or
+/// unit variant can turn the binder into a pattern that matches it.
+pub(super) fn authored_binder_name<'db>(
+    db: &'db dyn HirDb,
+    template: Body<'db>,
+    binder: PatId,
+) -> Result<IdentId<'db>, QuoteConstructionFault> {
+    match &template.pats(db)[binder] {
+        Partial::Present(Pat::Path(Partial::Present(path), _)) => path
+            .as_ident(db)
+            .map(|name| IdentId::new(db, format!("{}'", name.data(db))))
+            .ok_or(QuoteConstructionFault::PatternNeedsACheckedBinder),
+        _ => Err(QuoteConstructionFault::PatternNeedsACheckedBinder),
+    }
+}
+
 fn fresh_ident<'db>(db: &'db dyn HirDb, reserved: &FxHashSet<String>, name: &str) -> IdentId<'db> {
     let mut ident = format!("__fe_{name}");
     let mut suffix = 0;
@@ -2359,15 +2378,14 @@ where
         let locals = node
             .locals
             .iter()
-            .enumerate()
-            .map(|(index, local)| {
-                (
+            .map(|local| {
+                Ok((
                     local.binder,
-                    IdentId::new(self.db(), format!("<quote-fragment-local-{child}-{index}>")),
+                    authored_binder_name(self.db(), source.template, local.binder)?,
                     local.uses.clone(),
-                )
+                ))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, QuoteConstructionFault>>()?;
         let mut map = QuoteCopyMap::new(
             self.db(),
             &node.holes,
