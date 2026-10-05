@@ -681,7 +681,7 @@ fn family_signatures_are_checked_without_a_use_site() {
         (
             "type Out<T, T>",
             "type Out<U, V> = u256",
-            Some("duplicate associated type parameter"),
+            Some("duplicate generic parameter name in associated type"),
         ),
         (
             "type Out<T>",
@@ -940,4 +940,37 @@ fn associated_type_bounds_name_a_missing_trait() {
         ("trait T1 { type Bar<T>: T2 }", Some("`T2` is not found")),
         ("trait T1 { type Bar<T: T2> }", Some("`T2` is not found")),
     ]);
+}
+
+#[test]
+fn associated_type_parameters_use_the_generic_parameter_checks() {
+    check_cases(&[
+        (
+            "trait Tr { type Out<T, T> }",
+            Some("duplicate generic parameter name in associated type `Out`"),
+        ),
+        ("trait Tr<T> { type Out<U> = U }", None),
+        (
+            "trait Tr<T> { type Out<T> = T }",
+            Some("generic parameter is already defined in the parent item"),
+        ),
+        (
+            "trait Tr { type Out<T> }\nstruct S<T> {}\nimpl<T> Tr for S<T> { type Out<T> = T }",
+            Some("generic parameter is already defined in the parent item"),
+        ),
+    ]);
+}
+
+#[test]
+fn a_const_parameter_on_an_associated_type_is_reported_once() {
+    for source in [
+        "trait Factory { type Arr<const N: usize> = [u8; N] }\nstruct F {}\nimpl Factory for F {}",
+        "trait Factory { type Arr<const N: usize> = u8 }",
+    ] {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("const_param.fe"), source);
+        let result = diagnostics(&db, file);
+        assert!(result.contains("const"), "{result}");
+        assert_eq!(result.matches("error[").count(), 1, "{source}\n{result}");
+    }
 }

@@ -4593,6 +4593,11 @@ impl<'db> ImplAssocTypeView<'db> {
         ScopeId::ImplTraitType(self.owner, self.idx as u16)
     }
 
+    fn has_const_param(self, db: &'db dyn HirDb) -> bool {
+        crate::hir_def::scope_graph::AssocTypeOwner::Impl(self.owner, self.idx as u16)
+            .has_const_param(db)
+    }
+
     pub(crate) fn bind_body(self, db: &'db dyn HirAnalysisDb, body: TyId<'db>) -> TyId<'db> {
         TyId::type_family(
             db,
@@ -4628,6 +4633,9 @@ impl<'db> ImplAssocTypeView<'db> {
     /// Semantic type of this associated type implementation.
     pub fn ty(self, db: &'db dyn HirAnalysisDb) -> Option<TyId<'db>> {
         let hir = self.owner.types(db)[self.idx].type_ref.to_opt()?;
+        if self.has_const_param(db) {
+            return Some(TyId::invalid(db, InvalidCause::Other));
+        }
         let assumptions = self.with_declared_guards(db, constraints_for(db, self.owner.into()));
         let minter = LoweringContext::new(self.hole_anchor());
         Some(lower_hir_ty_with_minter(
@@ -4641,6 +4649,9 @@ impl<'db> ImplAssocTypeView<'db> {
 
     pub(crate) fn candidate_ty(self, db: &'db dyn HirAnalysisDb) -> Option<TyId<'db>> {
         let hir = self.owner.types(db)[self.idx].type_ref.to_opt()?;
+        if self.has_const_param(db) {
+            return Some(TyId::invalid(db, InvalidCause::Other));
+        }
         let assumptions = self.with_declared_guards(
             db,
             collect_candidate_constraints(db, self.owner.into()).instantiate_identity(),
@@ -4659,6 +4670,9 @@ impl<'db> ImplAssocTypeView<'db> {
         let Some(hir) = self.owner.types(db)[self.idx].type_ref.to_opt() else {
             return Vec::new();
         };
+        if self.has_const_param(db) {
+            return Vec::new();
+        }
         let scope = self.scope();
         let minter = LoweringContext::new(self.hole_anchor());
         lower_layout_root_uses_in_hir_ty(
@@ -4675,6 +4689,9 @@ impl<'db> ImplAssocTypeView<'db> {
         let Some(hir) = self.owner.types(db)[self.idx].type_ref.to_opt() else {
             return Vec::new();
         };
+        if self.has_const_param(db) {
+            return Vec::new();
+        }
 
         let ty_span = self.span().ty();
         let assumptions = self.with_declared_guards(db, constraints_for(db, self.owner.into()));
@@ -4800,6 +4817,11 @@ impl<'db> TraitAssocTypeView<'db> {
         ScopeId::TraitType(self.owner, self.idx as u16)
     }
 
+    pub(crate) fn has_const_param(self, db: &'db dyn HirDb) -> bool {
+        crate::hir_def::scope_graph::AssocTypeOwner::Trait(self.owner, self.idx as u16)
+            .has_const_param(db)
+    }
+
     pub(crate) fn bind_body(self, db: &'db dyn HirAnalysisDb, body: TyId<'db>) -> TyId<'db> {
         TyId::type_family(
             db,
@@ -4836,6 +4858,9 @@ impl<'db> TraitAssocTypeView<'db> {
         db: &'db dyn HirAnalysisDb,
     ) -> Option<crate::analysis::ty::ty_def::TyId<'db>> {
         let hir = self.decl(db).default?;
+        if self.has_const_param(db) {
+            return Some(TyId::invalid(db, InvalidCause::Other));
+        }
         let trait_ = self.owner;
         let assumptions = self.with_declared_guards(db, constraints_for(db, trait_.into()));
         Some(lower_hir_ty(db, hir, self.scope(), assumptions))
@@ -4850,6 +4875,9 @@ impl<'db> TraitAssocTypeView<'db> {
         db: &'db dyn HirAnalysisDb,
     ) -> Option<crate::analysis::ty::ty_def::TyId<'db>> {
         let hir = self.decl(db).default?;
+        if self.has_const_param(db) {
+            return Some(TyId::invalid(db, InvalidCause::Other));
+        }
         let trait_ = self.owner;
         let assumptions = self.with_declared_guards(
             db,
@@ -4862,6 +4890,9 @@ impl<'db> TraitAssocTypeView<'db> {
         let Some(hir) = self.decl(db).default else {
             return Vec::new();
         };
+        if self.has_const_param(db) {
+            return Vec::new();
+        }
         let scope = self.scope();
         let assumptions = self.with_declared_guards(db, constraints_for(db, self.owner.into()));
         let minter = LoweringContext::new(HoleAnchor::TemplateTy {

@@ -22,6 +22,14 @@ use salsa::Update;
 use smallvec1::SmallVec;
 use thin_vec::ThinVec;
 
+/// The owner of a generic parameter list: an item, or an associated type
+/// with parameters of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update, derive_more::From)]
+pub enum GenericParamListOwner<'db> {
+    Item(GenericParamOwner<'db>),
+    AssocType(crate::hir_def::scope_graph::AssocTypeOwner<'db>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
 pub enum AssociatedFamilyError {
     ParameterCount { expected: usize, given: usize },
@@ -30,7 +38,6 @@ pub enum AssociatedFamilyError {
     ConstParameter,
     ImplementationBound,
     UnknownMember,
-    DuplicateParameter,
     InvalidGuard,
     InvalidOutputBound,
     GuardedPartialApplication,
@@ -128,7 +135,7 @@ pub enum TyLowerDiag<'db> {
     DuplicateArgName(Func<'db>, SmallVec<[u16; 4]>),
     DuplicateFieldName(FieldParent<'db>, SmallVec<[u16; 4]>),
     DuplicateVariantName(Enum<'db>, SmallVec<[u16; 4]>),
-    DuplicateGenericParamName(GenericParamOwner<'db>, SmallVec<[u16; 4]>),
+    DuplicateGenericParamName(GenericParamListOwner<'db>, SmallVec<[u16; 4]>),
 
     InvalidConstParamTy(DynLazySpan<'db>),
     RecursiveConstParamTy(DynLazySpan<'db>),

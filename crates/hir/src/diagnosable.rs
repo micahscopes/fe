@@ -47,9 +47,19 @@ fn associated_family_parameter_diags<'db>(
 ) -> Vec<TyDiagCollection<'db>> {
     use crate::hir_def::scope_graph::AssocTypeOwner;
     use ty::diagnostics::AssociatedFamilyError;
-    let mut out = Vec::new();
-    let mut names = FxHashMap::default();
-    for (idx, param) in owner.generic_params(db).data(db).iter().enumerate() {
+    let params = owner.generic_params(db).data(db);
+    let mut out: Vec<TyDiagCollection<'db>> =
+        check_duplicate_names(params.iter().map(|param| param.name().to_opt()), |idxs| {
+            TyLowerDiag::DuplicateGenericParamName(
+                ty::diagnostics::GenericParamListOwner::AssocType(owner),
+                idxs,
+            )
+            .into()
+        })
+        .into_iter()
+        .collect();
+    let parent_scope = owner.scope().item().scope();
+    for (idx, param) in params.iter().enumerate() {
         let span: DynLazySpan<'db> = owner.span().generic_params().param(idx).into();
         let family_diag = |error| -> TyDiagCollection<'db> {
             TyLowerDiag::AssociatedFamilyDeclaration {
@@ -59,9 +69,14 @@ fn associated_family_parameter_diags<'db>(
             .into()
         };
         if let Some(name) = param.name().to_opt()
-            && names.insert(name, idx).is_some()
+            && let Some(diag) = param_defined_in_parent(
+                db,
+                name,
+                parent_scope,
+                owner.span().generic_params().param(idx),
+            )
         {
-            out.push(family_diag(AssociatedFamilyError::DuplicateParameter));
+            out.push(diag.into());
         }
         let GenericParam::Type(param) = param else {
             out.push(family_diag(AssociatedFamilyError::ConstParameter));
@@ -590,6 +605,10 @@ impl<'db> Trait<'db> {
             let Some(default_ty) = assoc.default_ty(db) else {
                 continue;
             };
+            if assoc.has_const_param(db) {
+                // Reported once, at the parameter.
+                continue;
+            }
             let assumptions = assoc.with_declared_guards(db, assumptions);
             let source_diags = ty::ty_error::collect_hir_ty_diags(
                 db,
@@ -1657,7 +1676,7 @@ impl<'db> GenericParamOwner<'db> {
     ) -> impl Iterator<Item = TyDiagCollection<'db>> + 'db {
         let params_iter = self.params(db).map(|v| v.name().to_opt());
         check_duplicate_names(params_iter, |idxs| {
-            TyDiagCollection::from(TyLowerDiag::DuplicateGenericParamName(self, idxs))
+            TyDiagCollection::from(TyLowerDiag::DuplicateGenericParamName(self.into(), idxs))
         })
         .into_iter()
     }
@@ -1917,30 +1936,39 @@ impl<'db> GenericParamView<'db> {
         self,
         db: &'db dyn HirAnalysisDb,
     ) -> Option<TyLowerDiag<'db>> {
-        use crate::analysis::name_resolution::{PathRes, resolve_path};
-        use crate::analysis::ty::trait_resolution::PredicateListId;
-
         let name = self.param.name().to_opt()?;
         let parent_scope = self.owner.scope().parent_item(db)?.scope();
-        let path = PathId::from_ident(db, name);
-        let span = self.span();
+        param_defined_in_parent(db, name, parent_scope, self.span())
+    }
+}
 
-        match resolve_path(
-            db,
-            path,
-            parent_scope,
-            PredicateListId::empty_list(db),
-            false,
-        ) {
-            Ok(r @ PathRes::Ty(ty)) if ty.is_param(db) => {
-                Some(TyLowerDiag::GenericParamAlreadyDefinedInParent {
-                    span,
-                    conflict_with: r.name_span(db).unwrap(),
-                    name,
-                })
-            }
-            _ => None,
+/// A generic parameter named `name` that hides a parameter of the item at
+/// `parent_scope`.
+fn param_defined_in_parent<'db>(
+    db: &'db dyn HirAnalysisDb,
+    name: IdentId<'db>,
+    parent_scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    span: crate::span::params::LazyGenericParamSpan<'db>,
+) -> Option<TyLowerDiag<'db>> {
+    use crate::analysis::name_resolution::{PathRes, resolve_path};
+    use crate::analysis::ty::trait_resolution::PredicateListId;
+
+    let path = PathId::from_ident(db, name);
+    match resolve_path(
+        db,
+        path,
+        parent_scope,
+        PredicateListId::empty_list(db),
+        false,
+    ) {
+        Ok(r @ PathRes::Ty(ty)) if ty.is_param(db) => {
+            Some(TyLowerDiag::GenericParamAlreadyDefinedInParent {
+                span,
+                conflict_with: r.name_span(db).unwrap(),
+                name,
+            })
         }
+        _ => None,
     }
 }
 

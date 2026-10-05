@@ -100,6 +100,15 @@ impl<'db> AssocTypeOwner<'db> {
         }
     }
 
+    /// Whether the parameter list has a const parameter, which associated
+    /// types do not support. Such a body is not lowered.
+    pub fn has_const_param(self, db: &'db dyn HirDb) -> bool {
+        self.generic_params(db)
+            .data(db)
+            .iter()
+            .any(|param| matches!(param, super::GenericParam::Const(_)))
+    }
+
     pub fn span(self) -> crate::span::item::LazyTraitTypeSpan<'db> {
         match self {
             Self::Trait(owner, idx) => owner.span().item_list().assoc_type(idx as usize),

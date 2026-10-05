@@ -2116,23 +2116,31 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
             }
 
             Self::DuplicateGenericParamName(owner, idxs) => {
-                let message = if let Some(name) = owner.name(db) {
+                use crate::analysis::ty::diagnostics::GenericParamListOwner;
+                let (owner_name, kind_name) = match owner {
+                    GenericParamListOwner::Item(item) => (item.name(db), item.kind_name()),
+                    GenericParamListOwner::AssocType(assoc) => {
+                        (assoc.scope().name(db), "associated type")
+                    }
+                };
+                let message = if let Some(name) = owner_name {
                     format!(
                         "duplicate generic parameter name in {} `{}`",
-                        owner.kind_name(),
+                        kind_name,
                         name.data(db)
                     )
                 } else {
-                    format!(
-                        "duplicate generic parameter name in {} definition",
-                        owner.kind_name()
-                    )
+                    format!("duplicate generic parameter name in {kind_name} definition")
                 };
 
-                let name = owner
-                    .params(db)
-                    .next()
-                    .map(|p| p.param.name().unwrap().data(db))
+                let first = match owner {
+                    GenericParamListOwner::Item(item) => item.params(db).next().map(|p| p.param),
+                    GenericParamListOwner::AssocType(assoc) => {
+                        assoc.generic_params(db).data(db).first()
+                    }
+                };
+                let name = first
+                    .map(|p| p.name().unwrap().data(db))
                     .expect("should be at least one generic param");
 
                 let spans = offending_generic_param_spans(*owner, idxs.as_slice(), db);
@@ -2810,8 +2818,6 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                         "associated type implementation parameter bounds must be declared on the trait".into(),
                     AssociatedFamilyError::UnknownMember =>
                         "associated type is not declared by the trait".into(),
-                    AssociatedFamilyError::DuplicateParameter =>
-                        "duplicate associated type parameter".into(),
                     AssociatedFamilyError::InvalidGuard =>
                         "invalid associated type parameter guard".into(),
                     AssociatedFamilyError::InvalidOutputBound =>
@@ -2870,13 +2876,17 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
 }
 
 fn offending_generic_param_spans<'db>(
-    owner: crate::core::hir_def::GenericParamOwner<'db>,
+    owner: crate::analysis::ty::diagnostics::GenericParamListOwner<'db>,
     idxs: &'db [u16],
     db: &'db dyn SpannedHirAnalysisDb,
 ) -> impl Iterator<Item = Option<Span>> + 'db {
-    let params_vec: Vec<_> = owner.params(db).collect();
-    idxs.iter()
-        .map(move |i| params_vec[*i as usize].span().resolve(db))
+    use crate::analysis::ty::diagnostics::GenericParamListOwner;
+    idxs.iter().map(move |&i| match owner {
+        GenericParamListOwner::Item(item) => item.param_view(db, i as usize).span().resolve(db),
+        GenericParamListOwner::AssocType(assoc) => {
+            assoc.span().generic_params().param(i as usize).resolve(db)
+        }
+    })
 }
 
 fn duplicate_name_subdiags<I>(name: &str, spans: I) -> Vec<SubDiagnostic>
