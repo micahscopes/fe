@@ -55,3 +55,31 @@ fn same_goal_parameters_keep_distinct_choices_in_both_orders() {
     assert(read_pair<Subject>(ordinary, selected) == 121)
     assert(read_pair<Subject>(selected, ordinary) == 212)
 }
+
+// The witness choice crosses an ordinary function's runtime branch.
+// Both branches reach the same opening and must retain their own authority.
+fn choose_evidence(_ selected: bool) -> Evidence<Read<Subject>> {
+    if selected {
+        with (Alternative) { prove<Read<Subject>>() }
+    } else {
+        prove<Read<Subject>>()
+    }
+}
+fn read_chosen_evidence(_ selected: bool) -> u256 {
+    read_with<Subject>(choose_evidence(selected))
+}
+fn read_chosen_pair(_ selected_first: bool) -> u256 {
+    let first = choose_evidence(selected_first)
+    let second = choose_evidence(!selected_first)
+    read_pair<Subject>(first, second)
+}
+#[test]
+fn runtime_branch_transports_both_witness_choices() {
+    assert(read_chosen_evidence(false) == 1)
+    assert(read_chosen_evidence(true) == 2)
+}
+#[test]
+fn runtime_branches_keep_same_goal_operands_distinct() {
+    assert(read_chosen_pair(false) == 121)
+    assert(read_chosen_pair(true) == 212)
+}

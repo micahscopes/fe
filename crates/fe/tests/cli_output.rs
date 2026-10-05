@@ -4807,6 +4807,7 @@ fn rd114_named_impl_self_pattern_at_o0_and_o2() {
 #[test]
 #[ignore = "RD103 Q9: runtime evidence transport must replace the MIR provision rejection"]
 fn rd103_evidence_ordinary_function_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_runtime_choice.fe");
     evidence_boundary_runtime_at_o0_and_o2("evidence_ordinary_function.fe");
 }
 

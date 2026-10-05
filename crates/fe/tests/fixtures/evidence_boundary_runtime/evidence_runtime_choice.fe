@@ -1,0 +1,19 @@
+// RD103 Q9 pending: an opaque witness must survive runtime value transport.
+use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+impl Read for Subject as Alternative { const fn read() -> u256 { 2 } }
+
+fn choose_evidence(_ selected: bool) -> Evidence<Read<Subject>> {
+    if selected {
+        with (Alternative) { prove<Read<Subject>>() }
+    } else {
+        prove<Read<Subject>>()
+    }
+}
+#[test]
+fn runtime_choices_can_be_returned_without_opening() {
+    let ordinary = choose_evidence(false)
+    let selected = choose_evidence(true)
+}
