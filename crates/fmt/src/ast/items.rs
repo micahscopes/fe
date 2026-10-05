@@ -37,7 +37,8 @@ fn token_piece_basic<'a>(
         }
         ImplKw => TokenPiece::new(text),
         ForKw => TokenPiece::new(text).space_before(),
-        Eq | Arrow => TokenPiece::new(text).spaces(),
+        // `impl Trait for Type as Name`.
+        Eq | Arrow | AsKw => TokenPiece::new(text).spaces(),
         _ => return None,
     })
 }

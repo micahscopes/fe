@@ -222,3 +222,13 @@ fn record_field_label_splices_survive_formatting() {
     assert!(formatted.contains("${x}: 7"), "{formatted}");
     assert_eq!(format_str(&formatted, &Config::default()).unwrap(), formatted);
 }
+
+#[test]
+fn commented_named_impl_keeps_its_name() {
+    let source = "impl Compute for Subject as Alternate // why this one\n{ fn compute() -> u256 { 1 } }\n";
+    let formatted = format_str(source, &Config::default()).unwrap();
+    assert!(formatted.contains("Subject as Alternate"), "{formatted}");
+    assert!(formatted.contains("// why this one"), "{formatted}");
+    let (_, errors) = parse_source_file(&formatted, RecoveryMode::NoRecover);
+    assert!(errors.is_empty(), "{errors:?}\n{formatted}");
+}
