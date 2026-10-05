@@ -85,6 +85,38 @@ fn evaluate(db: &DriverDataBase, file: File, name: &str) -> String {
 }
 
 #[test]
+fn same_goal_evidence_parameters_keep_each_operands_choice_in_both_orders() {
+    let mut db = database();
+    let file = checked(
+        &mut db,
+        "same-goal-evidence-parameters",
+        "use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+impl Read for Subject as Alternative { const fn read() -> u256 { 2 } }
+const fn pair<T>(_ left: Evidence<Read<T>>, _ right: Evidence<Read<T>>) -> u256 {
+    let first = with (left) { <T as Read>::read() }
+    let second = with (right) { <T as Read>::read() }
+    let again = with (left) { <T as Read>::read() }
+    first * 100 + second * 10 + again
+}
+const fn forward() -> u256 {
+    let ordinary = prove<Read<Subject>>()
+    let selected = with (Alternative) { prove<Read<Subject>>() }
+    pair<Subject>(ordinary, selected)
+}
+const fn reverse() -> u256 {
+    let ordinary = prove<Read<Subject>>()
+    let selected = with (Alternative) { prove<Read<Subject>>() }
+    pair<Subject>(selected, ordinary)
+}",
+    );
+    assert_eq!(evaluate(&db, file, "forward"), "121");
+    assert_eq!(evaluate(&db, file, "reverse"), "212");
+}
+
+#[test]
 fn selected_impl_bound_agrees_between_condition_and_body() {
     let mut db = database();
     let file = checked(

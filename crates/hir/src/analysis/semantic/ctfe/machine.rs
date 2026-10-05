@@ -2284,8 +2284,27 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         }
         // The caller scope, rather than the intrinsic's core scope, owns lookup.
         let scope = self.frames[frame_idx].body.template_owner.scope();
-        let context = TraitSolveCx::new(db, scope);
-        let evidence = introduce_obligation(db, context, *term).map_err(invalid)?;
+        let caller_key = self.frames[frame_idx].body.owner.key(db);
+        let context = crate::semantic::context_at(
+            db,
+            scope,
+            match origin {
+                SemOrigin::Expr(expr) => Some((caller_key.typed_body(db), expr)),
+                _ => None,
+            },
+        );
+        let solve_cx = TraitSolveCx::new(db, context.normalization_scope(db))
+            .with_assumptions(context.assumptions(db));
+        let evidence = if let crate::analysis::ty::ty_def::TyData::ConstraintTerm(goal) =
+            term.data(db)
+            && let Some(selection) = context.selection_for(db, *goal)
+        {
+            selection
+                .revalidate(db, solve_cx, *goal)
+                .map_err(|_| invalid("selected implementation prerequisites were not proved"))?
+        } else {
+            introduce_obligation(db, solve_cx, *term).map_err(invalid)?
+        };
         self.structural_value(
             result_ty,
             StructuralHandle::Evidence(

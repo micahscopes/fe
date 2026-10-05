@@ -41,3 +41,17 @@ fn nested_choice_restores_the_opened_evidence() {
     assert(read_nested(ordinary) == 131)
     assert(read_nested(selected) == 232)
 }
+
+fn read_pair<T>(_ left: Evidence<Read<T>>, _ right: Evidence<Read<T>>) -> u256 {
+    let first = with (left) { <T as Read>::read() }
+    let second = with (right) { <T as Read>::read() }
+    let again = with (left) { <T as Read>::read() }
+    first * 100 + second * 10 + again
+}
+#[test]
+fn same_goal_parameters_keep_distinct_choices_in_both_orders() {
+    let ordinary = prove<Read<Subject>>()
+    let selected = with (Alternative) { prove<Read<Subject>>() }
+    assert(read_pair<Subject>(ordinary, selected) == 121)
+    assert(read_pair<Subject>(selected, ordinary) == 212)
+}
