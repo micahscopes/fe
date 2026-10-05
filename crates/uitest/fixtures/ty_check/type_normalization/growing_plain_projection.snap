@@ -3,7 +3,7 @@ source: crates/uitest/tests/ty_check.rs
 expression: diags
 input_file: fixtures/ty_check/type_normalization/growing_plain_projection.fe
 ---
-error[3-0050]: type normalization limit exceeded
+error[3-0057]: type normalization limit exceeded
   ┌─ growing_plain_projection.fe:3:36
   │
 3 │ impl<T> Grow for W<T> { type Out = <W<W<T>> as Grow>::Out }

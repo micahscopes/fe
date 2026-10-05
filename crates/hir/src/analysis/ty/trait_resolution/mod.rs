@@ -837,8 +837,8 @@ pub(crate) fn check_type_application_requirements<'db>(
     solve_cx: TraitSolveCx<'db>,
     ty: TyId<'db>,
 ) -> WellFormedness<'db> {
-    if ty.has_unsaturated_family_guards(db) {
-        return WellFormedness::UnsaturatedGuardedFamily;
+    if let Some(name) = ty.lacks_args_for_parameter_bounds(db) {
+        return WellFormedness::FamilyNeedsAllArgs { name };
     }
     let requirements = if matches!(
         ty.decompose_ty_app(db).0.data(db),
@@ -846,7 +846,7 @@ pub(crate) fn check_type_application_requirements<'db>(
     ) {
         Some(ty_constraints(db, ty))
     } else {
-        ty.associated_family_requirements(db)
+        ty.family_parameter_bounds(db)
     };
     if let Some(requirements) = requirements {
         for &goal in requirements.list(db) {
@@ -919,7 +919,11 @@ fn unsatisfied_goal<'db>(
 pub(crate) enum WellFormedness<'db> {
     WellFormed,
     WithConditions(ImplConditionsId<'db>),
-    UnsaturatedGuardedFamily,
+    /// A family whose parameters have bounds, used without all of its
+    /// arguments.
+    FamilyNeedsAllArgs {
+        name: crate::hir_def::IdentId<'db>,
+    },
     IllFormed {
         goal: TraitInstId<'db>,
         subgoal: Option<TraitInstId<'db>>,
@@ -983,7 +987,7 @@ impl<'db> WellFormedness<'db> {
         self,
         span: crate::span::DynLazySpan<'db>,
     ) -> Option<super::diagnostics::TyDiagCollection<'db>> {
-        use super::diagnostics::{AssociatedFamilyError, TraitConstraintDiag, TyLowerDiag};
+        use super::diagnostics::{TraitConstraintDiag, TyLowerDiag};
         match self {
             Self::WellFormed | Self::WithConditions(_) => None,
             Self::IllFormed { goal, subgoal } => Some(
@@ -996,13 +1000,9 @@ impl<'db> WellFormedness<'db> {
                 }
                 .into(),
             ),
-            Self::UnsaturatedGuardedFamily => Some(
-                TyLowerDiag::AssociatedFamilyDeclaration {
-                    span,
-                    error: AssociatedFamilyError::GuardedPartialApplication,
-                }
-                .into(),
-            ),
+            Self::FamilyNeedsAllArgs { name } => {
+                Some(TyLowerDiag::AssocTypeNeedsAllArgs { span, name }.into())
+            }
         }
     }
 }

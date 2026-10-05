@@ -1503,13 +1503,14 @@ impl DiagnosticVoucher for PathResDiag<'_> {
                 )
             }
 
-            Self::AssociatedFamilyBinding { span, name } => primary_diag(
+            Self::AssocTypeBindingWithParams { span, name } => primary_diag(
                 Severity::Error,
                 format!(
-                    "associated family binding `{}` requires a parameter-preserving form",
+                    "`{}` takes type parameters, so it cannot be set with `{} = ...`",
+                    name.data(db),
                     name.data(db)
                 ),
-                "this binding syntax supports associated types without parameters",
+                "set here",
                 span.resolve(db),
                 error_code,
             ),
@@ -2801,32 +2802,37 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 error_code,
             ),
 
-            Self::AssociatedFamilyDeclaration { span, error } => {
-                use crate::analysis::ty::diagnostics::AssociatedFamilyError;
-                let message = match error {
-                    AssociatedFamilyError::ParameterCount { expected, given } => format!(
-                        "associated type parameter count mismatch: expected {expected}, given {given}"
-                    ),
-                    AssociatedFamilyError::ParameterKind { expected, given } => format!(
-                        "associated type parameter kind mismatch: expected {expected}, given {given}"
-                    ),
-                    AssociatedFamilyError::ParameterSort =>
-                        "associated type parameter sort does not match the declaration".into(),
-                    AssociatedFamilyError::ConstParameter =>
-                        "const associated type parameters are not supported".into(),
-                    AssociatedFamilyError::ImplementationBound =>
-                        "associated type implementation parameter bounds must be declared on the trait".into(),
-                    AssociatedFamilyError::UnknownMember =>
-                        "associated type is not declared by the trait".into(),
-                    AssociatedFamilyError::InvalidGuard =>
-                        "invalid associated type parameter guard".into(),
-                    AssociatedFamilyError::InvalidOutputBound =>
-                        "invalid associated type output bound".into(),
-                    AssociatedFamilyError::GuardedPartialApplication =>
-                        "guarded associated family must be fully applied".into(),
-                };
-                primary_diag(Severity::Error, &message, &message, span.resolve(db), error_code)
-            }
+            Self::AssocTypeConstParam(span) => primary_diag(
+                Severity::Error,
+                "associated types cannot have const parameters",
+                "const parameter",
+                span.resolve(db),
+                error_code,
+            ),
+            Self::InvalidAssocTypeParamBound { span, param } => primary_diag(
+                Severity::Error,
+                format!("invalid bound on associated type parameter `{}`", param.data(db)),
+                "this bound cannot be used for the parameter",
+                span.resolve(db),
+                error_code,
+            ),
+            Self::InvalidAssocTypeBound { span, name } => primary_diag(
+                Severity::Error,
+                format!("invalid bound on associated type `{}`", name.data(db)),
+                "this bound cannot be used for the associated type",
+                span.resolve(db),
+                error_code,
+            ),
+            Self::AssocTypeNeedsAllArgs { span, name } => primary_diag(
+                Severity::Error,
+                format!(
+                    "`{}` has bounds on its type parameters, so it needs all of its type arguments",
+                    name.data(db)
+                ),
+                "type arguments missing",
+                span.resolve(db),
+                error_code,
+            ),
             Self::ComputedTypeImplHeader(span) => primary_diag(
                 Severity::Error,
                 "computed types are not allowed in implementation headers",
@@ -6254,6 +6260,52 @@ impl DiagnosticVoucher for ImplDiag<'_> {
                     error_code,
                 }
             }
+
+            Self::AssocTypeParamNumMismatch {
+                primary,
+                expected,
+                given,
+            } => primary_diag(
+                severity,
+                "associated type parameter count mismatch",
+                format!("expected {expected} type parameters, but {given} given"),
+                primary.resolve(db),
+                error_code,
+            ),
+
+            Self::AssocTypeParamKindMismatch {
+                primary,
+                expected,
+                given,
+            } => {
+                use crate::analysis::ty::diagnostics::AssocTypeParamKind;
+                let label = match (expected, given) {
+                    (AssocTypeParamKind::Type(expected), AssocTypeParamKind::Type(given)) => {
+                        format!("expected `{expected}` kind, but this parameter has `{given}` kind")
+                    }
+                    (AssocTypeParamKind::Type(_), AssocTypeParamKind::Const) => {
+                        "expected a type parameter, found a const parameter".to_string()
+                    }
+                    (AssocTypeParamKind::Const, _) => {
+                        "expected a const parameter, found a type parameter".to_string()
+                    }
+                };
+                primary_diag(
+                    severity,
+                    "associated type parameter does not match the trait",
+                    label,
+                    primary.resolve(db),
+                    error_code,
+                )
+            }
+
+            Self::AssocTypeParamBoundInImpl { primary } => primary_diag(
+                severity,
+                "bounds on associated type parameters must be written in the trait",
+                "move this bound to the trait's declaration",
+                primary.resolve(db),
+                error_code,
+            ),
         }
     }
 }

@@ -1,0 +1,17 @@
+trait Allowed {}
+
+trait Family {
+    type Count<T>
+    type Kind<F: * -> *>
+    type Sort<T>
+    type Bound<T>
+}
+
+struct S {}
+
+impl Family for S {
+    type Count<T, U> = u8
+    type Kind<T> = u8
+    type Sort<const N: usize> = u8
+    type Bound<T: Allowed> = u8
+}

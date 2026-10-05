@@ -30,17 +30,11 @@ pub enum GenericParamListOwner<'db> {
     AssocType(crate::hir_def::scope_graph::AssocTypeOwner<'db>),
 }
 
+/// What an associated type parameter is, for comparing an impl with its trait.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
-pub enum AssociatedFamilyError {
-    ParameterCount { expected: usize, given: usize },
-    ParameterKind { expected: Kind, given: Kind },
-    ParameterSort,
-    ConstParameter,
-    ImplementationBound,
-    UnknownMember,
-    InvalidGuard,
-    InvalidOutputBound,
-    GuardedPartialApplication,
+pub enum AssocTypeParamKind {
+    Type(Kind),
+    Const,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, derive_more::From, Update)]
@@ -221,9 +215,23 @@ pub enum TyLowerDiag<'db> {
         span: DynLazySpan<'db>,
         reason: String,
     },
-    AssociatedFamilyDeclaration {
+    /// A const parameter on an associated type.
+    AssocTypeConstParam(DynLazySpan<'db>),
+    /// A bound on an associated type parameter whose arguments are invalid.
+    InvalidAssocTypeParamBound {
         span: DynLazySpan<'db>,
-        error: AssociatedFamilyError,
+        param: IdentId<'db>,
+    },
+    /// A bound declared on an associated type that cannot hold as written.
+    InvalidAssocTypeBound {
+        span: DynLazySpan<'db>,
+        name: IdentId<'db>,
+    },
+    /// An associated type whose parameters have bounds, used without all of
+    /// its type arguments.
+    AssocTypeNeedsAllArgs {
+        span: DynLazySpan<'db>,
+        name: IdentId<'db>,
     },
 
     NonTrailingDefaultGenericParam(LazyGenericParamSpan<'db>),
@@ -364,8 +372,11 @@ impl TyLowerDiag<'_> {
             Self::ConstEvalRecursiveConst(_) => 37,
             Self::ConstEvalAtUse { fault, .. } => fault.local_code(),
             Self::TypeLoweringCycle(_) => 38,
-            Self::TypeNormalizationLimit(_) => 50,
-            Self::AssociatedFamilyDeclaration { .. } => 51,
+            Self::TypeNormalizationLimit(_) => 57,
+            Self::AssocTypeConstParam(_) => 58,
+            Self::InvalidAssocTypeParamBound { .. } => 59,
+            Self::InvalidAssocTypeBound { .. } => 60,
+            Self::AssocTypeNeedsAllArgs { .. } => 61,
             Self::ComputedTypeDeclaration { .. } => 52,
             Self::ComputedTypeImplHeader(_) => 53,
             Self::MixedRefSelfPrefixWithExplicitType { .. } => 28,
@@ -1449,6 +1460,26 @@ pub enum ImplDiag<'db> {
         raw_ty: TyId<'db>,
         failure: ProviderLayoutFailure,
     },
+
+    /// An impl's associated type has a different number of type parameters
+    /// than the trait declares.
+    AssocTypeParamNumMismatch {
+        primary: DynLazySpan<'db>,
+        expected: usize,
+        given: usize,
+    },
+
+    /// An impl's associated type parameter differs from the trait's in kind,
+    /// or is a const parameter where the trait has a type parameter.
+    AssocTypeParamKindMismatch {
+        primary: DynLazySpan<'db>,
+        expected: AssocTypeParamKind,
+        given: AssocTypeParamKind,
+    },
+
+    /// A bound on an impl's associated type parameter; bounds belong to the
+    /// trait's declaration.
+    AssocTypeParamBoundInImpl { primary: DynLazySpan<'db> },
 }
 
 impl ImplDiag<'_> {
@@ -1479,6 +1510,9 @@ impl ImplDiag<'_> {
             Self::InherentConstShadowsVariant { .. } => 20,
             Self::InherentConstShadowsFn { .. } => 21,
             Self::InvalidEffectHandleRaw { .. } => 22,
+            Self::AssocTypeParamNumMismatch { .. } => 26,
+            Self::AssocTypeParamKindMismatch { .. } => 27,
+            Self::AssocTypeParamBoundInImpl { .. } => 28,
             Self::TypeNotDefinedInTrait { .. } => 23,
             Self::MethodConstPredicateMismatch { .. } => 24,
         }

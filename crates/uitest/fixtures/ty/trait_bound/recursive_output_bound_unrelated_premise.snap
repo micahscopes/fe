@@ -3,8 +3,8 @@ source: crates/uitest/tests/ty.rs
 expression: diags
 input_file: fixtures/ty/trait_bound/recursive_output_bound_unrelated_premise.fe
 ---
-error[3-0051]: invalid associated type output bound
+error[6-0003]: trait bound is not satisfied
   ┌─ recursive_output_bound_unrelated_premise.fe:5:16
   │
 5 │     type Item: Recursive<T, u256>
-  │                ^^^^^^^^^^^^^^^^^^ invalid associated type output bound
+  │                ^^^^^^^^^^^^^^^^^^ `u256` doesn't implement `Marker`

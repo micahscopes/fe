@@ -624,7 +624,7 @@ pub(crate) enum TraitArgError<'db> {
     ConstHoleNotAllowed {
         arg_idx: usize,
     },
-    AssociatedFamilyBinding {
+    AssocTypeBindingWithParams {
         name: crate::hir_def::IdentId<'db>,
     },
     Ignored,
@@ -691,7 +691,7 @@ pub(crate) fn lower_trait_ref_impl_with_minter<'db>(
                     if t.assoc_ty(db, name)
                         .is_some_and(|decl| !decl.generic_params.data(db).is_empty())
                     {
-                        return Err(TraitArgError::AssociatedFamilyBinding { name });
+                        return Err(TraitArgError::AssocTypeBindingWithParams { name });
                     }
                     let ty = lower_hir_ty_with_minter(db, ty, scope, assumptions, minter);
                     assoc_bindings.insert(name, ty);

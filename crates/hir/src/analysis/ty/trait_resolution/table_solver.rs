@@ -510,7 +510,7 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
             if let Some((requirements, bounds)) = prepared
                 .normalized_goal
                 .self_ty(self.db)
-                .associated_family_rules(self.db)
+                .family_declared_bounds(self.db)
             {
                 clauses.extend(bounds.list(self.db).iter().copied().map(|bound| {
                     Clause::FamilyBound {
