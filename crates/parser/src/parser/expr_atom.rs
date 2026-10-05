@@ -60,20 +60,27 @@ pub(super) fn parse_expr_atom<S: TokenStream>(
             if is_with {
                 parser.parse_cp(WithExprScope::default(), None)
             } else {
+                // `quote` starts a quote only when its body opens on the same
+                // line; otherwise it is an ordinary name, as on master.
                 let is_quote = allow_record_init
                     && parser
                         .current_token()
                         .is_some_and(|token| token.text() == "quote")
-                    && (parser.peek_n_non_trivia(2).as_slice()
-                        == [SyntaxKind::Ident, SyntaxKind::LBrace]
-                        || parser.peek_n_non_trivia(2).as_slice()
-                            == [SyntaxKind::Ident, SyntaxKind::LParen]
-                            && parser.dry_run(|p| {
-                                p.bump_expected(SyntaxKind::Ident);
+                    && parser.dry_run(|p| {
+                        let newline_as_trivia = p.set_newline_as_trivia(false);
+                        p.bump_expected(SyntaxKind::Ident);
+                        let opens_body = match p.current_kind() {
+                            Some(SyntaxKind::LBrace) => true,
+                            Some(SyntaxKind::LParen) => {
                                 p.parse_ok(QuoteOpenListScope::default())
                                     .is_ok_and(identity)
                                     && p.current_kind() == Some(SyntaxKind::LBrace)
-                            }));
+                            }
+                            _ => false,
+                        };
+                        p.set_newline_as_trivia(newline_as_trivia);
+                        opens_body
+                    });
                 if is_quote {
                     parser.parse_cp(QuoteExprScope::default(), None)
                 } else {
