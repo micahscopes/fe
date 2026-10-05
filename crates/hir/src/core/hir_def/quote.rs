@@ -40,6 +40,21 @@ impl<'db> Quote<'db> {
         }
     }
 
+    /// The expression an expression quote stands for. The braces of
+    /// `quote { e }` delimit the template; they are not a block, so a body of
+    /// one expression is that expression.
+    pub fn expression_root(&self, db: &'db dyn crate::HirDb) -> super::ExprId {
+        let template = self.template;
+        let root = template.expr(db);
+        if let super::Partial::Present(super::Expr::Block(stmts)) = &template.exprs(db)[root]
+            && let [stmt] = stmts.as_slice()
+            && let super::Partial::Present(super::Stmt::Expr(expr)) = &template.stmts(db)[*stmt]
+        {
+            return *expr;
+        }
+        root
+    }
+
     /// For `quote { ${a} ${b} }`, the slots in order.
     pub fn splice_only_body(&self, db: &'db dyn crate::HirDb) -> Option<Vec<u32>> {
         if !matches!(self.fragment, QuoteFragment::Expr) || !self.block_items.is_empty() {

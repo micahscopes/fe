@@ -2997,6 +2997,36 @@ fn realistic_quote_derives_fit_the_limits(fixture: Fixture<&str>) {
     quote_round_trip::assert_round_trip(&authored, &output, &url);
 }
 
+#[test]
+fn expression_quote_braces_are_not_blocks() {
+    // A fold over 200 fields splices 200 expression quotes into each other.
+    // Copying each quote's braces as a block nested the output 200 blocks
+    // deep, which made checking the output ten times slower than the same
+    // impl written by hand.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/quote_fold_limits/allowed/derive_eq_200.fe"
+    );
+    let url = Url::from_file_path(path).unwrap();
+    let mut authored = DriverDataBase::default();
+    authored.workspace().update(
+        &mut authored,
+        url.clone(),
+        include_str!("fixtures/quote_fold_limits/allowed/derive_eq_200.fe").to_string(),
+    );
+    let output = prepare(&authored)
+        .expect("derive elaborates")
+        .expect("generation");
+    let eq = named_function(&output, &url, "eq");
+    let body = eq.body(&output).expect("generated body");
+    let blocks = body
+        .exprs(&output)
+        .iter()
+        .filter(|(_, expr)| matches!(expr, Partial::Present(Expr::Block(_))))
+        .count();
+    assert!(blocks <= 2, "{blocks} blocks in the generated body");
+}
+
 #[dir_test(
     dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_fold_limits/function",
     glob: "*.fe.in",

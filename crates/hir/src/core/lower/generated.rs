@@ -772,7 +772,7 @@ fn quoted_fragment_sources<'db>(
                                 super::hir_builder::QuoteFragmentRoot::Arms(arms.clone())
                             }
                             _ => super::hir_builder::QuoteFragmentRoot::Expr {
-                                root: quote.template.expr(db),
+                                root: quote.expression_root(db),
                                 splices: quote.splice_only_body(db),
                             },
                         },
