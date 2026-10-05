@@ -974,3 +974,14 @@ fn a_const_parameter_on_an_associated_type_is_reported_once() {
         assert_eq!(result.matches("error[").count(), 1, "{source}\n{result}");
     }
 }
+
+#[test]
+fn an_unmet_family_bound_on_a_default_is_reported_at_the_default() {
+    let source = "trait Show {}\ntrait Tr {\n    type Next\n    type Out<T>: Show = (T, bool)\n}";
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(Utf8PathBuf::from("default_span.fe"), source);
+    let result = diagnostics(&db, file);
+    assert!(result.contains("trait bound is not satisfied"), "{result}");
+    assert!(result.contains("default_span.fe:4:"), "{result}");
+    assert!(!result.contains("default_span.fe:2:"), "{result}");
+}

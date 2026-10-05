@@ -832,6 +832,21 @@ fn check_const_expr_wf<'db>(
 
 /// Check formation before normalization can erase a computed type or family. This
 /// is also used by source-path diagnostics, which see intermediate projections.
+/// Whether a bound promised for every argument holds: a family's declared
+/// and parameter bounds, or a computed type's requirements. Only a completed
+/// proof establishes it. An ambiguous or unfinished proof does not show that
+/// the bound holds for all arguments, so it counts as a failure.
+pub(crate) fn bound_holds_for_every_argument<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    goal: TraitInstId<'db>,
+) -> bool {
+    matches!(
+        is_goal_satisfiable(db, solve_cx, goal),
+        GoalSatisfiability::Satisfied(_)
+    )
+}
+
 pub(crate) fn check_type_application_requirements<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
@@ -850,10 +865,7 @@ pub(crate) fn check_type_application_requirements<'db>(
     };
     if let Some(requirements) = requirements {
         for &goal in requirements.list(db) {
-            if !matches!(
-                is_goal_satisfiable(db, solve_cx, goal),
-                GoalSatisfiability::Satisfied(_)
-            ) {
+            if !bound_holds_for_every_argument(db, solve_cx, goal) {
                 return WellFormedness::IllFormed {
                     goal,
                     subgoal: None,

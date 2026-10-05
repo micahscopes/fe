@@ -644,20 +644,14 @@ impl<'db> Trait<'db> {
                 diags.push(diag);
                 continue;
             }
+            let is_family = !assoc.generic_params(db).data(db).is_empty();
             for trait_inst in assoc.bounds_on_subject(db, default_ty) {
-                match ty::trait_resolution::is_goal_satisfiable(
-                    db,
-                    ty::trait_resolution::TraitSolveCx::new(db, self.scope())
-                        .with_assumptions(assumptions),
-                    trait_inst,
-                ) {
-                    ty::trait_resolution::GoalSatisfiability::Satisfied(_) => {}
-                    ty::trait_resolution::GoalSatisfiability::NeedsConfirmation { .. }
-                    | ty::trait_resolution::GoalSatisfiability::ContainsInvalid
-                        if !assoc.generic_params(db).data(db).is_empty() =>
-                    {
-                        // A family promises this bound for every admitted input.
-                        // An unfinished proof cannot establish that promise.
+                let solve_cx = ty::trait_resolution::TraitSolveCx::new(db, self.scope())
+                    .with_assumptions(assumptions);
+                if is_family {
+                    if !ty::trait_resolution::bound_holds_for_every_argument(
+                        db, solve_cx, trait_inst,
+                    ) {
                         diags.push(
                             TraitConstraintDiag::TraitBoundNotSat {
                                 span: assoc.span().ty().into(),
@@ -669,6 +663,10 @@ impl<'db> Trait<'db> {
                             .into(),
                         );
                     }
+                    continue;
+                }
+                match ty::trait_resolution::is_goal_satisfiable(db, solve_cx, trait_inst) {
+                    ty::trait_resolution::GoalSatisfiability::Satisfied(_) => {}
                     ty::trait_resolution::GoalSatisfiability::UnSat(_) => {
                         diags.push(
                             TraitConstraintDiag::TraitBoundNotSat {
@@ -1281,22 +1279,21 @@ impl<'db> ImplTrait<'db> {
             for bound_inst in assoc.bounds(db) {
                 let bound_inst = Binder::bind(implementor.trait_def(db).into(), bound_inst)
                     .instantiate(db, trait_args);
-                use ty::trait_resolution::{GoalSatisfiability, TraitSolveCx, is_goal_satisfiable};
-                let result = is_goal_satisfiable(
-                    db,
-                    TraitSolveCx::new(db, self.scope()).with_assumptions(assumptions),
-                    bound_inst,
-                );
-                let family = matches!(
+                use ty::trait_resolution::{
+                    GoalSatisfiability, TraitSolveCx, bound_holds_for_every_argument,
+                    is_goal_satisfiable,
+                };
+                let solve_cx = TraitSolveCx::new(db, self.scope()).with_assumptions(assumptions);
+                let failed = if matches!(
                     assoc.impl_ty().data(db),
                     ty::ty_def::TyData::TypeFamily { .. }
-                );
-                // A universally promised family bound needs a completed proof.
-                // Ambiguity is not evidence that every argument satisfies it.
-                let failed = if family {
-                    !matches!(result, GoalSatisfiability::Satisfied(_))
+                ) {
+                    !bound_holds_for_every_argument(db, solve_cx, bound_inst)
                 } else {
-                    matches!(result, GoalSatisfiability::UnSat(_))
+                    matches!(
+                        is_goal_satisfiable(db, solve_cx, bound_inst),
+                        GoalSatisfiability::UnSat(_)
+                    )
                 };
                 if failed {
                     let assoc_ty_span = self
