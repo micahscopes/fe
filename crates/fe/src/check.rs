@@ -126,13 +126,20 @@ pub fn check(
                 eprintln!("Error: {INGOT_REQUIRES_WORKSPACE_ROOT}");
                 true
             } else {
-                check_single_file(
-                    &mut db,
-                    &file_path,
-                    dump_mir,
-                    report_ctx.as_ref(),
-                    decisions_out,
-                )
+                if let Some(output) = decisions_out
+                    && let Err(error) = remove_old_export(output)
+                {
+                    eprintln!("Error: {error}");
+                    true
+                } else {
+                    check_single_file(
+                        &mut db,
+                        &file_path,
+                        dump_mir,
+                        report_ctx.as_ref(),
+                        decisions_out,
+                    )
+                }
             }
         }
         CliTarget::Directory(dir_path) => {
@@ -474,9 +481,24 @@ fn check_single_file(
     // Add the file to the workspace
     db.workspace().touch(db, file_url.clone(), Some(content));
 
-    let Some(prepared) = crate::generation::prepare_or_report(db, &file_url, Some(&file_url))
-    else {
-        return true;
+    let prepared = match crate::generation::prepare(db, &file_url) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            crate::generation::report(db, &error, Some(&file_url));
+            if let Some(output) = decisions_out
+                && let Some(file) = db.workspace().get(db, &file_url)
+            {
+                let diagnostic = error.diagnostic(db);
+                let records =
+                    fe::decision_export::generation_failure_records(db, file, diagnostic.as_ref());
+                if let Err(error) =
+                    fe::decision_export::write_records(&records, output.as_std_path())
+                {
+                    eprintln!("Error: {error}");
+                }
+            }
+            return true;
+        }
     };
     let db = &*prepared;
 
@@ -517,13 +539,8 @@ fn check_single_file(
         if let Some(output) = decisions_out {
             let mut completed = diagnostics.hir.complete_diags(db);
             completed.extend(diagnostics.mir.iter().cloned());
-            if let Err(error) = fe::decision_export::write_module(
-                db,
-                top_mod,
-                file,
-                &completed,
-                output.as_std_path(),
-            ) {
+            let records = fe::decision_export::module_records(db, top_mod, file, &completed);
+            if let Err(error) = fe::decision_export::write_records(&records, output.as_std_path()) {
                 eprintln!("Error: {error}");
                 return true;
             }
@@ -543,6 +560,18 @@ fn check_single_file(
     }
 
     false
+}
+
+/// Remove an export left by an earlier run, so a run that stops before writing
+/// one leaves no file rather than a stale one.
+fn remove_old_export(output: &Utf8PathBuf) -> Result<(), String> {
+    match std::fs::remove_file(output) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot remove old decision export {output}: {error}"
+        )),
+    }
 }
 
 fn dump_module_mir(db: &DriverDataBase, top_mod: TopLevelMod<'_>) {

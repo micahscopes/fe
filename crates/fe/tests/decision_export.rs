@@ -8,6 +8,14 @@ fn rows(records: Vec<fe::decision_export::records::Record>) -> Vec<serde_json::V
     records.iter().map(|record| record.to_json()).collect()
 }
 
+/// The records of decisions that are all inside format v1.
+fn decided(decisions: Vec<fe::decision_export::Decision>) -> Vec<serde_json::Value> {
+    decisions
+        .into_iter()
+        .map(|decision| decision.unwrap().to_json())
+        .collect()
+}
+
 #[test]
 fn export_reads_the_retained_equivalent_clone_answer() {
     let mut db = DriverDataBase::default();
@@ -22,7 +30,7 @@ fn export_reads_the_retained_equivalent_clone_answer() {
     assert!(diagnostics.is_empty(), "{}", diagnostics.format_diags(&db));
     let func = module.all_funcs(&db)[0];
     let (_, body) = check_func_body(&db, func);
-    let records = rows(fe::decision_export::goal_records(&db, body).unwrap());
+    let records = decided(fe::decision_export::goal_records(&db, body));
     let clone = records
         .iter()
         .find(|row| row["goal"]["trait"] == "Clone")
@@ -67,7 +75,7 @@ fn selected(_ x: Word) -> u8 { with (Other) { x.read() } }
             .find(|func| func.name(&db).to_opt().unwrap().data(&db) == name)
             .unwrap();
         let (_, body) = check_func_body(&db, func);
-        let records = rows(fe::decision_export::goal_records(&db, body).unwrap());
+        let records = decided(fe::decision_export::goal_records(&db, body));
         let answer = records
             .iter()
             .find(|row| row["goal"]["trait"] == "Read")
@@ -103,7 +111,7 @@ fn call<T, const B: bool>(_ x: T) where T: Test<B> { x.test() }
         .find(|func| func.name(&db).to_opt().unwrap().data(&db) == "call")
         .unwrap();
     let (_, body) = check_func_body(&db, func);
-    let records = rows(fe::decision_export::goal_records(&db, body).unwrap());
+    let records = decided(fe::decision_export::goal_records(&db, body));
     assert_eq!(
         records[0]["goal"]["args"],
         json!([{ "var": "B", "kind": "bool" }])
@@ -111,7 +119,7 @@ fn call<T, const B: bool>(_ x: T) where T: Test<B> { x.test() }
 }
 
 #[test]
-fn export_does_not_number_external_impls_as_local() {
+fn export_marks_external_impl_answers_outside_v1_instead_of_numbering_them() {
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///external_decision_export.fe").unwrap();
     db.workspace().touch(
@@ -123,12 +131,12 @@ fn export_does_not_number_external_impls_as_local() {
     let diagnostics = db.run_on_top_mod(module);
     assert!(diagnostics.is_empty(), "{}", diagnostics.format_diags(&db));
     let (_, body) = check_func_body(&db, module.all_funcs(&db)[0]);
-    assert!(
-        fe::decision_export::goal_records(&db, body)
-            .unwrap_err()
-            .0
-            .contains("another file")
-    );
+    let gap = fe::decision_export::goal_records(&db, body)
+        .into_iter()
+        .find_map(Result::err)
+        .expect("the core answer is outside format v1");
+    assert!(gap.reason.contains("another file"));
+    assert_eq!(gap.site.map(|site| site.line), Some(1));
 }
 
 #[test]
@@ -163,7 +171,7 @@ fn forward<const N: usize>() where N > 0 { need<N>() }
             .find(|func| func.name(&db).to_opt().unwrap().data(&db) == name)
             .unwrap();
         let (_, body) = check_func_body(&db, func);
-        let records = rows(fe::decision_export::condition_records(&db, body).unwrap());
+        let records = decided(fe::decision_export::condition_records(&db, body));
         assert_eq!(records.len(), 1, "{name}");
         assert_eq!(records[0]["source"], json!("fn need"));
         assert_eq!(records[0]["outcome"], json!(outcome));
@@ -188,7 +196,7 @@ fn export_reads_the_condition_selection_used_for_discharge() {
         .find(|func| func.name(&db).to_opt().unwrap().data(&db) == "selected")
         .unwrap();
     let (_, body) = check_func_body(&db, func);
-    let records = rows(fe::decision_export::condition_records(&db, body).unwrap());
+    let records = decided(fe::decision_export::condition_records(&db, body));
     let condition = records
         .iter()
         .find(|row| row["source"] == "impl #2")
@@ -233,8 +241,11 @@ fn unknown() { with (Missing) {} }
             .find(|func| func.name(&db).to_opt().unwrap().data(&db) == func_name)
             .unwrap();
         let (_, body) = check_func_body(&db, func);
-        let records =
-            rows(fe::decision_export::with_records(&db, func.body(&db).unwrap(), body).unwrap());
+        let records = decided(fe::decision_export::with_records(
+            &db,
+            func.body(&db).unwrap(),
+            body,
+        ));
         assert_eq!(records.len(), 1);
         assert_eq!(records[0]["name"], json!(name));
         assert_eq!(records[0]["outcome"], outcome);
@@ -315,6 +326,105 @@ fn cli_export_preserves_check_results_and_source_provenance() {
                 .all(|row| row["kind"] != "select_impl" && row["kind"] != "read_impl_choice")
         );
     }
+}
+
+/// Run `fe check --standalone` on `source`, without and with `--decisions-out`,
+/// starting from `previous` at the output path. Returns both runs and the export.
+fn check_and_export(
+    source: &str,
+    previous: Option<&str>,
+) -> (
+    std::process::Output,
+    std::process::Output,
+    Option<Vec<serde_json::Value>>,
+) {
+    use std::process::Command;
+    let temp = tempfile::tempdir().unwrap();
+    let input = temp.path().join("program.fe");
+    let output = temp.path().join("decisions.jsonl");
+    std::fs::write(&input, source).unwrap();
+    if let Some(previous) = previous {
+        std::fs::write(&output, previous).unwrap();
+    }
+    let run = |export: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fe"));
+        command.args(["check", "--standalone", "--color", "never"]);
+        if export {
+            command.arg("--decisions-out").arg(&output);
+        }
+        command.arg(&input).output().unwrap()
+    };
+    let baseline = run(false);
+    let exported = run(true);
+    let records = std::fs::read_to_string(&output).ok().map(|text| {
+        text.lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    });
+    let leftovers = std::fs::read_dir(temp.path()).unwrap().count();
+    assert_eq!(leftovers, 2, "the export must not leave temporary files");
+    (baseline, exported, records)
+}
+
+#[test]
+fn cli_export_of_an_ordinary_program_marks_core_answers_outside_v1() {
+    let source = "fn add(_ a: u8, _ b: u8) -> u8 { a + b }\n\
+                  fn copy(_ x: u8) -> u8 { x.clone() }\n\
+                  #[test]\n\
+                  fn adds() { assert!(add(1, 2) == 3) }\n";
+    let (baseline, exported, records) = check_and_export(source, Some("stale\n"));
+    assert_eq!(baseline.status.code(), Some(0));
+    assert_eq!(
+        exported.status.code(),
+        baseline.status.code(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    assert_eq!(exported.stdout, baseline.stdout);
+    assert_eq!(exported.stderr, baseline.stderr);
+    let records = records.expect("export written");
+    assert_eq!(records[0]["kind"], "header");
+    let outside_in = |name: &str| {
+        records
+            .iter()
+            .find(|row| {
+                row["item"] == "out_of_fragment" && row["what"] == "goal" && row["name"] == name
+            })
+            .unwrap_or_else(|| panic!("{name}: {records:#?}"))
+    };
+    // `a + b` and `x.clone()` are answered by core implementations.
+    assert_eq!(outside_in("add")["site"]["line"], 1);
+    let outside = outside_in("copy");
+    assert_eq!(outside["site"]["line"], 2);
+    assert!(outside["reason"].as_str().unwrap().contains("another file"));
+}
+
+#[test]
+fn cli_export_replaces_an_old_file_when_generation_fails() {
+    let source = r#"
+mod author {
+    use core::meta::{Code, Item, Record, variant, field_count}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let value = field_count(variant(record, 0))
+        quote { fn reflected() -> usize { ${value} } }
+    }
+}
+
+#[generate(ingot::author::emit)]
+pub struct Shape { x: bool }
+"#;
+    let (baseline, exported, records) = check_and_export(source, Some("stale\n"));
+    assert_eq!(baseline.status.code(), Some(1));
+    assert_eq!(exported.status.code(), Some(1));
+    assert_eq!(exported.stderr, baseline.stderr);
+    let records = records.expect("export written");
+    assert_eq!(records[0]["kind"], "header");
+    let diagnostic = records
+        .iter()
+        .find(|row| row["kind"] == "diagnostic")
+        .unwrap_or_else(|| panic!("{records:#?}"));
+    assert_eq!(diagnostic["code"], "19-0001");
+    assert_eq!(diagnostic["site"]["line"], 5);
 }
 
 #[test]
@@ -460,8 +570,11 @@ fn exercise() -> u256 {
         .copied()
         .unwrap();
     let (_, typed) = check_func_body(&db, function);
-    let openings =
-        rows(fe::decision_export::with_records(&db, function.body(&db).unwrap(), typed).unwrap());
+    let openings = decided(fe::decision_export::with_records(
+        &db,
+        function.body(&db).unwrap(),
+        typed,
+    ));
     assert_eq!(uses[4]["span"], openings[0]["site"]);
     assert!(
         uses[4]["span_aliases"]
@@ -494,7 +607,9 @@ fn export_overlap_uses_reported_pairs_and_keeps_disjoint_pairs() {
         db.workspace().touch(&mut db, url.clone(), Some(source));
         let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
         let completed = db.run_on_top_mod(module).complete_diags(&db);
-        let pairs = rows(fe::decision_export::overlap_records(&db, module, &completed).unwrap());
+        let pairs = decided(fe::decision_export::overlap_records(
+            &db, module, &completed,
+        ));
         assert_eq!(
             pairs,
             json!([{"v":1,"kind":"overlap","a":0,"b":1,"conflict":conflict}])
@@ -502,7 +617,7 @@ fn export_overlap_uses_reported_pairs_and_keeps_disjoint_pairs() {
                 .unwrap()
                 .clone()
         );
-        let errors = rows(fe::decision_export::diagnostic_records(&db, &completed).unwrap());
+        let errors = decided(fe::decision_export::diagnostic_records(&db, &completed));
         assert_eq!(errors.iter().any(|e| e["code"] == "5-0001"), conflict);
         if conflict {
             assert_eq!(errors[0]["site"]["line"], 4);
@@ -536,7 +651,7 @@ fn export_keeps_written_type_conditions_in_generic_const_paths() {
             "authored check did not retain a condition for {name}"
         );
         let (_, typed) = check_func_body(&db, function);
-        let conditions = rows(fe::decision_export::condition_records(&db, typed).unwrap());
+        let conditions = decided(fe::decision_export::condition_records(&db, typed));
         assert_eq!(
             conditions.len(),
             1,
@@ -586,7 +701,7 @@ fn export_pairs_annotation_conditions_with_their_initializer_use() {
             .copied()
             .unwrap();
         let (_, typed) = check_func_body(&db, function);
-        let conditions = rows(fe::decision_export::condition_records(&db, typed).unwrap());
+        let conditions = decided(fe::decision_export::condition_records(&db, typed));
         let record = program
             .iter()
             .find(|r| r["item"] == "fn" && r["name"] == name)
@@ -626,9 +741,10 @@ fn export_pairs_override_errors_with_impl_without_capturing_body_errors() {
         .iter()
         .find(|d| d.error_code.to_string() == "6-0024")
         .unwrap();
-    let errors = rows(
-        fe::decision_export::diagnostic_records(&db, std::slice::from_ref(override_)).unwrap(),
-    );
+    let errors = decided(fe::decision_export::diagnostic_records(
+        &db,
+        std::slice::from_ref(override_),
+    ));
     assert!(aliases.contains(&errors[0]["site"]));
     let function = module
         .all_funcs(&db)
@@ -644,9 +760,10 @@ fn export_pairs_override_errors_with_impl_without_capturing_body_errors() {
                 .is_some_and(|span| body_span.range.contains(span.range.start()))
         })
         .unwrap();
-    let errors = rows(
-        fe::decision_export::diagnostic_records(&db, std::slice::from_ref(body_error)).unwrap(),
-    );
+    let errors = decided(fe::decision_export::diagnostic_records(
+        &db,
+        std::slice::from_ref(body_error),
+    ));
     assert!(!aliases.contains(&errors[0]["site"]));
 }
 
@@ -669,7 +786,7 @@ fn export_keeps_successful_path_receiver_conditions() {
         .copied()
         .unwrap();
     let (_, typed) = check_func_body(&db, function);
-    let conditions = rows(fe::decision_export::condition_records(&db, typed).unwrap());
+    let conditions = decided(fe::decision_export::condition_records(&db, typed));
     assert_eq!(
         conditions
             .iter()
@@ -698,7 +815,8 @@ fn retained_evidence_opening_is_explicitly_outside_format_v1() {
         .unwrap();
     let (_, typed) = check_func_body(&db, function);
     assert_eq!(typed.with_choices().len(), 1);
-    let error =
-        fe::decision_export::with_records(&db, function.body(&db).unwrap(), typed).unwrap_err();
-    assert_eq!(error.0, "evidence opening is outside format v1");
+    let decisions = fe::decision_export::with_records(&db, function.body(&db).unwrap(), typed);
+    let gap = decisions[0].clone().unwrap_err();
+    assert_eq!(gap.reason, "evidence opening is outside format v1");
+    assert!(gap.site.is_some());
 }

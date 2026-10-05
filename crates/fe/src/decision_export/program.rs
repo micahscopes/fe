@@ -32,13 +32,10 @@ pub fn declaration_records<'db>(
                     span_aliases: Some(span_aliases),
                 })
             });
-            Record::Item(record.unwrap_or_else(|ExportGap(reason)| ItemRecord {
-                item: Item::OutOfFragment(OutOfFragment {
-                    what: item.kind_name(),
-                    reason,
-                }),
-                span_aliases: None,
-            }))
+            record.map_or_else(
+                |ExportGap(reason)| Record::outside(item.kind_name(), None, None, reason),
+                Record::Item,
+            )
         })
         .collect()
 }

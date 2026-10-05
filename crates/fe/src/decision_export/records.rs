@@ -194,10 +194,38 @@ pub enum Item {
 }
 
 /// Something format v1 cannot express, written in place of the item or decision.
+/// `what` is an item kind (`fn`, `enum`, ...) or a decision kind (`goal`,
+/// `condition`, `with`, `diagnostic`, `overlap`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OutOfFragment {
     pub what: &'static str,
+    /// The function whose body holds the decision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Where the decision was taken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site: Option<Site>,
     pub reason: &'static str,
+}
+
+impl Record {
+    /// An `out_of_fragment` item in place of something v1 cannot express.
+    pub fn outside(
+        what: &'static str,
+        name: Option<String>,
+        site: Option<Site>,
+        reason: &'static str,
+    ) -> Self {
+        Self::Item(ItemRecord {
+            item: Item::OutOfFragment(OutOfFragment {
+                what,
+                name,
+                site,
+                reason,
+            }),
+            span_aliases: None,
+        })
+    }
 }
 
 /// How a goal at a use was answered.
