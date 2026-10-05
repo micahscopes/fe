@@ -523,7 +523,6 @@ pub(crate) fn normalize_comparable_const_predicate_key<'db>(
         // Keep evidence and user-defined operator authorities. Only closed
         // core operations on primitive values share the syntax representation.
         if let Some(callable) = operation
-            && callable.opened_provisions.is_empty()
             && callable.effect_providers().is_empty()
             && let Some(inst) = callable.trait_inst()
             && crate::analysis::ty::corelib::resolve_core_trait(
@@ -666,6 +665,8 @@ impl<'db> PredicateKeyBuilder<'_, 'db> {
             return Ok(None);
         };
         let callable = typed.callable_expr(expr);
+        // Supported keys have no opening/block syntax and use canonical inference.
+        debug_assert!(crate::semantic::call_evidence_at(db, typed, expr).is_empty());
         let term = match data {
             Expr::Lit(lit) => PredicateTerm::Literal(*lit),
             Expr::Path(_) => {
@@ -3296,6 +3297,65 @@ const fn inherited() { target<Subject>() }",
             checked += 1;
         }
         assert_eq!(checked, 1);
+    }
+
+    #[test]
+    fn const_opened_dispatch_reads_record_after_callable_trait_link_is_cleared() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "const_opened_record.fe".into(),
+            "use core::obligations::Evidence
+trait Read { const fn read(_ x: u256) -> u256 }
+const fn caller<T>(_ evidence: Evidence<Read<T>>) -> u256 {
+    with (evidence) { <T as Read>::read(1) }
+}",
+        );
+        let (top, _) = db.top_mod(file);
+        let caller = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|func| {
+                func.name(&db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(&db) == "caller")
+            })
+            .unwrap();
+        let result = super::super::inferred_body_with_selections(
+            &db,
+            super::super::BodyOwner::Func(caller),
+            &[],
+        );
+        assert_eq!(
+            result.result.0.len(),
+            1,
+            "the unsupported opened call must reject"
+        );
+        let mut typed = result.result.1.clone();
+        let before = crate::analysis::ty::const_check::check_const_fn_body(&db, caller, &typed);
+        assert!(
+            !before.is_empty(),
+            "opened method with an argument must reject"
+        );
+        let mut cleared = 0;
+        for lowering in std::sync::Arc::make_mut(&mut typed.tables)
+            .semantic_expr_lowering
+            .values_mut()
+        {
+            if let Some(super::super::SemanticExprLowering::Call { callable }) = lowering
+                && callable.trait_inst.is_some()
+            {
+                callable.trait_inst = None;
+                cleared += 1;
+            }
+        }
+        assert_eq!(cleared, 1);
+        let after = crate::analysis::ty::const_check::check_const_fn_body(&db, caller, &typed);
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "the accepted opening record must remain authoritative"
+        );
     }
 
     #[test]

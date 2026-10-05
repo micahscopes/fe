@@ -1,7 +1,7 @@
 """PLAN-v2: owned trait-selection context fields may only decrease.
 
-Counts collection fields containing SelectedApplication, and the legacy
-opened_provisions evidence list. Actual individual decisions are not context
+Counts collection fields containing SelectedApplication or evidence expression/goal
+pairs, including renamed or aliased fields. Actual individual decisions are not context
 copies. No Frame/evidence exemptions exist yet; introduce audited exemptions
 with those authorities, never by merely naming an arbitrary struct Frame.
 """
@@ -12,7 +12,7 @@ import sys
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE = 2
+BASELINE = 1
 spec = importlib.util.spec_from_file_location(
     "solver_budget", ROOT / ".github/check_trait_solver_setup_budget.py"
 )
@@ -82,7 +82,9 @@ def fields(source):
                         r"\b(?:Vec|Arc|Box|SecondaryMap|FxHashMap|IndexMap|HashMap|SmallVec|VecDeque|BTreeMap|HashSet)\b|\[", typ
                     )
                     selected = any(re.search(r"\b" + name + r"\b", typ) for name in names)
-                    evidence = field[1] == "opened_provisions" and "TraitInstId" in typ
+                    evidence = "TraitInstId" in typ and "ExprId" in typ
+                    if match[1] == "Callable" and collection and evidence:
+                        raise ValueError("Callable context storage is retired; evidence reads recorded opening frames")
                     if not typ.startswith("&") and collection and (selected or evidence):
                         yield {
                             "owner": match[1], "field": field[1],
@@ -108,11 +110,14 @@ def self_check():
         ("#[cfg(test)] mod tests { struct A { x: Vec<SelectedApplication>, } } struct B { x: Vec<SelectedApplication>, }", 1),
         ("struct Frame { x: Vec<SelectedApplication>, }", 1),
         ("struct A { opened_provisions: Vec<(ExprId, TraitInstId<'db>)>, }", 1),
+        ("struct A { renamed: Vec<(ExprId, TraitInstId<'db>)>, }", 1),
     ]
     for source, expected in cases:
         assert len(list(fields(source))) == expected, source
     for source in [
         "struct Callable { context: ImplEnv<'db>, }",
+        "struct Callable { renamed: Vec<(ExprId, TraitInstId<'db>)>, }",
+        "type EvidencePairs = Vec<(ExprId, TraitInstId<'db>)>; struct Callable { renamed: EvidencePairs, }",
         "type Alias = ImplEnv<'db>; struct Callable { renamed: Option<Alias>, }",
         "struct Callable(ImplEnv<'db>);",
     ]:

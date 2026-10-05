@@ -295,6 +295,134 @@ pub(crate) fn context_at<'db>(
     )
 }
 
+/// The direct trait goal belongs to the accepted record, not a copied callable link.
+fn call_trait_goal_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    typed: &crate::analysis::ty::ty_check::TypedBody<'db>,
+    expr: ExprId,
+) -> Option<TraitInstId<'db>> {
+    let callable = typed.callable_expr(expr)?;
+    let CallableDef::Func(func) = callable.callable_def() else {
+        return None;
+    };
+    if func.containing_trait(db).is_none() && func.containing_impl_trait(db).is_none() {
+        return None;
+    }
+    let body = typed.body().expect("a source call must retain its body");
+    Some(
+        body.decision_at(typed, expr.span(body).into())
+            .expect("a source trait call must retain its accepted choice")
+            .data(db)
+            .goal(),
+    )
+}
+
+/// Read lexical evidence operands restricted to the checked call's requirements.
+pub(crate) fn call_evidence_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    typed: &crate::analysis::ty::ty_check::TypedBody<'db>,
+    expr: ExprId,
+) -> Vec<(ExprId, TraitInstId<'db>)> {
+    if typed.with_choices().len() == 0 {
+        return Vec::new();
+    }
+    let Some(callable) = typed.callable_expr(expr) else {
+        return Vec::new();
+    };
+    let evidence = recorded_chain_at(db, typed, expr)
+        .visible(db)
+        .filter_map(|provision| match provision {
+            Provision::Evidence(value, goal) => Some((value, goal)),
+            Provision::Named(_) => None,
+        })
+        .collect::<Vec<_>>();
+    if evidence.is_empty() {
+        return evidence;
+    }
+    let mut requirements = callable.selection_requirements(db).list(db).to_vec();
+    requirements.extend(call_trait_goal_at(db, typed, expr));
+    evidence
+        .into_iter()
+        .filter(|(_, goal)| {
+            requirements.iter().any(|required| {
+                goal.def(db) == required.def(db) && goal.args(db) == required.args(db)
+            })
+        })
+        .collect()
+}
+
+fn matching_opened_call<'db>(
+    db: &'db dyn HirAnalysisDb,
+    goal: TraitInstId<'db>,
+    provisions: Vec<(ExprId, TraitInstId<'db>)>,
+) -> Option<(ExprId, TraitInstId<'db>)> {
+    provisions.into_iter().rev().find(|(_, opened)| {
+        opened.def(db) == goal.def(db)
+            && opened.args(db) == goal.args(db)
+            && goal
+                .assoc_type_bindings(db)
+                .iter()
+                .all(|(name, ty)| opened.assoc_type_bindings(db).get(name) == Some(ty))
+    })
+}
+
+pub(crate) fn opened_call_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    typed: &crate::analysis::ty::ty_check::TypedBody<'db>,
+    expr: ExprId,
+) -> Option<(ExprId, TraitInstId<'db>)> {
+    let provisions = call_evidence_at(db, typed, expr);
+    if provisions.is_empty() {
+        return None;
+    }
+    matching_opened_call(db, call_trait_goal_at(db, typed, expr)?, provisions)
+}
+
+/// Freeze applicability in the checked source, then read instantiated operands.
+/// Substitution must not let a concrete opening capture a formerly generic bound.
+pub(crate) fn instance_call_evidence_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    key: crate::analysis::semantic::SemanticInstanceKey<'db>,
+    expr: ExprId,
+) -> Vec<(ExprId, TraitInstId<'db>)> {
+    let template = crate::analysis::semantic::typed_body_template(db, key.owner(db));
+    let applicable = call_evidence_at(db, &template.body, expr);
+    if applicable.is_empty() {
+        return applicable;
+    }
+    let typed = key.typed_body(db);
+    applicable
+        .into_iter()
+        .map(|(value, _)| {
+            let Provision::Evidence(_, goal) = typed
+                .with_choice(value)
+                .expect("an applicable opening must retain its record")
+                .outcome()
+                .expect("an applicable opening must remain accepted")
+            else {
+                panic!("an evidence opening must retain its source kind");
+            };
+            (value, goal)
+        })
+        .collect()
+}
+
+pub(crate) fn instance_opened_call_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    key: crate::analysis::semantic::SemanticInstanceKey<'db>,
+    expr: ExprId,
+) -> Option<(ExprId, TraitInstId<'db>)> {
+    let provisions = instance_call_evidence_at(db, key, expr);
+    if provisions.is_empty() {
+        return None;
+    }
+    matching_opened_call(
+        db,
+        call_trait_goal_at(db, key.typed_body(db), expr)?,
+        provisions,
+    )
+}
+
 /// The selections a call is allowed to pass on at its recorded position.
 /// Freeze against the checked declaration before generic specialization, so
 /// an unrelated concrete choice cannot become applicable to a rigid parameter.

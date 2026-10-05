@@ -521,17 +521,7 @@ impl<'db> TyCheckEnv<'db> {
         self.quotes.insert(expr, quote);
     }
 
-    pub(super) fn register_semantic_call(&mut self, expr: ExprId, mut callable: Callable<'db>) {
-        let requirements = callable.selection_requirements(self.db);
-        callable.opened_provisions = self
-            .opened_obligations()
-            .filter(|(_, opened)| {
-                requirements.list(self.db).iter().any(|required| {
-                    opened.def(self.db) == required.def(self.db)
-                        && opened.args(self.db) == required.args(self.db)
-                })
-            })
-            .collect();
+    pub(super) fn register_semantic_call(&mut self, expr: ExprId, callable: Callable<'db>) {
         self.register_callable(expr, callable.clone());
         self.register_semantic_expr_lowering(expr, SemanticExprLowering::Call { callable });
     }

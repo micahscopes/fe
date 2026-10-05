@@ -280,9 +280,6 @@ pub struct Callable<'db> {
     /// The originating trait instance if this callable comes from a trait method
     /// (e.g., operator overloading, method call, indexing). None for inherent functions.
     pub trait_inst: Option<TraitInstId<'db>>,
-    /// Open evidence values needed by this call's trait requirements, including
-    /// direct trait calls. CTFE revalidates their selected applications.
-    pub opened_provisions: Vec<(ExprId, TraitInstId<'db>)>,
 }
 
 impl<'db> TyVisitable<'db> for Callable<'db> {
@@ -294,9 +291,6 @@ impl<'db> TyVisitable<'db> for Callable<'db> {
         self.effect_providers.visit_with(visitor);
         if let Some(inputs) = &self.checked_input_tys {
             inputs.visit_with(visitor);
-        }
-        for (_, goal) in &self.opened_provisions {
-            goal.visit_with(visitor);
         }
         if let Some(inst) = self.trait_inst {
             inst.visit_with(visitor);
@@ -318,35 +312,11 @@ impl<'db> TyFoldable<'db> for Callable<'db> {
                 .checked_input_tys
                 .map(|inputs| inputs.fold_with(db, folder)),
             trait_inst: self.trait_inst.map(|i| i.fold_with(db, folder)),
-            opened_provisions: self
-                .opened_provisions
-                .into_iter()
-                .map(|(value, goal)| (value, goal.fold_with(db, folder)))
-                .collect(),
         }
     }
 }
 
 impl<'db> Callable<'db> {
-    pub(crate) fn opened_obligation(
-        &self,
-        db: &'db dyn HirAnalysisDb,
-    ) -> Option<(ExprId, TraitInstId<'db>)> {
-        let goal = self.trait_inst?;
-        self.opened_provisions
-            .iter()
-            .rev()
-            .copied()
-            .find(|(_, opened)| {
-                opened.def(db) == goal.def(db)
-                    && opened.args(db) == goal.args(db)
-                    && goal
-                        .assoc_type_bindings(db)
-                        .iter()
-                        .all(|(name, ty)| opened.assoc_type_bindings(db).get(name) == Some(ty))
-            })
-    }
-
     pub(crate) fn selection_requirements(
         &self,
         db: &'db dyn HirAnalysisDb,
@@ -417,7 +387,6 @@ impl<'db> Callable<'db> {
             effect_providers: Vec::new(),
             checked_input_tys: None,
             trait_inst,
-            opened_provisions: Vec::new(),
         })
     }
 
@@ -435,7 +404,6 @@ impl<'db> Callable<'db> {
             effect_providers: Vec::new(),
             checked_input_tys: None,
             trait_inst,
-            opened_provisions: Vec::new(),
         }
     }
 

@@ -2177,7 +2177,11 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 .typed_body(db)
                 .callable_expr(expr)
                 .and_then(|callable| {
-                    let (_, goal) = callable.opened_obligation(db)?;
+                    let (_, goal) = crate::semantic::instance_opened_call_at(
+                        db,
+                        self.frames[frame_idx].body.owner.key(db),
+                        expr,
+                    )?;
                     let CallableDef::Func(func) = callable.callable_def() else {
                         return None;
                     };

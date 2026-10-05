@@ -1,0 +1,18 @@
+use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+impl Read for Subject as Alternative { const fn read() -> u256 { 2 } }
+const fn target<T: Read>() -> u256 { <T as Read>::read() }
+const fn caller<T: Read>(_ e: Evidence<Read<Subject>>) -> u256 {
+    with (e) { target<T>() }
+}
+const fn evaluated() -> u256 {
+    let evidence = with (Alternative) { prove<Read<Subject>>() }
+    caller<Subject>(evidence)
+}
+const RESULT: u256 = evaluated()
+#[test]
+fn concrete_evidence_does_not_capture_a_generic_bound_after_specialization() {
+    assert(RESULT == 1)
+}

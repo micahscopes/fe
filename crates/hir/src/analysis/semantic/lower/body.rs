@@ -1149,18 +1149,21 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     .callee
                     .unwrap_or_else(|| panic!("call lowering plan missing callee for {expr:?}"));
                 let effect_args = self.lower_effect_arg_slice(&call_site.effect_args);
-                let provisions = callable
-                    .opened_provisions
-                    .iter()
-                    .map(|(value, goal)| {
-                        let Some(WithBindingSource::Value(witness)) =
-                            self.with_binding_sources.get(value)
-                        else {
-                            panic!("opened evidence must retain its lexical value");
-                        };
-                        (*witness, *goal)
-                    })
-                    .collect();
+                let provisions = crate::semantic::instance_call_evidence_at(
+                    self.db,
+                    self.instance.key(self.db),
+                    expr,
+                )
+                .iter()
+                .map(|(value, goal)| {
+                    let Some(WithBindingSource::Value(witness)) =
+                        self.with_binding_sources.get(value)
+                    else {
+                        panic!("opened evidence must retain its lexical value");
+                    };
+                    (*witness, *goal)
+                })
+                .collect();
                 self.emit_expr_with_origin(
                     SemOrigin::Expr(expr),
                     ty,

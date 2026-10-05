@@ -335,12 +335,23 @@ pub(crate) fn semantic_callee_key_with_effect_providers<'db>(
         ),
         _ => Vec::new(),
     };
+    let opened_provisions = match origin {
+        SemOrigin::Expr(expr) => crate::semantic::instance_call_evidence_at(db, caller_key, expr),
+        _ => Vec::new(),
+    };
+    let opened_symbolic = match origin {
+        SemOrigin::Expr(expr) => crate::semantic::instance_opened_call_at(db, caller_key, expr)
+            .is_some_and(|(_, goal)| !is_ground(collect_flags(db, goal))),
+        _ => false,
+    };
     semantic_callee_key_with_assumptions(
         db,
         Some(caller),
         caller_key.impl_env(db),
         callable,
         &lexical_selections,
+        &opened_provisions,
+        opened_symbolic,
         effect_args,
         effect_providers,
         caller.assumptions(db),
@@ -367,12 +378,23 @@ pub(crate) fn provisional_semantic_callee_key<'db>(
         ),
         _ => Vec::new(),
     };
+    let opened_provisions = match origin {
+        SemOrigin::Expr(expr) => crate::semantic::instance_call_evidence_at(db, caller_key, expr),
+        _ => Vec::new(),
+    };
+    let opened_symbolic = match origin {
+        SemOrigin::Expr(expr) => crate::semantic::instance_opened_call_at(db, caller_key, expr)
+            .is_some_and(|(_, goal)| !is_ground(collect_flags(db, goal))),
+        _ => false,
+    };
     semantic_callee_key_with_assumptions(
         db,
         Some(SemanticInstance::new(db, caller_key)),
         caller_key.impl_env(db),
         callable,
         &lexical_selections,
+        &opened_provisions,
+        opened_symbolic,
         effect_args,
         callable.effect_providers(),
         assumptions,
@@ -424,6 +446,8 @@ pub fn generated_callee_key<'db>(
         ImplEnv::new(db, scope, assumptions, Vec::new()),
         &callable,
         &[],
+        &[],
+        false,
         &[],
         &[],
         assumptions,
@@ -584,6 +608,8 @@ fn semantic_callee_key_with_assumptions<'db>(
     impl_env: ImplEnv<'db>,
     callable: &Callable<'db>,
     lexical_selections: &[crate::analysis::semantic::SelectedApplication<'db>],
+    opened_provisions: &[(crate::hir_def::ExprId, TraitInstId<'db>)],
+    opened_symbolic: bool,
     effect_args: &[ResolvedEffectArg<'db>],
     effect_providers: &[EffectProviderSpecialization<'db>],
     assumptions: PredicateListId<'db>,
@@ -627,13 +653,9 @@ fn semantic_callee_key_with_assumptions<'db>(
         })
         .collect::<Vec<_>>();
     let mut subst_args = callable.generic_args().to_vec();
-    // Public evidence proves a unique ordinary implementation. A ground
-    // opened call can therefore use the shared static callee planner; CTFE
-    // still validates the supplied evidence value before dispatch. Symbolic
-    // opened calls retain their deferred implementation.
-    let opened_symbolic = callable
-        .opened_obligation(db)
-        .is_some_and(|(_, goal)| !is_ground(collect_flags(db, goal)));
+    // Ground opened calls keep a provisional static callee. CTFE validates
+    // the supplied witness and retargets to its retained selected application.
+    // Symbolic opened calls retain their deferred implementation.
     let body_func = if !opened_symbolic
         && let Some(inst) = callable.trait_inst()
         && let Some(name) = nominal_func.name(db).to_opt()
@@ -860,7 +882,7 @@ fn semantic_callee_key_with_assumptions<'db>(
             .all(
                 |(slot, bound)| match is_goal_satisfiable(db, independent_context, bound) {
                     GoalSatisfiability::Satisfied(solution) => {
-                        if callable.opened_provisions.is_empty()
+                        if opened_provisions.is_empty()
                             && !retained_selections
                                 .iter()
                                 .any(|selection| selection.matches(db, bound))

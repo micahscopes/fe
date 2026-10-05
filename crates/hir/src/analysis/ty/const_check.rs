@@ -75,13 +75,18 @@ impl<'db> ConstFnChecker<'db, '_> {
 
     /// Reports a callee that a `const fn` cannot call, and returns whether it
     /// reported one.
-    fn check_callable(&mut self, primary: DynLazySpan<'db>, callable: &Callable<'db>) -> bool {
+    fn check_callable(
+        &mut self,
+        primary: DynLazySpan<'db>,
+        callable: &Callable<'db>,
+        opened: Option<(ExprId, super::trait_def::TraitInstId<'db>)>,
+    ) -> bool {
         let choice = self.body.decision_at(self.typed_body, primary.clone());
-        let Some(callee) = self.callable_func(callable, choice) else {
+        let Some(callee) = self.callable_func(callable, choice, opened.is_some()) else {
             return false;
         };
 
-        if let Some((_, goal)) = callable.opened_obligation(self.db)
+        if let Some((_, goal)) = opened
             && (callee.params(self.db).next().is_some()
                 || callee.has_effects(self.db)
                 || callee.is_unsafe(self.db)
@@ -127,6 +132,7 @@ impl<'db> ConstFnChecker<'db, '_> {
         &self,
         callable: &Callable<'db>,
         choice: Option<TraitChoiceId<'db>>,
+        opened: bool,
     ) -> Option<Func<'db>> {
         let CallableDef::Func(func) = callable.callable_def() else {
             return None;
@@ -143,7 +149,7 @@ impl<'db> ConstFnChecker<'db, '_> {
         {
             return Some(func);
         }
-        if callable.opened_obligation(self.db).is_none()
+        if !opened
             && callable.trait_inst().is_some()
             && let Some(name) = func.name(self.db).to_opt()
             && let Selection::Unique(method) = recorded_method_instance(
@@ -167,7 +173,13 @@ impl<'db> ConstFnChecker<'db, '_> {
         };
         // One diagnostic per call: the providers a call passes are checked
         // only when the callee itself may be called.
-        if self.check_callable(expr.span(self.body).into(), callable) {
+        // This diagnostic walk also sees rejected trait calls. Only accepted
+        // calls have a dispatch record; inference owns the missing-impl error.
+        let opened = self
+            .body
+            .decision_at(self.typed_body, expr.span(self.body).into())
+            .and_then(|_| crate::semantic::opened_call_at(self.db, self.typed_body, expr));
+        if self.check_callable(expr.span(self.body).into(), callable, opened) {
             return;
         }
         if self.typed_body.call_effect_args(expr).is_some_and(|args| {
@@ -206,8 +218,8 @@ impl<'db> ConstFnChecker<'db, '_> {
                 self.check_expr(*iter);
                 if let Some(seq) = self.typed_body.for_loop_seq(stmt) {
                     let span: DynLazySpan<'db> = stmt.span(self.body).into();
-                    self.check_callable(span.clone(), &seq.len_callable);
-                    self.check_callable(span, &seq.get_callable);
+                    self.check_callable(span.clone(), &seq.len_callable, None);
+                    self.check_callable(span, &seq.get_callable, None);
                 }
                 self.check_expr(*body);
             }
