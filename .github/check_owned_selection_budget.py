@@ -49,6 +49,8 @@ def fields(source):
             depth += (code[end] == opening) - (code[end] == closing)
             end += 1
         body = expanded(code[match.end():end - 1])
+        if (match[1] or match[2]) == "Callable" and re.search(r"\bImplEnv\b", body):
+            raise ValueError("Callable context storage is retired; read the body position record")
         if re.search(r"\b(?:Vec|Arc|Box|Map|FxHashMap|IndexMap|HashMap|SmallVec|VecDeque|BTreeMap|HashSet)\b|\[", body) and any(
             re.search(r"\b" + name + r"\b", body) for name in names
         ):
@@ -70,6 +72,8 @@ def fields(source):
                 field = re.search(r"(\w+)\s*:(?!:)\s*(.*)", part, re.S)
                 if field:
                     typ = expanded(field[2].strip())
+                    if match[1] == "Callable" and re.search(r"\bImplEnv\b", typ):
+                        raise ValueError("Callable context storage is retired; read the body position record")
                     collection = re.search(
                         r"\b(?:Vec|Arc|Box|SecondaryMap|FxHashMap|IndexMap|HashMap|SmallVec|VecDeque|BTreeMap|HashSet)\b|\[", typ
                     )
@@ -103,6 +107,17 @@ def self_check():
     ]
     for source, expected in cases:
         assert len(list(fields(source))) == expected, source
+    for source in [
+        "struct Callable { context: ImplEnv<'db>, }",
+        "type Alias = ImplEnv<'db>; struct Callable { renamed: Option<Alias>, }",
+        "struct Callable(ImplEnv<'db>);",
+    ]:
+        try:
+            list(fields(source))
+        except ValueError as error:
+            assert "Callable context storage is retired" in str(error)
+        else:
+            raise AssertionError("retired Callable context restored: " + source)
     for source in ["struct A(Vec<SelectedApplication>);", "enum A { B(Vec<SelectedApplication>) }"]:
         try:
             list(fields(source))

@@ -522,13 +522,6 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     pub(super) fn register_semantic_call(&mut self, expr: ExprId, mut callable: Callable<'db>) {
-        // Callable equality already includes its declaration, not the caller's
-        // scope. Keep the added wrapper scope a function of that declaration.
-        callable.context = selection_context(
-            self.db,
-            callable.callable_def.scope(),
-            self.selections().collect(),
-        );
         let requirements = callable.selection_requirements(self.db);
         callable.opened_provisions = self
             .opened_obligations()
@@ -1102,32 +1095,6 @@ impl<'db> TyCheckEnv<'db> {
             .flatten()
             .for_each(|lowering| {
                 *lowering = lowering.clone().fold_with(self.db, &mut prober);
-                let (SemanticExprLowering::Call { callable }
-                | SemanticExprLowering::CodeRegionIntrinsic { callable, .. }
-                | SemanticExprLowering::ConstIntrinsic { callable, .. }) = lowering;
-                let context = callable.context;
-                if !context.selections(self.db).is_empty() {
-                    // Freeze applicability after inference, before generic
-                    // specialization. An unrelated concrete lexical choice must
-                    // not become applicable to a rigid type parameter later.
-                    let required = callable.selection_requirements(self.db);
-                    let selections = context
-                        .selections(self.db)
-                        .iter()
-                        .copied()
-                        .filter(|selection| {
-                            required
-                                .list(self.db)
-                                .iter()
-                                .any(|goal| selection.matches(self.db, *goal))
-                        })
-                        .collect::<Vec<_>>();
-                    callable.context = selection_context(
-                        self.db,
-                        context.normalization_scope(self.db),
-                        selections,
-                    );
-                }
             });
         for (expr, lowering) in self.semantic_expr_lowering.iter() {
             let Some(SemanticExprLowering::Call { callable }) = lowering else {

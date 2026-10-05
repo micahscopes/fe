@@ -523,7 +523,6 @@ pub(crate) fn normalize_comparable_const_predicate_key<'db>(
         // Keep evidence and user-defined operator authorities. Only closed
         // core operations on primitive values share the syntax representation.
         if let Some(callable) = operation
-            && callable.context.selections(db).is_empty()
             && callable.opened_provisions.is_empty()
             && callable.effect_providers().is_empty()
             && let Some(inst) = callable.trait_inst()
