@@ -1461,6 +1461,10 @@ pub enum ImplDiag<'db> {
         failure: ProviderLayoutFailure,
     },
 
+    /// `impl Copy for T as Name`: whether a type is `Copy` cannot depend on
+    /// which implementations a `with` block selects.
+    NamedCopyImpl { primary: DynLazySpan<'db> },
+
     /// An impl's associated type has a different number of type parameters
     /// than the trait declares.
     AssocTypeParamNumMismatch {
@@ -1515,6 +1519,7 @@ impl ImplDiag<'_> {
             Self::AssocTypeParamBoundInImpl { .. } => 28,
             Self::TypeNotDefinedInTrait { .. } => 23,
             Self::MethodConstPredicateMismatch { .. } => 29,
+            Self::NamedCopyImpl { .. } => 30,
         }
     }
 }

@@ -948,6 +948,21 @@ impl<'db> ImplTrait<'db> {
         out
     }
 
+    fn diags_named_copy(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        implementor: ImplementorId<'db>,
+    ) -> Option<TyDiagCollection<'db>> {
+        self.selection_name(db)?;
+        let copy = ty::corelib::resolve_core_trait(db, self.scope(), &["marker", "Copy"])?;
+        (implementor.trait_def(db) == copy).then(|| {
+            ty::diagnostics::ImplDiag::NamedCopyImpl {
+                primary: self.span().selection_name().into(),
+            }
+            .into()
+        })
+    }
+
     fn diags_effect_handle_raw(
         self,
         db: &'db dyn HirAnalysisDb,
@@ -2108,6 +2123,7 @@ impl<'db> Diagnosable<'db> for ImplTrait<'db> {
         out.extend(signature_diags);
         out.extend(implementor.diags_method_conformance(db));
         out.extend(self.diags_effect_handle_raw(db, implementor));
+        out.extend(self.diags_named_copy(db, implementor));
         out.extend(self.diags_trait_ref_and_wf(db));
         out.extend(self.diags_assoc_types_wf(db));
         out.extend(self.diags_assoc_types(db));

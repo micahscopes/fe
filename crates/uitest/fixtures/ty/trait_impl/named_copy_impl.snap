@@ -1,0 +1,12 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/trait_impl/named_copy_impl.fe
+---
+error[6-0030]: `Copy` cannot be implemented by name
+  ┌─ named_copy_impl.fe:4:25
+  │
+4 │ impl Copy for Ticket as Dup {}
+  │                         ^^^ a type is either `Copy` everywhere or nowhere
+  │
+  = remove `as <name>` to implement `Copy` for every use

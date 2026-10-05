@@ -6235,6 +6235,18 @@ impl DiagnosticVoucher for ImplDiag<'_> {
                 error_code,
             },
 
+            Self::NamedCopyImpl { primary } => CompleteDiagnostic {
+                severity,
+                message: "`Copy` cannot be implemented by name".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: "a type is either `Copy` everywhere or nowhere".to_string(),
+                    span: primary.resolve(db),
+                }],
+                notes: vec!["remove `as <name>` to implement `Copy` for every use".to_string()],
+                error_code,
+            },
+
             Self::InvalidEffectHandleRaw {
                 primary,
                 raw_ty,
