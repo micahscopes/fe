@@ -868,6 +868,8 @@ fn generic_match_pattern_paths_keep_the_function_body() {
     }
 }
 
+/// Syntax added with quotation, named impls and recursive type functions
+/// parses without errors in both frontends.
 #[test]
 fn new_syntax_parses_in_both_frontends() {
     let mut parser = new_parser();
@@ -887,4 +889,67 @@ fn new_syntax_parses_in_both_frontends() {
         let errors = parse_errors(&mut parser, source);
         assert!(errors.is_empty(), "tree-sitter: {source}: {errors:?}");
     }
+}
+
+/// Every fixture the compiler's parser accepts must parse in tree-sitter too.
+/// Known gaps are listed, one repository-relative path per line, in
+/// `tree_sitter_known_gaps.txt`; a listed file that now parses must be removed
+/// from the list, so the list only shrinks.
+#[test]
+fn tree_sitter_agrees_with_the_parser_on_every_fixture() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.join("../..");
+    let known_gaps: std::collections::BTreeSet<String> =
+        std::fs::read_to_string(manifest.join("tests/tree_sitter_known_gaps.txt"))
+            .expect("known gaps list")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_owned)
+            .collect();
+    let mut parser = new_parser();
+    let mut disagreements = Vec::new();
+    let mut fixed = Vec::new();
+    let mut checked = 0;
+    for dir in [
+        "crates/codegen/tests/fixtures",
+        "crates/driver/tests/fixtures",
+        "crates/fe/tests/fixtures",
+        "crates/fmt/tests/fixtures",
+        "crates/hir/tests/fixtures",
+        "crates/hir/test_files",
+        "crates/language-server/test_files",
+        "crates/parser/test_files",
+        "crates/uitest/fixtures",
+        "ingots",
+    ] {
+        for path in collect_fe_files(&root.join(dir)) {
+            let source = std::fs::read_to_string(&path).expect("fixture source");
+            let (_, parser_errors) = parse_source_file(&source, RecoveryMode::Recover);
+            if !parser_errors.is_empty() {
+                continue;
+            }
+            checked += 1;
+            let relative = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            let errors = parse_errors(&mut parser, &source);
+            match (errors.is_empty(), known_gaps.contains(&relative)) {
+                (false, false) => {
+                    disagreements.push(format!("  {relative}:\n{}", errors.join("\n")))
+                }
+                (true, true) => fixed.push(format!("  {relative}")),
+                _ => {}
+            }
+        }
+    }
+    assert!(checked > 0, "no fixtures were checked");
+    assert!(
+        disagreements.is_empty() && fixed.is_empty(),
+        "tree-sitter rejects files the parser accepts:\n{}\n\nlisted as known gaps but now parse; remove them from tree_sitter_known_gaps.txt:\n{}",
+        disagreements.join("\n"),
+        fixed.join("\n"),
+    );
 }

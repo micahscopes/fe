@@ -2240,6 +2240,7 @@ dependencies = [
  "fe-hir",
  "fe-language-server",
  "fe-mir",
+ "fe-parser",
  "fe-resolver",
  "fe-semantic-indexing",
  "fe-solc-runner",
