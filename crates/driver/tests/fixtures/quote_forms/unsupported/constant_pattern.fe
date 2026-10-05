@@ -1,0 +1,17 @@
+// A named constant in a pattern is refused at the form.
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const LIMIT: u256 = 7
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn gen(x: u256) -> u256 {
+                match x {
+                    LIMIT => 1
+                    _ => 2
+                }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}

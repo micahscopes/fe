@@ -69,6 +69,39 @@ impl<'db> Quote<'db> {
     }
 }
 
+/// Fe syntax that a quote template does not support yet. The quote checker
+/// reports each at its own node, so generation never meets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub enum QuoteUnsupportedForm {
+    ArrayRepeat,
+    ArrayType,
+    ConstGenericArgument,
+    Constant,
+    ConstantPattern,
+    InnerPathGenericArguments,
+    LetCondition,
+    MethodGenericArguments,
+    With,
+}
+
+impl std::fmt::Display for QuoteUnsupportedForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ArrayRepeat => "an array repeat expression `[value; length]`",
+            Self::ArrayType => "an array type",
+            Self::ConstGenericArgument => "a const generic argument",
+            Self::Constant => "a named constant",
+            Self::ConstantPattern => "a named constant in a pattern",
+            Self::InnerPathGenericArguments => {
+                "a value path with generic arguments before its last segment"
+            }
+            Self::LetCondition => "`if let` or `while let`",
+            Self::MethodGenericArguments => "generic arguments on a method call",
+            Self::With => "a `with` expression",
+        })
+    }
+}
+
 /// What a fragment is. It is part of the value's type, `Code<K>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub enum QuoteKind {

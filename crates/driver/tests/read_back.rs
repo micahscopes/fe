@@ -3031,6 +3031,21 @@ fn quoted_forms_elaborate_in_every_position(fixture: Fixture<&str>) {
     quote_round_trip::assert_round_trip(&authored, &output, &url);
 }
 
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_forms/unsupported", glob: "*.fe")]
+fn unsupported_quoted_forms_are_reported_at_the_form(fixture: Fixture<&str>) {
+    let snapshot_path = fixture.path().to_owned();
+    let authored = field_authority_fixture_db(fixture);
+    let Err(error) = prepare(&authored) else {
+        panic!("an unsupported form must be refused");
+    };
+    let rendered = error.render(&authored);
+    assert!(
+        rendered.contains("is not supported inside a quote yet"),
+        "{rendered}"
+    );
+    test_utils::snap_test!(rendered, &snapshot_path);
+}
+
 #[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_alias_arguments/allowed", glob: "*.fe")]
 fn quoted_alias_constructor_preserves_arguments(fixture: Fixture<&str>) {
     let url = Url::from_file_path(fixture.path()).unwrap();

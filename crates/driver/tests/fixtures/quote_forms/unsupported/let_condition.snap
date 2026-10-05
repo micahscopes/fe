@@ -1,0 +1,10 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_forms/unsupported/let_condition.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_forms/unsupported/let_condition.fe: error[8-0117]: `if let` or `while let` is not supported inside a quote yet
+  ┌─ let_condition.fe:7:24
+  │
+7 │                 if let Option::Some(v) = x {
+  │                        ^^^^^^^^^^^^^^^ not supported inside a quote yet

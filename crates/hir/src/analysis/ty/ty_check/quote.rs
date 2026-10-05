@@ -23,8 +23,8 @@ use crate::{
     hir_def::{
         Body, CallableDef, Cond, CondId, Expr, ExprId, FuncParamName, GenericArg, GenericArgListId,
         GenericParam, GenericParamListId, IdentId, Partial, Pat, PatId, PathId, PathKind, Quote,
-        QuoteHolePosition, QuoteItem, QuoteKind, QuoteWhereClause, QuoteWherePredicate, Stmt,
-        StmtId, TypeBound, TypeId as HirTyId, TypeKind,
+        QuoteHolePosition, QuoteItem, QuoteKind, QuoteUnsupportedForm, QuoteWhereClause,
+        QuoteWherePredicate, Stmt, StmtId, TypeBound, TypeId as HirTyId, TypeKind,
     },
     span::DynLazySpan,
 };
@@ -402,6 +402,8 @@ struct TemplateWalk<'a, 'db> {
     type_sites: u32,
     /// The template node whose span a type path reports at.
     anchor: Option<ExprId>,
+    /// The `let` whose annotation is being walked, a closer span for types.
+    let_anchor: Option<StmtId>,
     names: Vec<QuoteNameUse<'db>>,
 }
 
@@ -425,6 +427,7 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
             items: 0,
             type_sites: 0,
             anchor: None,
+            let_anchor: None,
             names: Vec::new(),
         }
     }
@@ -704,7 +707,9 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
                     self.walk_ty_opt(*elem);
                 }
             }
-            TypeKind::Array(elem, _) => self.walk_ty_opt(*elem),
+            // The length is a constant body whose names would bind where the
+            // code lands; refuse the form until those names are classified.
+            TypeKind::Array(..) => self.unsupported_type_form(QuoteUnsupportedForm::ArrayType),
             TypeKind::Path(Partial::Absent)
             | TypeKind::Primitive(_)
             | TypeKind::Never
@@ -714,12 +719,33 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
 
     fn walk_generic_args(&mut self, args: GenericArgListId<'db>) {
         for arg in args.data(self.db()) {
-            match arg {
-                GenericArg::Type(arg) => self.walk_ty_opt(arg.ty),
-                GenericArg::AssocType(arg) => self.walk_ty_opt(arg.ty),
-                GenericArg::Const(_) => {}
+            self.walk_generic_arg(arg);
+        }
+    }
+
+    fn walk_generic_arg(&mut self, arg: &GenericArg<'db>) {
+        match arg {
+            GenericArg::Type(arg) => self.walk_ty_opt(arg.ty),
+            GenericArg::AssocType(arg) => self.walk_ty_opt(arg.ty),
+            // Its body's names would bind where the code lands.
+            GenericArg::Const(_) => {
+                self.unsupported_type_form(QuoteUnsupportedForm::ConstGenericArgument)
             }
         }
+    }
+
+    /// Reports a form quotes do not support yet at the node being walked.
+    fn unsupported(&mut self, primary: DynLazySpan<'db>, form: QuoteUnsupportedForm) {
+        self.tc
+            .push_diag(BodyDiag::QuoteUnsupportedForm { primary, form });
+    }
+
+    fn unsupported_type_form(&mut self, form: QuoteUnsupportedForm) {
+        let primary = match self.let_anchor {
+            Some(stmt) => stmt.span(self.template).into(),
+            None => self.span_at(QuoteNameSite::Type(self.type_sites)),
+        };
+        self.unsupported(primary, form);
     }
 
     fn walk_path_args(&mut self, path: PathId<'db>) {
@@ -738,6 +764,7 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
         };
         let outer_anchor = self.anchor.replace(expr);
         match data {
+            // Lowering reports a nested quote and leaves no node for it.
             Expr::Lit(_) | Expr::Hole(_) | Expr::UnsupportedMacroCall | Expr::Quote(_) => {}
             Expr::Block(stmts) => {
                 self.values.push(FxHashMap::default());
@@ -762,7 +789,12 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
             Expr::Assert(args) => args.iter().for_each(|arg| self.walk_expr(arg.expr)),
             Expr::MethodCall(receiver, _, generic_args, args) => {
                 self.walk_expr(*receiver);
-                self.walk_generic_args(*generic_args);
+                if generic_args.is_given(db) {
+                    self.unsupported(
+                        expr.span(self.template).into(),
+                        QuoteUnsupportedForm::MethodGenericArguments,
+                    );
+                }
                 args.iter().for_each(|arg| self.walk_expr(arg.expr));
             }
             Expr::Path(Partial::Present(path)) => self.value_path(expr, *path),
@@ -778,7 +810,14 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
             Expr::Tuple(elems) | Expr::Array(elems) => {
                 elems.iter().for_each(|elem| self.walk_expr(*elem))
             }
-            Expr::ArrayRep(value, _) => self.walk_expr(*value),
+            Expr::ArrayRep(value, _) => {
+                // As for array types, the length is not classified yet.
+                self.unsupported(
+                    expr.span(self.template).into(),
+                    QuoteUnsupportedForm::ArrayRepeat,
+                );
+                self.walk_expr(*value);
+            }
             Expr::If(cond, then, else_) => {
                 self.values.push(FxHashMap::default());
                 self.walk_cond(*cond);
@@ -794,14 +833,8 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
                     self.walk_arms(arms);
                 }
             }
-            Expr::With(bindings, body) => {
-                for binding in bindings {
-                    if let Some(Partial::Present(path)) = binding.key_path {
-                        self.type_path(path);
-                    }
-                    self.walk_expr(binding.value);
-                }
-                self.walk_expr(*body);
+            Expr::With(..) => {
+                self.unsupported(expr.span(self.template).into(), QuoteUnsupportedForm::With)
             }
         }
         self.anchor = outer_anchor;
@@ -824,7 +857,9 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
                     let previous = self
                         .signature_site
                         .replace(QuoteSignatureSite::LocalType { func, stmt });
+                    let outer = self.let_anchor.replace(stmt);
                     self.walk_ty(*ty);
+                    self.let_anchor = outer;
                     self.signature_site = previous;
                 }
                 if let Some(init) = init {
@@ -858,6 +893,10 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
         match data {
             Cond::Expr(expr) => self.walk_expr(*expr),
             Cond::Let(pat, expr) => {
+                self.unsupported(
+                    pat.span(self.template).into(),
+                    QuoteUnsupportedForm::LetCondition,
+                );
                 self.walk_expr(*expr);
                 self.walk_pat(*pat);
             }
@@ -1083,7 +1122,12 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
             };
             let args = segment.generic_args(db);
             if index + 1 != path.len(db) {
-                self.walk_generic_args(args);
+                if args.is_given(db) {
+                    self.unsupported(
+                        self.span_at(site),
+                        QuoteUnsupportedForm::InnerPathGenericArguments,
+                    );
+                }
                 continue;
             }
             for (arg_index, arg) in args.data(db).iter().enumerate() {
@@ -1093,11 +1137,7 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
                         expr,
                         index: arg_index as u32,
                     });
-                match arg {
-                    GenericArg::Type(arg) => self.walk_ty_opt(arg.ty),
-                    GenericArg::AssocType(arg) => self.walk_ty_opt(arg.ty),
-                    GenericArg::Const(_) => {}
-                }
+                self.walk_generic_arg(arg);
                 self.signature_site = previous;
             }
         }
@@ -1230,7 +1270,27 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
                         },
                     );
                 }
+                if matches!(res, PathRes::Const(..)) {
+                    let form = match site {
+                        QuoteNameSite::Pat(_) => QuoteUnsupportedForm::ConstantPattern,
+                        _ => QuoteUnsupportedForm::Constant,
+                    };
+                    return self.unsupported(self.span_at(site), form);
+                }
                 self.push(site, QuoteNameClass::Rooted(res));
+            }
+            // In type position a constant is a const generic argument, which
+            // the parser cannot tell from a type.
+            None if matches!(site, QuoteNameSite::Type(_))
+                && matches!(
+                    self.resolve_in_provider(path, true),
+                    Some(PathRes::Const(..))
+                ) =>
+            {
+                self.unsupported(
+                    self.span_at(site),
+                    QuoteUnsupportedForm::ConstGenericArgument,
+                )
             }
             None => {
                 let span = self.span_at(site);

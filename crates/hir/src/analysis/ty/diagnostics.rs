@@ -678,6 +678,11 @@ pub enum BodyDiag<'db> {
         primary: DynLazySpan<'db>,
         name: String,
     },
+    /// Fe syntax that quotes do not support yet.
+    QuoteUnsupportedForm {
+        primary: DynLazySpan<'db>,
+        form: crate::hir_def::QuoteUnsupportedForm,
+    },
     IntLiteralOutOfRange {
         primary: DynLazySpan<'db>,
         literal: String,
@@ -1146,6 +1151,7 @@ impl<'db> BodyDiag<'db> {
             Self::QuoteUnresolvedName { .. } => 106,
             Self::QuoteProviderLocal { .. } => 107,
             Self::QuoteProviderGeneric { .. } => 108,
+            Self::QuoteUnsupportedForm { .. } => 117,
             Self::IntLiteralOutOfRange { .. } => 74,
             Self::BorrowFromNonPlace { .. } => 65,
             Self::CannotBorrowMut { .. } => 66,

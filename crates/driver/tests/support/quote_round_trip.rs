@@ -22,9 +22,9 @@ use hir::{
         FrozenVariantBinding, MetaItem,
     },
     hir_def::{
-        Body, Cond, CondId, Expr, ExprId, FieldIndex, FieldParent, Func, GenericParamOwner,
-        IdentId, ItemKind, LitKind, Partial, Pat, PatId, Quote, QuoteFragment, QuoteFunc,
-        QuoteItem, QuoteName, Stmt, StmtId, TypeKind, scope_graph::ScopeId,
+        Body, CallArg, Cond, CondId, Expr, ExprId, FieldIndex, FieldParent, Func,
+        GenericParamOwner, IdentId, ItemKind, LitKind, Partial, Pat, PatId, Quote, QuoteFragment,
+        QuoteFunc, QuoteItem, QuoteName, Stmt, StmtId, TypeKind, scope_graph::ScopeId,
     },
     span::{DesugaredOrigin, HirOrigin, LazySpan},
 };
@@ -947,17 +947,10 @@ impl<'a, 'db> Comparison<'a, 'db> {
             }
             (Expr::Call(callee, args), Expr::Call(actual_callee, actual_args)) => {
                 self.expr(frame, *callee, *actual_callee);
-                assert_eq!(args.len(), actual_args.len());
-                for (arg, actual) in args.iter().zip(actual_args) {
-                    assert_eq!(
-                        arg.label_eagerly(self.authored, frame.body)
-                            .map(|name| name.data(self.authored)),
-                        actual
-                            .label_eagerly(self.output, self.body)
-                            .map(|name| name.data(self.output))
-                    );
-                    self.expr(frame, arg.expr, actual.expr);
-                }
+                self.call_args(frame, args, actual_args);
+            }
+            (Expr::Assert(args), Expr::Assert(actual_args)) => {
+                self.call_args(frame, args, actual_args);
             }
             (
                 Expr::MethodCall(receiver, name, args, values),
@@ -1123,6 +1116,25 @@ impl<'a, 'db> Comparison<'a, 'db> {
                 frame.visible.truncate(visible);
             }
             other => panic!("template/output expression mismatch or uncovered form: {other:?}"),
+        }
+    }
+
+    fn call_args(
+        &self,
+        frame: &mut Frame<'db>,
+        args: &[CallArg<'db>],
+        actual_args: &[CallArg<'db>],
+    ) {
+        assert_eq!(args.len(), actual_args.len());
+        for (arg, actual) in args.iter().zip(actual_args) {
+            assert_eq!(
+                arg.label_eagerly(self.authored, frame.body)
+                    .map(|name| name.data(self.authored)),
+                actual
+                    .label_eagerly(self.output, self.body)
+                    .map(|name| name.data(self.output))
+            );
+            self.expr(frame, arg.expr, actual.expr);
         }
     }
 

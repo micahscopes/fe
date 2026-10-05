@@ -1,0 +1,13 @@
+// A const generic argument written as a name is refused at the form, though `K` is in scope.
+pub fn width<const W: u256>() -> u256 { W }
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const K: u256 = 4
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn gen() -> u256 { ingot::width<K>() }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}

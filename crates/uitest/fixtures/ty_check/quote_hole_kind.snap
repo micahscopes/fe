@@ -53,3 +53,15 @@ error[8-0105]: the splices of this quote have different kinds
 58 │ │         ${bounds}
 59 │ │     }
    │ ╰─────^ a body made only of splices takes their kind, so they must agree
+
+error[8-0117]: a const generic argument is not supported inside a quote yet
+   ┌─ quote_hole_kind.fe:11:5
+   │
+11 │ ╭     quote {
+12 │ │         ${items}
+13 │ │         pub fn ${DeclarationName::FieldPrefix("get_", f)}(_ value: ${record}) -> ${field_type(f)} where ${bounds} {
+14 │ │             value.${f}
+   · │
+17 │ │         const LABEL: String<4> = ${"text"}
+18 │ │     }
+   │ ╰─────^ not supported inside a quote yet

@@ -1877,16 +1877,9 @@ where
             }
             Expr::Call(callee, args) => Expr::Call(
                 self.copy_quote_expr(template, *callee, map)?,
-                args.iter()
-                    .map(|arg| {
-                        // Keep a shorthand label before a hygienic binder rename changes its name.
-                        Ok(CallArg {
-                            label: arg.label_eagerly(db, template),
-                            expr: self.copy_quote_expr(template, arg.expr, map)?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, QuoteConstructionError>>()?,
+                self.copy_quote_call_args(template, args, map)?,
             ),
+            Expr::Assert(args) => Expr::Assert(self.copy_quote_call_args(template, args, map)?),
             Expr::MethodCall(receiver, Partial::Present(name), generic_args, args) => {
                 if generic_args.is_given(db) {
                     return Err(
@@ -1898,14 +1891,7 @@ where
                     self.copy_quote_expr(template, *receiver, map)?,
                     Partial::Present(*name),
                     GenericArgListId::none(db),
-                    args.iter()
-                        .map(|arg| {
-                            Ok(CallArg {
-                                label: arg.label_eagerly(db, template),
-                                expr: self.copy_quote_expr(template, arg.expr, map)?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, QuoteConstructionError>>()?,
+                    self.copy_quote_call_args(template, args, map)?,
                 )
             }
             Expr::Field(receiver, Partial::Present(FieldIndex::Hole(slot))) => {
@@ -2059,6 +2045,24 @@ where
         map.groups = enclosing;
         map.visible_locals.truncate(visible);
         result
+    }
+
+    fn copy_quote_call_args(
+        &mut self,
+        template: Body<'db>,
+        args: &[CallArg<'db>],
+        map: &mut QuoteCopyMap<'_, 'db>,
+    ) -> Result<Vec<CallArg<'db>>, QuoteConstructionError> {
+        let db = self.db();
+        args.iter()
+            .map(|arg| {
+                // Keep a shorthand label before a hygienic binder rename changes its name.
+                Ok(CallArg {
+                    label: arg.label_eagerly(db, template),
+                    expr: self.copy_quote_expr(template, arg.expr, map)?,
+                })
+            })
+            .collect()
     }
 
     fn copy_quote_arms(
