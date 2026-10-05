@@ -65,6 +65,8 @@ def ownership(env, effects):
 
 
 def premise_boundary(env, semantic, provisions):
+    if re.search(r'root_assumptions:\s*Option\s*<\s*PredicateListId', provisions):
+        raise ValueError('root bounds must be provisions rather than a parallel frame field')
     for retired in ('opened_obligations', 'selections'):
         if goal_lookup.bodies(env, retired):
             raise ValueError('checker filtered provision adapters must be retired: ' + retired)
@@ -83,7 +85,7 @@ def premise_boundary(env, semantic, provisions):
     if len(bodies) != 1 or 'evidence_assumptions' not in bodies[0]:
         raise ValueError('record context must use the same semantic premise projection')
     roots = goal_lookup.bodies(provisions, 'recorded_chain_at')
-    if len(roots) != 1 or 'Chain::new(typed.assumptions())' not in roots[0]:
+    if len(roots) != 1 or 'Chain::new(db, typed.assumptions())' not in roots[0]:
         raise ValueError('body positions must read their completed root premises')
     if re.search(r'\.(?:list|extend_all_bounds)\s*\(', bodies[0]):
         raise ValueError('record context restored a separate premise builder')
@@ -120,12 +122,13 @@ if __name__ == '__main__':
             continue
         sys.exit('independent-scope-owner mutation escaped the guard')
     for mutant_env, mutant_semantic, mutant_provisions in [
+        (env, semantic, provisions.replace("    provisions: Vec<Provision<'db>>,", "    root_assumptions: Option<PredicateListId<'db>>,\n    provisions: Vec<Provision<'db>>,", 1)),
         (env + "\nimpl TyCheckEnv { fn selections(&self) {} }\n", semantic, provisions),
         (env + "\nimpl TyCheckEnv { fn opened_obligations(&self) {} }\n", semantic, provisions),
         (env.replace('self.provisions.evidence_assumptions', 'self.assumptions.list(self.db); self.provisions.evidence_assumptions', 1), semantic, provisions),
         (env.replace('self.provisions.method_lookup_assumptions', 'self.assumptions.list(self.db); self.provisions.method_lookup_assumptions', 1), semantic, provisions),
         (env, semantic.replace('provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 'assumptions.list(db); provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 1), provisions),
-        (env, semantic, provisions.replace('Chain::new(typed.assumptions())', 'Chain::new(PredicateListId::empty_list(db))', 1)),
+        (env, semantic, provisions.replace('Chain::new(db, typed.assumptions())', 'Chain::new(db, PredicateListId::empty_list(db))', 1)),
         (env.replace('    provisions:', "    assumptions: PredicateListId<'db>,\n    provisions:", 1), semantic, provisions),
     ]:
         assert mutant_env != env or mutant_semantic != semantic or mutant_provisions != provisions, 'premise mutation must modify actual source'

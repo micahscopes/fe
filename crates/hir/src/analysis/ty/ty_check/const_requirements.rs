@@ -3156,7 +3156,8 @@ fn caller() {
                 .visible(&db)
                 .filter_map(|provision| match provision {
                     crate::core::semantic::Provision::Named(selection) => Some(selection),
-                    crate::core::semantic::Provision::Evidence(..) => None,
+                    crate::core::semantic::Provision::Evidence(..)
+                    | crate::core::semantic::Provision::Bound(_) => None,
                 })
                 .collect::<Vec<_>>();
             assert_eq!(selections, expected, "reconstructed {}", name.data(&db));
@@ -3338,7 +3339,8 @@ const fn inherited() { target<Subject>() }",
                 .visible(&db)
                 .filter_map(|provision| match provision {
                     crate::core::semantic::Provision::Named(selection) => Some(selection),
-                    crate::core::semantic::Provision::Evidence(..) => None,
+                    crate::core::semantic::Provision::Evidence(..)
+                    | crate::core::semantic::Provision::Bound(_) => None,
                 })
                 .collect::<Vec<_>>();
             assert_eq!(

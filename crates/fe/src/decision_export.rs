@@ -370,6 +370,9 @@ pub fn with_records<'db>(
                         }
                         _ => return Err("non-HIR opening is outside format v1".into()),
                     },
+                    Ok(Provision::Bound(_)) => {
+                        unreachable!("root premises cannot be lexical opening records")
+                    }
                     Ok(Provision::Evidence(..)) => {
                         return Err("evidence opening is outside format v1".into());
                     }

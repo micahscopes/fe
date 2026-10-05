@@ -154,7 +154,7 @@ impl<'db> TyCheckEnv<'db> {
             decisions: Decisions::default(),
             effect_bounds: ThinVec::new(),
             base_assumptions,
-            provisions: Chain::new(base_assumptions),
+            provisions: Chain::new(db, base_assumptions),
             var_env: vec![BlockEnv::new(owner_scope, 0)],
             pending_vars: FxHashMap::default(),
             loop_stack: Vec::new(),
@@ -246,7 +246,7 @@ impl<'db> TyCheckEnv<'db> {
         let mut preds = base_preds.list(db).to_vec();
         preds.extend(env.effect_bounds.iter().copied());
         env.provisions
-            .complete_root(PredicateListId::new(db, preds).extend_all_bounds(db));
+            .complete_root(db, PredicateListId::new(db, preds).extend_all_bounds(db));
 
         Ok(env)
     }

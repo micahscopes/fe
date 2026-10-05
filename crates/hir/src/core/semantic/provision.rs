@@ -13,6 +13,8 @@ use crate::{
 pub enum Provision<'db> {
     Evidence(ExprId, TraitInstId<'db>),
     Named(SelectedApplication<'db>),
+    /// An item premise, without a selected implementation or evidence operand.
+    Bound(TraitInstId<'db>),
 }
 
 impl<'db> Provision<'db> {
@@ -26,7 +28,7 @@ impl<'db> Provision<'db> {
 
     pub fn goal(self) -> TraitInstId<'db> {
         match self {
-            Self::Evidence(_, goal) => goal,
+            Self::Evidence(_, goal) | Self::Bound(goal) => goal,
             Self::Named(selection) => selection.goal(),
         }
     }
@@ -38,7 +40,7 @@ impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for Provision<'db> {
         visitor: &mut V,
     ) {
         match self {
-            Self::Evidence(_, goal) => goal.visit_with(visitor),
+            Self::Evidence(_, goal) | Self::Bound(goal) => goal.visit_with(visitor),
             Self::Named(selection) => selection.visit_with(visitor),
         }
     }
@@ -53,6 +55,7 @@ impl<'db> crate::analysis::ty::fold::TyFoldable<'db> for Provision<'db> {
         match self {
             Self::Evidence(value, goal) => Self::Evidence(value, goal.fold_with(db, folder)),
             Self::Named(selection) => Self::Named(selection.fold_with(db, folder)),
+            Self::Bound(goal) => Self::Bound(goal.fold_with(db, folder)),
         }
     }
 }
@@ -60,7 +63,6 @@ impl<'db> crate::analysis::ty::fold::TyFoldable<'db> for Provision<'db> {
 #[derive(Clone, Default)]
 pub(crate) struct Frame<'db, Data = ()> {
     provisions: Vec<Provision<'db>>,
-    root_assumptions: Option<PredicateListId<'db>>,
     data: Data,
 }
 
@@ -69,7 +71,6 @@ impl<'db> Frame<'db> {
     fn from_records(provisions: Vec<Provision<'db>>) -> Self {
         Self {
             provisions,
-            root_assumptions: None,
             data: (),
         }
     }
@@ -82,9 +83,15 @@ impl<'db, Data> Frame<'db, Data> {
         db: &'db dyn HirAnalysisDb,
         provision: Provision<'db>,
     ) -> Result<(), ()> {
-        if super::lookup_trait_goal(db, provision.goal(), self.provisions.iter().copied(), |p| {
-            p.goal()
-        })
+        if super::lookup_trait_goal(
+            db,
+            provision.goal(),
+            self.provisions
+                .iter()
+                .copied()
+                .filter(|p| !matches!(p, Provision::Bound(_))),
+            |p| p.goal(),
+        )
         .is_some()
         {
             return Err(());
@@ -100,10 +107,15 @@ pub(crate) struct Chain<'db, Data = ()> {
 }
 
 impl<'db, Data: Default> Chain<'db, Data> {
-    pub fn new(root_assumptions: PredicateListId<'db>) -> Self {
+    pub fn new(db: &'db dyn HirAnalysisDb, root_assumptions: PredicateListId<'db>) -> Self {
         Self {
             frames: vec![Frame {
-                root_assumptions: Some(root_assumptions),
+                provisions: root_assumptions
+                    .list(db)
+                    .iter()
+                    .copied()
+                    .map(Provision::Bound)
+                    .collect(),
                 ..Frame::default()
             }],
         }
@@ -111,20 +123,30 @@ impl<'db, Data: Default> Chain<'db, Data> {
 }
 
 impl<'db, Data> Chain<'db, Data> {
-    fn root_assumptions(&self) -> PredicateListId<'db> {
-        self.frames[0]
-            .root_assumptions
-            .expect("the item frame owns root premises")
+    fn root_assumptions(&self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
+        PredicateListId::new(
+            db,
+            self.frames[0]
+                .provisions
+                .iter()
+                .filter_map(|p| match p {
+                    Provision::Bound(goal) => Some(*goal),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        )
     }
 
     /// Effect registration completes the item root before any lexical opening.
-    pub fn complete_root(&mut self, assumptions: PredicateListId<'db>) {
+    pub fn complete_root(&mut self, db: &'db dyn HirAnalysisDb, assumptions: PredicateListId<'db>) {
         assert_eq!(
             self.frames.len(),
             1,
             "root completion precedes lexical frames"
         );
-        self.frames[0].root_assumptions = Some(assumptions);
+        let root = &mut self.frames[0].provisions;
+        root.retain(|p| !matches!(p, Provision::Bound(_)));
+        root.extend(assumptions.list(db).iter().copied().map(Provision::Bound));
     }
 
     /// Enter a lexical frame. This is the sole frame-push operation.
@@ -174,7 +196,9 @@ impl<'db, Data> Chain<'db, Data> {
     }
 
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = Provision<'db>> + '_ {
-        self.entries().map(|(_, provision)| provision)
+        self.entries()
+            .map(|(_, provision)| provision)
+            .filter(|p| !matches!(p, Provision::Bound(_)))
     }
 
     /// Legacy readers receive only visible entries until they migrate to context_at.
@@ -184,9 +208,16 @@ impl<'db, Data> Chain<'db, Data> {
         db: &'db dyn HirAnalysisDb,
     ) -> impl DoubleEndedIterator<Item = Provision<'db>> + '_ {
         self.entries()
+            .filter(|(_, p)| !matches!(p, Provision::Bound(_)))
             .filter(move |(position, provision)| {
-                super::lookup_trait_goal(db, provision.goal(), self.entries(), |(_, p)| p.goal())
-                    .is_some_and(|(winner, _)| winner == *position)
+                super::lookup_trait_goal(
+                    db,
+                    provision.goal(),
+                    self.entries()
+                        .filter(|(_, p)| !matches!(p, Provision::Bound(_))),
+                    |(_, p)| p.goal(),
+                )
+                .is_some_and(|(winner, _)| winner == *position)
             })
             .map(|(_, provision)| provision)
     }
@@ -198,7 +229,7 @@ impl<'db, Data> Chain<'db, Data> {
     ) -> impl DoubleEndedIterator<Item = SelectedApplication<'db>> + '_ {
         self.visible(db).filter_map(|provision| match provision {
             Provision::Named(selection) => Some(selection),
-            Provision::Evidence(..) => None,
+            Provision::Evidence(..) | Provision::Bound(_) => None,
         })
     }
 
@@ -209,13 +240,13 @@ impl<'db, Data> Chain<'db, Data> {
     ) -> impl DoubleEndedIterator<Item = (ExprId, TraitInstId<'db>)> + '_ {
         self.visible(db).filter_map(|provision| match provision {
             Provision::Evidence(value, goal) => Some((value, goal)),
-            Provision::Named(_) => None,
+            Provision::Named(_) | Provision::Bound(_) => None,
         })
     }
 
     /// Evidence establishes premises; named choices remain separate authority.
     pub fn evidence_assumptions(&self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
-        let base = self.root_assumptions();
+        let base = self.root_assumptions(db);
         let mut evidence = self.opened_evidence(db).map(|(_, goal)| goal).peekable();
         if evidence.peek().is_none() {
             return base;
@@ -341,13 +372,14 @@ pub(crate) fn recorded_chain_at<'db>(
     typed: &crate::analysis::ty::ty_check::TypedBody<'db>,
     expr: ExprId,
 ) -> Chain<'db> {
-    let mut chain = Chain::new(typed.assumptions());
-    chain.frames[0].provisions = typed
-        .root_selections(db)
-        .iter()
-        .copied()
-        .map(Provision::Named)
-        .collect();
+    let mut chain = Chain::new(db, typed.assumptions());
+    chain.frames[0].provisions.extend(
+        typed
+            .root_selections(db)
+            .iter()
+            .copied()
+            .map(Provision::Named),
+    );
     if typed.with_choices().len() == 0 {
         return chain;
     }
