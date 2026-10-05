@@ -86,12 +86,12 @@ pub contract NestedProviderMaps {
     }
 
     recv NestedProviderMsg {
-        SetInferred { key, value } uses (inferred) {
+        SetInferred { key, value } uses (mut inferred) {
             let mut map = inferred.ptr.read()
             map.set(key, value)
         }
 
-        SetExplicit { key, value } uses (explicit) {
+        SetExplicit { key, value } uses (mut explicit) {
             let mut map = explicit.ptr.read()
             map.set(key, value)
         }
@@ -112,7 +112,7 @@ pub contract NestedProviderMaps {
             direct.get(key)
         }
 
-        SetTagged { key, value } uses (tagged) {
+        SetTagged { key, value } uses (mut tagged) {
             let mut map = tagged.ptr.read()
             map.set(key, value)
         }

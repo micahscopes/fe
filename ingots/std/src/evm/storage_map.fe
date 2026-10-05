@@ -222,6 +222,7 @@ fn storagemap_get_word_with_salt<K>(key: K, salt: u256) -> u256
 
 #[inline(always)]
 fn storagemap_set_word_with_salt<K>(key: K, salt: u256, word: u256)
+    uses (storage: mut RawStorage)
     where K: StorageKey
 {
     let storage_slot = storagemap_storage_slot_with_salt(key, salt)
@@ -250,12 +251,12 @@ impl<K: StorageKey, V: WordRepr, const SALT: u256> StorageMap<K, V, SALT> {
     }
 
     #[inline(always)]
-    pub(ingot) fn set_unchecked(mut self, key: K, value: own V) {
+    pub(ingot) fn set_unchecked(mut self, key: K, value: own V) uses (storage: mut RawStorage) {
         storagemap_set_word_with_salt(key, salt: SALT, word: value.to_word())
     }
 
     #[inline(always)]
-    pub fn set(mut self, key: K, value: own V) {
+    pub fn set(mut self, key: K, value: own V) uses (storage: mut RawStorage) {
         self.set_unchecked(key: key, value)
     }
 }

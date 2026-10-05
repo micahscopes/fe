@@ -1069,9 +1069,10 @@ fn resolve_callable_effect_providers<'db>(
                         ..provider
                     })
                     .unwrap_or(specialization.provider.clone()),
-                crate::analysis::ty::ty_check::EffectProviderProvenance::Expr { .. } => {
-                    specialization.provider.clone()
-                }
+                crate::analysis::ty::ty_check::EffectProviderProvenance::Expr { .. }
+                | crate::analysis::ty::ty_check::EffectProviderProvenance::RootProvider {
+                    ..
+                } => specialization.provider.clone(),
             };
             EffectProviderSpecialization {
                 provider,

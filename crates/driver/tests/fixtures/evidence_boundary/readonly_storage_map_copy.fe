@@ -1,0 +1,44 @@
+// p10: RD111 says storage write access must show in a function's effects. StorageMap is
+// Copy, and `set` takes `mut self`. A recv arm with read-only access to the map field
+// (`uses (balances)`, not `mut balances`) copies the handle into a local and writes.
+// Expected: rejected (writing through read-only access). Also checks the plain path.
+use std::evm::{StorageMap, Evm}
+
+msg M {
+    #[selector = 0x01]
+    Peek { k: u256 } -> u256,
+    #[selector = 0x02]
+    Sneak { k: u256 } -> u256,
+}
+
+fn sneaky(_ k: u256) uses (balances: StorageMap<u256, u256>) {
+    let mut copy = balances
+    copy.set(key: k, value: 99)
+}
+
+pub contract C {
+    mut balances: StorageMap<u256, u256>,
+    recv M {
+        Peek { k } -> u256 uses (balances) { balances.get(k) }
+        Sneak { k } -> u256 uses (balances) {
+            sneaky(k)
+            balances.get(k)
+        }
+    }
+}
+
+#[test]
+fn readonly_write() uses (evm: mut Evm) {
+    let c = evm.create2<C>(value: 0, args: (), salt: 1)
+    let v: u256 = evm.call(addr: c, gas: 1000000, value: 0, message: M::Sneak { k: 3 })
+    // 99 means the read-only arm wrote storage.
+    assert!(v != 99)
+}
+
+#[test]
+fn shows_the_write_happened() uses (evm: mut Evm) {
+    let c = evm.create2<C>(value: 0, args: (), salt: 1)
+    let _w: u256 = evm.call(addr: c, gas: 1000000, value: 0, message: M::Sneak { k: 3 })
+    let v: u256 = evm.call(addr: c, gas: 1000000, value: 0, message: M::Peek { k: 3 })
+    assert!(v == 99)
+}

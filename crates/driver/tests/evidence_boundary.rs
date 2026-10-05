@@ -323,8 +323,8 @@ fn read_only_evm_cannot_construct_writable_storage_handles() {
         let file = input(&mut db, "readonly-storage", &source);
         let errors = diagnostics(&db, file);
         assert!(
-            errors.contains("error[8-0066]: mutable borrow requires a mutable place"),
-            "read-only EVM access produced a writable storage handle: {errors}"
+            errors.contains("error[8-0117]: storage mutation requires the write capability"),
+            "read-only EVM access wrote through an opened storage handle: {errors}"
         );
     }
 }
@@ -342,6 +342,211 @@ fn storage_write_capability_and_read_only_operations_remain_available() {
         let file = input(&mut db, "storage-controls", &source);
         let errors = diagnostics(&db, file);
         assert!(errors.is_empty(), "{errors}");
+    }
+}
+
+#[test]
+fn mutable_contract_storage_keeps_its_write_capability() {
+    let source = include_str!("fixtures/evidence_boundary/mutable_contract_storage.fe");
+    let mut db = database();
+    let file = input(&mut db, "mutable-contract-storage", source);
+    let errors = diagnostics(&db, file);
+    assert!(errors.is_empty(), "{errors}");
+}
+
+#[test]
+fn read_only_evm_can_construct_and_read_storage_handles() {
+    for source in [
+        "use std::evm::{Evm, StorPtr, RawStorage}\nfn peek() -> u256 uses (evm: Evm) { let p: StorPtr<u256> = evm.stor_ptr(0)\np.read() }",
+        "use std::evm::{Evm, TStorPtr, RawOps}\nfn peek() -> u256 uses (evm: Evm) { let p: TStorPtr<u256> = evm.tstor_ptr(0)\np.read() }",
+    ] {
+        let mut db = database();
+        let file = input(&mut db, "readonly-handle-construction", source);
+        let errors = diagnostics(&db, file);
+        assert!(errors.is_empty(), "{errors}");
+    }
+}
+
+#[test]
+fn read_only_storage_map_copy_requires_the_write_capability() {
+    let source = include_str!("fixtures/evidence_boundary/readonly_storage_map_copy.fe");
+    let mut db = database();
+    let file = input(&mut db, "readonly-storage-map-copy", source);
+    let errors = diagnostics(&db, file);
+    assert!(
+        errors.contains("RawStorage"),
+        "copied storage handle wrote without the write capability: {errors}"
+    );
+}
+
+#[test]
+fn copied_storage_handle_writes_require_mutable_storage_capability() {
+    for (typ, operation) in [
+        ("StorageMap<u256, u256, 0>", "copy.set(key: 1, value: 99)"),
+        ("StorPtr<u256>", "copy.write(99)"),
+        ("TStorPtr<u256>", "copy.write(99)"),
+        ("TSlot<u256, 0>", "copy.write(99)"),
+        ("SolArray<u256>", "copy.set(index: 0, value: 99)"),
+        ("SolSlot", "copy.write(offset: 0, value: 99 as u256)"),
+        (
+            "SolMapping",
+            "SolSlot::at(copy.slot_of(1 as u256)).write(offset: 0, value: 99 as u256)",
+        ),
+        ("SolEnumerableSet<u256>", "let inserted = copy.add(99)"),
+    ] {
+        let source = format!(
+            "use std::evm::*\nfn write(_ original: {typ}) uses (evm: Evm) {{\n    let mut copy = original\n    with (RawStorage = evm) {{\n        {operation}\n    }}\n}}"
+        );
+        let mut db = database();
+        let file = input(&mut db, "copied-storage-write", &source);
+        let errors = diagnostics(&db, file);
+        assert!(
+            errors.contains("mutable") || errors.contains("RawStorage"),
+            "{typ} write did not require mutable capability: {errors}"
+        );
+        let authorized = source.replace("evm: Evm", "evm: mut Evm");
+        let file = input(&mut db, "authorized-storage-write", &authorized);
+        let errors = diagnostics(&db, file);
+        assert!(
+            errors.is_empty(),
+            "{typ} authorized write rejected: {errors}"
+        );
+    }
+}
+
+#[test]
+fn copied_storage_descriptor_cannot_supply_a_mutable_helper_effect() {
+    let base = include_str!("fixtures/evidence_boundary/copied_descriptor_mutable_helper.fe");
+    for binding in ["copy", "mut copy"] {
+        let source = base.replace("with (copy)", &format!("with ({binding})"));
+        let mut db = database();
+        let file = input(&mut db, "copied-storage-helper", &source);
+        let errors = diagnostics(&db, file);
+        assert!(
+            errors.contains("storage mutation requires the write capability"),
+            "{errors}"
+        );
+        let authorized = source.replace(
+            "uses (balances: StorageMap",
+            "uses (balances: mut StorageMap",
+        );
+        let file = input(&mut db, "authorized-storage-helper", &authorized);
+        let errors = diagnostics(&db, file);
+        assert!(errors.is_empty(), "{errors}");
+    }
+}
+
+#[test]
+fn mutable_memory_effect_does_not_authorize_storage_writes() {
+    let source = "use std::evm::StorageMap\nfn write(_ original: StorageMap<u256, u256, 0>) uses (memory: mut u256) { let mut copy = original\ncopy.set(key: 1, value: 99) }";
+    let mut db = database();
+    let file = input(&mut db, "memory-is-not-storage-authority", source);
+    let errors = diagnostics(&db, file);
+    assert!(errors.contains("RawStorage"), "{errors}");
+}
+
+#[test]
+fn mutable_storage_receiver_checks_the_callers_write_effects() {
+    let source = "use std::evm::StorageMap\nstruct Store { map: StorageMap<u256, u256, 0> }\nimpl Store { fn write(mut self) { self.map.set(key: 1, value: 99) } }\nfn caller() uses (map: StorageMap<u256, u256, 0>) { let mut copy = Store { map }\ncopy.write() }";
+    let mut db = database();
+    let file = input(&mut db, "storage-receiver-readonly-caller", source);
+    let errors = diagnostics(&db, file);
+    assert!(
+        errors.contains("storage mutation requires the write capability"),
+        "{errors}"
+    );
+    assert!(errors.contains("copy.write()"), "{errors}");
+    let authorized = source.replace("uses (map: StorageMap", "uses (map: mut StorageMap");
+    let file = input(&mut db, "storage-receiver-authorized-caller", &authorized);
+    let errors = diagnostics(&db, file);
+    assert!(errors.is_empty(), "{errors}");
+}
+
+#[test]
+fn mutable_storage_receiver_transports_authority_across_a_loop() {
+    let source = "use std::evm::StorageMap\nstruct Store { map: StorageMap<u256, u256, 0> }\nimpl Store { fn write(mut self, _ value: u256) { let mut i = 0\nwhile i < 2 { self.map.set(key: i, value)\ni += 1 }\nself.map.set(key: i, value) } }\nfn caller() uses (store: mut Store) { store.write(99) }";
+    let mut db = database();
+    let file = input(&mut db, "storage-receiver-loop", source);
+    let errors = diagnostics(&db, file);
+    assert!(errors.is_empty(), "{errors}");
+}
+
+#[test]
+fn generic_storage_receiver_transports_authority_across_a_loop() {
+    let source = "use std::evm::{StorageMap, WordRepr}\nuse core::ops::Ord\nstruct Store<T> { map: StorageMap<u256, T, 0> }\nimpl<T> Store<T> where T: WordRepr + Ord + Copy { fn write(mut self, _ value: T) { let mut i = 0\nwhile i < 2 { let previous = self.map.get(i)\nif !value.lt(previous) { break }\nself.map.set(key: i, value: previous)\ni += 1 }\nself.map.set(key: i, value) } }\nfn caller() uses (store: mut Store<u256>) { store.write(99) }";
+    for source in [
+        source.to_owned(),
+        source.replace("StorageMap<u256, T, 0>", "StorageMap<u256, T>"),
+    ] {
+        let mut db = database();
+        let file = input(&mut db, "generic-storage-receiver-loop", &source);
+        let errors = diagnostics(&db, file);
+        assert!(errors.is_empty(), "{errors}");
+    }
+}
+
+#[test]
+fn storage_write_root_is_registered_inside_the_standard_library() {
+    let mut db = database();
+    let file = input(&mut db, "std-storage-root", "fn caller() {}");
+    let scope = named(&db, file, "caller").scope();
+    let raw = hir::analysis::ty::corelib::resolve_lib_trait_path(
+        &db,
+        scope,
+        "std::evm::effects::RawStorage",
+    )
+    .unwrap();
+    let root = hir::analysis::ty::resolve_default_root_effect_ty(
+        &db,
+        raw.scope(),
+        hir::analysis::ty::trait_resolution::PredicateListId::empty_list(&db),
+    );
+    assert!(
+        root.is_some(),
+        "standard-library storage methods need their registered root provider"
+    );
+}
+
+#[test]
+fn mutable_aggregate_effect_transports_storage_write_authority() {
+    let source = "use std::evm::StorageMap\nstruct Store { map: StorageMap<u256, u256, 0> }\nfn write() uses (store: mut Store) { store.map.set(key: 1, value: 99) }";
+    let mut db = database();
+    let file = input(&mut db, "mutable-storage-aggregate", source);
+    let errors = diagnostics(&db, file);
+    assert!(errors.is_empty(), "{errors}");
+}
+
+#[test]
+fn storage_effect_marker_requires_its_seal() {
+    let source = "use std::evm::StorageEffect\nstruct Memory {}\nimpl StorageEffect for Memory {}";
+    let mut db = database();
+    let file = input(&mut db, "storage-effect-seal", source);
+    let errors = diagnostics(&db, file);
+    assert!(errors.contains("StorageEffectSeal"), "{errors}");
+}
+
+#[test]
+fn copied_storage_handles_keep_read_only_access() {
+    for (typ, operation) in [
+        ("StorageMap<u256, u256, 0>", "copy.get(1)"),
+        ("StorPtr<u256>", "copy.read()"),
+        ("TStorPtr<u256>", "copy.read()"),
+        ("TSlot<u256, 0>", "copy.read()"),
+        ("TSlot<u256, 0>", "copy.ptr().read()"),
+        ("SolArray<u256>", "copy.get(0)"),
+        ("SolSlot", "copy.read(offset: 0)"),
+        ("SolMapping", "copy.slot_of(1 as u256)"),
+    ] {
+        let source = format!(
+            "use std::evm::*\nfn read(_ original: {typ}) -> u256 uses (evm: Evm) {{\n    let copy = original\n    with (RawStorage = evm) {{\n        {operation}\n    }}\n}}"
+        );
+        let mut db = database();
+        let file = input(&mut db, "copied-storage-read", &source);
+        let errors = diagnostics(&db, file);
+        assert!(
+            errors.is_empty(),
+            "{typ} read-only access rejected: {errors}"
+        );
     }
 }
 

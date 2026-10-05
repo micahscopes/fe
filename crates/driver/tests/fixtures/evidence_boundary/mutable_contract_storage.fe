@@ -1,0 +1,29 @@
+// p10: the worktree has uncommitted edits (RD111 fix: StorageMap::set and StorPtr::write
+// now need `uses (storage: mut RawStorage)`). Binary built 20:59 includes them. Check the
+// ordinary contract pattern still works: a recv arm with `uses (mut balances)` writes a
+// StorageMap field, and a free helper that takes the map mutably writes it.
+// Expected: accepted, test passes (as on master).
+use std::evm::{StorageMap, Evm}
+msg M {
+    #[selector = 0x01]
+    Put { k: u256, v: u256 } -> u256,
+}
+fn helper(_ k: u256, _ v: u256) uses (balances: mut StorageMap<u256, u256>) {
+    balances.set(key: k, value: v)
+}
+pub contract C {
+    mut balances: StorageMap<u256, u256>,
+    recv M {
+        Put { k, v } -> u256 uses (mut balances) {
+            balances.set(key: k, value: v)
+            helper(k + 1, v)
+            balances.get(k + 1)
+        }
+    }
+}
+#[test]
+fn t() uses (evm: mut Evm) {
+    let c = evm.create2<C>(value: 0, args: (), salt: 1)
+    let r: u256 = evm.call(addr: c, gas: 1000000, value: 0, message: M::Put { k: 3, v: 7 })
+    assert!(r == 7)
+}

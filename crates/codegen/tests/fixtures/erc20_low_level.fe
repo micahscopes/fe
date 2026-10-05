@@ -45,7 +45,7 @@ impl<const BALANCES_ROOT: u256, const ALLOWANCES_ROOT: u256>
         self.allowances.get(key: (owner, spender))
     }
 
-    fn approve(mut own self, owner: Address, spender: Address, value: u256) {
+    fn approve(mut own self, owner: Address, spender: Address, value: u256) uses (storage: mut RawStorage) {
         self.allowances.set(key: (owner, spender), value: value)
     }
 
@@ -60,7 +60,7 @@ impl<const BALANCES_ROOT: u256, const ALLOWANCES_ROOT: u256>
         self.owner = owner
     }
 
-    fn transfer(mut own self, from: Address, to: Address, amount: u256) uses (ops: RawOps) {
+    fn transfer(mut own self, from: Address, to: Address, amount: u256) uses (storage: mut RawStorage, ops: RawOps) {
         let from_bal = self.balance_of(addr: from)
         if from_bal < amount {
             ops.revert(data: ptr::MemSpan::empty())
@@ -70,7 +70,7 @@ impl<const BALANCES_ROOT: u256, const ALLOWANCES_ROOT: u256>
         self.balances.set(key: to, value: to_bal + amount)
     }
 
-    fn transfer_from(mut own self, owner: Address, to: Address, amount: u256) uses (ctx: Ctx, ops: RawOps) {
+    fn transfer_from(mut own self, owner: Address, to: Address, amount: u256) uses (storage: mut RawStorage, ctx: Ctx, ops: RawOps) {
         let spender = ctx.caller()
         let allowed = self.allowance(owner: owner, spender: spender)
         if allowed < amount {
@@ -80,7 +80,7 @@ impl<const BALANCES_ROOT: u256, const ALLOWANCES_ROOT: u256>
         self.allowances.set(key: (owner, spender), value: allowed - amount)
     }
 
-    fn mint(mut own self, to: Address, amount: u256) uses (ctx: Ctx, ops: RawOps) {
+    fn mint(mut own self, to: Address, amount: u256) uses (storage: mut RawStorage, ctx: Ctx, ops: RawOps) {
         let caller = ctx.caller()
         if caller != self.owner {
             ops.revert(data: ptr::MemSpan::empty())

@@ -614,7 +614,7 @@ impl<'db> TyFoldable<'db> for EffectArg<'db> {
         match self {
             EffectArg::Place(place) => EffectArg::Place(place.fold_with(db, folder)),
             EffectArg::Binding(binding) => EffectArg::Binding(binding.fold_with(db, folder)),
-            EffectArg::Value(_) | EffectArg::Unknown => self,
+            EffectArg::RootProvider { .. } | EffectArg::Value(_) | EffectArg::Unknown => self,
         }
     }
 }

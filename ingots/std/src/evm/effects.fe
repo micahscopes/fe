@@ -145,7 +145,7 @@ impl<T> StorPtr<T> {
     }
 
     /// Writes the pointed-at value.
-    pub fn write(self, _ value: T) {
+    pub fn write(self, _ value: T) uses (storage: mut RawStorage) {
         let mut ptr = self
         with (ptr) {
             core::effect_ref::write(ptr, value)
@@ -208,7 +208,7 @@ impl<T> TStorPtr<T> {
     }
 
     /// Writes the pointed-at transient value.
-    pub fn write(self, _ value: T) {
+    pub fn write(self, _ value: T) uses (storage: mut RawStorage) {
         let mut ptr = self
         with (ptr) {
             core::effect_ref::write(ptr, value)
@@ -240,7 +240,7 @@ impl<T, const SLOT: u256> TSlot<T, SLOT> {
     }
 
     /// Runtime pointer to the assigned slot.
-    pub fn ptr(mut self) -> TStorPtr<T> {
+    pub fn ptr(self) -> TStorPtr<T> {
         self.ptr_unchecked()
     }
 
@@ -252,7 +252,7 @@ impl<T, const SLOT: u256> TSlot<T, SLOT> {
     }
 
     /// Writes the value at the assigned slot.
-    pub fn write(mut self, _ value: T) {
+    pub fn write(mut self, _ value: T) uses (storage: mut RawStorage) {
         self.ptr_unchecked().write(value)
     }
 }
@@ -302,12 +302,40 @@ pub trait RawMem: EvmCapabilitySeal {
     fn mstore8(mut self, addr: *u8, value: u8)
 }
 
+/// A storage domain whose mutable effect authorizes writes through storage handles.
+/// Copying a descriptor does not create a mutable effect.
+trait StorageEffectSeal {}
+pub trait StorageEffect: StorageEffectSeal {}
+
+impl<T> StorageEffectSeal for StorPtr<T> {}
+impl<T> StorageEffect for StorPtr<T> {}
+impl<T> StorageEffectSeal for TStorPtr<T> {}
+impl<T> StorageEffect for TStorPtr<T> {}
+impl<T, const SLOT: u256> StorageEffectSeal for TSlot<T, SLOT> {}
+impl<T, const SLOT: u256> StorageEffect for TSlot<T, SLOT> {}
+impl<K, V, const SALT: u256> StorageEffectSeal for super::storage_map::StorageMap<K, V, SALT> {}
+impl<K, V, const SALT: u256> StorageEffect for super::storage_map::StorageMap<K, V, SALT> {}
+impl<K, const LEN_SALT: u256, const WORD_SALT: u256> StorageEffectSeal for super::storage_bytes::StorageBytes<K, LEN_SALT, WORD_SALT> {}
+impl<K, const LEN_SALT: u256, const WORD_SALT: u256> StorageEffect for super::storage_bytes::StorageBytes<K, LEN_SALT, WORD_SALT> {}
+impl<const BITS: u256, const SALT: u256> StorageEffectSeal for super::storage_packed_array::StoragePackedArray<BITS, SALT> {}
+impl<const BITS: u256, const SALT: u256> StorageEffect for super::storage_packed_array::StoragePackedArray<BITS, SALT> {}
+impl<T> StorageEffectSeal for super::mutex::Mutex<T> {}
+impl<T> StorageEffect for super::mutex::Mutex<T> {}
+impl<T> StorageEffectSeal for super::sol_array::SolArray<T> {}
+impl<T> StorageEffect for super::sol_array::SolArray<T> {}
+impl<T> StorageEffectSeal for super::sol_set::SolEnumerableSet<T> {}
+impl<T> StorageEffect for super::sol_set::SolEnumerableSet<T> {}
+impl StorageEffectSeal for super::sol_slot::SolSlot {}
+impl StorageEffect for super::sol_slot::SolSlot {}
+impl StorageEffectSeal for super::mapping::SolMapping {}
+impl StorageEffect for super::mapping::SolMapping {}
+
 /// Low-level raw storage operations.
 pub trait RawStorage: EvmCapabilitySeal {
     fn sload(self, _: u256) -> u256
     fn sstore(mut self, slot: u256, value: u256)
-    /// Creates a writable storage handle, requiring write access to the EVM effect.
-    fn stor_ptr<T>(mut self, _ slot: u256) -> StorPtr<T> {
+    /// Creates a storage handle. Writing through it requires the write capability.
+    fn stor_ptr<T>(self, _ slot: u256) -> StorPtr<T> {
         StorPtr { handle: slot }
     }
 }
@@ -319,8 +347,8 @@ pub trait RawOps: RawMem + RawStorage {
     fn calldata_ptr<T>(self, _ offset: u256) -> CalldataPtr<T> {
         CalldataPtr { offset }
     }
-    /// Creates a writable transient handle, requiring write access to the EVM effect.
-    fn tstor_ptr<T>(mut self, _ slot: u256) -> TStorPtr<T> {
+    /// Creates a transient handle. Writing through it requires the write capability.
+    fn tstor_ptr<T>(self, _ slot: u256) -> TStorPtr<T> {
         TStorPtr { slot }
     }
     fn calldatacopy(

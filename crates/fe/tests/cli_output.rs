@@ -4660,3 +4660,23 @@ fn public_obligations_check_build_and_execute() {
         );
     }
 }
+
+#[test]
+fn rd111_storage_write_capability_at_o0_and_o2() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/storage_write_capability.fe");
+    for level in ["0", "2"] {
+        let (output, exit_code) = run_fe_main(&[
+            "test",
+            "--jobs",
+            "1",
+            "--optimize",
+            level,
+            fixture.to_str().expect("fixture path utf8"),
+        ]);
+        assert_eq!(
+            exit_code, 0,
+            "storage capability controls failed at -O{level}:\n{output}"
+        );
+    }
+}

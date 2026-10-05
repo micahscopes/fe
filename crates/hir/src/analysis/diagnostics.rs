@@ -3325,6 +3325,12 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 }
             }
 
+            Self::StorageWriteCapabilityRequired { primary } => {
+                primary_diag(Severity::Error, "storage mutation requires the write capability",
+                    "provide mutable RawStorage access or declare a mutable storage effect",
+                    primary.resolve(db), error_code)
+            }
+
             Self::MissingEffect { primary, func, key } => {
                 let func_name = func
                     .name(db)

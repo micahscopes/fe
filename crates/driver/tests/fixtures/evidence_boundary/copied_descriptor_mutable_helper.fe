@@ -1,0 +1,8 @@
+use std::evm::StorageMap
+fn write_balance() uses (balances: mut StorageMap<u256, u256, 0>) {
+    balances.set(key: 1, value: 99)
+}
+fn read_only() uses (balances: StorageMap<u256, u256, 0>) {
+    let mut copy = balances
+    with (copy) { write_balance() }
+}

@@ -127,7 +127,7 @@ fn hold_across_set(_ key: u256) uses (slot: mut u256, map: mut StorageMap<u256, 
 
 // Rejected: a storage pointer can be built at a map entry's slot, so a
 // provider bound to an arbitrary pointer may alias the map.
-fn through_pointer(_ key: u256, pointer: StorPtr<u256>, map: mut StorageMap<u256, u256, 42>) {
+fn through_pointer(_ key: u256, pointer: StorPtr<u256>, map: mut StorageMap<u256, u256, 42>) uses (raw: mut RawStorage) {
     with (u256 = pointer, StorageMap<u256, u256, 42> = map) {
         hold_across_set(key)
     }

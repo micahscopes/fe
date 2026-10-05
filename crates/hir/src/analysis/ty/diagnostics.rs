@@ -500,6 +500,10 @@ pub enum BodyDiag<'db> {
         given: TyId<'db>,
     },
 
+    StorageWriteCapabilityRequired {
+        primary: DynLazySpan<'db>,
+    },
+
     MissingEffect {
         primary: DynLazySpan<'db>,
         func: Func<'db>,
@@ -1101,6 +1105,7 @@ impl<'db> BodyDiag<'db> {
             Self::InvalidEffectKey { .. } => 51,
             Self::ContractRootEffectTraitNotImplemented { .. } => 53,
             Self::ContractRootEffectTypeNotZeroSized { .. } => 54,
+            Self::StorageWriteCapabilityRequired { .. } => 117,
             Self::MissingEffect { .. } => 36,
             Self::EffectMutabilityMismatch { .. } => 37,
             Self::EffectTypeMismatch { .. } => 38,

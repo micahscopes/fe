@@ -6,7 +6,7 @@ use crate::analysis::ty::trait_resolution::{
 use crate::analysis::ty::ty_check::EffectParamOwner;
 use crate::core::adt_lower::lower_adt;
 use crate::core::hir_def::{
-    Func, GenericParamOwner, IdentId, ItemKind, PathId, TopLevelMod, Trait, TypeAlias,
+    Func, GenericParamOwner, IdentId, ItemKind, TopLevelMod, Trait, TypeAlias,
     scope_graph::{ScopeGraph, ScopeId},
 };
 use adt_def::{AdtDef, AdtRef};
@@ -850,7 +850,10 @@ pub fn resolve_default_root_effect_ty<'db>(
     scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
 ) -> Option<TyId<'db>> {
-    let target_path = PathId::from_segments(db, DEFAULT_TARGET_TY_PATH);
+    let mut target_path = corelib::lib_root_path(db, scope, DEFAULT_TARGET_TY_PATH[0]);
+    for segment in &DEFAULT_TARGET_TY_PATH[1..] {
+        target_path = target_path.push_str(db, segment);
+    }
     let target_ty = match resolve_path(db, target_path, scope, assumptions, false).ok()? {
         PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => ty,
         _ => return None,

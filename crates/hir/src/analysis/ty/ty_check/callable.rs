@@ -56,6 +56,11 @@ pub(super) enum CallGenericArgPhase {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub enum EffectProviderProvenance<'db> {
+    RootProvider {
+        owner: BodyOwner<'db>,
+        site: super::EffectParamSite<'db>,
+        provider_idx: u32,
+    },
     Binding {
         owner: BodyOwner<'db>,
         binding: LocalBinding<'db>,
@@ -169,6 +174,7 @@ impl<'db> TyFoldable<'db> for EffectProviderSpecialization<'db> {
                     binding: binding.fold_with(db, folder),
                 }
             }
+            root @ EffectProviderProvenance::RootProvider { .. } => root,
             EffectProviderProvenance::Expr { owner, expr } => {
                 EffectProviderProvenance::Expr { owner, expr }
             }

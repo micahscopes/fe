@@ -3,7 +3,7 @@ use common::ingot::IngotKind;
 use either::Either;
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec1::SmallVec;
 
 use crate::core::hir_def::{
@@ -29,19 +29,19 @@ use super::{
 use crate::analysis::place::{Place, PlaceBase, PlaceProjection};
 use crate::analysis::semantic::{RuntimeSizeError, runtime_size_bytes};
 use crate::analysis::ty::{
-    adt_def::AdtRef,
+    adt_def::{AdtRef, instantiate_adt_field_shape},
     assoc_const::{AssocConstUse, InherentConstUse},
     canonical::{Canonicalized, Solution},
     const_ty::{BodyHoleSite, HoleAnchor, LoweringContext, instantiate_inherent_const_decl_ty},
     corelib::{
         is_core_evidence_ty, resolve_core_range_types, resolve_core_trait, resolve_lib_func_path,
-        resolve_lib_type_path,
+        resolve_lib_trait_path, resolve_lib_type_path,
     },
     diagnostics::{BodyDiag, FuncBodyDiag, MustUseSubject},
     effects::{
-        BarrierReason, EffectBarrier, EffectKeyKind, EffectPatternKey, EffectQuery,
-        EffectRequirementDecl, EffectRequirementKey, EffectWitness, ForwardedEffectKey,
-        PatternSlotKind, StoredEffectKey, StoredTraitKey, StoredTypeKey, TraitPatternKey,
+        BarrierReason, EffectBarrier, EffectFamily, EffectKeyKind, EffectPatternKey, EffectQuery,
+        EffectQueryMode, EffectRequirementKey, EffectWitness, ForwardedEffectKey, PatternSlotKind,
+        PatternSlots, StoredEffectKey, StoredTraitKey, StoredTypeKey, TraitPatternKey,
         TypePatternKey, WitnessTransport,
         elaborate::{
             build_barrier_pattern_for_with_key,
@@ -1847,6 +1847,18 @@ impl<'db> TyChecker<'db> {
             return Vec::new();
         };
 
+        if func.is_method(self.db)
+            && let Some(receiver) = callable.arg_ty(self.db, 0)
+            && let Some((CapabilityKind::Mut, inner)) =
+                self.table.fold_ty(self.db, receiver).as_capability(self.db)
+            && self.is_storage_effect_ty(inner)
+            && self.storage_write_provider().is_none()
+            && !self.storage_write_authorized(func, None, 0, call_span.clone())
+        {
+            self.push_diag(BodyDiag::StorageWriteCapabilityRequired { primary: call_span });
+            return Vec::new();
+        }
+
         if !func.has_effects(self.db) {
             return Vec::new();
         }
@@ -1863,7 +1875,7 @@ impl<'db> TyChecker<'db> {
 
         let provided_span = |provided: ProvidedEffect<'db>| match provided.origin {
             EffectOrigin::With { value_expr } => Some(value_expr.span(body).into()),
-            EffectOrigin::Param { .. } => None,
+            EffectOrigin::Param { .. } | EffectOrigin::RootProvider { .. } => None,
         };
         let reqs = effect_requirement_decls_for_callable(self.db, callable.callable_def);
         for (param_idx, req) in reqs.iter().enumerate() {
@@ -1876,7 +1888,7 @@ impl<'db> TyChecker<'db> {
                 .copied()
                 .flatten();
 
-            match self.resolve_effect_query(func, req.clone(), query.clone(), call_span.clone()) {
+            match self.resolve_effect_query(func, req.name, query.clone(), call_span.clone()) {
                 EffectResolution::Chosen(evidence) => {
                     let (provider, arg_style, layout_view, key_kind, instantiated_key_ty) =
                         match *evidence {
@@ -1984,6 +1996,27 @@ impl<'db> TyChecker<'db> {
                         self.push_diag(diag);
                         continue;
                     }
+                    if req.required_mut
+                        && (matches!(
+                            self.concrete_borrow_provider_for_effect_handle_ty(provider.ty),
+                            Some(
+                                super::ProviderAddressSpace::Storage
+                                    | super::ProviderAddressSpace::Transient
+                            )
+                        ) || self.is_storage_effect_ty(provider.ty)
+                            || provider_target_ty.is_some_and(|ty| self.is_storage_effect_ty(ty)))
+                        && !self.storage_write_authorized(
+                            func,
+                            req.name,
+                            req.binding_idx,
+                            call_span.clone(),
+                        )
+                    {
+                        self.push_diag(BodyDiag::StorageWriteCapabilityRequired {
+                            primary: call_span.clone(),
+                        });
+                        continue;
+                    }
                     if !self.effect_arg_is_valid(&arg, pass_mode) {
                         let diag = BodyDiag::MissingEffect {
                             primary: call_span.clone(),
@@ -2077,7 +2110,7 @@ impl<'db> TyChecker<'db> {
                         arg,
                         with_source: match provider.origin {
                             EffectOrigin::With { value_expr } => Some(value_expr),
-                            EffectOrigin::Param { .. } => None,
+                            EffectOrigin::Param { .. } | EffectOrigin::RootProvider { .. } => None,
                         },
                         pass_mode,
                         layout_view,
@@ -2131,7 +2164,7 @@ impl<'db> TyChecker<'db> {
     fn resolve_effect_query(
         &mut self,
         func: crate::hir_def::Func<'db>,
-        req: EffectRequirementDecl<'db>,
+        required_name: Option<IdentId<'db>>,
         query: EffectQuery<'db>,
         call_span: DynLazySpan<'db>,
     ) -> EffectResolution<'db> {
@@ -2159,7 +2192,7 @@ impl<'db> TyChecker<'db> {
                             EffectResolution::Missing
                         };
                     }
-                    return self.choose_effect_evidence(req.name, viable);
+                    return self.choose_effect_evidence(required_name, viable);
                 }
                 FrameLookupResult::KeyedFamily { entries, providers } => {
                     let mut family_viable = SmallVec::new();
@@ -2190,7 +2223,7 @@ impl<'db> TyChecker<'db> {
                         }
                     }
                     if !family_viable.is_empty() {
-                        return self.choose_effect_evidence(req.name, family_viable);
+                        return self.choose_effect_evidence(required_name, family_viable);
                     }
                 }
                 FrameLookupResult::Unkeyed { providers } => {
@@ -2211,13 +2244,187 @@ impl<'db> TyChecker<'db> {
                         }
                     }
                     if !viable.is_empty() {
-                        return self.choose_effect_evidence(req.name, viable);
+                        return self.choose_effect_evidence(required_name, viable);
                     }
                 }
             }
         }
+        if let EffectPatternKey::Trait(key) = &query.key
+            && query.required_mut
+            && resolve_lib_trait_path(self.db, self.env.scope(), "std::evm::effects::RawStorage")
+                == Some(key.def)
+            && let Some(provider) = self.storage_write_provider()
+            && let Some(evidence) = self.evaluate_unkeyed_trait_provider(key.clone(), provider)
+        {
+            return EffectResolution::Chosen(Box::new(evidence));
+        }
         let _ = (func, call_span);
         EffectResolution::Missing
+    }
+
+    fn storage_write_authorized(
+        &mut self,
+        func: crate::hir_def::Func<'db>,
+        required_name: Option<IdentId<'db>>,
+        binding_idx: u32,
+        span: DynLazySpan<'db>,
+    ) -> bool {
+        let Some(raw) =
+            resolve_lib_trait_path(self.db, self.env.scope(), "std::evm::effects::RawStorage")
+        else {
+            return false;
+        };
+        let query = EffectQuery {
+            binding_idx,
+            required_mut: true,
+            mode: EffectQueryMode::Precise,
+            key: EffectPatternKey::Trait(TraitPatternKey {
+                def: raw,
+                args_no_self: SmallVec::new(),
+                assoc_bindings: SmallVec::new(),
+                family: EffectFamily::Trait(raw),
+                slots: PatternSlots::empty(),
+            }),
+        };
+        let EffectResolution::Chosen(evidence) =
+            self.resolve_effect_query(func, required_name, query, span)
+        else {
+            return false;
+        };
+        if !self.provider_supports_mut(evidence_provider(&evidence)) {
+            return false;
+        }
+        let commit = match *evidence {
+            EffectEvidence::Keyed { commit, .. }
+            | EffectEvidence::UnkeyedType { commit, .. }
+            | EffectEvidence::UnkeyedTrait { commit, .. } => commit,
+        };
+        self.apply_effect_commit_plan(commit)
+    }
+
+    fn is_storage_effect_ty(&mut self, ty: TyId<'db>) -> bool {
+        // Incomplete classification requires authority; it never grants authority.
+        self.storage_effect_affinity(ty).unwrap_or(true)
+    }
+
+    fn storage_effect_affinity(&mut self, ty: TyId<'db>) -> Option<bool> {
+        let Some(storage_effect) = resolve_lib_trait_path(
+            self.db,
+            self.env.scope(),
+            "std::evm::effects::StorageEffect",
+        ) else {
+            // Core-only ingots cannot contain standard-library storage descriptors.
+            return Some(false);
+        };
+        let mut pending = vec![ty];
+        let mut visited = FxHashSet::default();
+        while let Some(ty) = pending.pop() {
+            let ty = self.table.fold_ty(self.db, ty);
+            if !visited.insert(ty) {
+                continue;
+            }
+            if visited.len() > 256 {
+                return None;
+            }
+            if let Some((kind, inner)) = ty.as_capability(self.db) {
+                if kind == CapabilityKind::Mut {
+                    pending.push(inner);
+                }
+                continue;
+            }
+            let goal = TraitInstId::new(self.db, storage_effect, vec![ty], IndexMap::new());
+            if matches!(
+                self.trait_effect_goal_satisfiability(goal),
+                GoalSatisfiability::Satisfied(_)
+            ) {
+                return Some(true);
+            }
+            pending.extend(ty.field_types(self.db));
+            if let Some(adt) = ty.adt_def(self.db)
+                && matches!(adt.adt_ref(self.db), AdtRef::Enum(_))
+            {
+                for (variant, fields) in adt.fields(self.db).iter().enumerate() {
+                    for field in 0..fields.num_types() {
+                        pending.push(instantiate_adt_field_shape(
+                            self.db,
+                            adt,
+                            variant,
+                            field,
+                            ty.generic_args(self.db),
+                        ));
+                    }
+                }
+            }
+            if ty.is_array(self.db) {
+                pending.extend(ty.generic_args(self.db).first().copied());
+            }
+        }
+        Some(false)
+    }
+
+    /// Authority comes from mutable effects or a mutable storage receiver whose
+    /// caller was checked. A mutable local alone cannot grant authority.
+    fn storage_write_provider(&mut self) -> Option<ProvidedEffect<'db>> {
+        let site = crate::analysis::semantic::effect_param_site(self.env.owner())?;
+        let view = crate::core::semantic::EffectEnvView::new(site);
+        let raw =
+            resolve_lib_trait_path(self.db, self.env.scope(), "std::evm::effects::RawStorage")?;
+        let mut storage_authority = matches!(self.env.owner(), BodyOwner::ContractInit { .. });
+        if let BodyOwner::Func(func) = self.env.owner()
+            && func.is_method(self.db)
+            && let Some(receiver) = func.arg_tys(self.db).first()
+            && let Some((CapabilityKind::Mut, inner)) =
+                receiver.instantiate_identity().as_capability(self.db)
+        {
+            storage_authority |= self.storage_effect_affinity(inner) == Some(true);
+        }
+        for requirement in view.requirements(self.db).into_iter().filter(|r| r.is_mut) {
+            let idx = requirement.binding_idx as usize;
+            let Some(binding) = view.resolved_binding(self.db, idx) else {
+                continue;
+            };
+            let Some(ty) = view.visible_effect_binding_ty(self.db, idx) else {
+                continue;
+            };
+            let raw_goal = TraitInstId::new(self.db, raw, vec![ty], IndexMap::new());
+            if matches!(
+                self.trait_effect_goal_satisfiability(raw_goal),
+                GoalSatisfiability::Satisfied(_)
+            ) {
+                return Some(ProvidedEffect {
+                    origin: EffectOrigin::Param {
+                        site,
+                        index: idx,
+                        name: Some(requirement.binding_name),
+                    },
+                    ty,
+                    is_mut: true,
+                    binding: Some(LocalBinding::effect_param(&binding)),
+                });
+            }
+            storage_authority |= matches!(
+                binding.provider.semantics.address_space,
+                Some(super::ProviderAddressSpace::Storage | super::ProviderAddressSpace::Transient)
+            ) || self.storage_effect_affinity(ty) == Some(true);
+        }
+        if !storage_authority {
+            return None;
+        }
+        let provider = view.providers(self.db).into_iter().find(|provider| {
+            matches!(
+                provider.source,
+                crate::core::semantic::ProviderSource::RootProvider { .. }
+            )
+        })?;
+        Some(ProvidedEffect {
+            origin: EffectOrigin::RootProvider {
+                site,
+                provider_idx: provider.provider_idx,
+            },
+            ty: provider.provider_ty,
+            is_mut: true,
+            binding: None,
+        })
     }
 
     fn match_family_keyed_entry(
@@ -2452,6 +2659,9 @@ impl<'db> TyChecker<'db> {
         target_ty: TyId<'db>,
         _: bool,
     ) -> Option<EffectArgStyle> {
+        if matches!(provider.origin, EffectOrigin::RootProvider { .. }) {
+            return Some(EffectArgStyle::Value);
+        }
         let target_ty = normalize_ty(self.db, target_ty, self.env.scope(), self.env.assumptions());
         match provider_semantics(self.db, self.env.scope(), self.env.assumptions(), target_ty)
             .evidence
@@ -2466,6 +2676,7 @@ impl<'db> TyChecker<'db> {
             | ProviderLayoutEvidence::ContractField => {}
         }
         let place = match provider.origin {
+            EffectOrigin::RootProvider { .. } => None,
             EffectOrigin::With { value_expr } => self.env.expr_place(value_expr),
             EffectOrigin::Param { .. } => provider
                 .binding
@@ -2486,6 +2697,12 @@ impl<'db> TyChecker<'db> {
         arg_style: EffectArgStyle,
         required_mut: bool,
     ) -> (super::EffectArg<'db>, super::EffectPassMode) {
+        if let EffectOrigin::RootProvider { site, provider_idx } = provider.origin {
+            return (
+                super::EffectArg::RootProvider { site, provider_idx },
+                super::EffectPassMode::ByValue,
+            );
+        }
         if required_mut && !self.provider_supports_mut(provider) {
             return (super::EffectArg::Unknown, super::EffectPassMode::Unknown);
         }
@@ -2494,6 +2711,9 @@ impl<'db> TyChecker<'db> {
             EffectArgStyle::Place => {
                 let place = match provider.origin {
                     EffectOrigin::With { value_expr } => self.env.expr_place(value_expr),
+                    EffectOrigin::RootProvider { .. } => {
+                        unreachable!("root provider handled above")
+                    }
                     EffectOrigin::Param { .. } => provider
                         .binding
                         .map(|binding| Place::new(PlaceBase::Binding(binding))),
@@ -2508,6 +2728,7 @@ impl<'db> TyChecker<'db> {
                     super::EffectArg::Value(value_expr),
                     super::EffectPassMode::ByTempPlace,
                 ),
+                EffectOrigin::RootProvider { .. } => unreachable!("root provider handled above"),
                 EffectOrigin::Param { .. } => {
                     (super::EffectArg::Unknown, super::EffectPassMode::Unknown)
                 }
@@ -2515,6 +2736,9 @@ impl<'db> TyChecker<'db> {
             EffectArgStyle::Value => (
                 match provider.origin {
                     EffectOrigin::With { value_expr } => super::EffectArg::Value(value_expr),
+                    EffectOrigin::RootProvider { .. } => {
+                        unreachable!("root provider handled above")
+                    }
                     EffectOrigin::Param { .. } => provider
                         .binding
                         .map_or(super::EffectArg::Unknown, super::EffectArg::Binding),
@@ -2545,6 +2769,12 @@ impl<'db> TyChecker<'db> {
         pass_mode: super::EffectPassMode,
         provider_target_ty: Option<TyId<'db>>,
     ) -> Option<TyId<'db>> {
+        if let super::EffectArg::RootProvider { site, provider_idx } = arg {
+            return self
+                .env
+                .provider_binding(*site, *provider_idx)
+                .map(|p| p.provider_ty);
+        }
         match pass_mode {
             super::EffectPassMode::ByValue => Some(self.table.fold_ty(self.db, provider.ty)),
             super::EffectPassMode::ByTempPlace => {
@@ -2558,7 +2788,9 @@ impl<'db> TyChecker<'db> {
                         Some(binding)
                     }
                     super::EffectArg::Binding(binding) => Some(*binding),
-                    super::EffectArg::Value(_) | super::EffectArg::Unknown => provider.binding,
+                    super::EffectArg::RootProvider { .. }
+                    | super::EffectArg::Value(_)
+                    | super::EffectArg::Unknown => provider.binding,
                 }?;
 
                 let inferred = match binding {
@@ -2655,6 +2887,10 @@ impl<'db> TyChecker<'db> {
                 super::EffectArg::Binding(binding) => {
                     self.concrete_borrow_provider_for_binding(*binding)
                 }
+                super::EffectArg::RootProvider { site, provider_idx } => self
+                    .env
+                    .provider_binding(*site, *provider_idx)
+                    .and_then(|p| p.semantics.address_space),
                 super::EffectArg::Unknown => None,
             },
             super::EffectPassMode::ByPlace => match arg {
@@ -2662,7 +2898,9 @@ impl<'db> TyChecker<'db> {
                 super::EffectArg::Binding(binding) => {
                     self.concrete_borrow_provider_for_binding(*binding)
                 }
-                super::EffectArg::Value(_) | super::EffectArg::Unknown => None,
+                super::EffectArg::RootProvider { .. }
+                | super::EffectArg::Value(_)
+                | super::EffectArg::Unknown => None,
             },
             super::EffectPassMode::ByValue => match arg {
                 super::EffectArg::Place(place) => self.concrete_borrow_provider_for_place(place),
@@ -2673,6 +2911,10 @@ impl<'db> TyChecker<'db> {
                 super::EffectArg::Binding(binding) => {
                     self.concrete_borrow_provider_for_binding(*binding)
                 }
+                super::EffectArg::RootProvider { site, provider_idx } => self
+                    .env
+                    .provider_binding(*site, *provider_idx)
+                    .and_then(|p| p.semantics.address_space),
                 super::EffectArg::Unknown => None,
             },
             super::EffectPassMode::Unknown => None,
@@ -2686,7 +2928,9 @@ impl<'db> TyChecker<'db> {
                 Some(binding)
             }
             super::EffectArg::Binding(binding) => Some(*binding),
-            super::EffectArg::Value(_) | super::EffectArg::Unknown => None,
+            super::EffectArg::RootProvider { .. }
+            | super::EffectArg::Value(_)
+            | super::EffectArg::Unknown => None,
         };
 
         matches!(binding, Some(LocalBinding::EffectParam { .. }))
@@ -2766,6 +3010,9 @@ impl<'db> TyChecker<'db> {
         provided: ProvidedEffect<'db>,
         arg: &super::EffectArg<'db>,
     ) -> Option<ProviderBinding<'db>> {
+        if let super::EffectArg::RootProvider { site, provider_idx } = arg {
+            return self.env.provider_binding(*site, *provider_idx);
+        }
         let binding = match arg {
             super::EffectArg::Place(place) => {
                 if !place.projections.is_empty() {
@@ -2775,7 +3022,9 @@ impl<'db> TyChecker<'db> {
                 Some(binding)
             }
             super::EffectArg::Binding(binding) => Some(*binding),
-            super::EffectArg::Value(_) | super::EffectArg::Unknown => provided.binding,
+            super::EffectArg::RootProvider { .. }
+            | super::EffectArg::Value(_)
+            | super::EffectArg::Unknown => provided.binding,
         }?;
         match binding {
             LocalBinding::EffectParam {
@@ -2795,6 +3044,13 @@ impl<'db> TyChecker<'db> {
         provided: ProvidedEffect<'db>,
         arg: &super::EffectArg<'db>,
     ) -> Option<EffectProviderProvenance<'db>> {
+        if let super::EffectArg::RootProvider { site, provider_idx } = arg {
+            return Some(EffectProviderProvenance::RootProvider {
+                owner: self.env.owner(),
+                site: *site,
+                provider_idx: *provider_idx,
+            });
+        }
         let owner = self.env.owner();
         let binding = match arg {
             super::EffectArg::Place(place) => {
@@ -2810,7 +3066,9 @@ impl<'db> TyChecker<'db> {
                 Some(binding)
             }
             super::EffectArg::Binding(binding) => Some(*binding),
-            super::EffectArg::Value(_) | super::EffectArg::Unknown => provided.binding,
+            super::EffectArg::RootProvider { .. }
+            | super::EffectArg::Value(_)
+            | super::EffectArg::Unknown => provided.binding,
         };
         binding
             .map(|binding| EffectProviderProvenance::Binding { owner, binding })
@@ -2819,7 +3077,7 @@ impl<'db> TyChecker<'db> {
                     owner,
                     expr: value_expr,
                 }),
-                EffectOrigin::Param { .. } => None,
+                EffectOrigin::Param { .. } | EffectOrigin::RootProvider { .. } => None,
             })
     }
 
@@ -4724,7 +4982,7 @@ impl<'db> TyChecker<'db> {
             super::EffectArg::Binding(binding) => self
                 .contract_field_layout_context_for_place(&Place::new(PlaceBase::Binding(*binding))),
             super::EffectArg::Value(expr) => self.contract_field_layout_context(*expr),
-            super::EffectArg::Unknown => None,
+            super::EffectArg::RootProvider { .. } | super::EffectArg::Unknown => None,
         }
     }
 

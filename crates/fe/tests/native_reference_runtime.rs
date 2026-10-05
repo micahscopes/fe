@@ -47,6 +47,11 @@ fn trusted_source(source: String) -> (DriverDataBase, File) {
 fn native_space_source(space: &str, writable: bool) -> String {
     let kind = if writable { "mut" } else { "ref" };
     let effect_mode = if writable { "mut " } else { "" };
+    let write_authority = if writable && matches!(space, "Storage" | "TransientStorage") {
+        "uses (storage: mut std::evm::effects::RawStorage)"
+    } else {
+        ""
+    };
     let offset = if space == "Calldata" { 4 } else { 0 };
     let initialize = if matches!(space, "Storage" | "TransientStorage") {
         "value = Cell { prefix: 7, pair: [11, 23] }"
@@ -98,7 +103,7 @@ msg NativeMsg {{
 }}
 pub contract NativeSpaceContract {{
     recv NativeMsg {{
-        Run {{ seed }} -> u8 {{
+        Run {{ seed }} -> u8 {write_authority} {{
             let mut provider = Provider<Cell> {{ address: {offset} }}
             with (provider) {{ observe(seed) }}
         }}

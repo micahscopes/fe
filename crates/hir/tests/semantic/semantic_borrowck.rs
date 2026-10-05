@@ -257,7 +257,7 @@ fn pending_calls_preserve_independent_boundary_diagnostics() {
         (
             r#"
 trait Operation { fn apply() }
-fn bad<T: Operation>(destination: std::evm::StorPtr<*u256>, value: *u256) {
+fn bad<T: Operation>(destination: std::evm::StorPtr<*u256>, value: *u256) uses (storage: mut std::evm::effects::RawStorage) {
     destination.write(value)
     T::apply()
 }
@@ -9476,6 +9476,14 @@ fn access() {
 }
 "#,
         );
+        let source = if matches!(space, "Storage" | "TransientStorage") {
+            source.replace(
+                "fn access() {",
+                "fn access() uses (storage: mut std::evm::effects::RawStorage) {",
+            )
+        } else {
+            source
+        };
         let diags = checked_trusted_borrow_diags(&source);
         if matches!(space, "Calldata" | "Code") {
             assert!(
@@ -9532,6 +9540,14 @@ fn populated(_ handle: ref u256) {
 fn store(_ handle: ref u256) uses (holder: mut Holder) { holder.value = Maybe::Full(handle) }
 "#,
         );
+        let source = if matches!(space, "Storage" | "TransientStorage") {
+            // This fixture exercises storage layout, with write authority explicit.
+            source
+                .replace("fn empty() {", "fn empty() uses (storage: mut std::evm::effects::RawStorage) {")
+                .replace("fn populated(_ handle: ref u256) {", "fn populated(_ handle: ref u256) uses (storage: mut std::evm::effects::RawStorage) {")
+        } else {
+            source
+        };
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_trusted_effect_handle_module("boundary_store.fe".into(), &source);
         let (top_mod, _) = db.top_mod(file);
@@ -9710,6 +9726,14 @@ fn caller() {
 }
 "#,
         );
+        let source = if matches!(space, "Storage" | "TransientStorage") {
+            source.replace(
+                "fn caller() {",
+                "fn caller() uses (storage: mut std::evm::effects::RawStorage) {",
+            )
+        } else {
+            source
+        };
         let diags = checked_trusted_borrow_diags(&source);
         if space == "Memory" {
             assert!(diags.is_empty(), "{space}: {diags}");
@@ -9828,6 +9852,14 @@ with (ptr) {{ forward() }} }}
 "#
             );
             let source = boundary_provider_source(space, "Cell", &body);
+            let source = if matches!(space, "Storage" | "TransientStorage") {
+                source.replace(
+                    "fn caller() {",
+                    "fn caller() uses (storage: mut std::evm::effects::RawStorage) {",
+                )
+            } else {
+                source
+            };
             let diags = checked_trusted_borrow_diags(&source);
             if space == "Memory" {
                 assert!(diags.is_empty(), "{space} {call}: {diags}");
@@ -10552,6 +10584,10 @@ fn caller(_ wrapped: mut Wrapped) {
     with (ptr) { replace(mut wrapped) }
 }
 "#,
+    );
+    let source = source.replace(
+        "fn caller(_ wrapped: mut Wrapped) {",
+        "fn caller(_ wrapped: mut Wrapped) uses (storage: mut std::evm::effects::RawStorage) {",
     );
     let diagnostics = checked_trusted_borrow_diags(&source);
     assert!(diagnostics.contains("transport violation"), "{diagnostics}");

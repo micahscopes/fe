@@ -104,6 +104,11 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             EffectArg::Binding(binding) => self
                 .binding_provider(*binding)
                 .and_then(|provider| provider.semantics.address_space),
+            EffectArg::RootProvider { site, provider_idx } => EffectEnvView::new(*site)
+                .providers(self.db)
+                .into_iter()
+                .find(|p| p.provider_idx == *provider_idx)
+                .and_then(|p| p.semantics.address_space),
             EffectArg::Value(_) | EffectArg::Unknown => None,
         })
     }
@@ -187,6 +192,21 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     }
                 }
                 EffectArg::Value(_) => unreachable!("with provider is missing its source"),
+                EffectArg::RootProvider { site, provider_idx } => {
+                    let provider = EffectEnvView::new(*site)
+                        .providers(self.db)
+                        .into_iter()
+                        .find(|p| p.provider_idx == *provider_idx)
+                        .expect("registered root provider missing");
+                    let local = self.alloc_local(provider.provider_ty, Mutability::Mutable, None);
+                    self.locals[local.index()].role =
+                        crate::analysis::semantic::SemanticLocalRole::DirectValue {
+                            provenance: crate::analysis::semantic::ValueProvenance::RootProvider(
+                                provider,
+                            ),
+                        };
+                    SEffectArgValue::Place(SPlace::new(local))
+                }
                 EffectArg::Unknown => {
                     SEffectArgValue::Value(SOperand::synthetic(self.unit_value()))
                 }

@@ -62,3 +62,15 @@ error[8-0066]: mutable borrow requires a mutable place
 34 │ {
 35 │     store.balances.set(key: 1, value: 2)
    │     ^^^^^^^^^^^^^^ cannot borrow as `mut`
+
+error[8-0117]: storage mutation requires the write capability
+   ┌─ storage_capability_boundaries.fe:29:5
+   │
+29 │     slot.write(1)
+   │     ^^^^^^^^^^^^^ provide mutable RawStorage access or declare a mutable storage effect
+
+error[8-0117]: storage mutation requires the write capability
+   ┌─ storage_capability_boundaries.fe:35:5
+   │
+35 │     store.balances.set(key: 1, value: 2)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ provide mutable RawStorage access or declare a mutable storage effect

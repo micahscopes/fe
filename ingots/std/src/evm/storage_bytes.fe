@@ -130,7 +130,7 @@ impl<K: StorageKey + Copy, const LEN_SALT: u256, const WORD_SALT: u256>
         lengths.get_unchecked(key)
     }
 
-    pub fn clear(mut self, key: K) {
+    pub fn clear(mut self, key: K) uses (storage: mut RawStorage) {
         let mut lengths: StorageMap<K, u256, LEN_SALT> = StorageMap::new_unchecked()
         let mut words: StorageMap<(K, u256), u256, WORD_SALT> = StorageMap::new_unchecked()
 
@@ -147,7 +147,7 @@ impl<K: StorageKey + Copy, const LEN_SALT: u256, const WORD_SALT: u256>
     /// Store bytes copied directly from calldata.
     ///
     /// `data_ptr` is a raw calldata byte offset.
-    pub fn store_from_calldata(mut self, key: K, data_ptr: u256, len: u256) {
+    pub fn store_from_calldata(mut self, key: K, data_ptr: u256, len: u256) uses (storage: mut RawStorage) {
         self.clear(key)
 
         let mut lengths: StorageMap<K, u256, LEN_SALT> = StorageMap::new_unchecked()
@@ -171,6 +171,7 @@ impl<K: StorageKey + Copy, const LEN_SALT: u256, const WORD_SALT: u256>
 
     /// Store bytes from an arbitrary ABI byte view.
     pub fn store_view<I>(mut self, key: K, view: BytesView<I>)
+        uses (storage: mut RawStorage)
         where I: ByteInput
     {
         self.clear(key)

@@ -4212,6 +4212,10 @@ impl<'db> TyChecker<'db> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
 pub enum EffectArg<'db> {
+    RootProvider {
+        site: EffectParamSite<'db>,
+        provider_idx: u32,
+    },
     Place(Place<'db>),
     Value(ExprId),
     Binding(LocalBinding<'db>),
@@ -5827,7 +5831,7 @@ impl<'db> TypedBody<'db> {
                         seen,
                         visited_locals,
                     ),
-                    EffectArg::Unknown => None,
+                    EffectArg::RootProvider { .. } | EffectArg::Unknown => None,
                 }
             }
         }?;
