@@ -1150,7 +1150,7 @@ impl<'db> BodyDiag<'db> {
             Self::ConstValueMustBeKnown(..) => 64,
             Self::ConstDependencyMustBeKnown { .. } => 90,
             Self::ConstEvaluationFailed { .. } => 89,
-            Self::ReturnTypeNotComputable(..) => 117,
+            Self::ReturnTypeNotComputable(..) => 118,
             Self::WhereConstPredicateFailed(..) => 91,
             Self::GenericConstPredicateUnsupported(..) => 92,
             Self::RecursiveConstRequirement(..) => 94,
