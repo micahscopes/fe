@@ -51,26 +51,24 @@ fn associated_family_parameter_diags<'db>(
     let mut names = FxHashMap::default();
     for (idx, param) in owner.generic_params(db).data(db).iter().enumerate() {
         let span: DynLazySpan<'db> = owner.span().generic_params().param(idx).into();
-        let mut emit = |error| {
-            out.push(
-                TyLowerDiag::AssociatedFamilyDeclaration {
-                    span: span.clone(),
-                    error,
-                }
-                .into(),
-            )
+        let family_diag = |error| -> TyDiagCollection<'db> {
+            TyLowerDiag::AssociatedFamilyDeclaration {
+                span: span.clone(),
+                error,
+            }
+            .into()
         };
         if let Some(name) = param.name().to_opt()
             && names.insert(name, idx).is_some()
         {
-            emit(AssociatedFamilyError::DuplicateParameter);
+            out.push(family_diag(AssociatedFamilyError::DuplicateParameter));
         }
         let GenericParam::Type(param) = param else {
-            emit(AssociatedFamilyError::ConstParameter);
+            out.push(family_diag(AssociatedFamilyError::ConstParameter));
             continue;
         };
         let subject = ty::ty_lower::assoc_type_param(db, owner, idx);
-        for bound in &param.bounds {
+        for (bound_idx, bound) in param.bounds.iter().enumerate() {
             let TypeBound::Trait(trait_ref) = bound else {
                 continue;
             };
@@ -78,7 +76,7 @@ fn associated_family_parameter_diags<'db>(
                 continue;
             }
             let AssocTypeOwner::Trait(trait_, family_idx) = owner else {
-                emit(AssociatedFamilyError::ImplementationBound);
+                out.push(family_diag(AssociatedFamilyError::ImplementationBound));
                 continue;
             };
             match ty::trait_lower::lower_trait_ref(
@@ -102,7 +100,7 @@ fn associated_family_parameter_diags<'db>(
                             .values()
                             .any(|ty| ty.has_invalid(db))
                     {
-                        emit(AssociatedFamilyError::InvalidGuard);
+                        out.push(family_diag(AssociatedFamilyError::InvalidGuard));
                         continue;
                     }
                     let family = trait_
@@ -113,14 +111,73 @@ fn associated_family_parameter_diags<'db>(
                     let solve_cx = ty::trait_resolution::TraitSolveCx::new(db, owner.scope())
                         .with_assumptions(assumptions);
                     if !ty::trait_resolution::check_trait_inst_wf(db, solve_cx, inst).is_wf() {
-                        emit(AssociatedFamilyError::InvalidGuard);
+                        out.push(family_diag(AssociatedFamilyError::InvalidGuard));
                     }
                 }
-                _ => emit(AssociatedFamilyError::InvalidGuard),
+                Err(error) => {
+                    let bound_span = owner
+                        .span()
+                        .generic_params()
+                        .param(idx)
+                        .into_type_param()
+                        .bounds()
+                        .bound(bound_idx)
+                        .trait_bound();
+                    match assoc_bound_lowering_diag(db, *trait_ref, bound_span, error) {
+                        Some(diag) => out.push(diag),
+                        None => out.push(family_diag(AssociatedFamilyError::InvalidGuard)),
+                    }
+                }
+                Ok(_) => out.push(family_diag(AssociatedFamilyError::InvalidGuard)),
             }
         }
     }
     out
+}
+
+/// The diagnostic for a written trait bound that did not lower to a trait.
+fn bound_lowering_diag<'db>(
+    db: &'db dyn HirAnalysisDb,
+    trait_ref: crate::hir_def::TraitRefId<'db>,
+    span: crate::span::params::LazyTraitRefSpan<'db>,
+    error: ty::trait_lower::TraitRefLowerError<'db>,
+    context: &str,
+) -> Option<TyDiagCollection<'db>> {
+    use name_resolution::{ExpectedPathKind, diagnostics::PathResDiag};
+    use ty::trait_lower::TraitRefLowerError;
+    match error {
+        TraitRefLowerError::PathResError(err) => {
+            let path = trait_ref.path(db).to_opt()?;
+            err.into_diag(db, path, span.path(), ExpectedPathKind::Trait)
+                .map(Into::into)
+        }
+        TraitRefLowerError::InvalidDomain(res) => {
+            let ident = trait_ref.path(db).to_opt()?.ident(db).to_opt()?;
+            Some(PathResDiag::ExpectedTrait(span.path().into(), ident, res.kind_name()).into())
+        }
+        TraitRefLowerError::Cycle => Some(cyclic_trait_ref_diag(span.path().into(), context)),
+        TraitRefLowerError::UnsafeLocalBoundBlanketImpl | TraitRefLowerError::Ignored => None,
+    }
+}
+
+/// As [`bound_lowering_diag`], for a bound on an associated type or one of
+/// its parameters. A failure inside the bound's generic arguments has no span
+/// of its own on the bound's path, so it gets no diagnostic here.
+fn assoc_bound_lowering_diag<'db>(
+    db: &'db dyn HirAnalysisDb,
+    trait_ref: crate::hir_def::TraitRefId<'db>,
+    span: crate::span::params::LazyTraitRefSpan<'db>,
+    error: ty::trait_lower::TraitRefLowerError<'db>,
+) -> Option<TyDiagCollection<'db>> {
+    if let ty::trait_lower::TraitRefLowerError::PathResError(err) = &error {
+        let path = trait_ref.path(db).to_opt()?;
+        if !std::iter::successors(Some(path), |path| path.parent(db))
+            .any(|prefix| prefix == err.failed_at)
+        {
+            return None;
+        }
+    }
+    bound_lowering_diag(db, trait_ref, span, error, "associated type bound")
 }
 
 /// Shared helper for duplicate name diagnostics.
@@ -475,6 +532,7 @@ impl<'db> Trait<'db> {
             let solve_cx = ty::trait_resolution::TraitSolveCx::new(db, assoc.scope())
                 .with_assumptions(assumptions);
             for bound in assoc.bounds(db) {
+                let span = assoc.span().bounds().bound(bound.index()).trait_bound();
                 let valid = match bound.lower_trait_inst(
                     db,
                     subject,
@@ -500,12 +558,20 @@ impl<'db> Trait<'db> {
                             )
                             .is_wf()
                     }
-                    Err(_) => false,
+                    Err(error) => {
+                        if let Some(diag) =
+                            assoc_bound_lowering_diag(db, bound.trait_ref(db), span.clone(), error)
+                        {
+                            diags.push(diag);
+                            continue;
+                        }
+                        false
+                    }
                 };
                 if !valid {
                     diags.push(
                         TyLowerDiag::AssociatedFamilyDeclaration {
-                            span: assoc.span().bounds().into(),
+                            span: span.into(),
                             error: ty::diagnostics::AssociatedFamilyError::InvalidOutputBound,
                         }
                         .into(),
@@ -1769,8 +1835,7 @@ impl<'db> GenericParamOwner<'db> {
     }
 
     pub fn diags_trait_bounds(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
-        use name_resolution::{ExpectedPathKind, diagnostics::PathResDiag};
-        use ty::trait_lower::{self, TraitRefLowerError};
+        use ty::trait_lower;
         use ty::trait_resolution::check_trait_inst_wf;
 
         let mut out = Vec::new();
@@ -1836,35 +1901,9 @@ impl<'db> GenericParamOwner<'db> {
                             out.push(diag);
                         }
                     }
-                    Err(TraitRefLowerError::PathResError(err)) => {
-                        if let Some(path) = tr.path(db).to_opt()
-                            && let Some(diag) =
-                                err.into_diag(db, path, span.path(), ExpectedPathKind::Trait)
-                        {
-                            out.push(diag.into());
-                        }
+                    Err(error) => {
+                        out.extend(bound_lowering_diag(db, *tr, span, error, "trait bound"));
                     }
-                    Err(TraitRefLowerError::InvalidDomain(res)) => {
-                        if let Some(path) = tr.path(db).to_opt()
-                            && let Some(ident) = path.ident(db).to_opt()
-                        {
-                            out.push(
-                                PathResDiag::ExpectedTrait(
-                                    span.path().into(),
-                                    ident,
-                                    res.kind_name(),
-                                )
-                                .into(),
-                            );
-                        }
-                    }
-                    Err(TraitRefLowerError::Cycle) => {
-                        out.push(cyclic_trait_ref_diag(span.path().into(), "trait bound"));
-                    }
-                    Err(
-                        TraitRefLowerError::UnsafeLocalBoundBlanketImpl
-                        | TraitRefLowerError::Ignored,
-                    ) => {}
                 }
             }
         }

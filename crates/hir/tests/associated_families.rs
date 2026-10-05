@@ -676,7 +676,7 @@ fn family_signatures_are_checked_without_a_use_site() {
         (
             "type Out<T: Missing>",
             "type Out<U> = u256",
-            Some("invalid associated type parameter guard"),
+            Some("`Missing` is not found"),
         ),
         (
             "type Out<T, T>",
@@ -931,4 +931,13 @@ fn growing_projections_stop_at_the_normalization_limit() {
     ] {
         check_cases(&[(source, Some("type normalization limit exceeded"))]);
     }
+}
+
+#[test]
+fn associated_type_bounds_name_a_missing_trait() {
+    check_cases(&[
+        ("trait T1 { type Bar: T2 }", Some("`T2` is not found")),
+        ("trait T1 { type Bar<T>: T2 }", Some("`T2` is not found")),
+        ("trait T1 { type Bar<T: T2> }", Some("`T2` is not found")),
+    ]);
 }
