@@ -1063,15 +1063,7 @@ pub(super) fn reify_quote_fragment_types<'db>(
             Ok((*site, *path))
         })
         .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
-    let cast_types = node
-        .cast_primitives
-        .iter()
-        .map(|(site, primitive)| {
-            let primitive = quote_hir_primitive(*primitive)
-                .ok_or(QuoteConstructionFault::ReadBackCastPrimitiveIsUnsupported)?;
-            Ok((*site, TypeId::new(db, TypeKind::Primitive(primitive))))
-        })
-        .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
+    let cast_types = quote_cast_types(db, node)?;
     let variants = node
         .rooted_constructors
         .iter()
@@ -1087,6 +1079,22 @@ pub(super) fn reify_quote_fragment_types<'db>(
         local_types,
         record_paths,
     })
+}
+
+/// The checked target type of every cast in a frozen template, keyed by its
+/// template expression. Fragments and quoted bodies share this one table.
+pub(super) fn quote_cast_types<'db>(
+    db: &'db dyn HirDb,
+    node: &FrozenCodeNode,
+) -> Result<Vec<(ExprId, TypeId<'db>)>, QuoteConstructionError> {
+    node.cast_primitives
+        .iter()
+        .map(|(site, primitive)| {
+            let primitive = quote_hir_primitive(*primitive)
+                .ok_or(QuoteConstructionFault::ReadBackCastPrimitiveIsUnsupported)?;
+            Ok((*site, TypeId::new(db, TypeKind::Primitive(primitive))))
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -1273,6 +1281,7 @@ fn emit_closed_quoted_items<'db>(
                 );
             }
         }
+        let cast_types = quote_cast_types(db, node)?;
         let emit = QuoteEmitCtx {
             db,
             request,
@@ -1284,6 +1293,7 @@ fn emit_closed_quoted_items<'db>(
             fragment_sources: &fragment_sources,
             code_root,
             provider_scope: owner.scope(),
+            cast_types: &cast_types,
         };
         for (item_index, item) in items.iter().enumerate().skip(start) {
             if let QuoteItem::Hole(slot) = item {
@@ -1364,6 +1374,7 @@ struct QuoteEmitCtx<'a, 'db> {
     fragment_sources: &'a [Option<QuoteFragmentSource<'db>>],
     code_root: usize,
     provider_scope: ScopeId<'db>,
+    cast_types: &'a [(ExprId, TypeId<'db>)],
 }
 
 impl<'db> QuoteEmitCtx<'_, 'db> {
@@ -1772,6 +1783,7 @@ fn emit_quoted_function<'db>(
                         emit.provider_scope,
                         QuoteBodyBindings {
                             holes: &emit.node.holes,
+                            cast_types: emit.cast_types,
                             rooted_funcs: &rooted_paths,
                             generic_uses: &generics,
                             ..Default::default()
@@ -1805,6 +1817,7 @@ fn emit_quoted_function<'db>(
                 emit.provider_scope,
                 QuoteBodyBindings {
                     holes: &emit.node.holes,
+                    cast_types: emit.cast_types,
                     fragments: Some((emit.code, emit.fragment_sources)),
                     open_bindings: &open_bindings,
                     owner_generic_bindings: generic_names,
@@ -2270,6 +2283,7 @@ fn quoted_impl_const<'db>(
                 emit.provider_scope,
                 QuoteBodyBindings {
                     holes: &emit.node.holes,
+                    cast_types: emit.cast_types,
                     fragments: Some((emit.code, emit.fragment_sources)),
                     rooted_funcs: &rooted_paths,
                     ..Default::default()

@@ -3021,6 +3021,16 @@ fn quoted_function_copy_has_its_own_node_limit(fixture: Fixture<&str>) {
     test_utils::snap_test!(rendered, &snapshot_path);
 }
 
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_forms/allowed", glob: "*.fe")]
+fn quoted_forms_elaborate_in_every_position(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).unwrap();
+    let authored = field_authority_fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("quoted form elaborates")
+        .expect("generation");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
 #[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_alias_arguments/allowed", glob: "*.fe")]
 fn quoted_alias_constructor_preserves_arguments(fixture: Fixture<&str>) {
     let url = Url::from_file_path(fixture.path()).unwrap();

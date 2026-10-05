@@ -71,7 +71,7 @@ quotation_faults! {
         AuthoredFunctionLocatorIsAmbiguous => "quoted authored function locator is ambiguous",
         BinderIsClassifiedTwice => "quoted binder is classified twice",
         BodyCopyIsMissing => "quoted body copy is missing",
-        CastNeedsACheckedTypeBeforeTransplantation => "quoted cast needs a checked type before transplantation",
+        CastHasNoFrozenType => "quoted cast has no recorded target type",
         CodeRootIsMissing => "quoted code root is missing",
         CodeSpliceHasNoFrozenNode => "quoted code splice has no frozen node",
         CodeSpliceRequiresFragmentTransplantation => "quoted code splice requires fragment transplantation",

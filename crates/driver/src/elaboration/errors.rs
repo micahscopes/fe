@@ -38,7 +38,7 @@ freezing_protocol_faults! {
     SelfConstructionOutsideAMethodNeedsTransplantation => "quoted Self construction outside a method needs transplantation",
     SelfPathNeedsCheckedTransplantation => "quoted Self path needs checked transplantation",
     AssociatedTypeHasExtraCheckedNames => "quoted associated type has extra checked names",
-    CastNeedsACheckedPrimitiveTypeBeforeTransplantation => "quoted cast needs a checked primitive type before transplantation",
+    CastNeedsACheckedPrimitiveType => "a cast inside a quote must name a primitive type",
     ConstWhereLocalOrValueUseNeedsCheckedReification => "quoted const where local or value use needs checked reification",
     EffectUseNeedsASimpleBoundPath => "quoted effect use needs a simple bound path",
     FragmentConstPredicateNeedsCheckedReification => "quoted fragment const predicate needs checked reification",

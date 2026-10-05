@@ -1207,6 +1207,7 @@ pub(crate) struct QuoteMethodCall<'db> {
 #[derive(Default)]
 pub(super) struct QuoteBodyBindings<'a, 'db> {
     pub(super) holes: &'a [FrozenCodeHole],
+    pub(super) cast_types: &'a [(ExprId, TypeId<'db>)],
     pub(super) fragments: Option<(&'a FrozenCode, &'a [Option<QuoteFragmentSource<'db>>])>,
     pub(super) open_bindings: &'a [(IdentId<'db>, usize)],
     pub(super) owner_generic_bindings: &'a [IdentId<'db>],
@@ -1542,6 +1543,7 @@ where
     ) -> Result<(ExprId, QuoteCopySummary<'db>), QuoteConstructionError> {
         let QuoteBodyBindings {
             holes,
+            cast_types,
             fragments,
             open_bindings,
             owner_generic_bindings,
@@ -1591,6 +1593,7 @@ where
         }
         map.allow_self = allow_self;
         map.self_record_inits = self_record_inits.to_vec();
+        map.cast_types = cast_types.iter().copied().collect();
         for (stmt, ty) in local_types {
             classify(
                 &mut map.local_types,
@@ -1926,14 +1929,12 @@ where
                 *op,
             ),
             Expr::Un(value, op) => Expr::Un(self.copy_quote_expr(template, *value, map)?, *op),
-            Expr::Cast(value, Partial::Present(ty)) => {
+            Expr::Cast(value, Partial::Present(_)) => {
                 let checked = map
                     .cast_types
                     .get(&old)
                     .copied()
-                    .or_else(|| matches!(ty.data(db), TypeKind::Primitive(_)).then_some(*ty));
-                let checked = checked
-                    .ok_or(QuoteConstructionFault::CastNeedsACheckedTypeBeforeTransplantation)?;
+                    .ok_or(QuoteConstructionFault::CastHasNoFrozenType)?;
                 Expr::Cast(
                     self.copy_quote_expr(template, *value, map)?,
                     Partial::Present(checked),
