@@ -367,14 +367,10 @@ fn check_ingot_and_dependencies(
     report: Option<&ReportContext>,
     seen: &mut HashSet<Url>,
 ) -> bool {
-    let prepared = match driver::elaboration::prepare_target(db, ingot_url) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            eprintln!("{}", error.render(db));
-            return true;
-        }
+    let Some(prepared) = crate::generation::prepare_or_report(db, ingot_url) else {
+        return true;
     };
-    let db = prepared.as_ref().unwrap_or(db);
+    let db = &*prepared;
 
     if !seen.insert(ingot_url.clone()) {
         return false;
@@ -463,14 +459,10 @@ fn check_single_file(
     // Add the file to the workspace
     db.workspace().touch(db, file_url.clone(), Some(content));
 
-    let prepared = match driver::elaboration::prepare_target(db, &file_url) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            eprintln!("{}", error.render(db));
-            return true;
-        }
+    let Some(prepared) = crate::generation::prepare_or_report(db, &file_url) else {
+        return true;
     };
-    let db = prepared.as_ref().unwrap_or(db);
+    let db = &*prepared;
 
     // Try to get the file and check it for errors
     if let Some(file) = db.workspace().get(db, &file_url) {

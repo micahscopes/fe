@@ -110,6 +110,25 @@ fn suite_error_result(suite: &str, kind: &str, message: String) -> Vec<TestResul
     }]
 }
 
+/// A suite whose declarations could not be generated: report it and run nothing.
+fn generation_failure(
+    db: &DriverDataBase,
+    error: &driver::elaboration::ElaborationError,
+    suite: &str,
+    output: &mut String,
+    report: Option<&ReportContext>,
+) -> SuitePreparation {
+    let message = error.render(db);
+    let _ = writeln!(output, "{message}");
+    if let Some(report) = report {
+        write_report_error(report, "compilation_errors.txt", &message);
+    }
+    SuitePreparation {
+        results: suite_error_result(suite, "compile", message),
+        single_jobs: Vec::new(),
+    }
+}
+
 pub(super) fn write_report_error(report: &ReportContext, filename: &str, contents: &str) {
     let dir = report.root_dir.join("errors");
     let _ = create_dir_all_utf8(&dir);
@@ -1639,21 +1658,11 @@ fn prepare_tests_single_file(
     };
 
     db.workspace().touch(db, file_url.clone(), Some(content));
-    let prepared = match driver::elaboration::prepare_target(db, &file_url) {
+    let prepared = match crate::generation::prepare(db, &file_url) {
         Ok(prepared) => prepared,
-        Err(error) => {
-            let message = error.render(db);
-            let _ = writeln!(output, "{message}");
-            if let Some(report) = report {
-                write_report_error(report, "compilation_errors.txt", &message);
-            }
-            return SuitePreparation {
-                results: suite_error_result(suite, "compile", message),
-                single_jobs: Vec::new(),
-            };
-        }
+        Err(error) => return generation_failure(db, &error, suite, output, report),
     };
-    let db = prepared.as_ref().unwrap_or(db);
+    let db = &*prepared;
 
     let Some(file) = db.workspace().get(db, &file_url) else {
         return SuitePreparation {
@@ -1853,21 +1862,11 @@ fn prepare_tests_ingot(
         };
     }
 
-    let prepared = match driver::elaboration::prepare_target(db, &ingot_url) {
+    let prepared = match crate::generation::prepare(db, &ingot_url) {
         Ok(prepared) => prepared,
-        Err(error) => {
-            let message = error.render(db);
-            let _ = writeln!(output, "{message}");
-            if let Some(report) = report {
-                write_report_error(report, "compilation_errors.txt", &message);
-            }
-            return SuitePreparation {
-                results: suite_error_result(suite, "compile", message),
-                single_jobs: Vec::new(),
-            };
-        }
+        Err(error) => return generation_failure(db, &error, suite, output, report),
     };
-    let db = prepared.as_ref().unwrap_or(db);
+    let db = &*prepared;
 
     let Some(ingot) = db.workspace().containing_ingot(db, ingot_url.clone()) else {
         return SuitePreparation {
