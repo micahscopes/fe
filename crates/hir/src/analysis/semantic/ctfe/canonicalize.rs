@@ -161,6 +161,9 @@ fn canonicalize_semantic_consts_from_body_with_mode<'db>(
         }
     }
 
+    if matches!(mode, ConstCanonicalizationMode::Runtime) {
+        discard_unused_evidence_constants(db, &mut body);
+    }
     body
 }
 
@@ -192,6 +195,7 @@ fn canonicalize_stmt<'db>(
                 cx.body.locals[dst.index()].ty,
                 locals,
                 cx.layout_index_locals[dst.index()],
+                stmt.origin,
             );
             locals[dst.index()] = value;
             if let SExpr::Call {
@@ -363,6 +367,7 @@ fn canonicalize_expr<'db>(
     result_ty: TyId<'db>,
     locals: &LocalConstMap<'db>,
     preserves_layout_index: bool,
+    origin: crate::analysis::semantic::SemOrigin<'db>,
 ) -> (SExpr<'db>, Option<SemConstId<'db>>) {
     if let SExpr::Const(constant @ SConst::Ref(_)) = expr {
         let (constant, value) = canonicalize_const(cx.db, cx.instance, constant, result_ty);
@@ -381,8 +386,7 @@ fn canonicalize_expr<'db>(
             _ => false,
         };
         if !has_runtime_evidence {
-            match attempt_optional_const_fold(cx.db, cx.body, result_ty, expr, locals, synthetic())
-            {
+            match attempt_optional_const_fold(cx.db, cx.body, result_ty, expr, locals, origin) {
                 FoldAttempt::Folded(value) => {
                     let value = canonicalize_const_value(cx.db, value.value());
                     if matches!(value.value(cx.db), SemConstValue::Structural { .. })
@@ -391,6 +395,19 @@ fn canonicalize_expr<'db>(
                             crate::analysis::semantic::sem_const_ty(cx.db, value),
                         ) == cx.instance.normalized_ty(cx.db, result_ty)
                     {
+                        if matches!(
+                            value.value(cx.db),
+                            SemConstValue::Structural {
+                                handle: crate::analysis::semantic::StructuralHandle::Evidence(_),
+                                ..
+                            }
+                        ) && matches!(cx.mode, ConstCanonicalizationMode::Runtime)
+                        {
+                            return (
+                                SExpr::Const(SConst::from_trusted_source(cx.db, value)),
+                                Some(value),
+                            );
+                        }
                         return (expr.clone(), Some(value));
                     }
                     if let Some(value) =
@@ -501,8 +518,47 @@ fn block_successors<'db>(term: &STerminatorKind<'db>) -> Vec<SBlockId> {
     }
 }
 
-fn synthetic<'db>() -> crate::analysis::semantic::SemOrigin<'db> {
-    crate::analysis::semantic::SemOrigin::Synthetic
+/// A completely evaluated witness needs no runtime operation once every
+/// consumer has folded. The operation-preserving body still owns checking.
+fn discard_unused_evidence_constants<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: &mut SemanticBody<'db>,
+) {
+    use crate::analysis::semantic::normalized::{
+        expr_used_locals, place_used_locals, terminator_used_locals,
+    };
+    let mut used = FxHashSet::default();
+    for block in &body.blocks {
+        used.extend(terminator_used_locals(&block.terminator.kind));
+        for statement in &block.stmts {
+            match &statement.kind {
+                SStmtKind::Assign { expr, .. } => used.extend(expr_used_locals(expr)),
+                SStmtKind::Store { dst, src } => {
+                    used.extend(place_used_locals(dst));
+                    used.insert(src.value);
+                }
+            }
+        }
+    }
+    for block in &mut body.blocks {
+        block.stmts.retain(|statement| {
+            let SStmtKind::Assign {
+                dst,
+                expr: SExpr::Const(SConst::Value(value)),
+            } = &statement.kind
+            else {
+                return true;
+            };
+            used.contains(dst)
+                || !matches!(
+                    value.value().value(db),
+                    SemConstValue::Structural {
+                        handle: crate::analysis::semantic::StructuralHandle::Evidence(_),
+                        ..
+                    }
+                )
+        });
+    }
 }
 
 fn canonicalize_const_value<'db>(

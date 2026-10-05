@@ -1,0 +1,27 @@
+use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+impl Read for Subject as Alternative { const fn read() -> u256 { 2 } }
+const fn read_with<T>(_ evidence: Evidence<Read<T>>) -> u256 {
+    with (evidence) { <T as Read>::read() }
+}
+#[test]
+fn named_evidence_survives_optional_folding() {
+    let evidence = with (Alternative) { prove<Read<Subject>>() }
+    assert(read_with<Subject>(evidence) == 2)
+}
+
+const fn pair<T>(_ left: Evidence<Read<T>>, _ right: Evidence<Read<T>>) -> u256 {
+    let first = with (left) { <T as Read>::read() }
+    let second = with (right) { <T as Read>::read() }
+    let again = with (left) { <T as Read>::read() }
+    first * 100 + second * 10 + again
+}
+#[test]
+fn distinct_witnesses_survive_runtime_folding_in_both_orders() {
+    let ordinary = prove<Read<Subject>>()
+    let selected = with (Alternative) { prove<Read<Subject>>() }
+    assert(pair<Subject>(ordinary, selected) == 121)
+    assert(pair<Subject>(selected, ordinary) == 212)
+}

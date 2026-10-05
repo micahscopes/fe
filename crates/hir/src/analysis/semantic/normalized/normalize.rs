@@ -2965,7 +2965,7 @@ pub(super) fn normalized_source_local_value_ty<'db>(
     copied_scalar_ty(db, instance.normalized_ty(db, ty))
 }
 
-fn expr_used_locals(expr: &SExpr<'_>) -> Vec<SLocalId> {
+pub(crate) fn expr_used_locals(expr: &SExpr<'_>) -> Vec<SLocalId> {
     let mut locals = Vec::new();
     match expr {
         SExpr::Forward(value)
@@ -2993,9 +2993,13 @@ fn expr_used_locals(expr: &SExpr<'_>) -> Vec<SLocalId> {
             locals.push(index.value);
         }
         SExpr::Call {
-            args, effect_args, ..
+            args,
+            effect_args,
+            provisions,
+            ..
         } => {
             locals.extend(args.iter().map(|arg| arg.value));
+            locals.extend(provisions.iter().map(|(operand, _)| operand.value));
             for arg in effect_args {
                 match &arg.arg {
                     crate::analysis::semantic::SEffectArgValue::Place(place) => {
@@ -3015,7 +3019,7 @@ fn expr_used_locals(expr: &SExpr<'_>) -> Vec<SLocalId> {
     locals
 }
 
-fn place_used_locals(place: &SPlace<'_>) -> Vec<SLocalId> {
+pub(crate) fn place_used_locals(place: &SPlace<'_>) -> Vec<SLocalId> {
     std::iter::once(place.local)
         .chain(place.path.iter().filter_map(|projection| match projection {
             Projection::Index(IndexSource::Dynamic(index)) => Some(*index),
@@ -3029,7 +3033,7 @@ fn place_used_locals(place: &SPlace<'_>) -> Vec<SLocalId> {
         .collect()
 }
 
-fn terminator_used_locals(terminator: &STerminatorKind<'_>) -> Vec<SLocalId> {
+pub(crate) fn terminator_used_locals(terminator: &STerminatorKind<'_>) -> Vec<SLocalId> {
     match terminator {
         STerminatorKind::Goto(_)
         | STerminatorKind::Assert { .. }

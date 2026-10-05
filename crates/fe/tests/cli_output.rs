@@ -4811,6 +4811,11 @@ fn rd103_evidence_ordinary_function_at_o0_and_o2() {
 }
 
 #[test]
+fn evidence_const_helper_runtime_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_const_helper_runtime.fe");
+}
+
+#[test]
 fn evidence_scope_is_frozen_before_specialization_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("evidence_scope_freeze.fe");
 }

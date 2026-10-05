@@ -13,5 +13,6 @@ pub use admission::{
 pub use ir::*;
 pub use layout_plan::*;
 pub use normalize::{NormalizeError, NormalizedArtifacts, normalize_raw_body};
+pub(crate) use normalize::{expr_used_locals, place_used_locals, terminator_used_locals};
 pub(crate) use verify::normalized_cfg;
 pub use verify::{NormalizedBodyVerifyError, verify_normalized_body};
