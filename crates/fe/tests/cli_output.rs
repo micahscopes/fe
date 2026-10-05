@@ -566,7 +566,7 @@ fn test_cli_build_native_executes_representative_programs_at_o0_and_o1() {
 fn native_exit_code(source: &str, level: &str) -> Option<i32> {
     let temp = tempdir().expect("tempdir");
     let executable = build_native_program(source, level, temp.path());
-    native_program_exit_code(&executable, &[], level)
+    native_program_exit_code(&executable, &[], level, Duration::from_secs(10))
 }
 
 #[cfg(all(
@@ -604,12 +604,17 @@ fn build_native_program(source: &str, level: &str, temp: &Path) -> PathBuf {
         all(target_arch = "aarch64", target_os = "macos")
     )
 ))]
-fn native_program_exit_code(executable: &Path, args: &[&str], level: &str) -> Option<i32> {
+fn native_program_exit_code(
+    executable: &Path,
+    args: &[&str],
+    level: &str,
+    timeout: Duration,
+) -> Option<i32> {
     let mut child = Command::new(executable)
         .args(args)
         .spawn()
         .expect("run native executable");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait().expect("poll native executable") {
             return status.code();
@@ -617,7 +622,7 @@ fn native_program_exit_code(executable: &Path, args: &[&str], level: &str) -> Op
         if Instant::now() >= deadline {
             child.kill().expect("kill timed out native executable");
             child.wait().expect("reap native executable");
-            panic!("native program {args:?} did not finish within 10 seconds at O{level}");
+            panic!("native program {args:?} did not finish within {timeout:?} at O{level}");
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -805,14 +810,21 @@ pub fn main(argc: i32, argv: **u8) -> i32 {
             (&[""][..], 97),
         ] {
             assert_eq!(
-                native_program_exit_code(&executable, args, level),
+                native_program_exit_code(&executable, args, level, Duration::from_secs(10)),
                 Some(expected),
                 "native arithmetic selector control {args:?} failed at O{level}"
             );
         }
         for ((ty, op, value, rhs), selector) in cases.iter().zip(&selectors) {
             assert_eq!(
-                native_program_exit_code(&executable, &[selector], level),
+                native_program_exit_code(
+                    &executable,
+                    &[selector],
+                    level,
+                    // A trapped child can wait on the system core handler even
+                    // with RLIMIT_CORE=0; keep normal-program timeouts strict.
+                    Duration::from_secs(30),
+                ),
                 None,
                 "checked {ty} {value} {op} {rhs} did not trap at O{level}"
             );
