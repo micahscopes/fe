@@ -174,14 +174,61 @@ fn application_requirement_diags<'db>(
     type_uses
         .into_iter()
         .filter_map(|(used_path, ty)| {
-            check_type_application_requirements(db, solve_cx, ty).into_diag(
-                path_span
-                    .clone()
-                    .segment(used_path.segment_index(db))
-                    .into(),
-            )
+            let span: DynLazySpan<'db> = path_span
+                .clone()
+                .segment(used_path.segment_index(db))
+                .into();
+            check_type_application_requirements(db, solve_cx, ty)
+                .into_diag(span.clone())
+                .or_else(|| projection_const_fault(db, scope, assumptions, ty, span))
         })
         .collect()
+}
+
+/// A projection whose output, once its arguments are known, contains a const
+/// that faults when evaluated (`Slot<{N - 5}>` at `N = 2`). Normalization
+/// reports the fault instead of keeping the unevaluated value, so the written
+/// projection is where the user sees it.
+fn projection_const_fault<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    ty: TyId<'db>,
+    span: DynLazySpan<'db>,
+) -> Option<TyDiagCollection<'db>> {
+    if !matches!(ty.data(db), TyData::AssocTy(_) | TyData::QualifiedTy(_)) {
+        return None;
+    }
+    let normalized = super::normalize::normalize_ty(db, ty, scope, assumptions);
+    let cause = normalized.invalid_cause(db)?;
+    if is_const_fault(&cause) {
+        diag_from_invalid_cause(span, &cause)
+    } else {
+        None
+    }
+}
+
+/// Whether `cause` is a fault of evaluating a const.
+pub(crate) fn is_const_fault(cause: &InvalidCause<'_>) -> bool {
+    matches!(
+        cause,
+        InvalidCause::ConstEvalUnsupported { .. }
+            | InvalidCause::ConstEvalAssertionFailed { .. }
+            | InvalidCause::ConstEvalNonConstCall { .. }
+            | InvalidCause::ConstEvalDivisionByZero { .. }
+            | InvalidCause::ConstEvalOutOfBounds { .. }
+            | InvalidCause::ConstEvalInvalidOperation { .. }
+            | InvalidCause::ConstEvalInvalidBorrow { .. }
+            | InvalidCause::ConstEvalInvalidProviderUse { .. }
+            | InvalidCause::ConstEvalVariantMismatch { .. }
+            | InvalidCause::ConstEvalUninitializedLocal { .. }
+            | InvalidCause::ConstEvalInvariant { .. }
+            | InvalidCause::ConstEvalArithmeticOverflow { .. }
+            | InvalidCause::ConstEvalNegativeExponent { .. }
+            | InvalidCause::ConstEvalStepLimitExceeded { .. }
+            | InvalidCause::ConstEvalRecursionLimitExceeded { .. }
+            | InvalidCause::ConstEvalRecursiveConst { .. }
+    )
 }
 
 struct ApplicationRequirementVisitor<'db> {

@@ -365,3 +365,22 @@ fn symbolic_induction_checks_constructor_bounds_in_recursive_arms() {
         );
     }
 }
+
+#[test]
+fn a_const_that_faults_after_substitution_is_reported() {
+    for source in [
+        // An associated type's output const, at the projection.
+        "struct Slot<const N: usize> {}\nstruct S<const N: usize> {}\ntrait Step { type Out }\nimpl<const N: usize> Step for S<N> { type Out = Slot<{ N - 5 }> }\nfn b(x: <S<2> as Step>::Out) -> <S<2> as Step>::Out { x }",
+        // A generic function's return type, at the call.
+        "pub struct S<const N: usize> {}\nfn h<const N: usize>(_ b: bool) -> S<{N - 5}> { h<N>(b) }\nfn call_h(_ b: bool) -> u256 { if b { return 0 }\n h<2>(b) }",
+    ] {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("const_fault.fe"), source);
+        let (top, _) = db.top_mod(file);
+        let result = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top));
+        assert!(
+            result.contains("arithmetic overflow in const context"),
+            "{source}\n{result}"
+        );
+    }
+}

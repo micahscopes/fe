@@ -593,7 +593,16 @@ impl<'db> TypeNormalizer<'db> {
                         *value,
                         ConstCanonEnv::new(self.scope, self.assumptions, None),
                     )
-                    .unwrap_or(*value)
+                    // A ground value whose evaluation faulted is not ground;
+                    // evaluate it to report the fault instead of keeping it.
+                    .unwrap_or_else(|| {
+                        let evaluated = value.evaluate(db, None);
+                        if matches!(evaluated.data(db), ConstTyData::Invalid(_)) {
+                            evaluated
+                        } else {
+                            *value
+                        }
+                    })
                 }
                 (ConstPolicy::Computed, ConstTyData::UnEvaluated { .. }) => {
                     value.evaluate(db, None)
@@ -609,6 +618,13 @@ impl<'db> TypeNormalizer<'db> {
                 }
                 _ => *value,
             };
+            // A fault while evaluating a const is a hard error, never a value
+            // that takes part in type equality.
+            if let ConstTyData::Invalid(fault) = evaluated.data(db)
+                && let Some(cause) = fault.invalid_cause(db)
+            {
+                return Err(cause);
+            }
             let result = TyId::const_ty(db, evaluated);
             return Ok((result != ty).then_some((result, 0, policy)));
         }
