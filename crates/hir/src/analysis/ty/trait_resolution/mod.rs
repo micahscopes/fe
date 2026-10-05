@@ -634,17 +634,13 @@ pub(crate) fn check_ty_wf<'db>(
         };
 
         for &goal in normalized_constraints.list(db) {
-            let mut table = UnificationTable::new(db);
             let query = CanonicalGoalQuery::new(db, goal, assumptions);
-
             if let GoalSatisfiability::UnSat(subgoal) =
                 is_goal_query_satisfiable(db, solve_cx, &query)
+                && let Some(ill_formed) =
+                    ill_formed_unless_by_induction(db, solve_cx, goal, &query, subgoal)
             {
-                if super::type_fn::induction::discharge(db, solve_cx, goal) {
-                    continue;
-                }
-                let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
-                return WellFormedness::IllFormed { goal, subgoal };
+                return ill_formed;
             }
         }
     }
@@ -917,14 +913,28 @@ fn unsatisfied_goal<'db>(
             }
         }
         GoalSatisfiability::UnSat(subgoal) => {
-            if super::type_fn::induction::discharge(db, solve_cx, goal) {
-                return WellFormedness::WellFormed;
-            }
-            let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
-            WellFormedness::IllFormed { goal, subgoal }
+            ill_formed_unless_by_induction(db, solve_cx, goal, &query, subgoal)
+                .unwrap_or(WellFormedness::WellFormed)
         }
         _ => WellFormedness::WellFormed,
     }
+}
+
+/// A goal the solver could not satisfy makes a type ill formed, unless the
+/// goal holds for every subject of a computed type by induction.
+fn ill_formed_unless_by_induction<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    goal: TraitInstId<'db>,
+    query: &CanonicalGoalQuery<'db>,
+    subgoal: Option<Solution<TraitInstId<'db>>>,
+) -> Option<WellFormedness<'db>> {
+    if super::type_fn::induction::discharge(db, solve_cx, goal) {
+        return None;
+    }
+    let mut table = UnificationTable::new(db);
+    let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
+    Some(WellFormedness::IllFormed { goal, subgoal })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Update)]
@@ -1099,15 +1109,12 @@ fn check_trait_inst_wf_inner<'db>(
     };
 
     for &goal in normalized_constraints.list(db) {
-        let mut table = UnificationTable::new(db);
         let query = CanonicalGoalQuery::new(db, goal, assumptions);
         if let GoalSatisfiability::UnSat(subgoal) = is_goal_query_satisfiable(db, solve_cx, &query)
+            && let Some(ill_formed) =
+                ill_formed_unless_by_induction(db, solve_cx, goal, &query, subgoal)
         {
-            if super::type_fn::induction::discharge(db, solve_cx, goal) {
-                continue;
-            }
-            let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
-            return WellFormedness::IllFormed { goal, subgoal };
+            return ill_formed;
         }
     }
 

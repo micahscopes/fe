@@ -415,3 +415,37 @@ fn use_it(x: Tree<1, 2>) -> Tree<1, 2> {{ x }}"
         assert_eq!(result.matches("error[").count(), 1, "{source}\n{result}");
     }
 }
+
+#[test]
+fn a_bound_proved_by_induction_explains_why_a_call_still_needs_it() {
+    let source = r#"
+struct Par {}
+struct Comp<A, B> {}
+trait Reduce {}
+impl Reduce for Par {}
+impl<A: Reduce, B: Reduce> Reduce for Comp<A, B> {}
+struct Reducer<S> where S: Reduce {}
+recursive type fn RPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RPow<F, {N - 1}>, F>
+    }
+}
+fn need<T: Reduce>() {}
+fn admitted<F: Reduce, const N: usize>(_ x: Reducer<RPow<F, N>>) {}
+fn call<F: Reduce, const N: usize>() { need<RPow<F, N>>() }
+"#;
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(Utf8PathBuf::from("induction_call.fe"), source);
+    let (top, _) = db.top_mod(file);
+    let result = format_diagnostics(&db, &db.run_on_top_mod(top));
+    assert_eq!(result.matches("error[").count(), 1, "{result}");
+    assert!(
+        result.contains("add this bound to the function's `where` clause"),
+        "{result}"
+    );
+    check(&source.replace(
+        "fn call<F: Reduce, const N: usize>() {",
+        "fn call<F: Reduce, const N: usize>() where RPow<F, N>: Reduce {",
+    ));
+}

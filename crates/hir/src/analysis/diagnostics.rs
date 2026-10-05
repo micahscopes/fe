@@ -5576,7 +5576,20 @@ impl DiagnosticVoucher for TraitConstraintDiag<'_> {
                     });
                 }
 
-                let notes = capability.map(|(_, notes)| notes).unwrap_or_default();
+                let mut notes = capability.map(|(_, notes)| notes).unwrap_or_default();
+                // A computed type with a generic subject can meet a bound in a
+                // signature (proved for every subject) without giving a call
+                // an implementation to use.
+                let self_ty = primary_goal.self_ty(db);
+                if matches!(
+                    self_ty.base_ty(db).data(db),
+                    TyData::TyBase(crate::analysis::ty::ty_def::TyBase::TypeFn(_))
+                ) {
+                    notes.push(
+                        "an implementation for a computed type cannot be chosen while its subject is generic; add this bound to the function's `where` clause"
+                            .to_string(),
+                    );
+                }
 
                 CompleteDiagnostic {
                     severity,
