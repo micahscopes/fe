@@ -4,6 +4,10 @@ use hir::analysis::ty::ty_check::check_func_body;
 use serde_json::json;
 use url::Url;
 
+fn rows(records: Vec<fe::decision_export::records::Record>) -> Vec<serde_json::Value> {
+    records.iter().map(|record| record.to_json()).collect()
+}
+
 #[test]
 fn export_reads_the_retained_equivalent_clone_answer() {
     let mut db = DriverDataBase::default();
@@ -18,7 +22,7 @@ fn export_reads_the_retained_equivalent_clone_answer() {
     assert!(diagnostics.is_empty(), "{}", diagnostics.format_diags(&db));
     let func = module.all_funcs(&db)[0];
     let (_, body) = check_func_body(&db, func);
-    let records = fe::decision_export::goal_records(&db, body).unwrap();
+    let records = rows(fe::decision_export::goal_records(&db, body).unwrap());
     let clone = records
         .iter()
         .find(|row| row["goal"]["trait"] == "Clone")
@@ -63,7 +67,7 @@ fn selected(_ x: Word) -> u8 { with (Other) { x.read() } }
             .find(|func| func.name(&db).to_opt().unwrap().data(&db) == name)
             .unwrap();
         let (_, body) = check_func_body(&db, func);
-        let records = fe::decision_export::goal_records(&db, body).unwrap();
+        let records = rows(fe::decision_export::goal_records(&db, body).unwrap());
         let answer = records
             .iter()
             .find(|row| row["goal"]["trait"] == "Read")
@@ -99,7 +103,7 @@ fn call<T, const B: bool>(_ x: T) where T: Test<B> { x.test() }
         .find(|func| func.name(&db).to_opt().unwrap().data(&db) == "call")
         .unwrap();
     let (_, body) = check_func_body(&db, func);
-    let records = fe::decision_export::goal_records(&db, body).unwrap();
+    let records = rows(fe::decision_export::goal_records(&db, body).unwrap());
     assert_eq!(
         records[0]["goal"]["args"],
         json!([{ "var": "B", "kind": "bool" }])
@@ -122,6 +126,7 @@ fn export_does_not_number_external_impls_as_local() {
     assert!(
         fe::decision_export::goal_records(&db, body)
             .unwrap_err()
+            .0
             .contains("another file")
     );
 }
@@ -158,7 +163,7 @@ fn forward<const N: usize>() where N > 0 { need<N>() }
             .find(|func| func.name(&db).to_opt().unwrap().data(&db) == name)
             .unwrap();
         let (_, body) = check_func_body(&db, func);
-        let records = fe::decision_export::condition_records(&db, body).unwrap();
+        let records = rows(fe::decision_export::condition_records(&db, body).unwrap());
         assert_eq!(records.len(), 1, "{name}");
         assert_eq!(records[0]["source"], json!("fn need"));
         assert_eq!(records[0]["outcome"], json!(outcome));
@@ -183,7 +188,7 @@ fn export_reads_the_condition_selection_used_for_discharge() {
         .find(|func| func.name(&db).to_opt().unwrap().data(&db) == "selected")
         .unwrap();
     let (_, body) = check_func_body(&db, func);
-    let records = fe::decision_export::condition_records(&db, body).unwrap();
+    let records = rows(fe::decision_export::condition_records(&db, body).unwrap());
     let condition = records
         .iter()
         .find(|row| row["source"] == "impl #2")
@@ -229,7 +234,7 @@ fn unknown() { with (Missing) {} }
             .unwrap();
         let (_, body) = check_func_body(&db, func);
         let records =
-            fe::decision_export::with_records(&db, func.body(&db).unwrap(), body).unwrap();
+            rows(fe::decision_export::with_records(&db, func.body(&db).unwrap(), body).unwrap());
         assert_eq!(records.len(), 1);
         assert_eq!(records[0]["name"], json!(name));
         assert_eq!(records[0]["outcome"], outcome);
@@ -341,8 +346,11 @@ trait OutsideTrait: Base {}
     let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
     let diagnostics = db.run_on_top_mod(module);
     assert!(diagnostics.is_empty(), "{}", diagnostics.format_diags(&db));
-    let records =
-        fe::decision_export::declaration_records(&db, module, &diagnostics.complete_diags(&db));
+    let records = rows(fe::decision_export::declaration_records(
+        &db,
+        module,
+        &diagnostics.complete_diags(&db),
+    ));
     let requirement = json!({"op":">","a":{"var":"N"},"b":{"nat":0}});
     for kind in ["trait", "struct", "impl"] {
         let record = records
@@ -421,8 +429,11 @@ fn exercise() -> u256 {
     let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
     let diagnostics = db.run_on_top_mod(module);
     assert!(diagnostics.is_empty(), "{}", diagnostics.format_diags(&db));
-    let records =
-        fe::decision_export::declaration_records(&db, module, &diagnostics.complete_diags(&db));
+    let records = rows(fe::decision_export::declaration_records(
+        &db,
+        module,
+        &diagnostics.complete_diags(&db),
+    ));
     let function = records
         .iter()
         .find(|r| r["item"] == "fn" && r["name"] == "exercise")
@@ -450,7 +461,7 @@ fn exercise() -> u256 {
         .unwrap();
     let (_, typed) = check_func_body(&db, function);
     let openings =
-        fe::decision_export::with_records(&db, function.body(&db).unwrap(), typed).unwrap();
+        rows(fe::decision_export::with_records(&db, function.body(&db).unwrap(), typed).unwrap());
     assert_eq!(uses[4]["span"], openings[0]["site"]);
     assert!(
         uses[4]["span_aliases"]
@@ -483,7 +494,7 @@ fn export_overlap_uses_reported_pairs_and_keeps_disjoint_pairs() {
         db.workspace().touch(&mut db, url.clone(), Some(source));
         let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
         let completed = db.run_on_top_mod(module).complete_diags(&db);
-        let pairs = fe::decision_export::overlap_records(&db, module, &completed).unwrap();
+        let pairs = rows(fe::decision_export::overlap_records(&db, module, &completed).unwrap());
         assert_eq!(
             pairs,
             json!([{"v":1,"kind":"overlap","a":0,"b":1,"conflict":conflict}])
@@ -491,7 +502,7 @@ fn export_overlap_uses_reported_pairs_and_keeps_disjoint_pairs() {
                 .unwrap()
                 .clone()
         );
-        let errors = fe::decision_export::diagnostic_records(&db, &completed).unwrap();
+        let errors = rows(fe::decision_export::diagnostic_records(&db, &completed).unwrap());
         assert_eq!(errors.iter().any(|e| e["code"] == "5-0001"), conflict);
         if conflict {
             assert_eq!(errors[0]["site"]["line"], 4);
@@ -525,14 +536,17 @@ fn export_keeps_written_type_conditions_in_generic_const_paths() {
             "authored check did not retain a condition for {name}"
         );
         let (_, typed) = check_func_body(&db, function);
-        let conditions = fe::decision_export::condition_records(&db, typed).unwrap();
+        let conditions = rows(fe::decision_export::condition_records(&db, typed).unwrap());
         assert_eq!(
             conditions.len(),
             1,
             "one authored type application should retain one check, {name}: {conditions:#?}"
         );
-        let program =
-            fe::decision_export::declaration_records(&db, module, &diagnostics.complete_diags(&db));
+        let program = rows(fe::decision_export::declaration_records(
+            &db,
+            module,
+            &diagnostics.complete_diags(&db),
+        ));
         let function = program
             .iter()
             .find(|r| r["item"] == "fn" && r["name"] == name)
@@ -561,7 +575,9 @@ fn export_pairs_annotation_conditions_with_their_initializer_use() {
     let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
     let diagnostics = db.run_on_top_mod(module);
     let completed = diagnostics.complete_diags(&db);
-    let program = fe::decision_export::declaration_records(&db, module, &completed);
+    let program = rows(fe::decision_export::declaration_records(
+        &db, module, &completed,
+    ));
     for (name, outcome) in [("bad", "eval-false"), ("good", "eval-true")] {
         let function = module
             .all_funcs(&db)
@@ -570,7 +586,7 @@ fn export_pairs_annotation_conditions_with_their_initializer_use() {
             .copied()
             .unwrap();
         let (_, typed) = check_func_body(&db, function);
-        let conditions = fe::decision_export::condition_records(&db, typed).unwrap();
+        let conditions = rows(fe::decision_export::condition_records(&db, typed).unwrap());
         let record = program
             .iter()
             .find(|r| r["item"] == "fn" && r["name"] == name)
@@ -601,15 +617,18 @@ fn export_pairs_override_errors_with_impl_without_capturing_body_errors() {
     db.workspace().touch(&mut db,url.clone(),Some("trait Read { fn read() -> u256 }\nstruct Word {}\nimpl Read for Word { fn read() -> u256 where false { missing } }\n".into()));
     let module = db.top_mod(db.workspace().get(&db, &url).unwrap());
     let completed = db.run_on_top_mod(module).complete_diags(&db);
-    let records = fe::decision_export::declaration_records(&db, module, &completed);
+    let records = rows(fe::decision_export::declaration_records(
+        &db, module, &completed,
+    ));
     let impl_ = records.iter().find(|r| r["item"] == "impl").unwrap();
     let aliases = impl_["span_aliases"].as_array().unwrap();
     let override_ = completed
         .iter()
         .find(|d| d.error_code.to_string() == "6-0024")
         .unwrap();
-    let errors =
-        fe::decision_export::diagnostic_records(&db, std::slice::from_ref(override_)).unwrap();
+    let errors = rows(
+        fe::decision_export::diagnostic_records(&db, std::slice::from_ref(override_)).unwrap(),
+    );
     assert!(aliases.contains(&errors[0]["site"]));
     let function = module
         .all_funcs(&db)
@@ -625,8 +644,9 @@ fn export_pairs_override_errors_with_impl_without_capturing_body_errors() {
                 .is_some_and(|span| body_span.range.contains(span.range.start()))
         })
         .unwrap();
-    let errors =
-        fe::decision_export::diagnostic_records(&db, std::slice::from_ref(body_error)).unwrap();
+    let errors = rows(
+        fe::decision_export::diagnostic_records(&db, std::slice::from_ref(body_error)).unwrap(),
+    );
     assert!(!aliases.contains(&errors[0]["site"]));
 }
 
@@ -649,7 +669,7 @@ fn export_keeps_successful_path_receiver_conditions() {
         .copied()
         .unwrap();
     let (_, typed) = check_func_body(&db, function);
-    let conditions = fe::decision_export::condition_records(&db, typed).unwrap();
+    let conditions = rows(fe::decision_export::condition_records(&db, typed).unwrap());
     assert_eq!(
         conditions
             .iter()
@@ -680,5 +700,5 @@ fn retained_evidence_opening_is_explicitly_outside_format_v1() {
     assert_eq!(typed.with_choices().len(), 1);
     let error =
         fe::decision_export::with_records(&db, function.body(&db).unwrap(), typed).unwrap_err();
-    assert_eq!(error, "evidence opening is outside format v1");
+    assert_eq!(error.0, "evidence opening is outside format v1");
 }
