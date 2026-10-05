@@ -4712,6 +4712,18 @@ fn rd103_impl_bound_condition_and_body_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("impl_bound_condition_and_body.fe");
 }
 
+#[test]
+#[ignore = "Step 2: loop choice convergence must preserve array inference and borrowing"]
+fn loop_seq_selections_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("loop_seq_selections.fe");
+}
+
+#[test]
+#[ignore = "Step 2: generic loop resolution must read the caller's Seq bound"]
+fn loop_seq_bound_choice_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("loop_seq_bound_choice.fe");
+}
+
 fn evidence_boundary_runtime_at_o0_and_o2(name: &str) {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/evidence_boundary_runtime")

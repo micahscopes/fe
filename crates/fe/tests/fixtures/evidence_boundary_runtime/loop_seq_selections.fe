@@ -1,0 +1,60 @@
+use core::seq::Seq
+
+struct NamedFirst {}
+impl Seq for NamedFirst as Before {
+    type Item = u256
+    fn len(self) -> usize { 2 }
+    fn get(self, _ i: usize) -> u256 { (i as u256) + 10 }
+}
+impl Seq for NamedFirst {
+    type Item = u256
+    fn len(self) -> usize { 3 }
+    fn get(self, _ i: usize) -> u256 { i as u256 }
+}
+struct OrdinaryFirst {}
+impl Seq for OrdinaryFirst {
+    type Item = u256
+    fn len(self) -> usize { 3 }
+    fn get(self, _ i: usize) -> u256 { i as u256 }
+}
+impl Seq for OrdinaryFirst as After {
+    type Item = u256
+    fn len(self) -> usize { 2 }
+    fn get(self, _ i: usize) -> u256 { (i as u256) + 10 }
+}
+impl Seq for OrdinaryFirst as Inner {
+    type Item = u256
+    fn len(self) -> usize { 1 }
+    fn get(self, _ i: usize) -> u256 { 100 + (i as u256) }
+}
+
+#[test]
+fn ordinary_choice_is_independent_of_declaration_order() {
+    let mut first: u256 = 0
+    for x in (NamedFirst {}) { first += x }
+    let mut second: u256 = 0
+    for x in (OrdinaryFirst {}) { second += x }
+    assert(first == 3)
+    assert(second == 3)
+}
+
+#[test]
+fn selected_loops_use_both_selected_methods() {
+    let mut first: u256 = 0
+    with (Before) { for x in (NamedFirst {}) { first += x } }
+    let mut second: u256 = 0
+    with (After) { for x in (OrdinaryFirst {}) { second += x } }
+    assert(first == 21)
+    assert(second == 21)
+}
+
+#[test]
+fn nested_loop_choices_restore_the_outer_choice() {
+    let mut sum: u256 = 0
+    with (After) {
+        for x in (OrdinaryFirst {}) { sum += x }
+        with (Inner) { for x in (OrdinaryFirst {}) { sum += x } }
+        for x in (OrdinaryFirst {}) { sum += x }
+    }
+    assert(sum == 142)
+}

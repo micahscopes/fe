@@ -1,0 +1,23 @@
+use core::seq::Seq
+
+struct Three {}
+impl Seq for Three {
+    type Item = u256
+    fn len(self) -> usize { 3 }
+    fn get(self, _ i: usize) -> u256 { i as u256 }
+}
+impl Seq for Three as Two {
+    type Item = u256
+    fn len(self) -> usize { 2 }
+    fn get(self, _ i: usize) -> u256 { (i as u256) + 10 }
+}
+fn sum<T: Seq<Item = u256>>(_ t: T) -> u256 {
+    let mut result: u256 = 0
+    for x in t { result += x }
+    result
+}
+#[test]
+fn loop_reads_the_callers_bound_choice() {
+    assert(sum(Three {}) == 3)
+    assert(with (Two) { sum(Three {}) } == 21)
+}
