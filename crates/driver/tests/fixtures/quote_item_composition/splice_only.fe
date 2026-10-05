@@ -1,0 +1,33 @@
+// A body made only of item splices composes its fragments in order, with or
+// without literal items beside them and with empty fragments among them.
+mod author {
+    use core::meta::{Code, Item, Record, empty}
+    pub const fn two(_ record: Record) -> Code<Item> {
+        let a: Code<Item> = quote { pub fn a() -> u256 { 1 } }
+        let b: Code<Item> = quote { pub fn b() -> u256 { 2 } }
+        quote {
+            ${a}
+            ${b}
+        }
+    }
+    pub const fn one(_ record: Record) -> Code<Item> {
+        let c: Code<Item> = quote { pub fn c() -> u256 { 3 } }
+        quote {
+            ${c}
+        }
+    }
+    pub const fn with_empty(_ record: Record) -> Code<Item> {
+        let d: Code<Item> = quote { pub fn d() -> u256 { 4 } }
+        let e: Code<Item> = empty<Item>()
+        quote {
+            ${e}
+            ${d}
+        }
+    }
+}
+#[generate(ingot::author::two)]
+struct T {}
+#[generate(ingot::author::one)]
+struct U {}
+#[generate(ingot::author::with_empty)]
+struct V {}

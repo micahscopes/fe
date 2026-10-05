@@ -1236,8 +1236,18 @@ fn emit_closed_quoted_items<'db>(
         if quote.holes.len() != node.holes.len() {
             return Err(QuoteConstructionFault::SpliceCountChangedAfterFreezing.into());
         }
-        let QuoteFragment::Items(items) = &quote.fragment else {
-            return Err(QuoteConstructionFault::GenerationRequiresItemCode.into());
+        // A body made only of splices, `quote { ${a} ${b} }`, checked as item
+        // code, composes its fragments in order.
+        let spliced_items: Vec<QuoteItem<'db>>;
+        let (items, splice_only) = match &quote.fragment {
+            QuoteFragment::Items(items) => (items.as_slice(), false),
+            _ => {
+                let slots = quote
+                    .splice_only_body(db)
+                    .ok_or(QuoteConstructionFault::GenerationRequiresItemCode)?;
+                spliced_items = slots.into_iter().map(QuoteItem::Hole).collect();
+                (spliced_items.as_slice(), true)
+            }
         };
         for member in member_groups[code_root].members.keys() {
             let valid = match *member {
@@ -1277,8 +1287,9 @@ fn emit_closed_quoted_items<'db>(
         };
         for (item_index, item) in items.iter().enumerate().skip(start) {
             if let QuoteItem::Hole(slot) = item {
-                if quote.holes.get(*slot as usize).map(|hole| hole.position)
-                    != Some(QuoteHolePosition::Code(crate::hir_def::QuoteKind::Item))
+                if !splice_only
+                    && quote.holes.get(*slot as usize).map(|hole| hole.position)
+                        != Some(QuoteHolePosition::Code(crate::hir_def::QuoteKind::Item))
                 {
                     return Err(QuoteConstructionFault::ItemSplicePositionChanged.into());
                 }

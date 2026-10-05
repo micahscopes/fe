@@ -2861,20 +2861,19 @@ fn request_budget_counts_shared_edges_and_discards_partial_output() {
 }
 
 #[dir_test(
-    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_request_budget/limitations",
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_item_composition",
     glob: "*.fe",
 )]
-fn splice_only_empty_item_composition_fails_closed(fixture: Fixture<&str>) {
+fn splice_only_item_quotes_compose_their_fragments(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).unwrap();
     let authored = field_authority_fixture_db(fixture);
-    let error = match prepare(&authored) {
-        Err(error) => error,
-        Ok(_) => panic!("splice-only empty item syntax requires checked kind reification"),
-    };
-    assert!(
-        error.message().contains("generation requires item code"),
-        "{}",
-        error.message()
-    );
+    let output = prepare(&authored)
+        .expect("splice-only item quotes elaborate")
+        .expect("generation");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+    for name in ["a", "b", "c", "d"] {
+        named_function(&output, &url, name);
+    }
 }
 
 #[test]
