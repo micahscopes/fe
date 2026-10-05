@@ -85,7 +85,6 @@ fn evaluate(db: &DriverDataBase, file: File, name: &str) -> String {
 }
 
 #[test]
-#[ignore = "Step 2: pass the selected bound to both the impl condition and body"]
 fn selected_impl_bound_agrees_between_condition_and_body() {
     let mut db = database();
     let file = checked(

@@ -4707,6 +4707,11 @@ fn evidence_scope_is_frozen_before_specialization_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("evidence_scope_freeze.fe");
 }
 
+#[test]
+fn rd103_impl_bound_condition_and_body_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("impl_bound_condition_and_body.fe");
+}
+
 fn evidence_boundary_runtime_at_o0_and_o2(name: &str) {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/evidence_boundary_runtime")

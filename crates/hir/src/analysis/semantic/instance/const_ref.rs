@@ -635,10 +635,13 @@ fn semantic_callee_key_with_assumptions<'db>(
         .iter()
         .copied()
         .filter(|selection| {
-            requirements
-                .list(db)
-                .iter()
-                .any(|goal| selection.matches(db, *goal))
+            // The source view has already frozen lexical applicability,
+            // including bounds of the recorded impl before specialization.
+            lexical_selections.contains(selection)
+                || requirements
+                    .list(db)
+                    .iter()
+                    .any(|goal| selection.matches(db, *goal))
         })
         .collect::<Vec<_>>();
     let mut selected_trait_method: Option<(ResolvedImplInstance<'db>, TraitInstId<'db>)> = None;

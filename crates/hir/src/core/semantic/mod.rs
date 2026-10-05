@@ -317,6 +317,42 @@ fn call_trait_goal_at<'db>(
     )
 }
 
+/// Read nominal requirements and bounds of the already accepted implementation.
+pub(crate) fn call_requirements_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    typed: &crate::analysis::ty::ty_check::TypedBody<'db>,
+    expr: ExprId,
+) -> PredicateListId<'db> {
+    let Some(callable) = typed.callable_expr(expr) else {
+        return PredicateListId::empty_list(db);
+    };
+    let declared = callable.selection_requirements(db);
+    let Some(body) = typed.body() else {
+        return declared;
+    };
+    let Some(choice) = body.decision_at(typed, expr.span(body).into()) else {
+        return declared;
+    };
+    let choice = choice.data(db);
+    let mut requirements = declared.list(db).to_vec();
+    requirements.push(choice.goal());
+    if let ImplementorOrigin::Hir(item) = choice.answer_origin(db) {
+        // Project bounds from the already accepted impl. This reads the
+        // recorded answer; it neither searches nor rechecks its conditions.
+        let selected = crate::analysis::ty::trait_lower::lower_impl_trait(db, item)
+            .expect("an accepted implementation must retain its declaration");
+        let instance =
+            crate::analysis::ty::trait_def::instantiate_selected_impl(db, selected, choice.goal())
+                .expect("an accepted implementation must match its recorded goal");
+        requirements.extend(
+            collect_candidate_constraints(db, item.into())
+                .instantiate(db, instance.impl_args(db))
+                .list(db),
+        );
+    }
+    PredicateListId::new(db, requirements).extend_all_bounds(db)
+}
+
 /// Read lexical evidence operands restricted to the checked call's requirements.
 pub(crate) fn call_evidence_at<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -326,9 +362,9 @@ pub(crate) fn call_evidence_at<'db>(
     if typed.with_choices().len() == 0 {
         return Vec::new();
     }
-    let Some(callable) = typed.callable_expr(expr) else {
+    if typed.callable_expr(expr).is_none() {
         return Vec::new();
-    };
+    }
     let evidence = recorded_chain_at(db, typed, expr)
         .visible(db)
         .filter_map(|provision| match provision {
@@ -339,12 +375,11 @@ pub(crate) fn call_evidence_at<'db>(
     if evidence.is_empty() {
         return evidence;
     }
-    let mut requirements = callable.selection_requirements(db).list(db).to_vec();
-    requirements.extend(call_trait_goal_at(db, typed, expr));
+    let requirements = call_requirements_at(db, typed, expr);
     evidence
         .into_iter()
         .filter(|(_, goal)| {
-            requirements.iter().any(|required| {
+            requirements.list(db).iter().any(|required| {
                 goal.def(db) == required.def(db) && goal.args(db) == required.args(db)
             })
         })
@@ -435,10 +470,7 @@ pub(crate) fn call_selections_at<'db>(
     if selections.is_empty() {
         return Vec::new();
     }
-    let Some(callable) = typed.callable_expr(expr) else {
-        return Vec::new();
-    };
-    let requirements = callable.selection_requirements(db);
+    let requirements = call_requirements_at(db, typed, expr);
     selections
         .iter()
         .copied()

@@ -1,0 +1,42 @@
+trait Compute { const OK: bool const ID: u256 }
+struct Subject {}
+impl Compute for Subject { const OK: bool = false const ID: u256 = 0 }
+impl Compute for Subject as Relaxed { const OK: bool = true const ID: u256 = 1 }
+impl Compute for Subject as Inner { const OK: bool = true const ID: u256 = 3 }
+
+trait Value { const fn value() -> u256 }
+trait RawValue { const fn raw() -> u256 }
+struct Gate<T> {}
+impl<T: Compute> Value for Gate<T> where T::OK {
+    const fn value() -> u256 { if T::OK { 1 } else { 2 } }
+}
+impl<T: Compute> RawValue for Gate<T> {
+    const fn raw() -> u256 { T::ID }
+}
+
+const fn selected() -> u256 {
+    with (Relaxed) { <Gate<Subject> as Value>::value() }
+}
+const fn nested() -> u256 {
+    with (Relaxed) {
+        let first = <Gate<Subject> as RawValue>::raw()
+        let inner = with (Inner) { <Gate<Subject> as RawValue>::raw() }
+        first * 100 + inner * 10 + <Gate<Subject> as RawValue>::raw()
+    }
+}
+const fn generic<T: Compute>() -> u256 {
+    with (Relaxed) { <Gate<T> as RawValue>::raw() }
+}
+const SELECTED: u256 = selected()
+const NESTED: u256 = nested()
+const FROZEN: u256 = generic<Subject>()
+
+#[test]
+fn impl_bound_choices_agree_and_restore() {
+    assert(SELECTED == 1)
+    assert(NESTED == 131)
+    assert(FROZEN == 0)
+    assert(selected() == 1)
+    assert(nested() == 131)
+    assert(generic<Subject>() == 0)
+}
