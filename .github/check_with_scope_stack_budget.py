@@ -77,6 +77,8 @@ def premise_boundary(env, semantic):
     bodies = goal_lookup.bodies(semantic, 'context_at')
     if len(bodies) != 1 or 'evidence_assumptions' not in bodies[0]:
         raise ValueError('record context must use the same semantic premise projection')
+    if not re.search(r'\btyped\s*\.\s*assumptions\s*\(\s*\)', bodies[0]):
+        raise ValueError('body positions must read their completed root premises')
     if re.search(r'\.(?:list|extend_all_bounds)\s*\(', bodies[0]):
         raise ValueError('record context restored a separate premise builder')
 
@@ -114,7 +116,9 @@ if __name__ == '__main__':
         (env.replace('self.provisions\n            .evidence_assumptions', 'self.assumptions.list(self.db); self.provisions\n            .evidence_assumptions', 1), semantic),
         (env.replace('self.provisions\n            .method_lookup_assumptions', 'self.assumptions.list(self.db); self.provisions\n            .method_lookup_assumptions', 1), semantic),
         (env, semantic.replace('provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 'assumptions.list(db); provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 1)),
+        (env, semantic.replace('|(typed, _)| typed.assumptions()', '|(_, _)| param_env(db, scope.item())', 1)),
     ]:
+        assert mutant_env != env or mutant_semantic != semantic, 'premise mutation must modify actual source'
         try:
             premise_boundary(mutant_env, mutant_semantic)
         except ValueError:

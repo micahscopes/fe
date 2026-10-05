@@ -2980,6 +2980,50 @@ mod recording_tests {
     use crate::test_db::HirAnalysisTestDb;
 
     #[test]
+    fn context_view_reads_the_instantiated_body_root_premises() {
+        use crate::analysis::semantic::{
+            EffectProviderSubst, GenericSubst, ImplEnv, SemanticInstanceKey,
+        };
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "instantiated_context_root.fe".into(),
+            "trait Mark {}\nimpl Mark for u8 {}\nfn caller<T: Mark>() {}",
+        );
+        let (top, _) = db.top_mod(file);
+        let caller = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|func| {
+                func.name(&db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(&db) == "caller")
+            })
+            .expect("caller function");
+        let key = SemanticInstanceKey::new(
+            &db,
+            super::BodyOwner::Func(caller),
+            GenericSubst::for_owner(&db, caller.into(), vec![super::TyId::u8(&db)]),
+            EffectProviderSubst::empty(&db),
+            ImplEnv::empty(&db, caller.scope()),
+        );
+        let typed = key.typed_body(&db);
+        let body = typed.body().expect("instantiated body");
+        let actual = crate::semantic::context_at(&db, body.scope(), Some((typed, body.expr(&db))))
+            .assumptions(&db);
+        assert_eq!(typed.assumptions().list(&db).len(), 1);
+        assert_eq!(
+            typed.assumptions().list(&db)[0].self_ty(&db),
+            super::TyId::u8(&db)
+        );
+        assert_eq!(
+            actual,
+            typed.assumptions(),
+            "a position must read its instantiated root"
+        );
+    }
+
+    #[test]
     fn authored_types_and_param_env_share_trait_method_self_premise() {
         use crate::analysis::ty::trait_resolution::{
             GoalSatisfiability, TraitSolveCx, is_goal_satisfiable,

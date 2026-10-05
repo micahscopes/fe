@@ -265,17 +265,22 @@ pub(crate) fn context_at<'db>(
         crate::hir_def::ExprId,
     )>,
 ) -> crate::analysis::semantic::ImplEnv<'db> {
-    let mut enclosing = scope;
-    while matches!(enclosing.item(), ItemKind::Body(_)) {
-        let Some(parent) = enclosing.parent(db) else {
-            break;
-        };
-        enclosing = parent;
-    }
-    let assumptions = match enclosing.item() {
-        ItemKind::Func(_) => param_env(db, enclosing.item()),
-        item => constraints_for(db, item),
-    };
+    let assumptions = position.map_or_else(
+        || {
+            let mut enclosing = scope;
+            while matches!(enclosing.item(), ItemKind::Body(_)) {
+                let Some(parent) = enclosing.parent(db) else {
+                    break;
+                };
+                enclosing = parent;
+            }
+            match enclosing.item() {
+                ItemKind::Func(_) => param_env(db, enclosing.item()),
+                item => constraints_for(db, item),
+            }
+        },
+        |(typed, _)| typed.assumptions(),
+    );
     let assumptions = if let Some((typed, expr)) =
         position.filter(|(typed, _)| typed.with_choices().len() != 0)
     {
