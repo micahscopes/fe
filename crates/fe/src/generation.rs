@@ -37,12 +37,26 @@ pub(crate) fn prepare<'a>(
 pub(crate) fn prepare_or_report<'a>(
     db: &'a DriverDataBase,
     target: &Url,
+    header: Option<&Url>,
 ) -> Option<PreparedDb<'a>> {
     match prepare(db, target) {
         Ok(prepared) => Some(prepared),
         Err(error) => {
-            eprintln!("{}", error.render(db));
+            report(db, &error, header);
             None
         }
+    }
+}
+
+/// Print a generation error the way other diagnostics are printed: the same
+/// colour handling and, when `header` is given, an `errors in <url>` line.
+pub(crate) fn report(db: &DriverDataBase, error: &ElaborationError, header: Option<&Url>) {
+    if let Some(url) = header {
+        eprintln!("errors in {url}");
+        eprintln!();
+    }
+    match error.diagnostic(db) {
+        Some(diagnostic) => db.emit_complete_diagnostics(&[diagnostic]),
+        None => eprintln!("{}", error.render(db)),
     }
 }

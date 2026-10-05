@@ -4,6 +4,8 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/struct_variant.fe
 ---
 === STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/struct_variant.fe
+
 error[19-0001]: `variant` needs a whole enum input; a struct or selected payload has no variants
   ┌─ struct_variant.fe:4:33
   │
@@ -12,7 +14,6 @@ error[19-0001]: `variant` needs a whole enum input; a struct or selected payload
   ·
 9 │ #[generate(ingot::author::emit)]
   │ -------------------------------- generated here
-
 
 
 === EXIT CODE: 1 ===

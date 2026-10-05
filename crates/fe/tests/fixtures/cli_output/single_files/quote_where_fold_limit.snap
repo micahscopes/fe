@@ -4,6 +4,8 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/quote_where_fold_limit.fe
 ---
 === STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_where_fold_limit.fe
+
 error[19-0004]: invalid generated declaration: quotation request node limit exceeded: 65537 > 65536
    ┌─ quote_where_fold_limit.fe:10:38
    │
@@ -12,7 +14,6 @@ error[19-0004]: invalid generated declaration: quotation request node limit exce
    ·
 20 │ #[generate(ingot::author::emit)]
    │ -------------------------------- generated here
-
 
 
 === EXIT CODE: 1 ===

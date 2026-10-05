@@ -4,6 +4,8 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/enum_whole_field.fe
 ---
 === STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/enum_whole_field.fe
+
 error[19-0001]: `field` needs a struct or a selected variant; `Shape` is an enum, so select a payload with `variant(record, i)`
   ┌─ enum_whole_field.fe:4:46
   │
@@ -12,7 +14,6 @@ error[19-0001]: `field` needs a struct or a selected variant; `Shape` is an enum
   ·
 9 │ #[generate(ingot::author::emit)]
   │ -------------------------------- generated here
-
 
 
 === EXIT CODE: 1 ===

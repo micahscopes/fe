@@ -280,8 +280,8 @@ fn check_ingot_url(
         return true;
     }
 
-    let mut seen = HashSet::new();
-    check_ingot_and_dependencies(db, ingot_url, dump_mir, report, &mut seen)
+    let mut checked = CheckedIngots::default();
+    check_ingot_and_dependencies(db, ingot_url, dump_mir, report, &mut checked)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -343,7 +343,7 @@ fn check_workspace(
     };
     let selected_member_paths: HashSet<Utf8PathBuf> = selected_member_paths.into_iter().collect();
 
-    let mut seen = HashSet::new();
+    let mut checked = CheckedIngots::default();
     let mut has_errors = false;
     for member in members {
         let member_path = dir_path.join(member.path.as_str());
@@ -352,11 +352,21 @@ fn check_workspace(
         }
         let member_url = member.url;
         let member_has_errors =
-            check_ingot_and_dependencies(db, &member_url, dump_mir, report, &mut seen);
+            check_ingot_and_dependencies(db, &member_url, dump_mir, report, &mut checked);
         has_errors |= member_has_errors;
     }
 
     has_errors
+}
+
+/// What earlier workspace members already covered.
+#[derive(Default)]
+struct CheckedIngots {
+    /// Ingots whose diagnostics were already reported.
+    seen: HashSet<Url>,
+    /// Generation errors already printed. Members that share a dependency fail
+    /// generation with the same error.
+    generation_errors: HashSet<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -365,16 +375,21 @@ fn check_ingot_and_dependencies(
     ingot_url: &Url,
     dump_mir: bool,
     report: Option<&ReportContext>,
-    seen: &mut HashSet<Url>,
+    checked: &mut CheckedIngots,
 ) -> bool {
-    let Some(prepared) = crate::generation::prepare_or_report(db, ingot_url) else {
-        return true;
-    };
-    let db = &*prepared;
-
-    if !seen.insert(ingot_url.clone()) {
+    if !checked.seen.insert(ingot_url.clone()) {
         return false;
     }
+    let prepared = match crate::generation::prepare(db, ingot_url) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            if checked.generation_errors.insert(error.render(db)) {
+                crate::generation::report(db, &error, None);
+            }
+            return true;
+        }
+    };
+    let db = &*prepared;
 
     let Some(ingot) = db.workspace().containing_ingot(db, ingot_url.clone()) else {
         eprintln!("Error: Could not resolve ingot {ingot_url}");
@@ -386,7 +401,7 @@ fn check_ingot_and_dependencies(
         return true;
     }
 
-    let diagnostics = CompilationDiagnostics::for_ingot_with_seen(db, ingot, seen);
+    let diagnostics = CompilationDiagnostics::for_ingot_with_seen(db, ingot, &mut checked.seen);
     let mut has_errors = false;
 
     if !diagnostics.hir.is_empty() {
@@ -459,7 +474,8 @@ fn check_single_file(
     // Add the file to the workspace
     db.workspace().touch(db, file_url.clone(), Some(content));
 
-    let Some(prepared) = crate::generation::prepare_or_report(db, &file_url) else {
+    let Some(prepared) = crate::generation::prepare_or_report(db, &file_url, Some(&file_url))
+    else {
         return true;
     };
     let db = &*prepared;

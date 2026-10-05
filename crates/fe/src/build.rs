@@ -566,7 +566,7 @@ fn build_file(
 
     db.workspace().touch(db, url.clone(), Some(content));
 
-    let Some(prepared) = crate::generation::prepare_or_report(db, &url) else {
+    let Some(prepared) = crate::generation::prepare_or_report(db, &url, None) else {
         return true;
     };
     let db = &*prepared;
@@ -951,7 +951,7 @@ fn analyze_ingot_build_artifacts(
     ingot_url: &Url,
     include_abi_artifact_names: bool,
 ) -> Result<IngotBuildAnalysis, ()> {
-    let Some(prepared) = crate::generation::prepare_or_report(db, ingot_url) else {
+    let Some(prepared) = crate::generation::prepare_or_report(db, ingot_url, None) else {
         return Err(());
     };
     let db = &*prepared;
@@ -1145,7 +1145,7 @@ fn build_ingot_url(
     missing_contract_is_error: bool,
     report_dir: Option<&Utf8PathBuf>,
 ) -> BuildSummary {
-    let Some(prepared) = crate::generation::prepare_or_report(db, ingot_url) else {
+    let Some(prepared) = crate::generation::prepare_or_report(db, ingot_url, None) else {
         return BuildSummary { had_errors: true };
     };
     let db = &*prepared;

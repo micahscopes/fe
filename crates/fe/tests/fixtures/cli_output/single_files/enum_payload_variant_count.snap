@@ -4,6 +4,8 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/enum_payload_variant_count.fe
 ---
 === STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/enum_payload_variant_count.fe
+
 error[19-0001]: `variant_count` needs a whole enum input; a struct or selected payload has no variants
   ┌─ enum_payload_variant_count.fe:4:21
   │
@@ -12,7 +14,6 @@ error[19-0001]: `variant_count` needs a whole enum input; a struct or selected p
   ·
 9 │ #[generate(ingot::author::emit)]
   │ -------------------------------- generated here
-
 
 
 === EXIT CODE: 1 ===

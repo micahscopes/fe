@@ -170,6 +170,76 @@ fn test_cli_check_color_flag_controls_diagnostic_escape_codes() {
     }
 }
 
+const FAILING_PROVIDER: &str = r#"
+mod author {
+    use core::meta::{Code, Item, Record, variant, field_count}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let value = field_count(variant(record, 0))
+        quote { fn reflected() -> usize { ${value} } }
+    }
+}
+
+#[generate(ingot::author::emit)]
+pub struct Shape { x: bool }
+"#;
+
+#[test]
+fn test_cli_check_generation_error_has_header_and_follows_color_flag() {
+    let temp = tempdir().expect("tempdir");
+    let file = temp.path().join("provider_error.fe");
+    fs::write(&file, FAILING_PROVIDER).expect("write fixture");
+    for (choice, colored) in [("never", false), ("always", true)] {
+        let output = Command::new(fe_binary())
+            .args(["check", "--color", choice])
+            .arg(&file)
+            .env_remove("NO_COLOR")
+            .output()
+            .expect("run fe check");
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.starts_with("errors in file://"), "{stderr}");
+        assert!(stderr.contains("19-0001"), "{stderr}");
+        assert_eq!(
+            stderr.contains('\x1b'),
+            colored,
+            "--color {choice}:\n{stderr:?}"
+        );
+    }
+}
+
+#[test]
+fn test_cli_check_workspace_reports_shared_generation_error_once() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    fs::write(
+        root.join("fe.toml"),
+        "[workspace]\nname = \"shared\"\nversion = \"0.1.0\"\nmembers = [\"ingots/lib\", \"ingots/a\", \"ingots/b\"]\n",
+    )
+    .expect("write workspace config");
+    for (name, source) in [
+        ("lib", FAILING_PROVIDER),
+        ("a", "use lib::Shape\npub fn g() -> u8 { 1 }\n"),
+        ("b", "use lib::Shape\npub fn g() -> u8 { 1 }\n"),
+    ] {
+        let dir = root.join("ingots").join(name);
+        fs::create_dir_all(dir.join("src")).expect("create ingot");
+        let dependencies = if name == "lib" {
+            ""
+        } else {
+            "\n[dependencies]\nlib = \"../lib\"\n"
+        };
+        fs::write(
+            dir.join("fe.toml"),
+            format!("[ingot]\nname = \"{name}\"\nversion = \"0.1.0\"\n{dependencies}"),
+        )
+        .expect("write ingot config");
+        fs::write(dir.join("src/lib.fe"), source).expect("write ingot source");
+    }
+    let (output, exit_code) = run_fe_check(root.to_str().expect("utf8 path"));
+    assert_eq!(exit_code, 1, "{output}");
+    assert_eq!(output.matches("error[19-0001]").count(), 1, "{output}");
+}
+
 #[test]
 fn test_cli_check_invalid_named_const_used_in_type_position_reports_error_instead_of_panicking() {
     let temp = tempdir().expect("tempdir");

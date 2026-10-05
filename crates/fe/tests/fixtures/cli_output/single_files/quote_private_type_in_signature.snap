@@ -4,6 +4,8 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/quote_private_type_in_signature.fe
 ---
 === STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_private_type_in_signature.fe
+
 error[2-0003]: `Secret` is not visible
    ┌─ quote_private_type_in_signature.fe:12:9
    │
