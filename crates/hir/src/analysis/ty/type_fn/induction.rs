@@ -18,7 +18,9 @@ use crate::{
     hir_def::{IdentId, TypeFnDef},
 };
 
-fn strict_prove<'db>(
+/// Whether `goal` and the assumptions are free of invalid types and inference
+/// variables, so a proof about them means something.
+fn inputs_are_valid<'db>(
     db: &'db dyn HirAnalysisDb,
     cx: TraitSolveCx<'db>,
     goal: TraitInstId<'db>,
@@ -30,17 +32,22 @@ fn strict_prove<'db>(
     };
     goal.visit_with(&mut validity);
     cx.assumptions().visit_with(&mut validity);
-    if validity.invalid {
+    !validity.invalid
+        && !CanonicalGoalQuery::new(db, goal, cx.assumptions())
+            .canonical()
+            .flags(db)
+            .intersects(TyFlags::HAS_INVALID | TyFlags::HAS_VAR)
+}
+
+fn strict_prove<'db>(
+    db: &'db dyn HirAnalysisDb,
+    cx: TraitSolveCx<'db>,
+    goal: TraitInstId<'db>,
+) -> bool {
+    if !inputs_are_valid(db, cx, goal) {
         return false;
     }
     let query = CanonicalGoalQuery::new(db, goal, cx.assumptions());
-    if query
-        .canonical()
-        .flags(db)
-        .intersects(TyFlags::HAS_INVALID | TyFlags::HAS_VAR)
-    {
-        return false;
-    }
     matches!(
         is_goal_query_satisfiable(db, cx, &query),
         GoalSatisfiability::Satisfied(_)
@@ -193,13 +200,9 @@ pub(in crate::analysis::ty) fn discharge<'db>(
             return false;
         }
     }
-    let mut assumptions = cx.assumptions().list(db).clone();
-    assumptions.push(goal);
-    strict_prove(
-        db,
-        cx.with_assumptions(PredicateListId::new(db, assumptions)),
-        goal,
-    )
+    // Every arm holds given the goal for smaller subjects, so the goal holds.
+    // What is left is to check that the goal itself is a valid input.
+    inputs_are_valid(db, cx, goal)
 }
 
 struct RecursiveCall<'db> {

@@ -233,7 +233,7 @@ impl<'db, 'a> CandidateAssembler<'db, 'a> {
 
         // Discovery does not grant these bounds. check_inst sends each
         // candidate through the solver, including the family rule's premises.
-        if let Some((_, bounds)) = self.receiver.original().associated_family_rules(self.db) {
+        if let Some((_, bounds)) = self.receiver.original().family_declared_bounds(self.db) {
             for &bound in bounds.list(self.db) {
                 self.insert_assumption_trait_method_cand(bound);
             }

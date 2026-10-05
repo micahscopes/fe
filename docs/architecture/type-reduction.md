@@ -25,8 +25,7 @@ turn a unique result into ambiguity. Cross-query re-entry therefore needs a
 specific diagnostic or an audited uncached route. A tracked entry may cache a
 completed reduction and its measured cost, but local in-progress state and
 the budget belong to one execution, and a cache hit must still register every
-dependency needed for incremental revalidation. The historical audit is
-`/workspace/mb2/SALSA_TRACKED_NORMALIZATION_DESIGN.md`.
+dependency needed for incremental revalidation.
 
 ## Const evaluation and containment
 

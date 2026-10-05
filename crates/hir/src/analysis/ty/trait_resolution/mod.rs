@@ -634,17 +634,13 @@ pub(crate) fn check_ty_wf<'db>(
         };
 
         for &goal in normalized_constraints.list(db) {
-            let mut table = UnificationTable::new(db);
             let query = CanonicalGoalQuery::new(db, goal, assumptions);
-
             if let GoalSatisfiability::UnSat(subgoal) =
                 is_goal_query_satisfiable(db, solve_cx, &query)
+                && let Some(ill_formed) =
+                    ill_formed_unless_by_induction(db, solve_cx, goal, &query, subgoal)
             {
-                if super::type_fn::induction::discharge(db, solve_cx, goal) {
-                    continue;
-                }
-                let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
-                return WellFormedness::IllFormed { goal, subgoal };
+                return ill_formed;
             }
         }
     }
@@ -832,13 +828,28 @@ fn check_const_expr_wf<'db>(
 
 /// Check formation before normalization can erase a computed type or family. This
 /// is also used by source-path diagnostics, which see intermediate projections.
+/// Whether a bound promised for every argument holds: a family's declared
+/// and parameter bounds, or a computed type's requirements. Only a completed
+/// proof establishes it. An ambiguous or unfinished proof does not show that
+/// the bound holds for all arguments, so it counts as a failure.
+pub(crate) fn bound_holds_for_every_argument<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    goal: TraitInstId<'db>,
+) -> bool {
+    matches!(
+        is_goal_satisfiable(db, solve_cx, goal),
+        GoalSatisfiability::Satisfied(_)
+    )
+}
+
 pub(crate) fn check_type_application_requirements<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
     ty: TyId<'db>,
 ) -> WellFormedness<'db> {
-    if ty.has_unsaturated_family_guards(db) {
-        return WellFormedness::UnsaturatedGuardedFamily;
+    if let Some(name) = ty.lacks_args_for_parameter_bounds(db) {
+        return WellFormedness::FamilyNeedsAllArgs { name };
     }
     let requirements = if matches!(
         ty.decompose_ty_app(db).0.data(db),
@@ -846,14 +857,11 @@ pub(crate) fn check_type_application_requirements<'db>(
     ) {
         Some(ty_constraints(db, ty))
     } else {
-        ty.associated_family_requirements(db)
+        ty.family_parameter_bounds(db)
     };
     if let Some(requirements) = requirements {
         for &goal in requirements.list(db) {
-            if !matches!(
-                is_goal_satisfiable(db, solve_cx, goal),
-                GoalSatisfiability::Satisfied(_)
-            ) {
+            if !bound_holds_for_every_argument(db, solve_cx, goal) {
                 return WellFormedness::IllFormed {
                     goal,
                     subgoal: None,
@@ -905,21 +913,39 @@ fn unsatisfied_goal<'db>(
             }
         }
         GoalSatisfiability::UnSat(subgoal) => {
-            if super::type_fn::induction::discharge(db, solve_cx, goal) {
-                return WellFormedness::WellFormed;
-            }
-            let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
-            WellFormedness::IllFormed { goal, subgoal }
+            ill_formed_unless_by_induction(db, solve_cx, goal, &query, subgoal)
+                .unwrap_or(WellFormedness::WellFormed)
         }
         _ => WellFormedness::WellFormed,
     }
+}
+
+/// A goal the solver could not satisfy makes a type ill formed, unless the
+/// goal holds for every subject of a computed type by induction.
+fn ill_formed_unless_by_induction<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    goal: TraitInstId<'db>,
+    query: &CanonicalGoalQuery<'db>,
+    subgoal: Option<Solution<TraitInstId<'db>>>,
+) -> Option<WellFormedness<'db>> {
+    if super::type_fn::induction::discharge(db, solve_cx, goal) {
+        return None;
+    }
+    let mut table = UnificationTable::new(db);
+    let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
+    Some(WellFormedness::IllFormed { goal, subgoal })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Update)]
 pub(crate) enum WellFormedness<'db> {
     WellFormed,
     WithConditions(ImplConditionsId<'db>),
-    UnsaturatedGuardedFamily,
+    /// A family whose parameters have bounds, used without all of its
+    /// arguments.
+    FamilyNeedsAllArgs {
+        name: crate::hir_def::IdentId<'db>,
+    },
     IllFormed {
         goal: TraitInstId<'db>,
         subgoal: Option<TraitInstId<'db>>,
@@ -983,7 +1009,7 @@ impl<'db> WellFormedness<'db> {
         self,
         span: crate::span::DynLazySpan<'db>,
     ) -> Option<super::diagnostics::TyDiagCollection<'db>> {
-        use super::diagnostics::{AssociatedFamilyError, TraitConstraintDiag, TyLowerDiag};
+        use super::diagnostics::{TraitConstraintDiag, TyLowerDiag};
         match self {
             Self::WellFormed | Self::WithConditions(_) => None,
             Self::IllFormed { goal, subgoal } => Some(
@@ -996,13 +1022,9 @@ impl<'db> WellFormedness<'db> {
                 }
                 .into(),
             ),
-            Self::UnsaturatedGuardedFamily => Some(
-                TyLowerDiag::AssociatedFamilyDeclaration {
-                    span,
-                    error: AssociatedFamilyError::GuardedPartialApplication,
-                }
-                .into(),
-            ),
+            Self::FamilyNeedsAllArgs { name } => {
+                Some(TyLowerDiag::AssocTypeNeedsAllArgs { span, name }.into())
+            }
         }
     }
 }
@@ -1087,15 +1109,12 @@ fn check_trait_inst_wf_inner<'db>(
     };
 
     for &goal in normalized_constraints.list(db) {
-        let mut table = UnificationTable::new(db);
         let query = CanonicalGoalQuery::new(db, goal, assumptions);
         if let GoalSatisfiability::UnSat(subgoal) = is_goal_query_satisfiable(db, solve_cx, &query)
+            && let Some(ill_formed) =
+                ill_formed_unless_by_induction(db, solve_cx, goal, &query, subgoal)
         {
-            if super::type_fn::induction::discharge(db, solve_cx, goal) {
-                continue;
-            }
-            let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
-            return WellFormedness::IllFormed { goal, subgoal };
+            return ill_formed;
         }
     }
 

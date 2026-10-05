@@ -3,7 +3,7 @@ source: crates/uitest/tests/ty_check.rs
 expression: diags
 input_file: fixtures/ty_check/const_where/unsupported_context.fe
 ---
-error[6-0024]: method has different const conditions than trait
+error[6-0029]: method has different const conditions than trait
    ┌─ unsupported_context.fe:26:8
    │
 10 │     fn read(self)

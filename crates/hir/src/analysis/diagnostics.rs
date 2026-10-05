@@ -1126,6 +1126,19 @@ impl DiagnosticVoucher for PathResDiag<'_> {
                 method_name,
                 receiver,
             } => {
+                // A receiver whose type faulted while being computed: report
+                // the fault, not the missing method on an invalid type.
+                if let Either::Left(ty) = receiver
+                    && let Some(cause) =
+                        crate::analysis::ty::ty_error::first_invalid_ty_cause(db, *ty)
+                    && crate::analysis::ty::ty_error::is_const_fault(&cause)
+                    && let Some(diag) = crate::analysis::ty::ty_error::diag_from_invalid_cause(
+                        primary.clone(),
+                        &cause,
+                    )
+                {
+                    return diag.to_complete(db);
+                }
                 let (recv_name, recv_ty, recv_kind) = match receiver {
                     Either::Left(ty) => (
                         ty.pretty_print(db),
@@ -1503,13 +1516,14 @@ impl DiagnosticVoucher for PathResDiag<'_> {
                 )
             }
 
-            Self::AssociatedFamilyBinding { span, name } => primary_diag(
+            Self::AssocTypeBindingWithParams { span, name } => primary_diag(
                 Severity::Error,
                 format!(
-                    "associated family binding `{}` requires a parameter-preserving form",
+                    "`{}` takes type parameters, so it cannot be set with `{} = ...`",
+                    name.data(db),
                     name.data(db)
                 ),
-                "this binding syntax supports associated types without parameters",
+                "set here",
                 span.resolve(db),
                 error_code,
             ),
@@ -2116,23 +2130,31 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
             }
 
             Self::DuplicateGenericParamName(owner, idxs) => {
-                let message = if let Some(name) = owner.name(db) {
+                use crate::analysis::ty::diagnostics::GenericParamListOwner;
+                let (owner_name, kind_name) = match owner {
+                    GenericParamListOwner::Item(item) => (item.name(db), item.kind_name()),
+                    GenericParamListOwner::AssocType(assoc) => {
+                        (assoc.scope().name(db), "associated type")
+                    }
+                };
+                let message = if let Some(name) = owner_name {
                     format!(
                         "duplicate generic parameter name in {} `{}`",
-                        owner.kind_name(),
+                        kind_name,
                         name.data(db)
                     )
                 } else {
-                    format!(
-                        "duplicate generic parameter name in {} definition",
-                        owner.kind_name()
-                    )
+                    format!("duplicate generic parameter name in {kind_name} definition")
                 };
 
-                let name = owner
-                    .params(db)
-                    .next()
-                    .map(|p| p.param.name().unwrap().data(db))
+                let first = match owner {
+                    GenericParamListOwner::Item(item) => item.params(db).next().map(|p| p.param),
+                    GenericParamListOwner::AssocType(assoc) => {
+                        assoc.generic_params(db).data(db).first()
+                    }
+                };
+                let name = first
+                    .map(|p| p.name().unwrap().data(db))
                     .expect("should be at least one generic param");
 
                 let spans = offending_generic_param_spans(*owner, idxs.as_slice(), db);
@@ -2793,34 +2815,37 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 error_code,
             ),
 
-            Self::AssociatedFamilyDeclaration { span, error } => {
-                use crate::analysis::ty::diagnostics::AssociatedFamilyError;
-                let message = match error {
-                    AssociatedFamilyError::ParameterCount { expected, given } => format!(
-                        "associated type parameter count mismatch: expected {expected}, given {given}"
-                    ),
-                    AssociatedFamilyError::ParameterKind { expected, given } => format!(
-                        "associated type parameter kind mismatch: expected {expected}, given {given}"
-                    ),
-                    AssociatedFamilyError::ParameterSort =>
-                        "associated type parameter sort does not match the declaration".into(),
-                    AssociatedFamilyError::ConstParameter =>
-                        "const associated type parameters are not supported".into(),
-                    AssociatedFamilyError::ImplementationBound =>
-                        "associated type implementation parameter bounds must be declared on the trait".into(),
-                    AssociatedFamilyError::UnknownMember =>
-                        "associated type is not declared by the trait".into(),
-                    AssociatedFamilyError::DuplicateParameter =>
-                        "duplicate associated type parameter".into(),
-                    AssociatedFamilyError::InvalidGuard =>
-                        "invalid associated type parameter guard".into(),
-                    AssociatedFamilyError::InvalidOutputBound =>
-                        "invalid associated type output bound".into(),
-                    AssociatedFamilyError::GuardedPartialApplication =>
-                        "guarded associated family must be fully applied".into(),
-                };
-                primary_diag(Severity::Error, &message, &message, span.resolve(db), error_code)
-            }
+            Self::AssocTypeConstParam(span) => primary_diag(
+                Severity::Error,
+                "associated types cannot have const parameters",
+                "const parameter",
+                span.resolve(db),
+                error_code,
+            ),
+            Self::InvalidAssocTypeParamBound { span, param } => primary_diag(
+                Severity::Error,
+                format!("invalid bound on associated type parameter `{}`", param.data(db)),
+                "this bound cannot be used for the parameter",
+                span.resolve(db),
+                error_code,
+            ),
+            Self::InvalidAssocTypeBound { span, name } => primary_diag(
+                Severity::Error,
+                format!("invalid bound on associated type `{}`", name.data(db)),
+                "this bound cannot be used for the associated type",
+                span.resolve(db),
+                error_code,
+            ),
+            Self::AssocTypeNeedsAllArgs { span, name } => primary_diag(
+                Severity::Error,
+                format!(
+                    "`{}` has bounds on its type parameters, so it needs all of its type arguments",
+                    name.data(db)
+                ),
+                "type arguments missing",
+                span.resolve(db),
+                error_code,
+            ),
             Self::ComputedTypeImplHeader(span) => primary_diag(
                 Severity::Error,
                 "computed types are not allowed in implementation headers",
@@ -2870,13 +2895,17 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
 }
 
 fn offending_generic_param_spans<'db>(
-    owner: crate::core::hir_def::GenericParamOwner<'db>,
+    owner: crate::analysis::ty::diagnostics::GenericParamListOwner<'db>,
     idxs: &'db [u16],
     db: &'db dyn SpannedHirAnalysisDb,
 ) -> impl Iterator<Item = Option<Span>> + 'db {
-    let params_vec: Vec<_> = owner.params(db).collect();
-    idxs.iter()
-        .map(move |i| params_vec[*i as usize].span().resolve(db))
+    use crate::analysis::ty::diagnostics::GenericParamListOwner;
+    idxs.iter().map(move |&i| match owner {
+        GenericParamListOwner::Item(item) => item.param_view(db, i as usize).span().resolve(db),
+        GenericParamListOwner::AssocType(assoc) => {
+            assoc.span().generic_params().param(i as usize).resolve(db)
+        }
+    })
 }
 
 fn duplicate_name_subdiags<I>(name: &str, spans: I) -> Vec<SubDiagnostic>
@@ -3946,6 +3975,14 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 severity,
                 "const value must be resolvable during type checking",
                 format!("requires {dependency}"),
+                primary.resolve(db),
+                error_code,
+            ),
+
+            Self::ReturnTypeNotComputable(primary) => primary_diag(
+                severity,
+                "the return type cannot be computed for these generic arguments",
+                "a constant in this call's return type has no value",
                 primary.resolve(db),
                 error_code,
             ),
@@ -5566,7 +5603,20 @@ impl DiagnosticVoucher for TraitConstraintDiag<'_> {
                     });
                 }
 
-                let notes = capability.map(|(_, notes)| notes).unwrap_or_default();
+                let mut notes = capability.map(|(_, notes)| notes).unwrap_or_default();
+                // A computed type with a generic subject can meet a bound in a
+                // signature (proved for every subject) without giving a call
+                // an implementation to use.
+                let self_ty = primary_goal.self_ty(db);
+                if matches!(
+                    self_ty.base_ty(db).data(db),
+                    TyData::TyBase(crate::analysis::ty::ty_def::TyBase::TypeFn(_))
+                ) {
+                    notes.push(
+                        "an implementation for a computed type cannot be chosen while its subject is generic; add this bound to the function's `where` clause"
+                            .to_string(),
+                    );
+                }
 
                 CompleteDiagnostic {
                     severity,
@@ -5579,8 +5629,8 @@ impl DiagnosticVoucher for TraitConstraintDiag<'_> {
 
             Self::NormalizationFault(span) => primary_diag(
                 severity,
-                "type or constant normalization failed during trait matching",
-                "a ground value needed to choose an implementation could not be normalized",
+                "could not compute a type while choosing an implementation",
+                "choosing an implementation here needs a type whose computation failed",
                 span.resolve(db),
                 error_code,
             ),
@@ -6212,6 +6262,36 @@ impl DiagnosticVoucher for ImplDiag<'_> {
                 error_code,
             },
 
+            Self::InherentImplOnGenericComputedType { primary, ty } => CompleteDiagnostic {
+                severity,
+                message: "invalid inherent implementation".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: format!(
+                        "`{}` cannot be computed while its subject is generic",
+                        ty.pretty_print(db)
+                    ),
+                    span: primary.resolve(db),
+                }],
+                notes: vec![
+                    "an inherent impl on a computed type needs a literal subject, such as `1`"
+                        .to_string(),
+                ],
+                error_code,
+            },
+
+            Self::NamedCopyImpl { primary } => CompleteDiagnostic {
+                severity,
+                message: "`Copy` cannot be implemented by name".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: "a type is either `Copy` everywhere or nowhere".to_string(),
+                    span: primary.resolve(db),
+                }],
+                notes: vec!["remove `as <name>` to implement `Copy` for every use".to_string()],
+                error_code,
+            },
+
             Self::InvalidEffectHandleRaw {
                 primary,
                 raw_ty,
@@ -6250,6 +6330,52 @@ impl DiagnosticVoucher for ImplDiag<'_> {
                     error_code,
                 }
             }
+
+            Self::AssocTypeParamNumMismatch {
+                primary,
+                expected,
+                given,
+            } => primary_diag(
+                severity,
+                "associated type parameter count mismatch",
+                format!("expected {expected} type parameters, but {given} given"),
+                primary.resolve(db),
+                error_code,
+            ),
+
+            Self::AssocTypeParamKindMismatch {
+                primary,
+                expected,
+                given,
+            } => {
+                use crate::analysis::ty::diagnostics::AssocTypeParamKind;
+                let label = match (expected, given) {
+                    (AssocTypeParamKind::Type(expected), AssocTypeParamKind::Type(given)) => {
+                        format!("expected `{expected}` kind, but this parameter has `{given}` kind")
+                    }
+                    (AssocTypeParamKind::Type(_), AssocTypeParamKind::Const) => {
+                        "expected a type parameter, found a const parameter".to_string()
+                    }
+                    (AssocTypeParamKind::Const, _) => {
+                        "expected a const parameter, found a type parameter".to_string()
+                    }
+                };
+                primary_diag(
+                    severity,
+                    "associated type parameter does not match the trait",
+                    label,
+                    primary.resolve(db),
+                    error_code,
+                )
+            }
+
+            Self::AssocTypeParamBoundInImpl { primary } => primary_diag(
+                severity,
+                "bounds on associated type parameters must be written in the trait",
+                "move this bound to the trait's declaration",
+                primary.resolve(db),
+                error_code,
+            ),
         }
     }
 }

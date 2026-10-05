@@ -22,18 +22,19 @@ use salsa::Update;
 use smallvec1::SmallVec;
 use thin_vec::ThinVec;
 
+/// The owner of a generic parameter list: an item, or an associated type
+/// with parameters of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update, derive_more::From)]
+pub enum GenericParamListOwner<'db> {
+    Item(GenericParamOwner<'db>),
+    AssocType(crate::hir_def::scope_graph::AssocTypeOwner<'db>),
+}
+
+/// What an associated type parameter is, for comparing an impl with its trait.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
-pub enum AssociatedFamilyError {
-    ParameterCount { expected: usize, given: usize },
-    ParameterKind { expected: Kind, given: Kind },
-    ParameterSort,
-    ConstParameter,
-    ImplementationBound,
-    UnknownMember,
-    DuplicateParameter,
-    InvalidGuard,
-    InvalidOutputBound,
-    GuardedPartialApplication,
+pub enum AssocTypeParamKind {
+    Type(Kind),
+    Const,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, derive_more::From, Update)]
@@ -128,7 +129,7 @@ pub enum TyLowerDiag<'db> {
     DuplicateArgName(Func<'db>, SmallVec<[u16; 4]>),
     DuplicateFieldName(FieldParent<'db>, SmallVec<[u16; 4]>),
     DuplicateVariantName(Enum<'db>, SmallVec<[u16; 4]>),
-    DuplicateGenericParamName(GenericParamOwner<'db>, SmallVec<[u16; 4]>),
+    DuplicateGenericParamName(GenericParamListOwner<'db>, SmallVec<[u16; 4]>),
 
     InvalidConstParamTy(DynLazySpan<'db>),
     RecursiveConstParamTy(DynLazySpan<'db>),
@@ -214,9 +215,23 @@ pub enum TyLowerDiag<'db> {
         span: DynLazySpan<'db>,
         reason: String,
     },
-    AssociatedFamilyDeclaration {
+    /// A const parameter on an associated type.
+    AssocTypeConstParam(DynLazySpan<'db>),
+    /// A bound on an associated type parameter whose arguments are invalid.
+    InvalidAssocTypeParamBound {
         span: DynLazySpan<'db>,
-        error: AssociatedFamilyError,
+        param: IdentId<'db>,
+    },
+    /// A bound declared on an associated type that cannot hold as written.
+    InvalidAssocTypeBound {
+        span: DynLazySpan<'db>,
+        name: IdentId<'db>,
+    },
+    /// An associated type whose parameters have bounds, used without all of
+    /// its type arguments.
+    AssocTypeNeedsAllArgs {
+        span: DynLazySpan<'db>,
+        name: IdentId<'db>,
     },
 
     NonTrailingDefaultGenericParam(LazyGenericParamSpan<'db>),
@@ -327,7 +342,7 @@ impl TyLowerDiag<'_> {
             Self::TypeAliasCycle { .. } => 4,
             Self::InconsistentKindBound { .. } => 5,
             Self::KindBoundNotAllowed(_) => 6,
-            Self::UnknownKindBound { .. } => 54,
+            Self::UnknownKindBound { .. } => 64,
             Self::GenericParamAlreadyDefinedInParent { .. } => 7,
             Self::DuplicateArgName { .. } => 8,
             Self::InvalidConstParamTy { .. } => 9,
@@ -357,10 +372,13 @@ impl TyLowerDiag<'_> {
             Self::ConstEvalRecursiveConst(_) => 37,
             Self::ConstEvalAtUse { fault, .. } => fault.local_code(),
             Self::TypeLoweringCycle(_) => 38,
-            Self::TypeNormalizationLimit(_) => 50,
-            Self::AssociatedFamilyDeclaration { .. } => 51,
-            Self::ComputedTypeDeclaration { .. } => 52,
-            Self::ComputedTypeImplHeader(_) => 53,
+            Self::TypeNormalizationLimit(_) => 57,
+            Self::AssocTypeConstParam(_) => 58,
+            Self::InvalidAssocTypeParamBound { .. } => 59,
+            Self::InvalidAssocTypeBound { .. } => 60,
+            Self::AssocTypeNeedsAllArgs { .. } => 61,
+            Self::ComputedTypeDeclaration { .. } => 62,
+            Self::ComputedTypeImplHeader(_) => 63,
             Self::MixedRefSelfPrefixWithExplicitType { .. } => 28,
             Self::MixedOwnSelfPrefixWithExplicitType { .. } => 29,
             Self::InvalidMutSelfPrefixWithExplicitType { .. } => 30,
@@ -594,6 +612,9 @@ pub enum BodyDiag<'db> {
         origin: String,
         reason: String,
     },
+    /// A constant in a callee's return type has no value for the generic
+    /// arguments of this call.
+    ReturnTypeNotComputable(DynLazySpan<'db>),
     WhereConstPredicateFailed(DynLazySpan<'db>),
     WhereTypeBoundMissing(DynLazySpan<'db>),
     GenericConstPredicateUnsupported(DynLazySpan<'db>),
@@ -1129,6 +1150,7 @@ impl<'db> BodyDiag<'db> {
             Self::ConstValueMustBeKnown(..) => 64,
             Self::ConstDependencyMustBeKnown { .. } => 90,
             Self::ConstEvaluationFailed { .. } => 89,
+            Self::ReturnTypeNotComputable(..) => 117,
             Self::WhereConstPredicateFailed(..) => 91,
             Self::GenericConstPredicateUnsupported(..) => 92,
             Self::RecursiveConstRequirement(..) => 94,
@@ -1368,6 +1390,13 @@ pub enum ImplDiag<'db> {
         is_nominal: bool,
     },
 
+    /// `impl<const N: usize> Tree<N>` for a computed type `Tree`: the target
+    /// has no fixed shape while its subject is generic.
+    InherentImplOnGenericComputedType {
+        primary: DynLazySpan<'db>,
+        ty: TyId<'db>,
+    },
+
     TypeNotDefinedInTrait {
         primary: DynLazySpan<'db>,
         trait_: Trait<'db>,
@@ -1447,6 +1476,30 @@ pub enum ImplDiag<'db> {
         raw_ty: TyId<'db>,
         failure: ProviderLayoutFailure,
     },
+
+    /// `impl Copy for T as Name`: whether a type is `Copy` cannot depend on
+    /// which implementations a `with` block selects.
+    NamedCopyImpl { primary: DynLazySpan<'db> },
+
+    /// An impl's associated type has a different number of type parameters
+    /// than the trait declares.
+    AssocTypeParamNumMismatch {
+        primary: DynLazySpan<'db>,
+        expected: usize,
+        given: usize,
+    },
+
+    /// An impl's associated type parameter differs from the trait's in kind,
+    /// or is a const parameter where the trait has a type parameter.
+    AssocTypeParamKindMismatch {
+        primary: DynLazySpan<'db>,
+        expected: AssocTypeParamKind,
+        given: AssocTypeParamKind,
+    },
+
+    /// A bound on an impl's associated type parameter; bounds belong to the
+    /// trait's declaration.
+    AssocTypeParamBoundInImpl { primary: DynLazySpan<'db> },
 }
 
 impl ImplDiag<'_> {
@@ -1477,10 +1530,85 @@ impl ImplDiag<'_> {
             Self::InherentConstShadowsVariant { .. } => 20,
             Self::InherentConstShadowsFn { .. } => 21,
             Self::InvalidEffectHandleRaw { .. } => 22,
+            Self::AssocTypeParamNumMismatch { .. } => 26,
+            Self::AssocTypeParamKindMismatch { .. } => 27,
+            Self::AssocTypeParamBoundInImpl { .. } => 28,
             Self::TypeNotDefinedInTrait { .. } => 23,
-            Self::MethodConstPredicateMismatch { .. } => 24,
+            Self::MethodConstPredicateMismatch { .. } => 29,
+            Self::NamedCopyImpl { .. } => 30,
+            Self::InherentImplOnGenericComputedType { .. } => 31,
         }
     }
 }
 
 pub struct DefConflictError<'db>(pub SmallVec<[ItemKind<'db>; 2]>);
+
+#[cfg(test)]
+mod tests {
+    use rustc_hash::FxHashMap;
+
+    /// Each `local_code` function in this file, as (enum name, [(variant, code)]).
+    fn local_codes() -> Vec<(String, Vec<(String, u16)>)> {
+        let source = include_str!("diagnostics.rs");
+        let mut out = Vec::new();
+        let mut owner = String::new();
+        let mut current: Option<Vec<(String, u16)>> = None;
+        for line in source.lines() {
+            if let Some(rest) = line.strip_prefix("impl") {
+                if let Some(name) = rest
+                    .split_whitespace()
+                    .find(|word| word.ends_with("Diag<'_>") || word.ends_with("Diag<'db>"))
+                {
+                    owner = name.split('<').next().unwrap().to_string();
+                }
+            } else if line.trim_start().starts_with("pub")
+                && line.ends_with("fn local_code(&self) -> u16 {")
+            {
+                current = Some(Vec::new());
+            } else if let Some(arms) = current.as_mut() {
+                if line == "    }" {
+                    out.push((owner.clone(), current.take().unwrap()));
+                } else if let Some((variant, code)) = line.trim().split_once(" => ")
+                    && let Some(code) = code.strip_suffix(',')
+                    && let Ok(code) = code.parse()
+                {
+                    arms.push((variant.to_string(), code));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn diagnostic_codes_are_unique() {
+        // Shared codes inherited from upstream master, kept so the published
+        // codes do not change. Do not add to this list.
+        let inherited = [
+            ("BodyDiag", 52),
+            ("BodyDiag", 55),
+            ("BodyDiag", 75),
+            ("BodyDiag", 76),
+            ("BodyDiag", 82),
+            ("BodyDiag", 84),
+            ("BodyDiag", 89),
+            ("BodyDiag", 90),
+        ];
+        let enums = local_codes();
+        assert!(
+            enums.len() >= 5,
+            "found {} local_code functions",
+            enums.len()
+        );
+        for (owner, arms) in enums {
+            assert!(!arms.is_empty(), "no codes found for {owner}");
+            let mut seen: FxHashMap<u16, &str> = FxHashMap::default();
+            for (variant, code) in &arms {
+                if let Some(first) = seen.insert(*code, variant)
+                    && !inherited.contains(&(owner.as_str(), *code))
+                {
+                    panic!("{owner}: `{first}` and `{variant}` share code {code}");
+                }
+            }
+        }
+    }
+}

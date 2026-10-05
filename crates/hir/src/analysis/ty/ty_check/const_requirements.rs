@@ -2601,6 +2601,14 @@ fn written_types_query<'db>(
             hir_ty: crate::hir_def::TypeId<'db>,
         ) {
             let scope = ctxt.scope();
+            // The body of an associated type with a const parameter is not
+            // lowered; the parameter is reported once where it is declared.
+            if scope
+                .assoc_type_owner()
+                .is_some_and(|owner| owner.has_const_param(self.db))
+            {
+                return;
+            }
             let span = ctxt.span().map(Into::into);
             self.written_type(hir_ty, scope, span, |this| walk_type(this, ctxt, hir_ty));
         }

@@ -1674,6 +1674,45 @@ impl<'db> TyChecker<'db> {
         result
     }
 
+    /// A callee's signature with its generic arguments filled in can contain a
+    /// const that faults only now (`S<{N - 5}>` at `N = 2`). Report the fault
+    /// at the call; the invalid type would otherwise match any type.
+    fn report_instantiated_const_fault(
+        &mut self,
+        callable: &Callable<'db>,
+        ty: TyId<'db>,
+        span: DynLazySpan<'db>,
+    ) {
+        use crate::analysis::ty::ty_error::{
+            diag_from_invalid_cause, first_invalid_ty_cause, is_const_fault,
+        };
+        let Some(cause) = first_invalid_ty_cause(self.db, ty) else {
+            return;
+        };
+        if is_const_fault(&cause)
+            && let Some(diag) = diag_from_invalid_cause(span.clone(), &cause)
+        {
+            self.push_diag(diag);
+            return;
+        }
+        // The fault can lose its cause on the way (a computed type's subject,
+        // `Tree<{N - 5}>`). It still came from these generic arguments if the
+        // declared return type and the arguments are valid.
+        let declared = callable
+            .callable_def()
+            .ret_ty(self.db)
+            .instantiate_identity();
+        if matches!(cause, InvalidCause::Other)
+            && !declared.has_invalid(self.db)
+            && !callable
+                .generic_args()
+                .iter()
+                .any(|arg| arg.has_invalid(self.db))
+        {
+            self.push_diag(BodyDiag::ReturnTypeNotComputable(span));
+        }
+    }
+
     fn normalize_callable_return(&mut self, callable: &Callable<'db>) -> TyId<'db> {
         let requirements = callable
             .selection_requirements(self.db)
@@ -1748,6 +1787,11 @@ impl<'db> TyChecker<'db> {
         callable.process_constraints(self, expr, call_span.callee().into());
 
         let normalized_ret_ty = self.normalize_callable_return(&callable);
+        self.report_instantiated_const_fault(
+            &callable,
+            normalized_ret_ty,
+            expr.span(self.body()).into(),
+        );
         if !self.in_const_context() && self.callable_contains_quote(callable.callable_def()) {
             self.push_diag(BodyDiag::QuoteCallAtRuntime(expr.span(self.body()).into()));
             return ExprProp::invalid(self.db);
@@ -4056,6 +4100,11 @@ impl<'db> TyChecker<'db> {
         callable.process_constraints(self, expr, call_span.method_name().into());
 
         let normalized_ret_ty = self.normalize_callable_return(&callable);
+        self.report_instantiated_const_fault(
+            &callable,
+            normalized_ret_ty,
+            expr.span(self.body()).into(),
+        );
         if !self.in_const_context() && self.callable_contains_quote(callable.callable_def()) {
             self.push_diag(BodyDiag::QuoteCallAtRuntime(expr.span(self.body()).into()));
             return ExprProp::invalid(self.db);

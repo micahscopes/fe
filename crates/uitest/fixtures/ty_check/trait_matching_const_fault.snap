@@ -3,8 +3,8 @@ source: crates/uitest/tests/ty_check.rs
 expression: diags
 input_file: fixtures/ty_check/trait_matching_const_fault.fe
 ---
-error[6-0007]: type or constant normalization failed during trait matching
+error[6-0007]: could not compute a type while choosing an implementation
   ┌─ trait_matching_const_fault.fe:8:16
   │
 8 │ fn trigger() { consume(_value: Subject<1> {}) }
-  │                ^^^^^^^ a ground value needed to choose an implementation could not be normalized
+  │                ^^^^^^^ choosing an implementation here needs a type whose computation failed

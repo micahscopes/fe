@@ -1,0 +1,12 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/type_normalization/computed_inherent_impl_generic.fe
+---
+error[6-0031]: invalid inherent implementation
+  ┌─ computed_inherent_impl_generic.fe:9:22
+  │
+9 │ impl<const N: usize> Tree<N> {
+  │                      ^^^^^^^ `Tree` cannot be computed while its subject is generic
+  │
+  = an inherent impl on a computed type needs a literal subject, such as `1`

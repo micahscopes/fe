@@ -120,7 +120,7 @@ pub enum PathResErrorKind<'db> {
     TraitConstHoleArg {
         arg_idx: usize,
     },
-    AssociatedFamilyBinding {
+    AssocTypeBindingWithParams {
         name: IdentId<'db>,
     },
 
@@ -213,8 +213,8 @@ impl<'db> PathResError<'db> {
             PathResErrorKind::TraitConstHoleArg { .. } => {
                 "Layout hole is not allowed in trait generic arguments".to_string()
             }
-            PathResErrorKind::AssociatedFamilyBinding { .. } => {
-                "An associated family binding must preserve its parameters".to_string()
+            PathResErrorKind::AssocTypeBindingWithParams { .. } => {
+                "An associated type with type parameters cannot be set with a binding".to_string()
             }
             PathResErrorKind::TraitGenericArgType { .. } => {
                 "Trait generic argument expects a type".to_string()
@@ -315,8 +315,8 @@ impl<'db> PathResError<'db> {
                 expected,
                 given,
             },
-            PathResErrorKind::AssociatedFamilyBinding { name } => {
-                PathResDiag::AssociatedFamilyBinding { span, name }
+            PathResErrorKind::AssocTypeBindingWithParams { name } => {
+                PathResDiag::AssocTypeBindingWithParams { span, name }
             }
 
             PathResErrorKind::ArgKindMisMatch { expected, given } => PathResDiag::ArgKindMismatch {
@@ -2025,7 +2025,7 @@ fn find_associated_type_in_mode<'db>(
         }
     }
 
-    if let Some((_, bounds)) = original_ty.associated_family_rules(db) {
+    if let Some((_, bounds)) = original_ty.family_declared_bounds(db) {
         let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
         for &bound in bounds.list(db) {
             if bound.def(db).assoc_ty(db, name).is_some()
@@ -2423,8 +2423,8 @@ fn resolve_name_res_unexpanded<'db>(
                                     TraitArgError::ConstHoleNotAllowed { arg_idx } => {
                                         PathResErrorKind::TraitConstHoleArg { arg_idx }
                                     }
-                                    TraitArgError::AssociatedFamilyBinding { name } => {
-                                        PathResErrorKind::AssociatedFamilyBinding { name }
+                                    TraitArgError::AssocTypeBindingWithParams { name } => {
+                                        PathResErrorKind::AssocTypeBindingWithParams { name }
                                     }
                                     TraitArgError::Ignored => PathResErrorKind::ParseError,
                                 };

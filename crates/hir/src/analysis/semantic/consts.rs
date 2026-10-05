@@ -1137,6 +1137,18 @@ pub(crate) fn runtime_size_bytes_with_source<'db>(
         source: TyId<'db>,
         visiting: &mut FxHashSet<TyId<'db>>,
     ) -> Result<Option<u64>, RuntimeSizeError<'db>> {
+        // A field written as a computed type (`VTree<1>`) is already reduced
+        // in the canonical view but not in the source view, which keeps const
+        // arguments unevaluated. The canonical type then serves as its own
+        // source.
+        let source = if matches!(
+            source.base_ty(db).data(db),
+            TyData::TyBase(TyBase::TypeFn(_))
+        ) {
+            ty
+        } else {
+            source
+        };
         if !visiting.insert(ty) {
             return Ok(None);
         }

@@ -4795,7 +4795,7 @@ pub struct ImplAssocTypeView<'db> {
 }
 
 impl<'db> ImplAssocTypeView<'db> {
-    fn with_declared_guards(
+    fn with_parameter_bounds(
         self,
         db: &'db dyn HirAnalysisDb,
         assumptions: PredicateListId<'db>,
@@ -4817,7 +4817,7 @@ impl<'db> ImplAssocTypeView<'db> {
         let args: Vec<_> = (0..self.generic_params(db).data(db).len())
             .map(|idx| crate::analysis::ty::ty_lower::assoc_type_param(db, owner, idx))
             .collect();
-        let Some(guards) = decl.parameter_requirements(db, inst, &args) else {
+        let Some(guards) = decl.parameter_bounds(db, inst, &args) else {
             return assumptions;
         };
         let mut predicates = assumptions.list(db).to_vec();
@@ -4827,6 +4827,11 @@ impl<'db> ImplAssocTypeView<'db> {
 
     pub fn scope(self) -> ScopeId<'db> {
         ScopeId::ImplTraitType(self.owner, self.idx as u16)
+    }
+
+    fn has_const_param(self, db: &'db dyn HirDb) -> bool {
+        crate::hir_def::scope_graph::AssocTypeOwner::Impl(self.owner, self.idx as u16)
+            .has_const_param(db)
     }
 
     pub(crate) fn bind_body(self, db: &'db dyn HirAnalysisDb, body: TyId<'db>) -> TyId<'db> {
@@ -4864,7 +4869,10 @@ impl<'db> ImplAssocTypeView<'db> {
     /// Semantic type of this associated type implementation.
     pub fn ty(self, db: &'db dyn HirAnalysisDb) -> Option<TyId<'db>> {
         let hir = self.owner.types(db)[self.idx].type_ref.to_opt()?;
-        let assumptions = self.with_declared_guards(db, constraints_for(db, self.owner.into()));
+        if self.has_const_param(db) {
+            return Some(TyId::invalid(db, InvalidCause::Other));
+        }
+        let assumptions = self.with_parameter_bounds(db, constraints_for(db, self.owner.into()));
         let minter = LoweringContext::new(self.hole_anchor());
         Some(lower_hir_ty_with_minter(
             db,
@@ -4877,7 +4885,10 @@ impl<'db> ImplAssocTypeView<'db> {
 
     pub(crate) fn candidate_ty(self, db: &'db dyn HirAnalysisDb) -> Option<TyId<'db>> {
         let hir = self.owner.types(db)[self.idx].type_ref.to_opt()?;
-        let assumptions = self.with_declared_guards(
+        if self.has_const_param(db) {
+            return Some(TyId::invalid(db, InvalidCause::Other));
+        }
+        let assumptions = self.with_parameter_bounds(
             db,
             collect_candidate_constraints(db, self.owner.into()).instantiate_identity(),
         );
@@ -4895,13 +4906,16 @@ impl<'db> ImplAssocTypeView<'db> {
         let Some(hir) = self.owner.types(db)[self.idx].type_ref.to_opt() else {
             return Vec::new();
         };
+        if self.has_const_param(db) {
+            return Vec::new();
+        }
         let scope = self.scope();
         let minter = LoweringContext::new(self.hole_anchor());
         lower_layout_root_uses_in_hir_ty(
             db,
             hir,
             scope,
-            self.with_declared_guards(db, constraints_for(db, self.owner.into())),
+            self.with_parameter_bounds(db, constraints_for(db, self.owner.into())),
             &minter,
         )
     }
@@ -4911,9 +4925,12 @@ impl<'db> ImplAssocTypeView<'db> {
         let Some(hir) = self.owner.types(db)[self.idx].type_ref.to_opt() else {
             return Vec::new();
         };
+        if self.has_const_param(db) {
+            return Vec::new();
+        }
 
         let ty_span = self.span().ty();
-        let assumptions = self.with_declared_guards(db, constraints_for(db, self.owner.into()));
+        let assumptions = self.with_parameter_bounds(db, constraints_for(db, self.owner.into()));
 
         let errs = collect_ty_lower_errors(db, self.scope(), hir, ty_span.clone(), assumptions);
         if !errs.is_empty() {
@@ -4933,7 +4950,7 @@ impl<'db> ImplAssocTypeView<'db> {
         if let Some(diag) = check_ty_wf(
             db,
             TraitSolveCx::new(db, self.scope())
-                .with_assumptions(self.with_declared_guards(db, param_env(db, self.owner.into()))),
+                .with_assumptions(self.with_parameter_bounds(db, param_env(db, self.owner.into()))),
             ty,
         )
         .into_diag(ty_span.into())
@@ -5036,6 +5053,11 @@ impl<'db> TraitAssocTypeView<'db> {
         ScopeId::TraitType(self.owner, self.idx as u16)
     }
 
+    pub(crate) fn has_const_param(self, db: &'db dyn HirDb) -> bool {
+        crate::hir_def::scope_graph::AssocTypeOwner::Trait(self.owner, self.idx as u16)
+            .has_const_param(db)
+    }
+
     pub(crate) fn bind_body(self, db: &'db dyn HirAnalysisDb, body: TyId<'db>) -> TyId<'db> {
         TyId::type_family(
             db,
@@ -5072,8 +5094,11 @@ impl<'db> TraitAssocTypeView<'db> {
         db: &'db dyn HirAnalysisDb,
     ) -> Option<crate::analysis::ty::ty_def::TyId<'db>> {
         let hir = self.decl(db).default?;
+        if self.has_const_param(db) {
+            return Some(TyId::invalid(db, InvalidCause::Other));
+        }
         let trait_ = self.owner;
-        let assumptions = self.with_declared_guards(db, constraints_for(db, trait_.into()));
+        let assumptions = self.with_parameter_bounds(db, constraints_for(db, trait_.into()));
         Some(lower_hir_ty(db, hir, self.scope(), assumptions))
     }
 
@@ -5086,8 +5111,11 @@ impl<'db> TraitAssocTypeView<'db> {
         db: &'db dyn HirAnalysisDb,
     ) -> Option<crate::analysis::ty::ty_def::TyId<'db>> {
         let hir = self.decl(db).default?;
+        if self.has_const_param(db) {
+            return Some(TyId::invalid(db, InvalidCause::Other));
+        }
         let trait_ = self.owner;
-        let assumptions = self.with_declared_guards(
+        let assumptions = self.with_parameter_bounds(
             db,
             collect_candidate_constraints(db, trait_.into()).instantiate_identity(),
         );
@@ -5098,8 +5126,11 @@ impl<'db> TraitAssocTypeView<'db> {
         let Some(hir) = self.decl(db).default else {
             return Vec::new();
         };
+        if self.has_const_param(db) {
+            return Vec::new();
+        }
         let scope = self.scope();
-        let assumptions = self.with_declared_guards(db, constraints_for(db, self.owner.into()));
+        let assumptions = self.with_parameter_bounds(db, constraints_for(db, self.owner.into()));
         let minter = LoweringContext::new(HoleAnchor::TemplateTy {
             ty: hir,
             scope,
@@ -5157,6 +5188,18 @@ pub struct AssocTypeBoundView<'db> {
 }
 
 impl<'db> TraitAssocTypeView<'db> {
+    /// `<Self as Trait<..>>::Name<P..>` over the trait's and the family's own
+    /// formal parameters.
+    pub(crate) fn formal_subject(self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
+        let trait_inst = trait_self_predicate(db, self.owner);
+        let name = self.name(db).expect("a family has a name");
+        TyId::foldl(
+            db,
+            TyId::assoc_ty(db, trait_inst.trait_ref(db), name),
+            &self.family_parameters(db),
+        )
+    }
+
     pub(crate) fn family_parameters(self, db: &'db dyn HirAnalysisDb) -> Vec<TyId<'db>> {
         let owner = self.scope().assoc_type_owner().unwrap();
         (0..self.generic_params(db).data(db).len())
@@ -5166,7 +5209,7 @@ impl<'db> TraitAssocTypeView<'db> {
 
     /// Declaration-owned requirements, instantiated for a particular enclosing
     /// trait and local family arguments. Both callers and definitions use this.
-    pub(crate) fn parameter_requirements(
+    pub(crate) fn parameter_bounds(
         self,
         db: &'db dyn HirAnalysisDb,
         inst: TraitInstId<'db>,
@@ -5217,7 +5260,7 @@ impl<'db> TraitAssocTypeView<'db> {
         Some(PredicateListId::new(db, requirements))
     }
 
-    pub(crate) fn with_declared_guards(
+    pub(crate) fn with_parameter_bounds(
         self,
         db: &'db dyn HirAnalysisDb,
         assumptions: PredicateListId<'db>,
@@ -5233,8 +5276,7 @@ impl<'db> TraitAssocTypeView<'db> {
                 .to_vec(),
             IndexMap::new(),
         );
-        let Some(guards) = self.parameter_requirements(db, inst, &self.family_parameters(db))
-        else {
+        let Some(guards) = self.parameter_bounds(db, inst, &self.family_parameters(db)) else {
             return assumptions;
         };
         let mut predicates = assumptions.list(db).to_vec();
@@ -5266,7 +5308,12 @@ impl<'db> TraitAssocTypeView<'db> {
 }
 
 impl<'db> AssocTypeBoundView<'db> {
-    fn trait_ref(self, db: &'db dyn HirDb) -> TraitRefId<'db> {
+    /// Position of this bound in the declaration's bound list.
+    pub(crate) fn index(self) -> usize {
+        self.idx
+    }
+
+    pub(crate) fn trait_ref(self, db: &'db dyn HirDb) -> TraitRefId<'db> {
         match self.owner.bounds_raw(db)[self.idx] {
             TypeBound::Trait(tr) => tr,
             _ => unreachable!(),
@@ -5322,9 +5369,9 @@ pub struct ImplementorAssocTypeView<'db> {
 }
 
 impl<'db> ImplementorAssocTypeView<'db> {
-    pub(crate) fn parameter_requirements(self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
+    pub(crate) fn parameter_bounds(self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
         self.assoc
-            .parameter_requirements(
+            .parameter_bounds(
                 db,
                 self.implementor.trait_(db),
                 &self.assoc.family_parameters(db),
@@ -5431,34 +5478,39 @@ impl<'db> TyId<'db> {
         Some((decl, inst, args))
     }
 
-    pub(crate) fn has_unsaturated_family_guards(self, db: &'db dyn HirAnalysisDb) -> bool {
-        self.associated_family_context(db).is_some_and(|(decl, _, args)| {
-            let params = decl.generic_params(db).data(db);
-            args.len() != params.len() && params.iter().any(|param| {
-                matches!(param, GenericParam::Type(param) if param.bounds.iter().any(|bound| match bound {
-                    TypeBound::Trait(reference) =>
-                        !crate::analysis::ty::ty_lower::is_core_constraint_bound(db, decl.scope(), *reference),
-                    _ => false,
-                }))
-            })
-        })
+    /// The family's name, if this applies a family whose parameters have
+    /// bounds to fewer arguments than it has parameters.
+    pub(crate) fn lacks_args_for_parameter_bounds(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Option<IdentId<'db>> {
+        let (decl, _, args) = self.associated_family_context(db)?;
+        let params = decl.generic_params(db).data(db);
+        let has_bounds = params.iter().any(|param| {
+            matches!(param, GenericParam::Type(param) if param.bounds.iter().any(|bound| match bound {
+                TypeBound::Trait(reference) =>
+                    !crate::analysis::ty::ty_lower::is_core_constraint_bound(db, decl.scope(), *reference),
+                _ => false,
+            }))
+        });
+        (args.len() != params.len() && has_bounds).then(|| decl.name(db))?
     }
 
     /// Local declaration guards instantiated at a family application. The
     /// enclosing trait obligation is checked separately from these guards.
-    pub(crate) fn associated_family_requirements(
+    pub(crate) fn family_parameter_bounds(
         self,
         db: &'db dyn HirAnalysisDb,
     ) -> Option<PredicateListId<'db>> {
         let (decl, inst, args) = self.associated_family_context(db)?;
-        decl.parameter_requirements(db, inst, args)
+        decl.parameter_bounds(db, inst, args)
     }
 
     /// Declared output rules for a saturated associated family application.
     /// These are candidates, not assumptions: consumers must establish every
     /// requirement before using a bound. Keep this separate from normalization,
     /// which can erase the projection and its formation requirements.
-    pub(crate) fn associated_family_rules(
+    pub(crate) fn family_declared_bounds(
         self,
         db: &'db dyn HirAnalysisDb,
     ) -> Option<(PredicateListId<'db>, PredicateListId<'db>)> {
@@ -5480,8 +5532,14 @@ impl<'db> TyId<'db> {
             Binder::bind(trait_owner.into(), bound).instantiate(db, inst.args(db))
         };
         let mut requirements = vec![inst];
-        requirements.extend_from_slice(self.associated_family_requirements(db)?.list(db));
-        let bounds: Vec<_> = decl.bounds_on_subject(db, self).map(instantiate).collect();
+        requirements.extend_from_slice(self.family_parameter_bounds(db)?.list(db));
+        // Lower the bounds on the declaration's own formal subject, so the
+        // substitutions above only ever replace formals. The actual subject
+        // can mention `Self` or the family's parameters itself.
+        let bounds: Vec<_> = decl
+            .bounds_on_subject(db, decl.formal_subject(db))
+            .map(instantiate)
+            .collect();
         Some((
             PredicateListId::new(db, requirements),
             PredicateListId::new(db, bounds).extend_all_bounds(db),

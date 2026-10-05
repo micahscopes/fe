@@ -139,6 +139,152 @@ pub(crate) fn collect_generic_arg_errors<'db>(
     visitor.diags
 }
 
+/// Errors for the requirements of type applications in a written type, such
+/// as the bounds on a family's parameters. Lowering normalizes, so a type that
+/// lowers without error can still have applied a family to arguments that do
+/// not meet those bounds.
+pub(crate) fn collect_application_requirement_errors<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    hir_ty: TypeId<'db>,
+    span: LazyTySpan<'db>,
+    assumptions: PredicateListId<'db>,
+) -> Vec<TyDiagCollection<'db>> {
+    let mut visitor = ApplicationRequirementVisitor {
+        db,
+        assumptions,
+        diags: Vec::new(),
+    };
+    let mut ctxt = VisitorCtxt::new(db, scope, span);
+    visitor.visit_ty(&mut ctxt, hir_ty);
+    visitor.diags
+}
+
+/// The requirement errors for the types a written path resolved to, one per
+/// path segment.
+fn application_requirement_diags<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    path_span: &LazyPathSpan<'db>,
+    type_uses: Vec<(PathId<'db>, TyId<'db>)>,
+) -> Vec<TyDiagCollection<'db>> {
+    use super::trait_resolution::{TraitSolveCx, check_type_application_requirements};
+    let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+    type_uses
+        .into_iter()
+        .filter_map(|(used_path, ty)| {
+            let span: DynLazySpan<'db> = path_span
+                .clone()
+                .segment(used_path.segment_index(db))
+                .into();
+            check_type_application_requirements(db, solve_cx, ty)
+                .into_diag(span.clone())
+                .or_else(|| projection_const_fault(db, scope, assumptions, ty, span))
+        })
+        .collect()
+}
+
+/// A projection whose output, once its arguments are known, contains a const
+/// that faults when evaluated (`Slot<{N - 5}>` at `N = 2`). Normalization
+/// reports the fault instead of keeping the unevaluated value, so the written
+/// projection is where the user sees it.
+fn projection_const_fault<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    ty: TyId<'db>,
+    span: DynLazySpan<'db>,
+) -> Option<TyDiagCollection<'db>> {
+    if !matches!(ty.data(db), TyData::AssocTy(_) | TyData::QualifiedTy(_)) {
+        return None;
+    }
+    let normalized = super::normalize::normalize_ty(db, ty, scope, assumptions);
+    let cause = normalized.invalid_cause(db)?;
+    if is_const_fault(&cause) {
+        diag_from_invalid_cause(span, &cause)
+    } else {
+        None
+    }
+}
+
+/// Whether `cause` is a fault of evaluating a const.
+pub(crate) fn is_const_fault(cause: &InvalidCause<'_>) -> bool {
+    matches!(
+        cause,
+        InvalidCause::ConstEvalUnsupported { .. }
+            | InvalidCause::ConstEvalAssertionFailed { .. }
+            | InvalidCause::ConstEvalNonConstCall { .. }
+            | InvalidCause::ConstEvalDivisionByZero { .. }
+            | InvalidCause::ConstEvalOutOfBounds { .. }
+            | InvalidCause::ConstEvalInvalidOperation { .. }
+            | InvalidCause::ConstEvalInvalidBorrow { .. }
+            | InvalidCause::ConstEvalInvalidProviderUse { .. }
+            | InvalidCause::ConstEvalVariantMismatch { .. }
+            | InvalidCause::ConstEvalUninitializedLocal { .. }
+            | InvalidCause::ConstEvalInvariant { .. }
+            | InvalidCause::ConstEvalArithmeticOverflow { .. }
+            | InvalidCause::ConstEvalNegativeExponent { .. }
+            | InvalidCause::ConstEvalStepLimitExceeded { .. }
+            | InvalidCause::ConstEvalRecursionLimitExceeded { .. }
+            | InvalidCause::ConstEvalRecursiveConst { .. }
+    )
+}
+
+struct ApplicationRequirementVisitor<'db> {
+    db: &'db dyn HirAnalysisDb,
+    assumptions: PredicateListId<'db>,
+    diags: Vec<TyDiagCollection<'db>>,
+}
+
+impl<'db> Visitor<'db> for ApplicationRequirementVisitor<'db> {
+    fn visit_body(
+        &mut self,
+        _: &mut VisitorCtxt<'db, crate::span::item::LazyBodySpan<'db>>,
+        _: crate::hir_def::Body<'db>,
+    ) {
+        // Const expressions in types are checked as bodies of their own.
+    }
+
+    fn visit_path(&mut self, ctxt: &mut VisitorCtxt<'db, LazyPathSpan<'db>>, path: PathId<'db>) {
+        let scope = ctxt.scope();
+        let path_span = ctxt.span().unwrap();
+        let mut type_uses = Vec::new();
+        let mut collect = |path: PathId<'db>, reso: &PathRes<'db>| {
+            if let PathRes::Ty(ty) | PathRes::TyAlias(_, ty) = reso {
+                type_uses.push((path, *ty));
+            }
+        };
+        let context = LoweringContext::for_const_bodies(
+            HoleAnchor::TemplatePath {
+                path,
+                scope,
+                assumptions: self.assumptions,
+            },
+            ConstBodyLowering::Eager,
+        );
+        // Resolution errors are reported by lowering; only uses that resolved
+        // are checked here.
+        let _ = resolve_path_with_observer_and_minter(
+            self.db,
+            path,
+            scope,
+            self.assumptions,
+            false,
+            &mut collect,
+            &context,
+        );
+        self.diags.extend(application_requirement_diags(
+            self.db,
+            scope,
+            self.assumptions,
+            &path_span,
+            type_uses,
+        ));
+        walk_path(self, ctxt, path);
+    }
+}
+
 struct HirTyErrVisitor<'db> {
     db: &'db dyn HirAnalysisDb,
     diags: Vec<TyDiagCollection<'db>>,
@@ -394,20 +540,13 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
             }
         };
 
-        for (used_path, ty) in type_uses {
-            use super::trait_resolution::{TraitSolveCx, check_type_application_requirements};
-            let solve_cx = TraitSolveCx::new(self.db, scope).with_assumptions(self.assumptions);
-            if let Some(diag) = check_type_application_requirements(self.db, solve_cx, ty)
-                .into_diag(
-                    path_span
-                        .clone()
-                        .segment(used_path.segment_index(self.db))
-                        .into(),
-                )
-            {
-                self.diags.push(diag);
-            }
-        }
+        self.diags.extend(application_requirement_diags(
+            self.db,
+            scope,
+            self.assumptions,
+            &path_span,
+            type_uses,
+        ));
 
         if !matches!(res, PathRes::Ty(_) | PathRes::TyAlias(..)) {
             let ident = path.ident(self.db).unwrap();
@@ -524,6 +663,7 @@ pub(crate) fn first_invalid_ty_cause<'db>(
             if !matches!(
                 cause,
                 InvalidCause::NotAType(_)
+                    | InvalidCause::ComputedTypeDefinitionInvalid
                     | InvalidCause::PathResolutionFailed { .. }
                     | InvalidCause::ParseError
                     | InvalidCause::Other
@@ -740,14 +880,8 @@ pub(crate) fn diag_from_invalid_cause<'db>(
 
         InvalidCause::TypeLoweringCycle => TyLowerDiag::TypeLoweringCycle(span).into(),
         InvalidCause::TypeNormalizationLimit => TyLowerDiag::TypeNormalizationLimit(span).into(),
-        InvalidCause::ComputedTypeDefinitionInvalid => TyLowerDiag::ComputedTypeDeclaration {
-            span,
-            reason: "this application refers to an invalid recursive type function definition"
-                .into(),
-        }
-        .into(),
-
-        InvalidCause::NotAType(_) => return None,
+        // The definition reports its own errors.
+        InvalidCause::ComputedTypeDefinitionInvalid | InvalidCause::NotAType(_) => return None,
 
         // These errors should be caught and reported elsewhere
         InvalidCause::PathResolutionFailed { .. }

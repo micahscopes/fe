@@ -1,4 +1,4 @@
-// Control: the impl leaves the condition out. Expected: reject 6-0024 (by design).
+// Control: the impl leaves the condition out. Expected: reject 6-0029 (by design).
 trait Read<const N: usize> {
     fn read() -> u256 where N > 0
 }

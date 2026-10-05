@@ -1,0 +1,16 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/type_normalization/exponential_computed_type.fe
+---
+error[3-0057]: type normalization limit exceeded
+   ┌─ exponential_computed_type.fe:10:12
+   │
+10 │ fn take(x: Tree<40>) -> Tree<40> { x }
+   │            ^^^^^^^^ this type requires more nested reductions than supported
+
+error[3-0057]: type normalization limit exceeded
+   ┌─ exponential_computed_type.fe:10:25
+   │
+10 │ fn take(x: Tree<40>) -> Tree<40> { x }
+   │                         ^^^^^^^^ this type requires more nested reductions than supported

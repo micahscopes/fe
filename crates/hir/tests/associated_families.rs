@@ -172,7 +172,7 @@ trait Factory { type Out<T>: Wrap<T> = Box<T> }
 }
 
 #[test]
-fn family_parameter_guards_validate_their_trait_arguments() {
+fn family_parameter_bounds_validate_their_trait_arguments() {
     let template = r#"
 trait Allowed {}
 impl Allowed for bool {}
@@ -232,7 +232,7 @@ trait F { type Out<T: Allowed>: BOUND }
 }
 
 #[test]
-fn family_guard_prerequisites_can_come_from_sibling_parameters() {
+fn family_parameter_bounds_can_rely_on_sibling_parameters() {
     for params in ["T: Needs<U>, UBOUND", "UBOUND, T: Needs<U>"] {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(Utf8PathBuf::from("family_sibling_guards.fe"), "");
@@ -349,7 +349,7 @@ fn generic<B: Factory, T>(x: B::Out<T>) -> u256 { x.METHOD() }
 }
 
 #[test]
-fn symbolic_family_bound_consumption_requires_parameter_guards() {
+fn symbolic_family_bound_use_requires_parameter_bounds() {
     let template = r#"
 trait Allowed {}
 trait Show<T> { fn show(self) -> u256 { 1 } }
@@ -396,7 +396,7 @@ fn generic<V, B: Factory<V>, T>(x: B::Out<T>, _ v: V, _ t: T) {
 }
 
 #[test]
-fn forming_a_symbolic_family_requires_guards_without_method_calls() {
+fn forming_a_symbolic_family_requires_parameter_bounds() {
     let template = r#"
 trait Allowed {}
 trait Factory { type Out<T: Allowed> }
@@ -561,7 +561,7 @@ CALLER
 }
 
 #[test]
-fn concrete_family_guards_keep_unused_enclosing_arguments() {
+fn concrete_family_parameter_bounds_keep_unused_enclosing_arguments() {
     let template = r#"
 trait Allowed<V> {}
 impl Allowed<bool> for bool {}
@@ -588,7 +588,7 @@ fn concrete(_ x: <Provider as Factory<CONTEXT>>::Out<bool>) {}
 }
 
 #[test]
-fn family_bodies_use_only_declared_guards_for_bounds_and_well_formedness() {
+fn family_bodies_use_only_their_parameter_bounds() {
     let template = r#"
 trait Allowed {}
 trait Extra {}
@@ -617,7 +617,7 @@ impl Factory for Provider { BODY }
 }
 
 #[test]
-fn declaration_guards_do_not_leak_to_sibling_families() {
+fn parameter_bounds_do_not_leak_to_sibling_families() {
     let template = r#"
 trait Allowed {}
 trait Show<T> {}
@@ -661,27 +661,27 @@ fn family_signatures_are_checked_without_a_use_site() {
         (
             "type Out<F: * -> *>",
             "type Out<U> = u256",
-            Some("parameter kind"),
+            Some("associated type parameter does not match the trait"),
         ),
         (
             "type Out<T>",
             "type Out<U: * -> *> = u256",
-            Some("parameter kind"),
+            Some("associated type parameter does not match the trait"),
         ),
         (
             "type Out<T>",
             "type Out<U: Allowed> = u256",
-            Some("implementation parameter bounds"),
+            Some("bounds on associated type parameters must be written in the trait"),
         ),
         (
             "type Out<T: Missing>",
             "type Out<U> = u256",
-            Some("invalid associated type parameter guard"),
+            Some("`Missing` is not found"),
         ),
         (
             "type Out<T, T>",
             "type Out<U, V> = u256",
-            Some("duplicate associated type parameter"),
+            Some("duplicate generic parameter name in associated type"),
         ),
         (
             "type Out<T>",
@@ -691,12 +691,12 @@ fn family_signatures_are_checked_without_a_use_site() {
         (
             "type Out<const N: usize>",
             "type Out<const N: usize> = u256",
-            Some("const associated type parameters"),
+            Some("associated types cannot have const parameters"),
         ),
         (
             "type Out<T>",
             "type Out<const N: usize> = u256",
-            Some("parameter sort"),
+            Some("expected a type parameter, found a const parameter"),
         ),
         ("type Out<T>", "type Out<U> = u256", None),
     ];
@@ -735,7 +735,7 @@ fn trait_bindings_do_not_erase_family_parameters() {
                 assert!(result.is_empty(), "{source}\n{result}");
             } else {
                 assert!(
-                    result.contains("associated family binding"),
+                    result.contains("takes type parameters, so it cannot be set with `Out = ...`"),
                     "{source}\n{result}"
                 );
             }
@@ -747,7 +747,7 @@ fn trait_bindings_do_not_erase_family_parameters() {
 }
 
 #[test]
-fn guarded_families_cannot_escape_through_constructor_parameters() {
+fn families_with_parameter_bounds_need_all_their_arguments() {
     for (declaration, definition, argument) in [
         ("type Out<T GUARD>", "type Out<U> = u256", ""),
         ("type Out<T GUARD> = u256", "", ""),
@@ -773,7 +773,7 @@ fn guarded_families_cannot_escape_through_constructor_parameters() {
                     assert!(result.is_empty(), "{source}\n{result}");
                 } else {
                     assert!(
-                        result.contains("guarded associated family must be fully applied"),
+                        result.contains("has bounds on its type parameters, so it needs all of its type arguments"),
                         "{source}\n{result}"
                     );
                 }
@@ -837,4 +837,186 @@ fn composed_projection_constraints_use_the_full_trait_instance() {
             fresh.new_stand_alone(Utf8PathBuf::from("composed_projection.fe"), &source);
         assert_eq!(result, diagnostics(&fresh, fresh_file));
     }
+}
+
+/// Checks each source in a fresh database and in one edited database, and
+/// expects no diagnostics (`None`) or a diagnostic containing the text.
+fn check_cases(cases: &[(&str, Option<&str>)]) {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(Utf8PathBuf::from("cases.fe"), "");
+    for &(source, expected) in cases {
+        file.set_text(&mut db).to(source.to_owned());
+        let result = diagnostics(&db, file);
+        match expected {
+            None => assert!(result.is_empty(), "{source}\n{result}"),
+            Some(text) => assert!(
+                result.contains(text),
+                "expected `{text}`\n{source}\n{result}"
+            ),
+        }
+        let mut fresh = HirAnalysisTestDb::default();
+        let fresh_file = fresh.new_stand_alone(Utf8PathBuf::from("cases.fe"), source);
+        assert_eq!(result, diagnostics(&fresh, fresh_file), "{source}");
+    }
+}
+
+#[test]
+fn family_bounds_hold_on_another_instance_of_the_trait() {
+    check_cases(&[
+        (
+            r#"
+trait Show { fn show(self) -> u8 }
+trait Tr {
+    type Next: Tr
+    type Out<T>: Show
+    fn get<T>(_ x: <Self::Next as Tr>::Out<T>) -> u8 { x.show() }
+}
+"#,
+            None,
+        ),
+        (
+            r#"
+trait Show { fn show(self) -> u8 }
+trait Tr {
+    type Next: Tr
+    type Out<T: Show>: Show = <Self::Next as Tr>::Out<T>
+}
+"#,
+            None,
+        ),
+        (
+            r#"
+trait Show { fn show(self) -> u8 }
+trait Tr {
+    type Next: Tr
+    type Out<T: Show>: Show = <Self::Next as Tr>::Out<bool>
+}
+"#,
+            Some("trait bound is not satisfied"),
+        ),
+    ]);
+}
+
+#[test]
+fn family_parameter_bounds_hold_for_types_written_in_bodies() {
+    let template = r#"
+trait Allowed {}
+impl Allowed for bool {}
+trait Factory { type Out<T: Allowed> }
+struct Provider {}
+impl Factory for Provider { type Out<T> = u256 }
+USE
+"#;
+    for use_site in [
+        "fn local() { let _x: Provider::Out<ARG> = 1 }",
+        "fn cast() -> u256 { 1 as Provider::Out<ARG> }",
+        "fn generic_local<B: Factory>(x: B::Out<bool>) { let _y: B::Out<ARG> = x }",
+    ] {
+        let template = template.replace("USE", use_site);
+        let valid = template.replace("ARG", "bool");
+        let invalid = template.replace("ARG", "u256");
+        check_cases(&[
+            (&valid, None),
+            (&invalid, Some("trait bound is not satisfied")),
+            (&valid, None),
+        ]);
+    }
+}
+
+#[test]
+fn growing_projections_stop_at_the_normalization_limit() {
+    for source in [
+        "trait Tr { type Out }\nstruct W<T> { t: T }\nimpl<T> Tr for W<T> { type Out = <W<(T, T)> as Tr>::Out }\nfn f(x: <W<u8> as Tr>::Out) {}",
+        "trait Tr { type Out }\nstruct W<T> { t: T }\nimpl<T> Tr for W<T> { type Out = <W<(T,)> as Tr>::Out }\nfn f(x: <W<u8> as Tr>::Out) {}",
+    ] {
+        check_cases(&[(source, Some("type normalization limit exceeded"))]);
+    }
+}
+
+#[test]
+fn associated_type_bounds_name_a_missing_trait() {
+    check_cases(&[
+        ("trait T1 { type Bar: T2 }", Some("`T2` is not found")),
+        ("trait T1 { type Bar<T>: T2 }", Some("`T2` is not found")),
+        ("trait T1 { type Bar<T: T2> }", Some("`T2` is not found")),
+    ]);
+}
+
+#[test]
+fn associated_type_parameters_use_the_generic_parameter_checks() {
+    check_cases(&[
+        (
+            "trait Tr { type Out<T, T> }",
+            Some("duplicate generic parameter name in associated type `Out`"),
+        ),
+        ("trait Tr<T> { type Out<U> = U }", None),
+        (
+            "trait Tr<T> { type Out<T> = T }",
+            Some("generic parameter is already defined in the parent item"),
+        ),
+        (
+            "trait Tr { type Out<T> }\nstruct S<T> {}\nimpl<T> Tr for S<T> { type Out<T> = T }",
+            Some("generic parameter is already defined in the parent item"),
+        ),
+    ]);
+}
+
+#[test]
+fn a_const_parameter_on_an_associated_type_is_reported_once() {
+    for source in [
+        "trait Factory { type Arr<const N: usize> = [u8; N] }\nstruct F {}\nimpl Factory for F {}",
+        "trait Factory { type Arr<const N: usize> = u8 }",
+    ] {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("const_param.fe"), source);
+        let result = diagnostics(&db, file);
+        assert!(result.contains("const"), "{result}");
+        assert_eq!(result.matches("error[").count(), 1, "{source}\n{result}");
+    }
+}
+
+#[test]
+fn an_unmet_family_bound_on_a_default_is_reported_at_the_default() {
+    let source = "trait Show {}\ntrait Tr {\n    type Next\n    type Out<T>: Show = (T, bool)\n}";
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(Utf8PathBuf::from("default_span.fe"), source);
+    let result = diagnostics(&db, file);
+    assert!(result.contains("trait bound is not satisfied"), "{result}");
+    assert!(result.contains("default_span.fe:4:"), "{result}");
+    assert!(!result.contains("default_span.fe:2:"), "{result}");
+}
+
+#[test]
+fn a_generic_impl_can_write_out_an_associated_const_type() {
+    check_cases(&[
+        (
+            "trait Local {
+    type S
+    const X: Self::S
+}
+pub struct Foo<const N: u256> { v: u256 }
+pub struct Baz<T> { v: T }
+impl<const N: u256> Local for Foo<N> {
+    type S = String<3>
+    const X: String<3> = \"abc\"
+}
+impl<T> Local for Baz<T> {
+    type S = [u8; 2]
+    const X: [u8; 2] = [1, 2]
+}",
+            None,
+        ),
+        (
+            "trait Local {
+    type S
+    const X: Self::S
+}
+pub struct Foo<const N: u256> { v: u256 }
+impl<const N: u256> Local for Foo<N> {
+    type S = String<3>
+    const X: String<4> = \"abc\"
+}",
+            Some("associated const `X` has incompatible type"),
+        ),
+    ]);
 }

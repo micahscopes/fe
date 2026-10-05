@@ -1,0 +1,20 @@
+// A struct with a computed-type field has the size of the type it computes.
+pub struct Leaf { pub v: u256 }
+pub struct Node<A> { pub l: A, pub r: A }
+recursive type fn VTree<const N: usize>() -> (*) {
+    match N {
+        0 => Leaf
+        _ => Node<VTree<{N - 1}>>
+    }
+}
+pub struct Computed { pub t: VTree<1> }
+pub struct Written { pub t: Node<Leaf> }
+pub struct Nested { pub t: (VTree<1>, [VTree<0>; 2]) }
+
+#[test]
+fn computed_field_size() {
+    assert!(core::size_of<Written>() == 64)
+    assert!(core::size_of<VTree<1>>() == 64)
+    assert!(core::size_of<Computed>() == 64)
+    assert!(core::size_of<Nested>() == 128)
+}

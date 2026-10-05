@@ -606,7 +606,7 @@ fn export_pairs_override_errors_with_impl_without_capturing_body_errors() {
     let aliases = impl_["span_aliases"].as_array().unwrap();
     let override_ = completed
         .iter()
-        .find(|d| d.error_code.to_string() == "6-0024")
+        .find(|d| d.error_code.to_string() == "6-0029")
         .unwrap();
     let errors =
         fe::decision_export::diagnostic_records(&db, std::slice::from_ref(override_)).unwrap();

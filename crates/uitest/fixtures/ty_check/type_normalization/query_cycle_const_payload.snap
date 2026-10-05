@@ -3,13 +3,7 @@ source: crates/uitest/tests/ty_check.rs
 expression: diags
 input_file: fixtures/ty_check/type_normalization/query_cycle_const_payload.fe
 ---
-error[3-0052]: invalid recursive type function declaration
-  ┌─ query_cycle_const_payload.fe:3:44
-  │
-3 │ const fn payload() -> u256 { core::size_of<Tree<0>>() }
-  │                                            ^^^^^^^ this application refers to an invalid recursive type function definition
-
-error[3-0052]: invalid recursive type function declaration
+error[3-0062]: invalid recursive type function declaration
    ┌─ query_cycle_const_payload.fe:5:1
    │
  5 │ ╭ recursive type fn Tree<const N: usize>() -> (*) {
@@ -19,15 +13,3 @@ error[3-0052]: invalid recursive type function declaration
  9 │ │     }
 10 │ │ }
    │ ╰─^ checking this computed type depends on its own result
-
-error[3-0052]: invalid recursive type function declaration
-   ┌─ query_cycle_const_payload.fe:12:14
-   │
-12 │ fn use_it(x: Tree<0>) -> Tree<0> { x }
-   │              ^^^^^^^ this application refers to an invalid recursive type function definition
-
-error[3-0052]: invalid recursive type function declaration
-   ┌─ query_cycle_const_payload.fe:12:26
-   │
-12 │ fn use_it(x: Tree<0>) -> Tree<0> { x }
-   │                          ^^^^^^^ this application refers to an invalid recursive type function definition

@@ -1,0 +1,15 @@
+// Whether a type is `Copy` cannot depend on which implementations a `with`
+// block selects, so `Copy` has no named impls.
+struct Ticket { id: u256 }
+impl Copy for Ticket as Dup {}
+
+struct Plain { id: u256 }
+impl Copy for Plain {}
+
+fn dup<T: Copy>(_ t: own T) -> (T, T) { (t, t) }
+
+fn spend_twice() -> u256 {
+    let t = Ticket { id: 5 }
+    let pair = with (Dup) { dup(t) }
+    pair.0.id + pair.1.id
+}

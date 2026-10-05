@@ -394,6 +394,7 @@ fn check_recurrences<'db>(db: &'db dyn HirAnalysisDb, def: TypeFnDef<'db>) -> Re
         def,
         lower_bound: BigUint::from(0u32),
         calls: Vec::new(),
+        call_args: FxHashSet::default(),
         diags: Vec::new(),
     };
     let mut calls_per_arm = Vec::new();
@@ -429,6 +430,8 @@ struct RecurrenceChecker<'db> {
     def: TypeFnDef<'db>,
     lower_bound: BigUint,
     calls: Vec<PathId<'db>>,
+    /// Const arguments of recursive calls, already judged by `check_call`.
+    call_args: FxHashSet<Body<'db>>,
     diags: Vec<TyLowerDiag<'db>>,
 }
 
@@ -581,7 +584,9 @@ impl<'db> Visitor<'db> for RecurrenceChecker<'db> {
     ) {
         if let GenericArg::Const(arg) = arg {
             let admitted = match arg.value {
-                ConstGenericArgValue::Expr(Partial::Present(body)) => self.is_payload(body),
+                ConstGenericArgValue::Expr(Partial::Present(body)) => {
+                    self.call_args.contains(&body) || self.is_payload(body)
+                }
                 _ => false,
             };
             if !admitted {
@@ -607,6 +612,13 @@ impl<'db> Visitor<'db> for RecurrenceChecker<'db> {
                 let span = ctxt.span().expect("path visitor has a path span").into();
                 if def == self.def {
                     self.calls.push(path);
+                    for arg in path.generic_args(self.db).data(self.db) {
+                        if let GenericArg::Const(arg) = arg
+                            && let ConstGenericArgValue::Expr(Partial::Present(body)) = arg.value
+                        {
+                            self.call_args.insert(body);
+                        }
+                    }
                     if let Err(reason) = self.check_call(path) {
                         self.report(span, reason);
                     }
@@ -912,37 +924,59 @@ recursive type fn Tree<T, const O: usize, const N: usize>() -> (*) {
     }
 }
 "#;
-        for (base, step, accepted) in [
-            ("0 => T", "Tree<T, O, {N - 1}>", true),
-            ("0 => T", "Tree<T, O, {N / 2}>", true),
-            ("0 => T", "Tree<T, O, {0}>", true),
-            ("0 => T, 1 => T", "Tree<T, O, {N - 2}>", true),
-            ("0 => T, 2 => T", "Tree<T, O, {N - 2}>", false),
-            ("", "Tree<T, O, {N / 2}>", false),
-            ("0 => T", "Tree<T, O, {N / 1}>", false),
-            ("0 => T", "Tree<T, O, {N - 0}>", false),
-            ("0 => T", "Tree<T, O, {N + 1}>", false),
-            ("0 => T", "Tree<T, O, {O - 1}>", false),
-            ("0 => T", "Tree<bool, O, {N - 1}>", false),
-            ("0 => T", "Tree<T, {O + 1}, {N - 1}>", false),
-            ("0 => T", "Tree<T, N, {N - 1}>", false),
+        const UNDERFLOW: &str = "the recursive subtraction may underflow in this arm";
+        const DECREASE: &str = "the recursive subject must strictly decrease";
+        const FORWARD: &str =
+            "recursive calls must forward invariant parameters unchanged and in order";
+        for (base, step, expected) in [
+            ("0 => T", "Tree<T, O, {N - 1}>", None),
+            ("0 => T", "Tree<T, O, {N / 2}>", None),
+            ("0 => T", "Tree<T, O, {0}>", None),
+            ("0 => T, 1 => T", "Tree<T, O, {N - 2}>", None),
+            ("0 => T, 2 => T", "Tree<T, O, {N - 2}>", Some(UNDERFLOW)),
+            (
+                "",
+                "Tree<T, O, {N / 2}>",
+                Some("recursive division does not decrease the subject at zero"),
+            ),
+            ("0 => T", "Tree<T, O, {N / 1}>", Some(DECREASE)),
+            ("0 => T", "Tree<T, O, {N - 0}>", Some(DECREASE)),
+            ("0 => T", "Tree<T, O, {N + 1}>", Some(DECREASE)),
+            (
+                "0 => T",
+                "Tree<T, O, {O - 1}>",
+                Some("the recursive subject must decrease from the declared subject"),
+            ),
+            ("0 => T", "Tree<bool, O, {N - 1}>", Some(FORWARD)),
+            ("0 => T", "Tree<T, {O + 1}, {N - 1}>", Some(FORWARD)),
+            ("0 => T", "Tree<T, N, {N - 1}>", Some(FORWARD)),
             (
                 "0 => T",
                 "<Wrapper<Tree<T, O, {N - 1}>> as Output>::Out",
-                true,
+                None,
             ),
             (
                 "0 => T",
                 "<Wrapper<Tree<T, O, {N + 1}>> as Output>::Out",
-                false,
+                Some(DECREASE),
             ),
-            ("0 => Tree<T, O, {N - 1}>", "Tree<T, O, {N - 1}>", false),
+            (
+                "0 => Tree<T, O, {N - 1}>",
+                "Tree<T, O, {N - 1}>",
+                Some(UNDERFLOW),
+            ),
         ] {
             let mut db = HirAnalysisTestDb::default();
             let source = template.replace("BASE", base).replace("STEP", step);
             let file = db.new_stand_alone(Utf8PathBuf::from("recursion.fe"), &source);
             let diags = recurrence_diagnostics(&db, definition(&db, file));
-            assert_eq!(diags.is_empty(), accepted, "{source}\n{diags:?}");
+            match expected {
+                None => assert!(diags.is_empty(), "{source}\n{diags:?}"),
+                Some(reason) => {
+                    assert_eq!(diags.len(), 1, "{source}\n{diags:?}");
+                    assert!(format!("{diags:?}").contains(reason), "{source}\n{diags:?}");
+                }
+            }
         }
     }
 
@@ -962,29 +996,41 @@ recursive type fn Tree<T, const O: usize, const N: usize>() -> (*) {
     }
 }
 "#;
-        for (base, step, accepted) in [
-            ("T", "Tree<T, O, {N - 1}>", true),
-            ("T", "Keep<Tree<T, O, {N - 1}>>", true),
+        const PAYLOAD: &str = "computed type payloads require";
+        // `Some("")`: rejected while lowering the arm, with the ordinary
+        // lowering error.
+        for (base, step, expected) in [
+            ("T", "Tree<T, O, {N - 1}>", None),
+            ("T", "Keep<Tree<T, O, {N - 1}>>", None),
             (
                 "T",
                 "Pair<Term<{payload(N - 1)}>, Tree<T, O, {N - 1}>>",
-                true,
+                None,
             ),
-            ("Missing", "Tree<T, O, {N - 1}>", false),
-            ("Pair", "Tree<T, O, {N - 1}>", false),
-            ("Term<{true}>", "Tree<T, O, {N - 1}>", false),
+            ("Missing", "Tree<T, O, {N - 1}>", Some("")),
+            (
+                "Pair",
+                "Tree<T, O, {N - 1}>",
+                Some("every arm must produce a type of the declared return kind"),
+            ),
+            ("Term<{true}>", "Tree<T, O, {N - 1}>", Some("")),
             (
                 "T",
                 "Pair<Term<{runtime(N - 1)}>, Tree<T, O, {N - 1}>>",
-                false,
+                Some(PAYLOAD),
             ),
             (
                 "T",
                 "Pair<Term<{if false { true } else { 1 }}>, Tree<T, O, {N - 1}>>",
-                false,
+                Some(PAYLOAD),
             ),
-            ("T", "Mask<Tree<T, O, {N - 1}>, T, O, N>", false),
+            (
+                "T",
+                "Mask<Tree<T, O, {N - 1}>, T, O, N>",
+                Some("a type alias or projection changes the checked recursive call structure"),
+            ),
         ] {
+            let accepted = expected.is_none();
             let mut db = HirAnalysisTestDb::default();
             let source = template.replace("BASE", base).replace("STEP", step);
             let file = db.new_stand_alone(Utf8PathBuf::from("body_check.fe"), &source);
@@ -1001,6 +1047,13 @@ recursive type fn Tree<T, const O: usize, const N: usize>() -> (*) {
                 "{source}\n{:?}",
                 checked.diags
             );
+            if let Some(reason) = expected {
+                assert!(
+                    format!("{:?}", checked.diags).contains(reason),
+                    "{source}\n{:?}",
+                    checked.diags
+                );
+            }
         }
     }
 
@@ -1029,6 +1082,7 @@ fn generic<T>(x: Tree<T, 7, 3>) -> Expected<T> { x }
             let (top, _) = db.top_mod(file);
             let actual = format_diagnostics(&db, &db.run_on_top_mod(top));
             assert_eq!(actual.is_empty(), accepted, "{actual}");
+            assert!(accepted || actual.contains("type mismatch"), "{actual}");
             let mut fresh = HirAnalysisTestDb::default();
             let fresh_file = fresh.new_stand_alone(Utf8PathBuf::from("normalized.fe"), &source);
             let (fresh_top, _) = fresh.top_mod(fresh_file);

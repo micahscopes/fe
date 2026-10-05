@@ -309,6 +309,10 @@ struct ReductionKey<'db> {
 struct Reduced<'db> {
     ty: TyId<'db>,
     depth: usize,
+    /// Nodes in `ty` written out as a tree. Interned types share subtrees, so
+    /// a type small as a graph can be exponentially large as a tree, and later
+    /// passes walk types as trees.
+    size: usize,
 }
 
 enum ReductionTask<'db> {
@@ -413,6 +417,7 @@ impl<'db> TypeNormalizer<'db> {
                     Some(Reduced {
                         ty: invalid,
                         depth: 0,
+                        size: 1,
                     }),
                 );
             }
@@ -438,6 +443,7 @@ impl<'db> TypeNormalizer<'db> {
                                 TyId::invalid(db, InvalidCause::TypeLoweringCycle)
                             },
                             depth: 0,
+                            size: 1,
                         });
                         if depth.saturating_add(reduced.depth) >= NORMALIZATION_DEPTH_LIMIT {
                             return self.abort(&active, InvalidCause::TypeNormalizationLimit);
@@ -497,17 +503,21 @@ impl<'db> TypeNormalizer<'db> {
                             policy: child_policy,
                         },
                     );
-                    let child_depth = children
-                        .iter()
-                        .map(|&ty| {
-                            results[&ReductionKey {
-                                ty,
-                                policy: child_policy,
-                            }]
-                                .depth
-                        })
-                        .max()
-                        .unwrap_or(0);
+                    let child_results = children.iter().map(|&ty| {
+                        results[&ReductionKey {
+                            ty,
+                            policy: child_policy,
+                        }]
+                    });
+                    let child_depth = child_results.clone().map(|r| r.depth).max().unwrap_or(0);
+                    // The written-out size of a result counts against the
+                    // same work limit as the reduction steps: a result too
+                    // large to write out is as unusable as one that takes
+                    // too many steps.
+                    let size = child_results.fold(1usize, |total, r| total.saturating_add(r.size));
+                    if size > NORMALIZATION_WORK_LIMIT {
+                        return self.abort(&active, InvalidCause::TypeNormalizationLimit);
+                    }
                     let rewrite = match self.rewrite_head(ty, depth, key.policy) {
                         Ok(rewrite) => rewrite,
                         Err(cause) => return self.abort(&active, cause),
@@ -533,6 +543,7 @@ impl<'db> TypeNormalizer<'db> {
                         let reduced = Reduced {
                             ty,
                             depth: child_depth.max(own_depth),
+                            size,
                         };
                         self.cache.insert(key, Some(reduced));
                         results.insert(key, reduced);
@@ -548,6 +559,7 @@ impl<'db> TypeNormalizer<'db> {
                     let reduced = Reduced {
                         ty: target.ty,
                         depth: child_depth.max(cost.saturating_add(target.depth)),
+                        size: target.size,
                     };
                     self.cache.insert(key, Some(reduced));
                     results.insert(key, reduced);
@@ -581,7 +593,16 @@ impl<'db> TypeNormalizer<'db> {
                         *value,
                         ConstCanonEnv::new(self.scope, self.assumptions, None),
                     )
-                    .unwrap_or(*value)
+                    // A ground value whose evaluation faulted is not ground;
+                    // evaluate it to report the fault instead of keeping it.
+                    .unwrap_or_else(|| {
+                        let evaluated = value.evaluate(db, None);
+                        if matches!(evaluated.data(db), ConstTyData::Invalid(_)) {
+                            evaluated
+                        } else {
+                            *value
+                        }
+                    })
                 }
                 (ConstPolicy::Computed, ConstTyData::UnEvaluated { .. }) => {
                     value.evaluate(db, None)
@@ -597,6 +618,13 @@ impl<'db> TypeNormalizer<'db> {
                 }
                 _ => *value,
             };
+            // A fault while evaluating a const is a hard error, never a value
+            // that takes part in type equality.
+            if let ConstTyData::Invalid(fault) = evaluated.data(db)
+                && let Some(cause) = fault.invalid_cause(db)
+            {
+                return Err(cause);
+            }
             let result = TyId::const_ty(db, evaluated);
             return Ok((result != ty).then_some((result, 0, policy)));
         }

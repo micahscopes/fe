@@ -95,6 +95,7 @@ fn consume(x: Tree<3>) -> Pair<Term<3>, Pair<Term<2>, Pair<Term<1>, bool>>> { x 
         let (top, _) = db.top_mod(file);
         let actual = format_diagnostics(&db, &db.run_on_top_mod(top));
         assert_eq!(actual.is_empty(), accepted, "{actual}");
+        assert!(accepted || actual.contains("type mismatch"), "{actual}");
         let mut fresh = HirAnalysisTestDb::default();
         let fresh_file = fresh.new_stand_alone(Utf8PathBuf::from("payload_edit.fe"), &source);
         let (fresh_top, _) = fresh.top_mod(fresh_file);
@@ -174,6 +175,7 @@ fn generic<T: Item>(x: Tree<T, 2>) -> <T as Item>::Out { x }
             let (top, _) = db.top_mod(file);
             let actual = format_diagnostics(&db, &db.run_on_top_mod(top));
             assert_eq!(actual.is_empty(), accepted, "{actual}");
+            assert!(accepted || actual.contains("type mismatch"), "{actual}");
             let mut fresh = HirAnalysisTestDb::default();
             let fresh_file =
                 fresh.new_stand_alone(Utf8PathBuf::from("projection_body.fe"), &source);
@@ -292,6 +294,10 @@ fn symbolic_computed_membership_requires_component_and_constructor_premises() {
         let (top, _) = db.top_mod(file);
         let actual = format_diagnostics(&db, &db.run_on_top_mod(top));
         assert_eq!(actual.is_empty(), accepted, "{actual}");
+        assert!(
+            accepted || actual.contains("doesn't implement `Reduce`"),
+            "{actual}"
+        );
         let mut fresh = HirAnalysisTestDb::default();
         let fresh_file = fresh.new_stand_alone(Utf8PathBuf::from("symbolic_membership.fe"), text);
         let (fresh_top, _) = fresh.top_mod(fresh_file);
@@ -356,6 +362,10 @@ fn symbolic_induction_checks_constructor_bounds_in_recursive_arms() {
         let (top, _) = db.top_mod(file);
         let actual = format_diagnostics(&db, &db.run_on_top_mod(top));
         assert_eq!(actual.is_empty(), accepted, "{actual}");
+        assert!(
+            accepted || actual.contains("doesn't implement `Reduce`"),
+            "{actual}"
+        );
         let mut fresh = HirAnalysisTestDb::default();
         let fresh_file = fresh.new_stand_alone("constructor.fe".into(), text);
         let (fresh_top, _) = fresh.top_mod(fresh_file);
@@ -364,4 +374,120 @@ fn symbolic_induction_checks_constructor_bounds_in_recursive_arms() {
             format_diagnostics(&fresh, &fresh.run_on_top_mod(fresh_top))
         );
     }
+}
+
+#[test]
+fn a_const_that_faults_after_substitution_is_reported() {
+    for source in [
+        // An associated type's output const, at the projection.
+        "struct Slot<const N: usize> {}\nstruct S<const N: usize> {}\ntrait Step { type Out }\nimpl<const N: usize> Step for S<N> { type Out = Slot<{ N - 5 }> }\nfn b(x: <S<2> as Step>::Out) -> <S<2> as Step>::Out { x }",
+        // A generic function's return type, at the call.
+        "pub struct S<const N: usize> {}\nfn h<const N: usize>(_ b: bool) -> S<{N - 5}> { h<N>(b) }\nfn call_h(_ b: bool) -> u256 { if b { return 0 }\n h<2>(b) }",
+    ] {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("const_fault.fe"), source);
+        let (top, _) = db.top_mod(file);
+        let result = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top));
+        assert!(
+            result.contains("arithmetic overflow in const context"),
+            "{source}\n{result}"
+        );
+    }
+}
+
+#[test]
+fn one_mistake_in_a_computed_type_is_reported_once() {
+    for (step, reason) in [
+        (
+            "Node<Tree<O, {N + 1}>>",
+            "the recursive subject must strictly decrease",
+        ),
+        (
+            "Node<Tree<{O + 1}, {N - 1}>>",
+            "recursive calls must forward invariant parameters unchanged and in order",
+        ),
+    ] {
+        let source = format!(
+            "struct Node<T> {{}}
+recursive type fn Tree<const O: usize, const N: usize>() -> (*) {{
+    match N {{
+        0 => bool
+        _ => {step}
+    }}
+}}
+fn use_it(x: Tree<1, 2>) -> Tree<1, 2> {{ x }}"
+        );
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("once.fe"), &source);
+        let (top, _) = db.top_mod(file);
+        let result = format_diagnostics(&db, &db.run_on_top_mod(top));
+        assert!(result.contains(reason), "{source}\n{result}");
+        assert_eq!(result.matches("error[").count(), 1, "{source}\n{result}");
+    }
+}
+
+#[test]
+fn a_bound_proved_by_induction_explains_why_a_call_still_needs_it() {
+    let source = r#"
+struct Par {}
+struct Comp<A, B> {}
+trait Reduce {}
+impl Reduce for Par {}
+impl<A: Reduce, B: Reduce> Reduce for Comp<A, B> {}
+struct Reducer<S> where S: Reduce {}
+recursive type fn RPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RPow<F, {N - 1}>, F>
+    }
+}
+fn need<T: Reduce>() {}
+fn admitted<F: Reduce, const N: usize>(_ x: Reducer<RPow<F, N>>) {}
+fn call<F: Reduce, const N: usize>() { need<RPow<F, N>>() }
+"#;
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(Utf8PathBuf::from("induction_call.fe"), source);
+    let (top, _) = db.top_mod(file);
+    let result = format_diagnostics(&db, &db.run_on_top_mod(top));
+    assert_eq!(result.matches("error[").count(), 1, "{result}");
+    assert!(
+        result.contains("add this bound to the function's `where` clause"),
+        "{result}"
+    );
+    check(&source.replace(
+        "fn call<F: Reduce, const N: usize>() {",
+        "fn call<F: Reduce, const N: usize>() where RPow<F, N>: Reduce {",
+    ));
+}
+
+#[test]
+fn a_computed_return_type_that_faults_at_a_call_is_reported() {
+    let source = r#"
+struct Node<T> {}
+recursive type fn Tree<const N: usize>() -> (*) {
+    match N {
+        0 => bool
+        _ => Node<Tree<{N - 1}>>
+    }
+}
+fn h<const N: usize>(_ b: bool) -> Tree<{N - 5}> { h<N>(b) }
+fn call_h(_ b: bool) -> u256 {
+    if b { return 0 }
+    h<2>(b)
+}
+"#;
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(Utf8PathBuf::from("computed_return.fe"), source);
+    let (top, _) = db.top_mod(file);
+    let result = format_diagnostics(&db, &db.run_on_top_mod(top));
+    assert!(
+        result.contains("the return type cannot be computed for these generic arguments"),
+        "{result}"
+    );
+    check(
+        &source
+            .replace("h<2>(b)", "h<7>(b)")
+            .replace("-> u256", "-> Tree<2>")
+            .replace("return 0", "return h<7>(b)"),
+    );
 }
