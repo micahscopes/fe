@@ -4215,6 +4215,7 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                         "import `{name}`, or declare it open with `quote({name})` so the destination binds it"
                     ), primary.resolve(db), error_code),
             Self::QuoteProviderLocal { primary, name } => primary_diag(Severity::Error, format!("`{}` is a value of the provider, not code", name.data(db)), format!("splice its value with `${{{}}}`", name.data(db)), primary.resolve(db), error_code),
+            Self::QuoteUnsupportedForm { primary, form } => primary_diag(Severity::Error, format!("{form} is not supported inside a quote yet"), "not supported inside a quote yet".to_string(), primary.resolve(db), error_code),
             Self::QuoteProviderGeneric { primary, name } => primary_diag(Severity::Error, format!("a quote cannot mention the provider's generic parameter `{name}`"), "the provider's generic parameters have no meaning where the code lands; splice a `FieldType` instead".to_string(), primary.resolve(db), error_code),
             Self::UnsupportedUnaryPlus(primary) => primary_diag(
                 Severity::Error,

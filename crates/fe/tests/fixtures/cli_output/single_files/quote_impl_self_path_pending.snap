@@ -6,7 +6,7 @@ input_file: tests/fixtures/cli_output/single_files/quote_impl_self_path_pending.
 === STDERR ===
 errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_impl_self_path_pending.fe
 
-error[19-0003]: invalid generated declaration: quoted Self constructor `Self::K` does not match the impl self type
+error[19-0004]: invalid generated declaration: quoted Self constructor `Self::K` does not match the impl self type
    ┌─ quote_impl_self_path_pending.fe:9:9
    │  
  9 │ ╭         quote {

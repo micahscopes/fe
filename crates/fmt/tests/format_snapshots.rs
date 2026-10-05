@@ -214,3 +214,41 @@ fn arm_splices_keep_comments_and_parse_after_formatting() {
         );
     }
 }
+
+#[test]
+fn record_field_label_splices_survive_formatting() {
+    let source = "const fn f(x: Code<Expr>) -> Code<Expr> { quote { Self { ${x}: 7, y: 2 } } }";
+    let formatted = format_str(source, &Config::default()).unwrap();
+    assert!(formatted.contains("${x}: 7"), "{formatted}");
+    assert_eq!(
+        format_str(&formatted, &Config::default()).unwrap(),
+        formatted
+    );
+}
+
+#[test]
+fn commented_named_impl_keeps_its_name() {
+    let source =
+        "impl Compute for Subject as Alternate // why this one\n{ fn compute() -> u256 { 1 } }\n";
+    let formatted = format_str(source, &Config::default()).unwrap();
+    assert!(formatted.contains("Subject as Alternate"), "{formatted}");
+    assert!(formatted.contains("// why this one"), "{formatted}");
+    let (_, errors) = parse_source_file(&formatted, RecoveryMode::NoRecover);
+    assert!(errors.is_empty(), "{errors:?}\n{formatted}");
+}
+
+#[test]
+fn recursive_type_fn_in_a_module_formats_once() {
+    let source = "mod shapes {\n    pub recursive   type fn Tree<const N:usize>()->(*){\n        match N {\n            0 => Leaf\n            _ => Node<Leaf, Tree<{N - 1}>>\n        }\n    }\n}\n";
+    let formatted = format_str(source, &Config::default()).unwrap();
+    assert_eq!(
+        format_str(&formatted, &Config::default()).unwrap(),
+        formatted
+    );
+    assert!(
+        formatted.contains("    pub recursive type fn Tree<const N: usize>() -> (*) {\n        match N {\n            0 => Leaf\n"),
+        "{formatted}"
+    );
+    let (_, errors) = parse_source_file(&formatted, RecoveryMode::NoRecover);
+    assert!(errors.is_empty(), "{errors:?}\n{formatted}");
+}

@@ -60,20 +60,27 @@ pub(super) fn parse_expr_atom<S: TokenStream>(
             if is_with {
                 parser.parse_cp(WithExprScope::default(), None)
             } else {
+                // `quote` starts a quote only when its body opens on the same
+                // line; otherwise it is an ordinary name, as on master.
                 let is_quote = allow_record_init
                     && parser
                         .current_token()
                         .is_some_and(|token| token.text() == "quote")
-                    && (parser.peek_n_non_trivia(2).as_slice()
-                        == [SyntaxKind::Ident, SyntaxKind::LBrace]
-                        || parser.peek_n_non_trivia(2).as_slice()
-                            == [SyntaxKind::Ident, SyntaxKind::LParen]
-                            && parser.dry_run(|p| {
-                                p.bump_expected(SyntaxKind::Ident);
+                    && parser.dry_run(|p| {
+                        let newline_as_trivia = p.set_newline_as_trivia(false);
+                        p.bump_expected(SyntaxKind::Ident);
+                        let opens_body = match p.current_kind() {
+                            Some(SyntaxKind::LBrace) => true,
+                            Some(SyntaxKind::LParen) => {
                                 p.parse_ok(QuoteOpenListScope::default())
                                     .is_ok_and(identity)
                                     && p.current_kind() == Some(SyntaxKind::LBrace)
-                            }));
+                            }
+                            _ => false,
+                        };
+                        p.set_newline_as_trivia(newline_as_trivia);
+                        opens_body
+                    });
                 if is_quote {
                     parser.parse_cp(QuoteExprScope::default(), None)
                 } else {
@@ -291,23 +298,8 @@ fn quote_body_kind<S: TokenStream>(parser: &mut Parser<S>) -> QuoteBodyKind {
             match p.current_kind() {
                 Some(SyntaxKind::Newline) => p.bump(),
                 Some(SyntaxKind::Dollar) => {
-                    p.bump();
-                    if p.current_kind() != Some(SyntaxKind::LBrace) {
+                    if !skip_splice(p) {
                         return QuoteBodyKind::Expr;
-                    }
-                    // Skip the splice's balanced braces.
-                    let mut depth = 0usize;
-                    loop {
-                        match p.current_kind() {
-                            Some(SyntaxKind::LBrace) => depth += 1,
-                            Some(SyntaxKind::RBrace) => depth -= 1,
-                            None => return QuoteBodyKind::Expr,
-                            _ => {}
-                        }
-                        p.bump();
-                        if depth == 0 {
-                            break;
-                        }
                     }
                 }
                 Some(SyntaxKind::WhereKw) => return QuoteBodyKind::Where,
@@ -501,28 +493,35 @@ fn starts_arm_hole<S: TokenStream>(parser: &mut Parser<S>) -> bool {
         return false;
     }
     parser.dry_run(|p| {
-        p.bump();
-        if p.current_kind() != Some(SyntaxKind::LBrace) {
-            return false;
-        }
-        let mut depth = 0usize;
-        loop {
-            match p.current_kind() {
-                Some(SyntaxKind::LBrace) => depth += 1,
-                Some(SyntaxKind::RBrace) => depth -= 1,
-                None => return false,
-                _ => {}
-            }
-            p.bump();
-            if depth == 0 {
-                break;
-            }
-        }
-        !matches!(
-            p.current_kind(),
-            Some(SyntaxKind::FatArrow | SyntaxKind::Pipe)
-        )
+        skip_splice(p)
+            && !matches!(
+                p.current_kind(),
+                Some(SyntaxKind::FatArrow | SyntaxKind::Pipe)
+            )
     })
+}
+
+/// Bumps a splice `${..}` at the current `$`, with its balanced braces.
+/// Returns false when the `$` does not open one. Callers look past a splice
+/// inside a dry run.
+fn skip_splice<S: TokenStream>(p: &mut Parser<S>) -> bool {
+    p.bump_expected(SyntaxKind::Dollar);
+    if p.current_kind() != Some(SyntaxKind::LBrace) {
+        return false;
+    }
+    let mut depth = 0usize;
+    loop {
+        match p.current_kind() {
+            Some(SyntaxKind::LBrace) => depth += 1,
+            Some(SyntaxKind::RBrace) => depth -= 1,
+            None => return false,
+            _ => {}
+        }
+        p.bump();
+        if depth == 0 {
+            return true;
+        }
+    }
 }
 
 define_scope! { MatchExprScope, MatchExpr }
@@ -665,40 +664,8 @@ impl super::Parse for RecordFieldListScope {
 
 define_scope! { RecordFieldScope, RecordField }
 fn quote_field_label_ahead<S: TokenStream>(parser: &mut Parser<S>) -> bool {
-    if !parser.at_quote_hole() {
-        return false;
-    }
-    let mut count = 8;
-    loop {
-        let tokens = parser.peek_n_non_trivia(count);
-        if tokens.first() != Some(&SyntaxKind::Dollar) || tokens.get(1) != Some(&SyntaxKind::LBrace)
-        {
-            return false;
-        }
-        let mut depth = 0;
-        for (index, kind) in tokens.iter().enumerate().skip(1) {
-            match kind {
-                SyntaxKind::LBrace => depth += 1,
-                SyntaxKind::RBrace => {
-                    depth -= 1;
-                    if depth == 0 {
-                        if let Some(next) = tokens.get(index + 1) {
-                            return *next == SyntaxKind::Colon;
-                        }
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if tokens.len() < count {
-            return false;
-        }
-        let Some(next) = count.checked_mul(2) else {
-            return false;
-        };
-        count = next;
-    }
+    parser.at_quote_hole()
+        && parser.dry_run(|p| skip_splice(p) && p.current_kind() == Some(SyntaxKind::Colon))
 }
 
 impl super::Parse for RecordFieldScope {

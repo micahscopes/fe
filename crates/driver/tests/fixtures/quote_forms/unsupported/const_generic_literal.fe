@@ -1,0 +1,12 @@
+// A const generic argument written as a literal is refused at the form.
+pub fn width<const W: u256>() -> u256 { W }
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn gen() -> u256 { ingot::width<2>() }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}

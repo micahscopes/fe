@@ -242,12 +242,13 @@ pub(super) fn check_definition_templates<'db>(
     if !diags.is_empty() {
         return DefinitionBodyCheck { arms: None, diags };
     }
+    // Parsing owns the diagnostic, but an incomplete header must still stop
+    // semantic checking instead of acquiring a successful declaration shape.
+    let Some(return_kind) = def.ret_kind(db).to_opt() else {
+        return DefinitionBodyCheck { arms: None, diags };
+    };
     let assumptions = *collect_constraints(db, def.into()).skip_binder();
-    let result_kind = lower_kind(
-        db,
-        def.scope(),
-        &def.ret_kind(db).to_opt().expect("checked return kind"),
-    );
+    let result_kind = lower_kind(db, def.scope(), &return_kind);
     let mut arms = Vec::new();
     for (idx, arm) in def.arms(db).iter().enumerate() {
         let span = def.span().body().match_().arms().arm(idx).ty();
@@ -694,7 +695,8 @@ pub(super) fn declaration_shape<'db>(
     }
 
     match def.ret_kind(db).to_opt() {
-        None => report(def.span().into(), "an explicit return kind is required"),
+        // The parser reports a missing return kind.
+        None => {}
         Some(kind)
             if let Some(name) = super::ty_lower::unknown_named_kind(db, def.scope(), &kind) =>
         {
@@ -767,7 +769,7 @@ pub(super) fn declaration_shape<'db>(
         );
     }
 
-    let lower_bounds = if diags.is_empty() {
+    let lower_bounds = if diags.is_empty() && def.ret_kind(db).to_opt().is_some() {
         let mut first_unmatched = BigUint::from(0u32);
         while literals.contains(&first_unmatched) {
             first_unmatched += 1u32;
@@ -861,7 +863,7 @@ mod tests {
                 "type `usize`",
             ),
             (valid.replace("match N", "match O"), "match must inspect"),
-            (valid.replace("-> (*)", ""), "explicit return kind"),
+            (valid.replace("-> (*)", ""), "recursive type fn return kind"),
             (
                 valid.replace("-> (*)", "-> (Constraint)"),
                 "cannot return kind `Constraint`",
@@ -892,6 +894,9 @@ mod tests {
                 let actual = format_diagnostics(&db, &db.run_on_top_mod(top));
                 if let Some(expected) = expected {
                     assert!(actual.contains(expected), "{expected}: {actual}");
+                    if expected == "recursive type fn return kind" {
+                        assert_eq!(actual.matches("error[").count(), 1, "{actual}");
+                    }
                     assert!(
                         declaration_shape(&db, definition(&db, file))
                             .lower_bounds

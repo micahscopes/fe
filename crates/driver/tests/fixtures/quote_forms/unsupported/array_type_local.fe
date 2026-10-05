@@ -1,0 +1,15 @@
+// An array type is refused at the form; its length would bind where the code lands.
+mod author {
+    use core::meta::{Code, Item, Record}
+    const N: usize = 3
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn gen() -> u256 {
+                let a: [u256; N] = [1, 2, 3]
+                a[0]
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}

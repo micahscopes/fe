@@ -1,0 +1,16 @@
+// `if let` is refused at the form; its binder still binds.
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn gen(x: Option<u256>) -> u256 {
+                if let Option::Some(v) = x {
+                    return v
+                }
+                0
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}

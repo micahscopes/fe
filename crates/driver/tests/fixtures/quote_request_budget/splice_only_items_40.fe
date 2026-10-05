@@ -1,4 +1,4 @@
-// Budget: Code<Item> spliced twice per step plus one literal item, 40 steps (about 2^40 items).
+// Budget: a body made only of two Code<Item> splices, doubled 40 times (about 2^40 empty items).
 mod author {
     use core::meta::{Code, Item, Record, empty}
     pub const fn emit(_ record: Record) -> Code<Item> {

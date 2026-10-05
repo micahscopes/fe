@@ -1,0 +1,26 @@
+// A cast written directly in a quoted function body, in a method body and in a
+// spliced expression fragment.
+mod author {
+    use core::meta::{Code, Expr, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let frag: Code<Expr> = quote(a) { a as u256 }
+        quote {
+            pub fn via_fragment(a: u8) -> u256 { ${frag} }
+            pub fn direct(a: u8) -> u256 { a as u256 }
+        }
+    }
+    pub trait Widen {
+        fn widen(self, _ a: u8) -> u256
+    }
+    pub const fn method(record: Record) -> Code<Item> {
+        quote {
+            impl ingot::author::Widen for ${record} {
+                fn widen(self, _ a: u8) -> u256 { a as u256 + 1 }
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}
+#[generate(ingot::author::method)]
+struct U {}

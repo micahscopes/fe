@@ -2794,11 +2794,7 @@ fn generation_request_has_one_node_budget(fixture: Fixture<&str>) {
         Err(error) => error,
         Ok(_) => panic!("over-budget generation request was admitted before publication"),
     };
-    assert_eq!(
-        error.code(),
-        4,
-        "request budget is a typed output-construction failure"
-    );
+    assert_eq!(error.code(), 3, "the request budget is a limit");
     let rendered = error.render(&authored);
     assert!(
         rendered.contains("quotation request node limit"),
@@ -2861,20 +2857,19 @@ fn request_budget_counts_shared_edges_and_discards_partial_output() {
 }
 
 #[dir_test(
-    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_request_budget/limitations",
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_item_composition",
     glob: "*.fe",
 )]
-fn splice_only_empty_item_composition_fails_closed(fixture: Fixture<&str>) {
+fn splice_only_item_quotes_compose_their_fragments(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).unwrap();
     let authored = field_authority_fixture_db(fixture);
-    let error = match prepare(&authored) {
-        Err(error) => error,
-        Ok(_) => panic!("splice-only empty item syntax requires checked kind reification"),
-    };
-    assert!(
-        error.message().contains("generation requires item code"),
-        "{}",
-        error.message()
-    );
+    let output = prepare(&authored)
+        .expect("splice-only item quotes elaborate")
+        .expect("generation");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+    for name in ["a", "b", "c", "d"] {
+        named_function(&output, &url, name);
+    }
 }
 
 #[test]
@@ -2998,6 +2993,36 @@ fn realistic_quote_derives_fit_the_limits(fixture: Fixture<&str>) {
     quote_round_trip::assert_round_trip(&authored, &output, &url);
 }
 
+#[test]
+fn expression_quote_braces_are_not_blocks() {
+    // A fold over 200 fields splices 200 expression quotes into each other.
+    // Copying each quote's braces as a block nested the output 200 blocks
+    // deep, which made checking the output ten times slower than the same
+    // impl written by hand.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/quote_fold_limits/allowed/derive_eq_200.fe"
+    );
+    let url = Url::from_file_path(path).unwrap();
+    let mut authored = DriverDataBase::default();
+    authored.workspace().update(
+        &mut authored,
+        url.clone(),
+        include_str!("fixtures/quote_fold_limits/allowed/derive_eq_200.fe").to_string(),
+    );
+    let output = prepare(&authored)
+        .expect("derive elaborates")
+        .expect("generation");
+    let eq = named_function(&output, &url, "eq");
+    let body = eq.body(&output).expect("generated body");
+    let blocks = body
+        .exprs(&output)
+        .iter()
+        .filter(|(_, expr)| matches!(expr, Partial::Present(Expr::Block(_))))
+        .count();
+    assert!(blocks <= 2, "{blocks} blocks in the generated body");
+}
+
 #[dir_test(
     dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_fold_limits/function",
     glob: "*.fe.in",
@@ -3013,10 +3038,35 @@ fn quoted_function_copy_has_its_own_node_limit(fixture: Fixture<&str>) {
     let Err(error) = prepare(&authored) else {
         panic!("large body needs a function diagnostic");
     };
-    assert_eq!(error.code(), 4);
+    assert_eq!(error.code(), 3);
     let rendered = error.render(&authored);
     assert!(
         rendered.contains("quoted function node limit exceeded: 8193 > 8192"),
+        "{rendered}"
+    );
+    test_utils::snap_test!(rendered, &snapshot_path);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_forms/allowed", glob: "*.fe")]
+fn quoted_forms_elaborate_in_every_position(fixture: Fixture<&str>) {
+    let url = Url::from_file_path(fixture.path()).unwrap();
+    let authored = field_authority_fixture_db(fixture);
+    let output = prepare(&authored)
+        .expect("quoted form elaborates")
+        .expect("generation");
+    quote_round_trip::assert_round_trip(&authored, &output, &url);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_forms/unsupported", glob: "*.fe")]
+fn unsupported_quoted_forms_are_reported_at_the_form(fixture: Fixture<&str>) {
+    let snapshot_path = fixture.path().to_owned();
+    let authored = field_authority_fixture_db(fixture);
+    let Err(error) = prepare(&authored) else {
+        panic!("an unsupported form must be refused");
+    };
+    let rendered = error.render(&authored);
+    assert!(
+        rendered.contains("is not supported inside a quote yet"),
         "{rendered}"
     );
     test_utils::snap_test!(rendered, &snapshot_path);
@@ -3342,7 +3392,10 @@ fn expanded_signature_types_share_the_freezing_budget() {
             };
             assert_eq!(error.code(), 3);
             let rendered = error.render(&db);
-            assert!(rendered.contains("frozen meta nodes limit"), "{rendered}");
+            assert!(
+                rendered.contains("generation result node limit"),
+                "{rendered}"
+            );
         }
     }
 }
@@ -3402,7 +3455,7 @@ fn expanded_alias_types_fail_during_bounded_freezing() {
     };
     let rendered = error.render(&db);
     assert!(
-        rendered.contains("quoted type nodes") && rendered.contains("65537 > 65536"),
+        rendered.contains("quoted type node limit") && rendered.contains("65537 > 65536"),
         "{rendered}"
     );
 }
@@ -3509,7 +3562,7 @@ fn reflected_field_types_share_the_freezing_budget() {
             assert_eq!(error.code(), 3);
             let rendered = error.render(&db);
             assert!(
-                rendered.contains("frozen meta nodes limit exceeded: 65537 > 65536"),
+                rendered.contains("generation result node limit exceeded: 65537 > 65536"),
                 "{rendered}"
             );
         }
@@ -3598,7 +3651,7 @@ fn shared_reflected_types_are_charged_on_item_replay() {
     };
     assert_eq!(
         error.code(),
-        4,
+        3,
         "freezing fits; output replay needs the limit"
     );
     let rendered = error.render(&db);
@@ -3732,7 +3785,7 @@ fn copied_kind_bounds_have_a_pre_recursion_limit() {
             let Err(error) = prepare(&db) else {
                 panic!("deep copied kind needs a quotation diagnostic")
             };
-            assert_eq!(error.code(), 4);
+            assert_eq!(error.code(), 3);
             let rendered = error.render(&db);
             assert!(
                 rendered.contains("quoted type nesting limit exceeded: 257 > 256"),

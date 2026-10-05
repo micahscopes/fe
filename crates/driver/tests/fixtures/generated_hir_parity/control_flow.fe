@@ -1,0 +1,46 @@
+// Control flow, method calls, record literals, operators and spliced
+// expression fragments in a generated function, printed and read back.
+mod author {
+    use core::meta::{Code, Expr, Item, Record}
+    pub struct Point {
+        pub x: u256,
+        pub y: u256,
+    }
+    impl Point {
+        pub fn sum(self) -> u256 { self.x + self.y }
+    }
+    pub enum Shape {
+        Dot,
+        Line(u256)
+    }
+    pub fn helper(_ a: u256) -> u256 { a * 2 }
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        let scaled: Code<Expr> = quote(n) { (n + 1) * 2 }
+        quote {
+            pub fn forms(n: u256, flag: bool) -> u256 {
+                let mut total: u256 = ${scaled}
+                if flag && !(n > 10) {
+                    total += ingot::author::helper(n)
+                } else {
+                    total = total - 1
+                }
+                let point = ingot::author::Point { x: n, y: total }
+                let shape = ingot::author::Shape::Line(n)
+                let width = match shape {
+                    ingot::author::Shape::Dot => 0
+                    ingot::author::Shape::Line(w) => w
+                }
+                let mut i: u256 = 0
+                while i < 3 {
+                    i += 1
+                }
+                for j in 0..2 {
+                    total += j as u256
+                }
+                (point.sum() + width) * (i + total)
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}

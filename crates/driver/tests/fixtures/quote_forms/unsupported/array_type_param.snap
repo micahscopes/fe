@@ -1,0 +1,12 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_forms/unsupported/array_type_param.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_forms/unsupported/array_type_param.fe: error[8-0119]: an array type is not supported inside a quote yet
+  ┌─ array_type_param.fe:5:9
+  │
+5 │ ╭         quote {
+6 │ │             pub fn gen(_ a: [u256; 2]) -> u256 { 0 }
+7 │ │         }
+  │ ╰─────────^ not supported inside a quote yet

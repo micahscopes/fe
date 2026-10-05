@@ -31,42 +31,42 @@ freezing_protocol_faults! {
     QuoteLocalUseHasNoBinder => "quote local use has no binder",
     QuoteOwnerBodyIsMissing => "quote owner body is missing",
     QuoteOwnerDoesNotTypeCheck => "quote owner does not type check",
-    QuoteOwnerIsNotAFunction => "quote owner is not a function",
+    QuoteOwnerIsNotAFunction => "quotes that generate code must be written inside a function",
     QuoteHoleSlotIsOutOfBounds => "quote hole slot is out of bounds",
     QuoteOwnerLocatorIsMissing => "quote owner locator is missing",
     QuoteSiteNoLongerNamesAQuote => "quote site no longer names a quote",
-    SelfConstructionOutsideAMethodNeedsTransplantation => "quoted Self construction outside a method needs transplantation",
-    SelfPathNeedsCheckedTransplantation => "quoted Self path needs checked transplantation",
+    SelfConstructionOutsideAMethodNeedsTransplantation => "this Self construction outside a method is not supported in a quote yet",
+    SelfPathNeedsCheckedTransplantation => "this Self path is not supported in a quote yet",
     AssociatedTypeHasExtraCheckedNames => "quoted associated type has extra checked names",
-    CastNeedsACheckedPrimitiveTypeBeforeTransplantation => "quoted cast needs a checked primitive type before transplantation",
-    ConstWhereLocalOrValueUseNeedsCheckedReification => "quoted const where local or value use needs checked reification",
+    CastNeedsACheckedPrimitiveType => "a cast inside a quote must name a primitive type",
+    ConstWhereLocalOrValueUseNeedsCheckedReification => "this const where local or value use is not supported in a quote yet",
     EffectUseNeedsASimpleBoundPath => "quoted effect use needs a simple bound path",
-    FragmentConstPredicateNeedsCheckedReification => "quoted fragment const predicate needs checked reification",
+    FragmentConstPredicateNeedsCheckedReification => "this fragment const predicate is not supported in a quote yet",
     FunctionArgumentNeedsAType => "quoted function argument needs a type",
     FunctionGenericIdentityIsMissing => "quoted function generic identity is missing",
     FunctionGenericOwnerIsMissing => "quoted function generic owner is missing",
     FunctionHasNoCheckedGenericOwner => "quoted function has no checked generic owner",
-    FunctionIntermediateTypeArgumentsNeedReification => "quoted function intermediate type arguments need reification",
+    FunctionIntermediateTypeArgumentsNeedReification => "these function intermediate type arguments are not supported in a quote yet",
     FunctionPathSegmentIsMissing => "quoted function path segment is missing",
     FunctionRootChangedShape => "quoted function root changed shape",
     FunctionRootHasNoAuthoredFunction => "quoted function root has no authored function",
     FunctionTypeArgumentHasExtraCheckedNames => "quoted function type argument has extra checked names",
     FunctionTypeArgumentIsMissing => "quoted function type argument is missing",
-    FunctionTypeArgumentNeedsCheckedReification => "quoted function type argument needs checked reification",
+    FunctionTypeArgumentNeedsCheckedReification => "this function type argument is not supported in a quote yet",
     GenericBodyUseNeedsASimplePath => "quoted generic body use needs a simple path",
-    GenericBodyUseNeedsCheckedReification => "quoted generic body use needs checked reification",
-    GenericBodyUseOutsideAFunctionNeedsTransplantation => "quoted generic body use outside a function needs transplantation",
+    GenericBodyUseNeedsCheckedReification => "this generic body use is not supported in a quote yet",
+    GenericBodyUseOutsideAFunctionNeedsTransplantation => "this generic body use outside a function is not supported in a quote yet",
     GenericSignatureBindingChanged => "quoted generic signature binding changed",
     ImplTraitArgumentHasExtraCheckedNames => "quoted impl trait argument has extra checked names",
     ImplTraitArgumentNeedsACheckedType => "quoted impl trait argument needs a checked type",
-    ImplTraitArgumentNeedsCheckedReification => "quoted impl trait argument needs checked reification",
+    ImplTraitArgumentNeedsCheckedReification => "this impl trait argument is not supported in a quote yet",
     ImplTraitTypeArgumentIsMissing => "quoted impl trait type argument is missing",
     LocalTypeHasExtraCheckedNames => "quoted local type has extra checked names",
-    LocalTypeNeedsCheckedReification => "quoted local type needs checked reification",
+    LocalTypeNeedsCheckedReification => "this local type is not supported in a quote yet",
     LocalUseChangedFunctionOwner => "quoted local use changed function owner",
     MethodWhereBoundTypeIsMissing => "quoted method where bound type is missing",
-    MethodWhereBoundTypeNeedsCheckedReification => "quoted method where bound type needs checked reification",
-    MethodWhereFragmentNeedsCheckedReification => "quoted method where fragment needs checked reification",
+    MethodWhereBoundTypeNeedsCheckedReification => "this method where bound type is not supported in a quote yet",
+    MethodWhereFragmentNeedsCheckedReification => "this method where fragment is not supported in a quote yet",
     NominalTypeFileIsMissing => "quoted nominal type file is missing",
     ParameterUseChangedFunctionOwner => "quoted parameter use changed function owner",
     QualifiedConstantHasNoCheckedTrait => "quoted qualified constant has no checked trait",
@@ -76,9 +76,9 @@ freezing_protocol_faults! {
     QualifiedConstantNeedsAPrimitiveReceiver => "quoted qualified constant needs a primitive receiver",
     QualifiedConstantNeedsARootedTrait => "quoted qualified constant needs a rooted trait",
     QualifiedConstantNeedsASimpleMember => "quoted qualified constant needs a simple member",
-    QualifiedConstantOutsideAFunctionNeedsTransplantation => "quoted qualified constant outside a function needs transplantation",
-    RootedFunctionOutsideAFunctionNeedsTransplantation => "quoted rooted function outside a function needs transplantation",
-    SelfOutsideAMethodNeedsTransplantation => "quoted self outside a method needs transplantation",
+    QualifiedConstantOutsideAFunctionNeedsTransplantation => "this qualified constant outside a function is not supported in a quote yet",
+    RootedFunctionOutsideAFunctionNeedsTransplantation => "this rooted function outside a function is not supported in a quote yet",
+    SelfOutsideAMethodNeedsTransplantation => "this self outside a method is not supported in a quote yet",
     SignatureHasExtraCheckedNames => "quoted signature has extra checked names",
     SignatureNameChangedSite => "quoted signature name changed site",
     SignaturePathSegmentIsMissing => "quoted signature path segment is missing",
@@ -87,13 +87,43 @@ freezing_protocol_faults! {
     TraitSignatureNameChangedSite => "quoted trait signature name changed site",
     WhereTypeHasExtraCheckedNames => "quoted where type has extra checked names",
     WhereTypeIsMissing => "quoted where type is missing",
-    WhereTypeNeedsCheckedReification => "quoted where type needs checked reification",
+    WhereTypeNeedsCheckedReification => "this where type is not supported in a quote yet",
     TargetConstParameterHasNoType => "target const parameter has no type",
     TargetConstParameterTypeIsNotScalar => "target const parameter type is not scalar",
     TypeLevelValuesAreNotGeneratedDeclarations => "type-level values are not generated declarations",
     UnsupportedGeneratedValueShape => "generation transport accepts quoted code, scalars, structural handles and declaration names",
     UnexpectedCoreMetaVariant => "unexpected core meta variant",
     UnexpectedDeclarationNameVariant => "unexpected declaration name variant",
+}
+
+impl FreezingProtocolFault {
+    /// Whether an author can reach this fault from a provider that type
+    /// checks. Every other fault breaks the compiler's own invariants.
+    pub fn is_user_facing(self) -> bool {
+        use FreezingProtocolFault::*;
+        matches!(
+            self,
+            CastNeedsACheckedPrimitiveType
+                | ConstWhereLocalOrValueUseNeedsCheckedReification
+                | FragmentConstPredicateNeedsCheckedReification
+                | FunctionIntermediateTypeArgumentsNeedReification
+                | FunctionTypeArgumentNeedsCheckedReification
+                | GenericBodyUseNeedsCheckedReification
+                | GenericBodyUseOutsideAFunctionNeedsTransplantation
+                | ImplTraitArgumentNeedsCheckedReification
+                | LocalTypeNeedsCheckedReification
+                | MethodWhereBoundTypeNeedsCheckedReification
+                | MethodWhereFragmentNeedsCheckedReification
+                | QualifiedConstantNeedsAPrimitiveReceiver
+                | QualifiedConstantOutsideAFunctionNeedsTransplantation
+                | QuoteOwnerIsNotAFunction
+                | RootedFunctionOutsideAFunctionNeedsTransplantation
+                | SelfConstructionOutsideAMethodNeedsTransplantation
+                | SelfOutsideAMethodNeedsTransplantation
+                | SelfPathNeedsCheckedTransplantation
+                | WhereTypeNeedsCheckedReification
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,10 +136,10 @@ pub enum FreezingLimitKind {
 impl std::fmt::Display for FreezingLimitKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::MetaNodes => "frozen meta nodes",
+            Self::MetaNodes => "generation result node",
             Self::TypeDepth => "quoted type nesting",
-            Self::TypeNodes => "quoted type nodes",
-            Self::MetaDepth => "frozen meta depth",
+            Self::TypeNodes => "quoted type node",
+            Self::MetaDepth => "generation result nesting",
         })
     }
 }
@@ -130,7 +160,9 @@ pub enum ElaborationErrorKind {
     EvaluationBlocked(ConstDemandKind),
     EvaluationFailed {
         fault: EvaluationFault,
-        calls: Vec<String>,
+        /// The provider's call chain to the fault, outermost first, with
+        /// consecutive repeats of one function counted once.
+        calls: Vec<(String, usize)>,
     },
     Operation(String),
     Freezing(ConstructionError),
@@ -147,12 +179,46 @@ pub enum ElaborationErrorKind {
     Hygiene(GeneratedQuoteFailure),
 }
 impl ElaborationErrorKind {
-    /// Preserve the six generation diagnostic classes in one exhaustive mapping.
-    pub fn code(&self) -> u16 {
+    /// Whether this failure breaks the compiler's own invariants, whichever
+    /// stage of generation found it.
+    pub fn is_internal(&self) -> bool {
         match self {
-            Self::Freezing(ConstructionError::Protocol(_)) => 2,
-            Self::Freezing(_) => 3,
-            Self::Lowering(_) => 4,
+            Self::Freezing(ConstructionError::Protocol(fault)) => !fault.is_user_facing(),
+            Self::Lowering(GeneratedQuoteFailure::Construction(fault)) => !fault.is_user_facing(),
+            Self::Hygiene(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether this failure is a size or nesting limit, whichever stage of
+    /// generation counted it.
+    pub fn is_limit(&self) -> bool {
+        matches!(
+            self,
+            Self::Freezing(ConstructionError::Limit { .. })
+                | Self::ProjectDescriptionLimit { .. }
+                | Self::Lowering(
+                    GeneratedQuoteFailure::RequestNodeLimit { .. }
+                        | GeneratedQuoteFailure::FragmentDepthLimit { .. }
+                        | GeneratedQuoteFailure::TypeDepthLimit { .. }
+                        | GeneratedQuoteFailure::FunctionNodeLimit { .. }
+                )
+        )
+    }
+
+    /// One code per kind of problem, not per stage of generation: 1 for the
+    /// invocation and the provider's evaluation, 2 for an internal error, 3 for
+    /// a limit, 4 for generated code that cannot be built, 5 for errors in
+    /// the generated code and 6 for a binding the generated code lost.
+    pub fn code(&self) -> u16 {
+        if self.is_limit() {
+            return 3;
+        }
+        if self.is_internal() && !matches!(self, Self::Hygiene(_)) {
+            return 2;
+        }
+        match self {
+            Self::Freezing(_) | Self::Lowering(_) => 4,
             Self::OutputDiagnostics(_) => 5,
             Self::Hygiene(_) => 6,
             Self::MissingTarget
@@ -198,17 +264,27 @@ impl std::fmt::Display for ElaborationErrorKind {
             }
             Self::EvaluationFailed { fault, calls } => {
                 write!(f, "generation evaluation failed: {fault}")?;
-                for call in calls { write!(f, "
-  while evaluating `{call}`")?; }
+                for (call, count) in calls {
+                    write!(f, "\n  while evaluating `{call}`")?;
+                    if *count > 1 {
+                        write!(f, " ({count} nested calls)")?;
+                    }
+                }
                 Ok(())
             }
             Self::Operation(message) => f.write_str(message),
+            Self::Freezing(error) if self.is_internal() => {
+                write!(f, "internal compiler error while generating code: {error}")
+            }
             Self::Freezing(error) => write!(f, "invalid generated declaration: {error}"),
             Self::ProjectDescriptionLimit { actual, maximum } => write!(f, "project generated nodes limit exceeded: {actual} > {maximum}"),
             Self::ProviderFileMissing => f.write_str("generation provider file is missing"),
             Self::ProviderPathMissing => f.write_str("generation provider path is missing"),
             Self::OwnerSpanMissing => f.write_str("generation owner has no source span"),
             Self::Owner(error) => write!(f, "invalid generation owner: {error}"),
+            Self::Lowering(error) | Self::Hygiene(error) if self.is_internal() => {
+                write!(f, "internal compiler error while generating code: {error}")
+            }
             Self::Lowering(error) | Self::Hygiene(error) => write!(f, "invalid generated declaration: {error}"),
         }
     }

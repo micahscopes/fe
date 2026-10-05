@@ -4,7 +4,7 @@ expression: output
 input_file: tests/fixtures/fe_test_runner/quote_transplant_limit.fe
 ---
 === STDOUT ===
-error[19-0004]: invalid generated declaration: quoted function node limit exceeded: 8193 > 8192
+error[19-0003]: invalid generated declaration: quoted function node limit exceeded: 8193 > 8192
      ┌─ quote_transplant_limit.fe:5:9
      │
    5 │ ╭         quote {
@@ -20,7 +20,7 @@ error[19-0004]: invalid generated declaration: quoted function node limit exceed
      │   -------------------------------- generated here
 
 
-ERROR [<time>] error[19-0004]: invalid generated declaration: quoted function node limit exceeded: 8193 > 8192
+ERROR [<time>] error[19-0003]: invalid generated declaration: quoted function node limit exceeded: 8193 > 8192
 
 test result: FAILED. 0 passed; 1 failed
 

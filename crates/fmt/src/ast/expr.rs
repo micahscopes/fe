@@ -639,11 +639,22 @@ fn token_doc_expr_children<'a>(
 
 fn token_doc_labeled_expr<'a>(ctx: &'a RewriteContext<'a>, syntax: &parser::SyntaxNode) -> Doc<'a> {
     let alloc = &ctx.alloc;
-    token_doc_expr_children(ctx, syntax, |token| match token.kind() {
-        SyntaxKind::Ident => Some(TokenPiece::new(alloc.text(ctx.token(&token)))),
-        SyntaxKind::Colon => Some(TokenPiece::new(alloc.text(":")).space_after()),
-        _ => None,
-    })
+    let indent = ctx.config.indent_width as isize;
+    token_doc(
+        ctx,
+        syntax,
+        indent,
+        // A label may be a splice, `${f}: value`.
+        |node| match ast::Expr::cast(node.clone()) {
+            Some(expr) => Some(TokenPiece::new(expr.to_doc(ctx)).no_nest()),
+            None => ast::QuoteHole::cast(node).map(|hole| TokenPiece::new(hole.to_doc(ctx))),
+        },
+        |token| match token.kind() {
+            SyntaxKind::Ident => Some(TokenPiece::new(alloc.text(ctx.token(&token)))),
+            SyntaxKind::Colon => Some(TokenPiece::new(alloc.text(":")).space_after()),
+            _ => None,
+        },
+    )
 }
 
 impl ToDoc for ast::MethodCallExpr {
@@ -684,6 +695,14 @@ impl ToDoc for ast::RecordField {
 
         if has_comment_tokens(self.syntax()) {
             return token_doc_labeled_expr(ctx, self.syntax());
+        }
+
+        // A spliced label, `${f}: expr`.
+        if let (Some(hole), Some(expr)) = (self.label_hole(), self.expr()) {
+            return hole
+                .to_doc(ctx)
+                .append(alloc.text(": "))
+                .append(expr.to_doc(ctx));
         }
 
         match (self.label(), self.expr()) {

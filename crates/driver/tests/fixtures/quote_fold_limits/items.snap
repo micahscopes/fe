@@ -3,7 +3,7 @@ source: crates/driver/tests/read_back.rs
 expression: rendered
 input_file: tests/fixtures/quote_fold_limits/items.fe
 ---
-error[19-0003]: invalid generated declaration: frozen meta nodes limit exceeded: 65537 > 65536
+error[19-0003]: invalid generated declaration: generation result node limit exceeded: 65537 > 65536
    ┌─ items.fe:8:21
    │
  8 │               items = quote {
@@ -11,7 +11,7 @@ error[19-0003]: invalid generated declaration: frozen meta nodes limit exceeded:
  9 │ │                 ${items}
 10 │ │                 fn helper() -> u256 { 1 }
 11 │ │             }
-   │ ╰─────────────^ invalid generated declaration: frozen meta nodes limit exceeded: 65537 > 65536
+   │ ╰─────────────^ invalid generated declaration: generation result node limit exceeded: 65537 > 65536
    · │
 17 │   #[generate(ingot::author::emit)]
    │   -------------------------------- generated here

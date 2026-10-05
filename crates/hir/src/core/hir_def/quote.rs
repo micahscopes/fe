@@ -40,6 +40,21 @@ impl<'db> Quote<'db> {
         }
     }
 
+    /// The expression an expression quote stands for. The braces of
+    /// `quote { e }` delimit the template; they are not a block, so a body of
+    /// one expression is that expression.
+    pub fn expression_root(&self, db: &'db dyn crate::HirDb) -> super::ExprId {
+        let template = self.template;
+        let root = template.expr(db);
+        if let super::Partial::Present(super::Expr::Block(stmts)) = &template.exprs(db)[root]
+            && let [stmt] = stmts.as_slice()
+            && let super::Partial::Present(super::Stmt::Expr(expr)) = &template.stmts(db)[*stmt]
+        {
+            return *expr;
+        }
+        root
+    }
+
     /// For `quote { ${a} ${b} }`, the slots in order.
     pub fn splice_only_body(&self, db: &'db dyn crate::HirDb) -> Option<Vec<u32>> {
         if !matches!(self.fragment, QuoteFragment::Expr) || !self.block_items.is_empty() {
@@ -66,6 +81,39 @@ impl<'db> Quote<'db> {
                 _ => None,
             })
             .collect()
+    }
+}
+
+/// Fe syntax that a quote template does not support yet. The quote checker
+/// reports each at its own node, so generation never meets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub enum QuoteUnsupportedForm {
+    ArrayRepeat,
+    ArrayType,
+    ConstGenericArgument,
+    Constant,
+    ConstantPattern,
+    InnerPathGenericArguments,
+    LetCondition,
+    MethodGenericArguments,
+    With,
+}
+
+impl std::fmt::Display for QuoteUnsupportedForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ArrayRepeat => "an array repeat expression `[value; length]`",
+            Self::ArrayType => "an array type",
+            Self::ConstGenericArgument => "a const generic argument",
+            Self::Constant => "a named constant",
+            Self::ConstantPattern => "a named constant in a pattern",
+            Self::InnerPathGenericArguments => {
+                "a value path with generic arguments before its last segment"
+            }
+            Self::LetCondition => "`if let` or `while let`",
+            Self::MethodGenericArguments => "generic arguments on a method call",
+            Self::With => "a `with` expression",
+        })
     }
 }
 

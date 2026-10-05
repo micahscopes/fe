@@ -24,7 +24,11 @@ fn run_ty_check(fixture: Fixture<&str>) {
 
     let diags = db.run_on_top_mod(top_mod);
     let diags = diags.format_diags(&db);
-    snap_test!(diags, fixture.path());
+    // Fixture directories can share a basename; each assertion has its own
+    // snapshot path and must not inherit the process-wide name counter.
+    test_utils::_macro_support::_insta::allow_duplicates! {
+        snap_test!(diags, fixture.path());
+    }
 }
 
 /// The error headlines of a program checked as a standalone file, in order.

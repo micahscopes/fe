@@ -85,7 +85,16 @@ macro_rules! ctfe_errors {
             InvalidOperation(String),
             Invariant(String),
         }
-        impl CtfeError<'_> {
+        impl<'db> CtfeError<'db> {
+            /// Where this error arose in its own body; for a failed call, the call.
+            pub fn origin(&self) -> SemOrigin<'db> {
+                match self {
+                    $(Self::$name { origin } |)*
+                    Self::AssertionFailed { origin, .. }
+                    | Self::InvalidOperation { origin, .. }
+                    | Self::CalleeError { origin, .. } => *origin,
+                }
+            }
             pub fn kind(&self) -> CtfeErrorKind {
                 match self {
                     $(Self::$name { .. } => CtfeErrorKind::$name,)*

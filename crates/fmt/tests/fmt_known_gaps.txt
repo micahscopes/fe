@@ -1,0 +1,24 @@
+# Fixtures whose formatting is not yet stable or drops tokens, as
+# repository-relative paths. Remove a line when its file formats cleanly.
+crates/driver/tests/fixtures/read_back_loops/read_back_loops.fe
+crates/fe/tests/fixtures/fe_test/inner_module_arithmetic_attr.fe
+crates/parser/test_files/syntax_node/items/impl_const.fe
+crates/uitest/fixtures/ty_check/abi_attr_on_non_struct.fe
+crates/uitest/fixtures/ty_check/loop_unroll_attr_duplicate.fe
+crates/uitest/fixtures/ty_check/loop_unroll_attr_empty_form.fe
+crates/uitest/fixtures/ty_check/loop_unroll_attr_expr_value_form.fe
+crates/uitest/fixtures/ty_check/loop_unroll_attr_invalid_form.fe
+crates/uitest/fixtures/ty_check/must_use_attr_unsupported.fe
+crates/uitest/fixtures/ty_check/named_noncore_kind_bound.fe
+crates/uitest/fixtures/ty_check/payable_on_for_stmt.fe
+crates/uitest/fixtures/ty_check/payable_on_inner_mod_attrs.fe
+ingots/core/src/ptr.fe
+ingots/std/src/abi/sol/types.fe
+ingots/std/src/evm/effects.fe
+ingots/std/src/evm/ops.fe
+ingots/std/src/evm/packed.fe
+ingots/std/src/evm/sol_array.fe
+ingots/std/src/evm/sol_slot.fe
+ingots/std/src/evm/storage_bytes.fe
+ingots/std/src/evm/storage_map.fe
+ingots/std/src/evm/storage_packed_array.fe

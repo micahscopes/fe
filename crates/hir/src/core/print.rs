@@ -579,7 +579,55 @@ impl<'db> RecordPatField<'db> {
 // Expressions
 // ============================================================================
 
+/// How tightly an expression form binds, following the parser's binding
+/// powers. Operands that bind more loosely than their position requires are
+/// printed in parentheses, which the HIR does not keep.
+fn binding_strength(expr: &Expr) -> u8 {
+    match expr {
+        Expr::Assign(..) | Expr::AugAssign(..) => 1,
+        Expr::Bin(_, _, op) => match op {
+            BinOp::Arith(ArithBinOp::Range) => 4,
+            BinOp::Logical(LogicalBinOp::Or) => 5,
+            BinOp::Logical(LogicalBinOp::And) => 6,
+            BinOp::Comp(_) => 7,
+            BinOp::Arith(op) => match op {
+                ArithBinOp::BitOr => 8,
+                ArithBinOp::BitXor => 9,
+                ArithBinOp::BitAnd => 10,
+                ArithBinOp::LShift | ArithBinOp::RShift => 11,
+                ArithBinOp::Add | ArithBinOp::Sub => 12,
+                ArithBinOp::Mul | ArithBinOp::Div | ArithBinOp::Rem => 13,
+                ArithBinOp::Pow => 14,
+                ArithBinOp::Range => 4,
+            },
+            BinOp::Index => POSTFIX_STRENGTH,
+        },
+        Expr::Un(..) => 15,
+        Expr::Cast(..) => 16,
+        _ => u8::MAX,
+    }
+}
+
+const POSTFIX_STRENGTH: u8 = 17;
+
 impl<'db> Expr<'db> {
+    /// Prints an operand, in parentheses when it binds more loosely than
+    /// `required`.
+    fn pretty_print_operand(
+        &self,
+        db: &'db dyn HirDb,
+        body: Body<'db>,
+        indent: usize,
+        required: u8,
+    ) -> String {
+        let printed = self.pretty_print(db, body, indent);
+        if binding_strength(self) < required {
+            format!("({printed})")
+        } else {
+            printed
+        }
+    }
+
     /// Pretty-prints an expression.
     pub fn pretty_print(&self, db: &'db dyn HirDb, body: Body<'db>, indent: usize) -> String {
         match self {
@@ -609,15 +657,23 @@ impl<'db> Expr<'db> {
                 if matches!(op, BinOp::Index) {
                     format!(
                         "{}[{}]",
-                        lhs_expr.pretty_print(db, body, indent),
+                        lhs_expr.pretty_print_operand(db, body, indent, POSTFIX_STRENGTH),
                         rhs_expr.pretty_print(db, body, indent)
                     )
                 } else {
+                    // `**` groups to the right; every other operator to the left.
+                    let strength = binding_strength(self);
+                    let (lhs_required, rhs_required) =
+                        if matches!(op, BinOp::Arith(ArithBinOp::Pow)) {
+                            (strength + 1, strength)
+                        } else {
+                            (strength, strength + 1)
+                        };
                     format!(
                         "{} {} {}",
-                        lhs_expr.pretty_print(db, body, indent),
+                        lhs_expr.pretty_print_operand(db, body, indent, lhs_required),
                         op.pretty_print(),
-                        rhs_expr.pretty_print(db, body, indent)
+                        rhs_expr.pretty_print_operand(db, body, indent, rhs_required)
                     )
                 }
             }
@@ -625,10 +681,11 @@ impl<'db> Expr<'db> {
             Expr::Un(expr, op) => {
                 let expr = unwrap_partial_ref(expr.data(db, body), "Un::expr");
                 let op_str = op.pretty_print();
+                let operand = expr.pretty_print_operand(db, body, indent, binding_strength(self));
                 if matches!(op, UnOp::Mut | UnOp::Ref) {
-                    format!("{op_str} {}", expr.pretty_print(db, body, indent))
+                    format!("{op_str} {operand}")
                 } else {
-                    format!("{op_str}{}", expr.pretty_print(db, body, indent))
+                    format!("{op_str}{operand}")
                 }
             }
 
@@ -637,7 +694,11 @@ impl<'db> Expr<'db> {
                 let ty = ty
                     .to_opt()
                     .map_or_else(|| "<missing>".into(), |ty| ty.pretty_print(db));
-                format!("{} as {}", expr.pretty_print(db, body, indent), ty)
+                format!(
+                    "{} as {}",
+                    expr.pretty_print_operand(db, body, indent, binding_strength(self)),
+                    ty
+                )
             }
 
             Expr::Call(callee, args) => {
@@ -649,7 +710,7 @@ impl<'db> Expr<'db> {
                     .join(", ");
                 format!(
                     "{}({})",
-                    callee_expr.pretty_print(db, body, indent),
+                    callee_expr.pretty_print_operand(db, body, indent, POSTFIX_STRENGTH),
                     args_str
                 )
             }
@@ -676,7 +737,7 @@ impl<'db> Expr<'db> {
                     .join(", ");
                 format!(
                     "{}.{}{}({})",
-                    receiver_expr.pretty_print(db, body, indent),
+                    receiver_expr.pretty_print_operand(db, body, indent, POSTFIX_STRENGTH),
                     method.data(db),
                     generic_args,
                     args_str
@@ -703,7 +764,7 @@ impl<'db> Expr<'db> {
                 let field = unwrap_partial_ref(field, "Field::field");
                 format!(
                     "{}.{}",
-                    expr.pretty_print(db, body, indent),
+                    expr.pretty_print_operand(db, body, indent, POSTFIX_STRENGTH),
                     field.pretty_print(db)
                 )
             }

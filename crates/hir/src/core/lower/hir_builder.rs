@@ -215,6 +215,25 @@ where
 /// `__fe_{name}`, or `__fe_{name}_{n}` for the first `n` that the desugared
 /// source does not mention. Generated code then cannot capture a name that a
 /// field type refers to, whichever namespace it is in.
+/// The output name of a quoted local binder: the name it was written with,
+/// marked with `'` so that no item can have it. Fragments are closed and
+/// compiler-issued pattern binders have their own names, so a use resolves by
+/// spelling to the binder the template meant, and no destination constant or
+/// unit variant can turn the binder into a pattern that matches it.
+pub(super) fn authored_binder_name<'db>(
+    db: &'db dyn HirDb,
+    template: Body<'db>,
+    binder: PatId,
+) -> Result<IdentId<'db>, QuoteConstructionFault> {
+    match &template.pats(db)[binder] {
+        Partial::Present(Pat::Path(Partial::Present(path), _)) => path
+            .as_ident(db)
+            .map(|name| IdentId::new(db, format!("{}'", name.data(db))))
+            .ok_or(QuoteConstructionFault::PatternNeedsACheckedBinder),
+        _ => Err(QuoteConstructionFault::PatternNeedsACheckedBinder),
+    }
+}
+
 fn fresh_ident<'db>(db: &'db dyn HirDb, reserved: &FxHashSet<String>, name: &str) -> IdentId<'db> {
     let mut ident = format!("__fe_{name}");
     let mut suffix = 0;
@@ -1207,6 +1226,7 @@ pub(crate) struct QuoteMethodCall<'db> {
 #[derive(Default)]
 pub(super) struct QuoteBodyBindings<'a, 'db> {
     pub(super) holes: &'a [FrozenCodeHole],
+    pub(super) cast_types: &'a [(ExprId, TypeId<'db>)],
     pub(super) fragments: Option<(&'a FrozenCode, &'a [Option<QuoteFragmentSource<'db>>])>,
     pub(super) open_bindings: &'a [(IdentId<'db>, usize)],
     pub(super) owner_generic_bindings: &'a [IdentId<'db>],
@@ -1542,6 +1562,7 @@ where
     ) -> Result<(ExprId, QuoteCopySummary<'db>), QuoteConstructionError> {
         let QuoteBodyBindings {
             holes,
+            cast_types,
             fragments,
             open_bindings,
             owner_generic_bindings,
@@ -1591,6 +1612,7 @@ where
         }
         map.allow_self = allow_self;
         map.self_record_inits = self_record_inits.to_vec();
+        map.cast_types = cast_types.iter().copied().collect();
         for (stmt, ty) in local_types {
             classify(
                 &mut map.local_types,
@@ -1874,16 +1896,9 @@ where
             }
             Expr::Call(callee, args) => Expr::Call(
                 self.copy_quote_expr(template, *callee, map)?,
-                args.iter()
-                    .map(|arg| {
-                        // Keep a shorthand label before a hygienic binder rename changes its name.
-                        Ok(CallArg {
-                            label: arg.label_eagerly(db, template),
-                            expr: self.copy_quote_expr(template, arg.expr, map)?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, QuoteConstructionError>>()?,
+                self.copy_quote_call_args(template, args, map)?,
             ),
+            Expr::Assert(args) => Expr::Assert(self.copy_quote_call_args(template, args, map)?),
             Expr::MethodCall(receiver, Partial::Present(name), generic_args, args) => {
                 if generic_args.is_given(db) {
                     return Err(
@@ -1895,14 +1910,7 @@ where
                     self.copy_quote_expr(template, *receiver, map)?,
                     Partial::Present(*name),
                     GenericArgListId::none(db),
-                    args.iter()
-                        .map(|arg| {
-                            Ok(CallArg {
-                                label: arg.label_eagerly(db, template),
-                                expr: self.copy_quote_expr(template, arg.expr, map)?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, QuoteConstructionError>>()?,
+                    self.copy_quote_call_args(template, args, map)?,
                 )
             }
             Expr::Field(receiver, Partial::Present(FieldIndex::Hole(slot))) => {
@@ -1926,14 +1934,12 @@ where
                 *op,
             ),
             Expr::Un(value, op) => Expr::Un(self.copy_quote_expr(template, *value, map)?, *op),
-            Expr::Cast(value, Partial::Present(ty)) => {
+            Expr::Cast(value, Partial::Present(_)) => {
                 let checked = map
                     .cast_types
                     .get(&old)
                     .copied()
-                    .or_else(|| matches!(ty.data(db), TypeKind::Primitive(_)).then_some(*ty));
-                let checked = checked
-                    .ok_or(QuoteConstructionFault::CastNeedsACheckedTypeBeforeTransplantation)?;
+                    .ok_or(QuoteConstructionFault::CastHasNoFrozenType)?;
                 Expr::Cast(
                     self.copy_quote_expr(template, *value, map)?,
                     Partial::Present(checked),
@@ -2058,6 +2064,24 @@ where
         map.groups = enclosing;
         map.visible_locals.truncate(visible);
         result
+    }
+
+    fn copy_quote_call_args(
+        &mut self,
+        template: Body<'db>,
+        args: &[CallArg<'db>],
+        map: &mut QuoteCopyMap<'_, 'db>,
+    ) -> Result<Vec<CallArg<'db>>, QuoteConstructionError> {
+        let db = self.db();
+        args.iter()
+            .map(|arg| {
+                // Keep a shorthand label before a hygienic binder rename changes its name.
+                Ok(CallArg {
+                    label: arg.label_eagerly(db, template),
+                    expr: self.copy_quote_expr(template, arg.expr, map)?,
+                })
+            })
+            .collect()
     }
 
     fn copy_quote_arms(
@@ -2354,15 +2378,14 @@ where
         let locals = node
             .locals
             .iter()
-            .enumerate()
-            .map(|(index, local)| {
-                (
+            .map(|local| {
+                Ok((
                     local.binder,
-                    IdentId::new(self.db(), format!("<quote-fragment-local-{child}-{index}>")),
+                    authored_binder_name(self.db(), source.template, local.binder)?,
                     local.uses.clone(),
-                )
+                ))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, QuoteConstructionFault>>()?;
         let mut map = QuoteCopyMap::new(
             self.db(),
             &node.holes,

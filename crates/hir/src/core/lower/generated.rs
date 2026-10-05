@@ -381,8 +381,8 @@ fn quoted_function_generics<'db>(
     paths: QuotePathContext<'db>,
     budget: &QuoteBudget,
     function: &crate::hir_def::QuoteFunc<'db>,
-    func_index: u32,
     inherited: GenericParamListId<'db>,
+    owner_names: &[IdentId<'db>],
     function_types: &crate::core::meta::FrozenQuoteFunctionTypes,
     roots: &[FrozenQuoteTrait],
 ) -> Result<(GenericParamListId<'db>, Vec<IdentId<'db>>), QuoteConstructionError> {
@@ -392,6 +392,33 @@ fn quoted_function_generics<'db>(
     let const_types = &function_types.generic_const_types;
     let mut params = inherited.data(db).to_vec();
     let mut names = Vec::new();
+    // Each parameter keeps its authored name unless a parameter of the
+    // function's owner, an inherited parameter or an earlier parameter already
+    // has it.
+    let inherited_names: Vec<IdentId<'db>> = params
+        .iter()
+        .filter_map(|param| param.name().to_opt())
+        .chain(owner_names.iter().copied())
+        .collect();
+    let authored_names: Vec<IdentId<'db>> = function
+        .generic_params
+        .data(db)
+        .iter()
+        .filter_map(|param| param.name().to_opt())
+        .collect();
+    let generic_name = |authored: IdentId<'db>, chosen: &[IdentId<'db>]| {
+        if !inherited_names.contains(&authored) && !chosen.contains(&authored) {
+            return authored;
+        }
+        (1usize..)
+            .map(|suffix| IdentId::new(db, format!("{}{suffix}", authored.data(db))))
+            .find(|name| {
+                !inherited_names.contains(name)
+                    && !authored_names.contains(name)
+                    && !chosen.contains(name)
+            })
+            .expect("an unused suffix exists")
+    };
     if bound_sites.len() != function.generic_params.data(db).len()
         || type_defaults.len() != function.generic_params.data(db).len()
         || const_types.len() != function.generic_params.data(db).len()
@@ -415,7 +442,7 @@ fn quoted_function_generics<'db>(
             let primitive = const_ty
                 .and_then(quote_hir_primitive)
                 .ok_or(QuoteConstructionFault::ConstParameterTypeIsNotACheckedScalar)?;
-            let name = IdentId::new(db, format!("<quote-function-const-{func_index}-{index}>"));
+            let name = generic_name(param.name.unwrap(), &names);
             let mut param = param.clone();
             param.name = Partial::Present(name);
             param.ty = Partial::Present(TypeId::new(db, TypeKind::Primitive(primitive)));
@@ -444,7 +471,7 @@ fn quoted_function_generics<'db>(
             .zip(sites)
             .map(|(bound, site)| quoted_trait_bound(paths, bound, *site, roots, budget))
             .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
-        let name = IdentId::new(db, format!("<quote-function-type-{func_index}-{index}>"));
+        let name = generic_name(param.name.unwrap(), &names);
         let mut param = param.clone();
         param.name = Partial::Present(name);
         param.bounds = bounds;
@@ -772,7 +799,7 @@ fn quoted_fragment_sources<'db>(
                                 super::hir_builder::QuoteFragmentRoot::Arms(arms.clone())
                             }
                             _ => super::hir_builder::QuoteFragmentRoot::Expr {
-                                root: quote.template.expr(db),
+                                root: quote.expression_root(db),
                                 splices: quote.splice_only_body(db),
                             },
                         },
@@ -1063,15 +1090,7 @@ pub(super) fn reify_quote_fragment_types<'db>(
             Ok((*site, *path))
         })
         .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
-    let cast_types = node
-        .cast_primitives
-        .iter()
-        .map(|(site, primitive)| {
-            let primitive = quote_hir_primitive(*primitive)
-                .ok_or(QuoteConstructionFault::ReadBackCastPrimitiveIsUnsupported)?;
-            Ok((*site, TypeId::new(db, TypeKind::Primitive(primitive))))
-        })
-        .collect::<Result<Vec<_>, QuoteConstructionError>>()?;
+    let cast_types = quote_cast_types(db, node)?;
     let variants = node
         .rooted_constructors
         .iter()
@@ -1087,6 +1106,22 @@ pub(super) fn reify_quote_fragment_types<'db>(
         local_types,
         record_paths,
     })
+}
+
+/// The checked target type of every cast in a frozen template, keyed by its
+/// template expression. Fragments and quoted bodies share this one table.
+pub(super) fn quote_cast_types<'db>(
+    db: &'db dyn HirDb,
+    node: &FrozenCodeNode,
+) -> Result<Vec<(ExprId, TypeId<'db>)>, QuoteConstructionError> {
+    node.cast_primitives
+        .iter()
+        .map(|(site, primitive)| {
+            let primitive = quote_hir_primitive(*primitive)
+                .ok_or(QuoteConstructionFault::ReadBackCastPrimitiveIsUnsupported)?;
+            Ok((*site, TypeId::new(db, TypeKind::Primitive(primitive))))
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -1236,8 +1271,18 @@ fn emit_closed_quoted_items<'db>(
         if quote.holes.len() != node.holes.len() {
             return Err(QuoteConstructionFault::SpliceCountChangedAfterFreezing.into());
         }
-        let QuoteFragment::Items(items) = &quote.fragment else {
-            return Err(QuoteConstructionFault::GenerationRequiresItemCode.into());
+        // A body made only of splices, `quote { ${a} ${b} }`, checked as item
+        // code, composes its fragments in order.
+        let spliced_items: Vec<QuoteItem<'db>>;
+        let (items, splice_only) = match &quote.fragment {
+            QuoteFragment::Items(items) => (items.as_slice(), false),
+            _ => {
+                let slots = quote
+                    .splice_only_body(db)
+                    .ok_or(QuoteConstructionFault::GenerationRequiresItemCode)?;
+                spliced_items = slots.into_iter().map(QuoteItem::Hole).collect();
+                (spliced_items.as_slice(), true)
+            }
         };
         for member in member_groups[code_root].members.keys() {
             let valid = match *member {
@@ -1263,6 +1308,7 @@ fn emit_closed_quoted_items<'db>(
                 );
             }
         }
+        let cast_types = quote_cast_types(db, node)?;
         let emit = QuoteEmitCtx {
             db,
             request,
@@ -1274,11 +1320,13 @@ fn emit_closed_quoted_items<'db>(
             fragment_sources: &fragment_sources,
             code_root,
             provider_scope: owner.scope(),
+            cast_types: &cast_types,
         };
         for (item_index, item) in items.iter().enumerate().skip(start) {
             if let QuoteItem::Hole(slot) = item {
-                if quote.holes.get(*slot as usize).map(|hole| hole.position)
-                    != Some(QuoteHolePosition::Code(crate::hir_def::QuoteKind::Item))
+                if !splice_only
+                    && quote.holes.get(*slot as usize).map(|hole| hole.position)
+                        != Some(QuoteHolePosition::Code(crate::hir_def::QuoteKind::Item))
                 {
                     return Err(QuoteConstructionFault::ItemSplicePositionChanged.into());
                 }
@@ -1353,6 +1401,7 @@ struct QuoteEmitCtx<'a, 'db> {
     fragment_sources: &'a [Option<QuoteFragmentSource<'db>>],
     code_root: usize,
     provider_scope: ScopeId<'db>,
+    cast_types: &'a [(ExprId, TypeId<'db>)],
 }
 
 impl<'db> QuoteEmitCtx<'_, 'db> {
@@ -1456,8 +1505,8 @@ fn emit_quoted_function<'db>(
         paths,
         budget,
         function,
-        func_index,
         generic_params,
+        generic_names,
         function_types,
         &emit.node.rooted_traits,
     )?;
@@ -1472,15 +1521,14 @@ fn emit_quoted_function<'db>(
             .data(db)
             .iter()
             .zip(&function_types.effects)
-            .enumerate()
-            .map(|(index, (effect, frozen))| {
+            .map(|(effect, frozen)| {
                 let ty = frozen
                     .as_ref()
                     .ok_or(QuoteConstructionFault::EffectKeyNeedsCheckedReification)?;
                 let ty = quoted_signature_type(paths, &type_budget, ty, &function_generic_names)?;
-                let name = effect
-                    .name
-                    .map(|_| IdentId::new(db, format!("<quote-effect-{func_index}-{index}>")));
+                // Effect uses are bound by position, so the authored name
+                // cannot be captured.
+                let name = effect.name;
                 effect_names.push(name);
                 let mut copied = effect.clone();
                 copied.name = name;
@@ -1661,14 +1709,14 @@ fn emit_quoted_function<'db>(
     let locals: Vec<(PatId, IdentId<'db>, Vec<ExprId>)> = member
         .locals
         .iter()
-        .map(|(index, local)| {
-            (
+        .map(|(_, local)| {
+            Ok((
                 local.binder,
-                IdentId::new(db, format!("<quote-local-{}-{index}>", emit.code_root)),
+                super::hir_builder::authored_binder_name(db, emit.quote.template, local.binder)?,
                 local.uses.clone(),
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_, QuoteConstructionFault>>()?;
     let variants = member
         .rooted_constructors
         .iter()
@@ -1761,6 +1809,7 @@ fn emit_quoted_function<'db>(
                         emit.provider_scope,
                         QuoteBodyBindings {
                             holes: &emit.node.holes,
+                            cast_types: emit.cast_types,
                             rooted_funcs: &rooted_paths,
                             generic_uses: &generics,
                             ..Default::default()
@@ -1794,6 +1843,7 @@ fn emit_quoted_function<'db>(
                 emit.provider_scope,
                 QuoteBodyBindings {
                     holes: &emit.node.holes,
+                    cast_types: emit.cast_types,
                     fragments: Some((emit.code, emit.fragment_sources)),
                     open_bindings: &open_bindings,
                     owner_generic_bindings: generic_names,
@@ -2259,6 +2309,7 @@ fn quoted_impl_const<'db>(
                 emit.provider_scope,
                 QuoteBodyBindings {
                     holes: &emit.node.holes,
+                    cast_types: emit.cast_types,
                     fragments: Some((emit.code, emit.fragment_sources)),
                     rooted_funcs: &rooted_paths,
                     ..Default::default()
@@ -2465,7 +2516,7 @@ fn bound_quote_item_path<'db>(
     );
     let mut count = 0;
     for segment in item_path.split("::") {
-        if !identifier(segment) {
+        if !parser::is_identifier(segment) {
             return Err(QuoteConstructionFault::ItemPathIsNotASimpleItemPath);
         }
         path = path.push_str(db, segment);
@@ -2494,13 +2545,8 @@ fn text(value: &FrozenMetaValue) -> Result<String, QuoteConstructionFault> {
         .map_err(|_| QuoteConstructionFault::GenerationStringIsNotUTF8)
 }
 
-fn identifier(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .enumerate()
-            .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
-}
+/// The longest name a provider may generate.
+const MAX_GENERATED_NAME_LEN: usize = 256;
 
 struct TargetContext<'a, 'db> {
     db: &'db dyn HirDb,
@@ -2606,7 +2652,7 @@ impl<'a, 'db> TargetContext<'a, 'db> {
             }
             _ => return Err(QuoteConstructionFault::InvalidGeneratedDeclarationName),
         };
-        if name.len() > 256 || !identifier(&name) {
+        if name.len() > MAX_GENERATED_NAME_LEN || !parser::is_identifier(&name) {
             return Err(QuoteConstructionFault::GeneratedNameMustBeAnIdentifier);
         }
         Ok(IdentId::new(self.db, name))

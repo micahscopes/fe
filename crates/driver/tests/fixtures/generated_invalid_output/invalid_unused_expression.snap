@@ -11,7 +11,7 @@ error[8-0000]: type mismatch
      pub const fn apply(_ value: u256) -> u256 {
          {
              if false {
-                 let <quote-local-0-0>: u256 = true
+                 let unused': u256 = true
              }
              value
          }

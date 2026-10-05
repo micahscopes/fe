@@ -1,0 +1,16 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_forms/unsupported/constant.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_forms/unsupported/constant.fe: error[8-0119]: a named constant is not supported inside a quote yet
+  ┌─ constant.fe:7:36
+  │
+7 │             pub fn gen() -> u256 { LIMIT + ingot::author::LIMIT }
+  │                                    ^^^^^ not supported inside a quote yet
+
+error[8-0119]: a named constant is not supported inside a quote yet
+  ┌─ constant.fe:7:44
+  │
+7 │             pub fn gen() -> u256 { LIMIT + ingot::author::LIMIT }
+  │                                            ^^^^^^^^^^^^^^^^^^^^ not supported inside a quote yet

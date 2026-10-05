@@ -1,0 +1,10 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_forms/unsupported/array_type_local.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_forms/unsupported/array_type_local.fe: error[8-0119]: an array type is not supported inside a quote yet
+  ┌─ array_type_local.fe:8:17
+  │
+8 │                 let a: [u256; N] = [1, 2, 3]
+  │                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not supported inside a quote yet

@@ -24,6 +24,16 @@ pub fn parse_source_file(text: &str, recovery_mode: RecoveryMode) -> (GreenNode,
     (node, errs)
 }
 
+/// Whether `text` is exactly one identifier token: identifier characters and
+/// not a keyword.
+pub fn is_identifier(text: &str) -> bool {
+    use logos::Logos;
+    let mut lexer = SyntaxKind::lexer(text);
+    matches!(lexer.next(), Some(Ok(SyntaxKind::Ident)))
+        && lexer.span() == (0..text.len())
+        && lexer.next().is_none()
+}
+
 /// An parse error which is accumulated in the [`parser::Parser`] while parsing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ParseError {

@@ -1,0 +1,13 @@
+// Generic arguments before the last segment of a value path are refused at the form.
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn gen(a: u256) -> u256 {
+                core::option::Option<u256>::Some(a).unwrap_or(0)
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}

@@ -1,0 +1,10 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_forms/unsupported/const_generic_name.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_forms/unsupported/const_generic_name.fe: error[8-0119]: a const generic argument is not supported inside a quote yet
+  ┌─ const_generic_name.fe:8:36
+  │
+8 │             pub fn gen() -> u256 { ingot::width<K>() }
+  │                                    ^^^^^^^^^^^^^^^ not supported inside a quote yet

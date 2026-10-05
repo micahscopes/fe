@@ -90,6 +90,8 @@
   "msg"
   "mut"
   "own"
+  "quote"
+  "recursive"
   "recv"
   "self"
   "struct"
@@ -103,6 +105,8 @@
   "while"
   "with"
 ] @keyword
+
+(quote_splice "$" @punctuation.special)
 
 (break_statement) @keyword
 (continue_statement) @keyword

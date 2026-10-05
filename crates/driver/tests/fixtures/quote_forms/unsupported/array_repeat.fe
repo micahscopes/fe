@@ -1,0 +1,15 @@
+// An array repeat expression is refused at the form.
+mod author {
+    use core::meta::{Code, Item, Record}
+    const N: usize = 3
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn gen() -> u256 {
+                let a = [1; N]
+                0
+            }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T {}

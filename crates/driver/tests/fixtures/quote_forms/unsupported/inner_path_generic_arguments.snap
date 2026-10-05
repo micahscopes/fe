@@ -1,0 +1,10 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_forms/unsupported/inner_path_generic_arguments.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_forms/unsupported/inner_path_generic_arguments.fe: error[8-0119]: a value path with generic arguments before its last segment is not supported inside a quote yet
+  ┌─ inner_path_generic_arguments.fe:7:17
+  │
+7 │                 core::option::Option<u256>::Some(a).unwrap_or(0)
+  │                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not supported inside a quote yet

@@ -585,7 +585,7 @@ impl std::fmt::Display for ConstructionError {
                 "quoted Self constructor `{name}` does not match the impl self type"
             ),
             Self::UnsupportedConstructorInstantiation => {
-                f.write_str("quoted constructor alias arguments need checked reification")
+                f.write_str("constructor alias arguments are not supported in a quote yet")
             }
             Self::MissingItemPath => f.write_str("quoted item has no ingot-relative path"),
             Self::Authority => f.write_str("generated declaration exceeds its owner's authority"),
@@ -1476,13 +1476,14 @@ impl<'db> RecordInput<'db> {
             for (index, item) in quoted_functions(&quote.fragment).enumerate() {
                 freeze_function(item, index as u32)?;
             }
-            if matches!(quote.fragment, QuoteFragment::Expr | QuoteFragment::Arms(_)) {
-                for (expr, data) in quote.template.exprs(self.db).iter() {
-                    if let Partial::Present(Expr::Cast(_, Partial::Present(ty))) = data {
-                        let primitive = checked_primitive(*ty).ok_or(FreezingProtocolFault::CastNeedsACheckedPrimitiveTypeBeforeTransplantation)?;
-                        charge_frozen_node(budget)?;
-                        cast_primitives.push((expr, primitive));
-                    }
+            // Every cast in the template, whichever fragment or quoted body
+            // holds it, carries its checked target type.
+            for (expr, data) in quote.template.exprs(self.db).iter() {
+                if let Partial::Present(Expr::Cast(_, Partial::Present(ty))) = data {
+                    let primitive = checked_primitive(*ty)
+                        .ok_or(FreezingProtocolFault::CastNeedsACheckedPrimitiveType)?;
+                    charge_frozen_node(budget)?;
+                    cast_primitives.push((expr, primitive));
                 }
             }
             // Standalone fragments have their own binder frame, without a

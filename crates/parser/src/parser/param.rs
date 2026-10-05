@@ -10,7 +10,7 @@ use super::{
     expr_atom::{BlockExprScope, LitExprScope},
     parse_list,
     path::PathScope,
-    token_stream::TokenStream,
+    token_stream::{LexicalToken, TokenStream},
     type_::{is_type_start, parse_type},
 };
 
@@ -239,10 +239,21 @@ impl super::Parse for TypeBoundScope {
     type Error = Recovery<ErrProof>;
 
     fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
-        let is_type_kind = matches!(
-            parser.current_kind(),
-            Some(SyntaxKind::LParen | SyntaxKind::Star)
-        ) || self.disallow_trait_bound;
+        // Where trait bounds are not allowed, an identifier is a kind bound
+        // only when it starts an arrow kind or names the `Constraint` kind;
+        // anything else is a trait bound, reported as such.
+        let is_type_kind = match parser.current_kind() {
+            Some(SyntaxKind::LParen | SyntaxKind::Star) => true,
+            Some(SyntaxKind::Ident) if self.disallow_trait_bound => {
+                let next = parser.peek_n_non_trivia(2);
+                next.get(1) == Some(&SyntaxKind::Arrow)
+                    || (parser
+                        .current_token()
+                        .is_some_and(|token| token.text() == "Constraint")
+                        && next.get(1) != Some(&SyntaxKind::Colon2))
+            }
+            _ => false,
+        };
 
         if is_type_kind {
             parse_kind_bound(parser)

@@ -59,8 +59,12 @@ impl super::Parse for RecursiveTypeFnScope {
             )?;
         }
 
-        parser.expect_and_pop_recovery_stack()?;
-        if parser.bump_if(SyntaxKind::Arrow) {
+        // The return kind is required, as in the tree-sitter grammar.
+        if parser.find_and_pop(
+            SyntaxKind::Arrow,
+            ExpectedKind::Syntax(SyntaxKind::TypeFnRetKind),
+        )? {
+            parser.bump();
             parser.parse(TypeFnRetKindScope::default())?;
         }
 
