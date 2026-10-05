@@ -45,7 +45,7 @@ quotation_faults! {
         ExpectedFixedStringData => "expected fixed string data",
         FieldHandleHasAnInvalidOwnerVariantOrFieldCoordinate => "field handle has an invalid owner, variant or field coordinate",
         FieldNameRequiresASelectedFieldList => "field name requires a selected field list",
-        GeneratedNameMustBeAnIdentifier => "generated name must be an identifier",
+        GeneratedNameMustBeAnIdentifier => "generated name must be an identifier that is not a keyword, at most 256 bytes long",
         GeneratedTargetHasNoLexicalParent => "generated target has no lexical parent",
         GeneratedTargetIsAbsentFromAuthoredHIR => "generated target is absent from authored HIR",
         GenerationFieldNameIsMissing => "generation field name is missing",

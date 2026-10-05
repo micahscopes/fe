@@ -2516,7 +2516,7 @@ fn bound_quote_item_path<'db>(
     );
     let mut count = 0;
     for segment in item_path.split("::") {
-        if !identifier(segment) {
+        if !parser::is_identifier(segment) {
             return Err(QuoteConstructionFault::ItemPathIsNotASimpleItemPath);
         }
         path = path.push_str(db, segment);
@@ -2545,13 +2545,8 @@ fn text(value: &FrozenMetaValue) -> Result<String, QuoteConstructionFault> {
         .map_err(|_| QuoteConstructionFault::GenerationStringIsNotUTF8)
 }
 
-fn identifier(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .enumerate()
-            .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
-}
+/// The longest name a provider may generate.
+const MAX_GENERATED_NAME_LEN: usize = 256;
 
 struct TargetContext<'a, 'db> {
     db: &'db dyn HirDb,
@@ -2657,7 +2652,7 @@ impl<'a, 'db> TargetContext<'a, 'db> {
             }
             _ => return Err(QuoteConstructionFault::InvalidGeneratedDeclarationName),
         };
-        if name.len() > 256 || !identifier(&name) {
+        if name.len() > MAX_GENERATED_NAME_LEN || !parser::is_identifier(&name) {
             return Err(QuoteConstructionFault::GeneratedNameMustBeAnIdentifier);
         }
         Ok(IdentId::new(self.db, name))

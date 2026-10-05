@@ -526,6 +526,20 @@ fn prepare_selected<'db>(
                 return Err(error(ElaborationErrorKind::InvalidEntry));
             }
             check_output_shape(&input, normalize(provider.return_ty(db))).map_err(error)?;
+            // A provider whose source does not parse is reported as written,
+            // before its body is checked or run.
+            let parse_errors = {
+                use hir::analysis::analysis_pass::{ModuleAnalysisPass, ParsingPass};
+                ParsingPass {}.run_on_module(db, provider.top_mod(db))
+            };
+            if !parse_errors.is_empty() {
+                let complete = parse_errors
+                    .iter()
+                    .map(|d| d.to_complete(db))
+                    .collect::<Vec<_>>();
+                let rendered = db.format_complete_diagnostics(&complete);
+                return Err(error(ElaborationErrorKind::ProviderDiagnostics(rendered)));
+            }
             let diagnostics = &check_func_body(db, *provider).0;
             if !diagnostics.is_empty() {
                 let complete = diagnostics
