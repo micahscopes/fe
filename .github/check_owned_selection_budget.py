@@ -74,6 +74,10 @@ def fields(source):
                     typ = expanded(field[2].strip())
                     if match[1] == "Callable" and re.search(r"\bImplEnv\b", typ):
                         raise ValueError("Callable context storage is retired; read the body position record")
+                    if match[1] == "Decisions" and re.search(r"\bImplEnv\b", typ) and re.search(
+                        r"\b(?:SecondaryMap|FxHashMap|IndexMap|HashMap|BTreeMap|Vec)\b", typ
+                    ):
+                        raise ValueError("per-position Decisions context storage is retired; read the root input and opening records")
                     collection = re.search(
                         r"\b(?:Vec|Arc|Box|SecondaryMap|FxHashMap|IndexMap|HashMap|SmallVec|VecDeque|BTreeMap|HashSet)\b|\[", typ
                     )
@@ -118,6 +122,16 @@ def self_check():
             assert "Callable context storage is retired" in str(error)
         else:
             raise AssertionError("retired Callable context restored: " + source)
+    for source in [
+        "struct Decisions { contexts: SecondaryMap<ExprId, Option<ImplEnv>>, }",
+        "type Contexts = HashMap<ExprId, ImplEnv>; struct Decisions { renamed: Contexts, }",
+    ]:
+        try:
+            list(fields(source))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("retired position-context map restored: " + source)
     for source in ["struct A(Vec<SelectedApplication>);", "enum A { B(Vec<SelectedApplication>) }"]:
         try:
             list(fields(source))

@@ -23,6 +23,7 @@
 pub mod index;
 mod provision;
 pub use provision::Provision;
+pub(crate) use provision::recorded_chain_at;
 pub(crate) use provision::{Chain, Frame};
 pub mod reference;
 mod storage_layout;

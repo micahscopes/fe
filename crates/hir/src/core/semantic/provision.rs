@@ -264,12 +264,21 @@ fn opening_positions<'db>(
     index.result
 }
 
-pub(super) fn recorded_chain_at<'db>(
+pub(crate) fn recorded_chain_at<'db>(
     db: &'db dyn HirAnalysisDb,
     typed: &crate::analysis::ty::ty_check::TypedBody<'db>,
     expr: ExprId,
 ) -> Chain<'db> {
-    let mut chain = Chain::default();
+    let mut chain = Chain {
+        frames: vec![Frame::from_records(
+            typed
+                .root_selections(db)
+                .iter()
+                .copied()
+                .map(Provision::Named)
+                .collect(),
+        )],
+    };
     if typed.with_choices().len() == 0 {
         return chain;
     }

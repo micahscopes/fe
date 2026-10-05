@@ -839,11 +839,12 @@ impl<'db> TyCheckEnv<'db> {
         self.expr_stack.iter().nth_back(1).copied()
     }
 
+    pub(super) fn set_root_context(&mut self, context: crate::analysis::semantic::ImplEnv<'db>) {
+        self.decisions.root_context = Some(context);
+    }
+
     pub(super) fn type_expr(&mut self, expr: ExprId, typed: ExprProp<'db>) {
         self.expr_ty[expr] = Some(typed);
-        let context = self.selection_context();
-        self.decisions.contexts[expr] =
-            (!context.selections(self.db).is_empty()).then_some(context);
     }
 
     pub(super) fn type_pat(&mut self, pat: PatId, ty: TyId<'db>) {
@@ -1142,9 +1143,9 @@ impl<'db> TyCheckEnv<'db> {
             .collect();
         // Preserve lexical capture's inference stage. Completed-body
         // substitution folds these references, just as it folded the old lists.
-        let contexts = std::mem::take(&mut self.decisions.contexts);
+        let root_context = self.decisions.root_context.take();
         self.decisions = self.decisions.fold_with(self.db, &mut prober);
-        self.decisions.contexts = contexts;
+        self.decisions.root_context = root_context;
         let mut expr_place = SecondaryMap::new();
         let mut expr_places: PrimaryMap<super::ExprPlaceId, Place<'db>> = PrimaryMap::new();
         for expr in self.body.exprs(self.db).keys() {
@@ -1852,7 +1853,7 @@ pub struct Decisions<'db> {
     pub(super) choices: common::indexmap::IndexMap<DecisionSite<'db>, TraitChoiceId<'db>>,
     pub(super) openings: common::indexmap::IndexMap<ExprId, WithChoice<'db>>,
     pub(super) condition_uses: super::const_requirements::ConditionDecisions<'db>,
-    pub(super) contexts: SecondaryMap<ExprId, Option<crate::analysis::semantic::ImplEnv<'db>>>,
+    pub(super) root_context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 }
 
 impl<'db> Decisions<'db> {
@@ -1939,9 +1940,9 @@ impl<'db> Decisions<'db> {
         for use_ in self.condition_uses.values_mut() {
             *use_ = use_.clone().fold_with(db, folder);
         }
-        for context in self.contexts.values_mut().flatten() {
-            *context = context.fold_with(db, folder);
-        }
+        self.root_context = self
+            .root_context
+            .map(|context| context.fold_with(db, folder));
         self
     }
 
@@ -1960,7 +1961,7 @@ impl<'db> Decisions<'db> {
         for use_ in self.condition_uses.values() {
             use_.visit_with(visitor);
         }
-        for context in self.contexts.values().flatten() {
+        if let Some(context) = self.root_context {
             context.visit_with(visitor);
         }
     }

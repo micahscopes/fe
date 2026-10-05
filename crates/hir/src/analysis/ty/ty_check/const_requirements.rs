@@ -3098,6 +3098,15 @@ fn caller() {
                 _ => continue,
             };
             assert_eq!(context.selections(&db), expected, "{}", name.data(&db));
+            let reconstructed = crate::semantic::recorded_chain_at(&db, typed, expr);
+            let selections = reconstructed
+                .visible(&db)
+                .filter_map(|provision| match provision {
+                    crate::core::semantic::Provision::Named(selection) => Some(selection),
+                    crate::core::semantic::Provision::Evidence(..) => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(selections, expected, "reconstructed {}", name.data(&db));
             assert_eq!(
                 context.assumptions(&db),
                 crate::semantic::param_env(&db, caller.into())
@@ -3199,6 +3208,94 @@ const fn caller<T>(_ first: Evidence<Compute<T>>, _ second: Evidence<Inspect<T>>
             checked += 1;
         }
         assert_eq!(checked, 4);
+    }
+
+    #[test]
+    fn recorded_context_view_preserves_inherited_selection_without_local_openings() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "inherited_context_positions.fe".into(),
+            "trait Compute {}
+struct Subject {}
+impl Compute for Subject {}
+impl Compute for Subject as First {}
+const fn target<T: Compute>() {}
+const fn source() { with (First) { target<Subject>() } }
+const fn inherited() { target<Subject>() }",
+        );
+        let (top, _) = db.top_mod(file);
+        let find = |name: &str| {
+            top.all_funcs(&db)
+                .iter()
+                .copied()
+                .find(|func| {
+                    func.name(&db)
+                        .to_opt()
+                        .is_some_and(|ident| ident.data(&db) == name)
+                })
+                .unwrap()
+        };
+        let source = super::super::inferred_body_with_selections(
+            &db,
+            super::super::BodyOwner::Func(find("source")),
+            &[],
+        );
+        assert!(source.result.0.is_empty(), "{:?}", source.result.0);
+        let selection = match source
+            .result
+            .1
+            .with_choices()
+            .next()
+            .unwrap()
+            .outcome()
+            .unwrap()
+        {
+            crate::core::semantic::Provision::Named(selection) => selection,
+            _ => panic!("expected named opening"),
+        };
+        let inherited = find("inherited");
+        let result = super::super::inferred_body_with_selections(
+            &db,
+            super::super::BodyOwner::Func(inherited),
+            &[selection],
+        );
+        assert!(result.result.0.is_empty(), "{:?}", result.result.0);
+        let typed = &result.result.1;
+        assert_eq!(typed.with_choices().len(), 0);
+        assert!(typed.trait_choices(&db).any(|choice| {
+            matches!(choice.via(), super::super::TraitChoiceVia::Selected(selected)
+                if selected == selection)
+        }));
+        let body = inherited.body(&db).unwrap();
+        let mut checked = 0;
+        for expr in body.exprs(&db).keys() {
+            let Some(callable) = typed.callable_expr(expr) else {
+                continue;
+            };
+            let crate::hir_def::CallableDef::Func(func) = callable.callable_def() else {
+                continue;
+            };
+            if func.name(&db).to_opt().unwrap().data(&db) != "target" {
+                continue;
+            }
+            let existing = crate::semantic::context_at(&db, body.scope(), Some((typed, expr)));
+            assert_eq!(existing.selections(&db), &[selection]);
+            let chain = crate::semantic::recorded_chain_at(&db, typed, expr);
+            let reconstructed = chain
+                .visible(&db)
+                .filter_map(|provision| match provision {
+                    crate::core::semantic::Provision::Named(selection) => Some(selection),
+                    crate::core::semantic::Provision::Evidence(..) => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                reconstructed,
+                existing.selections(&db).as_slice(),
+                "inherited root selection"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 1);
     }
 
     #[test]

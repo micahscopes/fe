@@ -1301,6 +1301,7 @@ fn infer_body_query<'db>(
         };
     };
 
+    checker.env.set_root_context(key.context(db));
     for &selection in key.context(db).selections(db) {
         checker.env.push_selection(selection);
     }
@@ -4361,12 +4362,35 @@ impl<'db> TypedBody<'db> {
         &self.decisions
     }
 
+    pub(crate) fn root_selections(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> &'db [crate::analysis::semantic::SelectedApplication<'db>] {
+        self.decisions
+            .root_context
+            .map_or(&[], |context| context.selections(db))
+    }
+
     pub(crate) fn selections_for_expr(
         &self,
         db: &'db dyn HirAnalysisDb,
         expr: ExprId,
     ) -> &'db [crate::analysis::semantic::SelectedApplication<'db>] {
-        self.decisions.contexts[expr].map_or(&[], |context| context.selections(db))
+        let Some(root) = self.decisions.root_context else {
+            return &[];
+        };
+        if root.selections(db).is_empty() && self.with_choices().len() == 0 {
+            return &[];
+        }
+        let selections = crate::semantic::recorded_chain_at(db, self, expr)
+            .visible(db)
+            .filter_map(|provision| match provision {
+                crate::semantic::Provision::Named(selection) => Some(selection),
+                crate::semantic::Provision::Evidence(..) => None,
+            })
+            .collect();
+        const_requirements::selection_context(db, root.normalization_scope(db), selections)
+            .selections(db)
     }
 }
 
