@@ -99,6 +99,22 @@ fn evidence_reopening_in_a_bounded_callee_shadows_the_inherited_choice() {
 }
 
 #[test]
+fn witness_dispatch_uses_the_impl_bound_choices_at_the_use() {
+    let mut db = database();
+    let file = checked(
+        &mut db,
+        "evidence-impl-bound-use-context",
+        include_str!(
+            "../../fe/tests/fixtures/evidence_boundary_runtime/evidence_impl_bound_use_context.fe"
+        ),
+    );
+    assert_eq!(evaluate(&db, file, "creation_only"), "1");
+    assert_eq!(evaluate(&db, file, "selected_at_use"), "2");
+    assert_eq!(evaluate(&db, file, "selected_inside_opening"), "2");
+    assert_eq!(evaluate(&db, file, "nested_use_choices"), "232");
+}
+
+#[test]
 fn same_goal_evidence_parameters_keep_each_operands_choice_in_both_orders() {
     let mut db = database();
     let file = checked(

@@ -2254,10 +2254,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             GenericSubst::complete(db, args),
             crate::analysis::semantic::EffectProviderSubst::empty(db),
             ImplEnv::new(db, owner.scope(), proof.context().assumptions(), vec![goal])
-                .with_selections(
-                    db,
-                    vec![crate::analysis::semantic::SelectedApplication::from_evidence(&proof)],
-                ),
+                .with_selections(db, env.selections(db).clone()),
         );
         Ok((key, true))
     }

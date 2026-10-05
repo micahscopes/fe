@@ -1,0 +1,49 @@
+use core::obligations::{Evidence, prove}
+trait Base { const fn base() -> u256 }
+trait Read { const fn read() -> u256 }
+struct Subject {}
+struct Wrap<T> {}
+impl Base for Subject { const fn base() -> u256 { 1 } }
+impl Base for Subject as Alternative { const fn base() -> u256 { 2 } }
+impl Base for Subject as Third { const fn base() -> u256 { 3 } }
+impl<T: Base> Read for Wrap<T> {
+    const fn read() -> u256 { <T as Base>::base() }
+}
+const fn creation_only() -> u256 {
+    let evidence = with (Alternative) { prove<Read<Wrap<Subject>>>() }
+    with (evidence) { <Wrap<Subject> as Read>::read() }
+}
+const fn selected_at_use() -> u256 {
+    let evidence = prove<Read<Wrap<Subject>>>()
+    with (Alternative) {
+        with (evidence) { <Wrap<Subject> as Read>::read() }
+    }
+}
+const fn selected_inside_opening() -> u256 {
+    let evidence = prove<Read<Wrap<Subject>>>()
+    with (evidence) {
+        with (Alternative) { <Wrap<Subject> as Read>::read() }
+    }
+}
+const fn nested_use_choices() -> u256 {
+    let evidence = prove<Read<Wrap<Subject>>>()
+    with (Alternative) {
+        let first = with (evidence) { <Wrap<Subject> as Read>::read() }
+        let inner = with (Third) {
+            with (evidence) { <Wrap<Subject> as Read>::read() }
+        }
+        let restored = with (evidence) { <Wrap<Subject> as Read>::read() }
+        first * 100 + inner * 10 + restored
+    }
+}
+const CREATION: u256 = creation_only()
+const OUTER: u256 = selected_at_use()
+const INNER: u256 = selected_inside_opening()
+const NESTED: u256 = nested_use_choices()
+#[test]
+fn witness_dispatch_keeps_the_bound_choices_at_each_use() {
+    assert(CREATION == 1)
+    assert(OUTER == 2)
+    assert(INNER == 2)
+    assert(NESTED == 232)
+}

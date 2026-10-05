@@ -919,7 +919,8 @@ pub fn main(argc: i32, argv: **u8) -> i32 {
                     level,
                     // A trapped child can wait on the system core handler even
                     // with RLIMIT_CORE=0; keep normal-program timeouts strict.
-                    Duration::from_secs(30),
+                    // Keep trap subprocesses bounded during loaded workspace runs.
+                    Duration::from_secs(120),
                 ),
                 None,
                 "checked {ty} {value} {op} {rhs} did not trap at O{level}"
@@ -4819,6 +4820,11 @@ fn evidence_const_helper_runtime_at_o0_and_o2() {
 #[test]
 fn evidence_reopen_across_call_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("evidence_reopen_across_call.fe");
+}
+
+#[test]
+fn evidence_impl_bound_use_context_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_impl_bound_use_context.fe");
 }
 
 #[test]
