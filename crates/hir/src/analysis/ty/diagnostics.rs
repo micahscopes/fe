@@ -342,7 +342,7 @@ impl TyLowerDiag<'_> {
             Self::TypeAliasCycle { .. } => 4,
             Self::InconsistentKindBound { .. } => 5,
             Self::KindBoundNotAllowed(_) => 6,
-            Self::UnknownKindBound { .. } => 54,
+            Self::UnknownKindBound { .. } => 64,
             Self::GenericParamAlreadyDefinedInParent { .. } => 7,
             Self::DuplicateArgName { .. } => 8,
             Self::InvalidConstParamTy { .. } => 9,
@@ -377,8 +377,8 @@ impl TyLowerDiag<'_> {
             Self::InvalidAssocTypeParamBound { .. } => 59,
             Self::InvalidAssocTypeBound { .. } => 60,
             Self::AssocTypeNeedsAllArgs { .. } => 61,
-            Self::ComputedTypeDeclaration { .. } => 52,
-            Self::ComputedTypeImplHeader(_) => 53,
+            Self::ComputedTypeDeclaration { .. } => 62,
+            Self::ComputedTypeImplHeader(_) => 63,
             Self::MixedRefSelfPrefixWithExplicitType { .. } => 28,
             Self::MixedOwnSelfPrefixWithExplicitType { .. } => 29,
             Self::InvalidMutSelfPrefixWithExplicitType { .. } => 30,
@@ -1514,9 +1514,79 @@ impl ImplDiag<'_> {
             Self::AssocTypeParamKindMismatch { .. } => 27,
             Self::AssocTypeParamBoundInImpl { .. } => 28,
             Self::TypeNotDefinedInTrait { .. } => 23,
-            Self::MethodConstPredicateMismatch { .. } => 24,
+            Self::MethodConstPredicateMismatch { .. } => 29,
         }
     }
 }
 
 pub struct DefConflictError<'db>(pub SmallVec<[ItemKind<'db>; 2]>);
+
+#[cfg(test)]
+mod tests {
+    use rustc_hash::FxHashMap;
+
+    /// Each `local_code` function in this file, as (enum name, [(variant, code)]).
+    fn local_codes() -> Vec<(String, Vec<(String, u16)>)> {
+        let source = include_str!("diagnostics.rs");
+        let mut out = Vec::new();
+        let mut owner = String::new();
+        let mut current: Option<Vec<(String, u16)>> = None;
+        for line in source.lines() {
+            if let Some(rest) = line.strip_prefix("impl") {
+                if let Some(name) = rest
+                    .split_whitespace()
+                    .find(|word| word.ends_with("Diag<'_>") || word.ends_with("Diag<'db>"))
+                {
+                    owner = name.split('<').next().unwrap().to_string();
+                }
+            } else if line.trim_start().starts_with("pub")
+                && line.ends_with("fn local_code(&self) -> u16 {")
+            {
+                current = Some(Vec::new());
+            } else if let Some(arms) = current.as_mut() {
+                if line == "    }" {
+                    out.push((owner.clone(), current.take().unwrap()));
+                } else if let Some((variant, code)) = line.trim().split_once(" => ")
+                    && let Some(code) = code.strip_suffix(',')
+                    && let Ok(code) = code.parse()
+                {
+                    arms.push((variant.to_string(), code));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn diagnostic_codes_are_unique() {
+        // Shared codes inherited from upstream master, kept so the published
+        // codes do not change. Do not add to this list.
+        let inherited = [
+            ("BodyDiag", 52),
+            ("BodyDiag", 55),
+            ("BodyDiag", 75),
+            ("BodyDiag", 76),
+            ("BodyDiag", 82),
+            ("BodyDiag", 84),
+            ("BodyDiag", 89),
+            ("BodyDiag", 90),
+        ];
+        let enums = local_codes();
+        assert!(
+            enums.len() >= 5,
+            "found {} local_code functions",
+            enums.len()
+        );
+        for (owner, arms) in enums {
+            assert!(!arms.is_empty(), "no codes found for {owner}");
+            let mut seen: FxHashMap<u16, &str> = FxHashMap::default();
+            for (variant, code) in &arms {
+                if let Some(first) = seen.insert(*code, variant)
+                    && !inherited.contains(&(owner.as_str(), *code))
+                {
+                    panic!("{owner}: `{first}` and `{variant}` share code {code}");
+                }
+            }
+        }
+    }
+}

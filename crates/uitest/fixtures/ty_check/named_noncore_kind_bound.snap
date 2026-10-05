@@ -3,7 +3,7 @@ source: crates/uitest/tests/ty_check.rs
 expression: diags
 input_file: fixtures/ty_check/named_noncore_kind_bound.fe
 ---
-error[3-0054]: unknown kind marker
+error[3-0064]: unknown kind marker
   ┌─ named_noncore_kind_bound.fe:3:19
   │
 3 │ fn not_a_kind<T: (Other)>() {}

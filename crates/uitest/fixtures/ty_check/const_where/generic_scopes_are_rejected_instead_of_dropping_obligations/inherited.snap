@@ -3,7 +3,7 @@ source: crates/uitest/tests/ty_check.rs
 expression: diags
 input_file: fixtures/ty_check/const_where/generic_scopes_are_rejected_instead_of_dropping_obligations/inherited.fe
 ---
-error[6-0024]: method has different const conditions than trait
+error[6-0029]: method has different const conditions than trait
   ┌─ inherited.fe:4:27
   │
 2 │ trait Has { fn unused() }

@@ -3,7 +3,7 @@ source: crates/uitest/tests/ty_check.rs
 expression: diags
 input_file: fixtures/ty_check/const_where/trait_and_impl_conditions_remain_explicitly_unsupported/trait_impl_method_where.fe
 ---
-error[6-0024]: method has different const conditions than trait
+error[6-0029]: method has different const conditions than trait
   ┌─ trait_impl_method_where.fe:4:41
   │
 2 │ trait Read<const N: usize> { fn read(self) }
