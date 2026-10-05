@@ -663,6 +663,7 @@ pub(crate) fn first_invalid_ty_cause<'db>(
             if !matches!(
                 cause,
                 InvalidCause::NotAType(_)
+                    | InvalidCause::ComputedTypeDefinitionInvalid
                     | InvalidCause::PathResolutionFailed { .. }
                     | InvalidCause::ParseError
                     | InvalidCause::Other
@@ -879,14 +880,8 @@ pub(crate) fn diag_from_invalid_cause<'db>(
 
         InvalidCause::TypeLoweringCycle => TyLowerDiag::TypeLoweringCycle(span).into(),
         InvalidCause::TypeNormalizationLimit => TyLowerDiag::TypeNormalizationLimit(span).into(),
-        InvalidCause::ComputedTypeDefinitionInvalid => TyLowerDiag::ComputedTypeDeclaration {
-            span,
-            reason: "this application refers to an invalid recursive type function definition"
-                .into(),
-        }
-        .into(),
-
-        InvalidCause::NotAType(_) => return None,
+        // The definition reports its own errors.
+        InvalidCause::ComputedTypeDefinitionInvalid | InvalidCause::NotAType(_) => return None,
 
         // These errors should be caught and reported elsewhere
         InvalidCause::PathResolutionFailed { .. }

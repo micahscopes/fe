@@ -394,6 +394,7 @@ fn check_recurrences<'db>(db: &'db dyn HirAnalysisDb, def: TypeFnDef<'db>) -> Re
         def,
         lower_bound: BigUint::from(0u32),
         calls: Vec::new(),
+        call_args: FxHashSet::default(),
         diags: Vec::new(),
     };
     let mut calls_per_arm = Vec::new();
@@ -429,6 +430,8 @@ struct RecurrenceChecker<'db> {
     def: TypeFnDef<'db>,
     lower_bound: BigUint,
     calls: Vec<PathId<'db>>,
+    /// Const arguments of recursive calls, already judged by `check_call`.
+    call_args: FxHashSet<Body<'db>>,
     diags: Vec<TyLowerDiag<'db>>,
 }
 
@@ -581,7 +584,9 @@ impl<'db> Visitor<'db> for RecurrenceChecker<'db> {
     ) {
         if let GenericArg::Const(arg) = arg {
             let admitted = match arg.value {
-                ConstGenericArgValue::Expr(Partial::Present(body)) => self.is_payload(body),
+                ConstGenericArgValue::Expr(Partial::Present(body)) => {
+                    self.call_args.contains(&body) || self.is_payload(body)
+                }
                 _ => false,
             };
             if !admitted {
@@ -607,6 +612,13 @@ impl<'db> Visitor<'db> for RecurrenceChecker<'db> {
                 let span = ctxt.span().expect("path visitor has a path span").into();
                 if def == self.def {
                     self.calls.push(path);
+                    for arg in path.generic_args(self.db).data(self.db) {
+                        if let GenericArg::Const(arg) = arg
+                            && let ConstGenericArgValue::Expr(Partial::Present(body)) = arg.value
+                        {
+                            self.call_args.insert(body);
+                        }
+                    }
                     if let Err(reason) = self.check_call(path) {
                         self.report(span, reason);
                     }

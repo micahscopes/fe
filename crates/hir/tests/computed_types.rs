@@ -384,3 +384,34 @@ fn a_const_that_faults_after_substitution_is_reported() {
         );
     }
 }
+
+#[test]
+fn one_mistake_in_a_computed_type_is_reported_once() {
+    for (step, reason) in [
+        (
+            "Node<Tree<O, {N + 1}>>",
+            "the recursive subject must strictly decrease",
+        ),
+        (
+            "Node<Tree<{O + 1}, {N - 1}>>",
+            "recursive calls must forward invariant parameters unchanged and in order",
+        ),
+    ] {
+        let source = format!(
+            "struct Node<T> {{}}
+recursive type fn Tree<const O: usize, const N: usize>() -> (*) {{
+    match N {{
+        0 => bool
+        _ => {step}
+    }}
+}}
+fn use_it(x: Tree<1, 2>) -> Tree<1, 2> {{ x }}"
+        );
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("once.fe"), &source);
+        let (top, _) = db.top_mod(file);
+        let result = format_diagnostics(&db, &db.run_on_top_mod(top));
+        assert!(result.contains(reason), "{source}\n{result}");
+        assert_eq!(result.matches("error[").count(), 1, "{source}\n{result}");
+    }
+}
