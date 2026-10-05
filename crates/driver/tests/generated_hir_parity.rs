@@ -5,7 +5,11 @@ use dir_test::{Fixture, dir_test};
 use fe_driver::DriverDataBase;
 use hir::{
     HirDb,
-    hir_def::{Body, Expr, ExprId, FieldIndex, Func, ItemKind, Partial, Pat, PatId, Stmt, StmtId},
+    analysis::ty::ty_check::{LocalBinding, TypedBody, check_func_body},
+    hir_def::{
+        Body, CallArg, CallableDef, Cond, CondId, Expr, ExprId, FieldIndex, Func, ItemKind,
+        Partial, Pat, PatId, Stmt, StmtId, scope_graph::ScopeId,
+    },
     span::LazySpan,
 };
 use parser::{
@@ -14,107 +18,249 @@ use parser::{
 };
 use url::Url;
 
-fn expression(db: &DriverDataBase, body: Body<'_>, id: ExprId) -> String {
-    match id.data(db, body).unwrap_ref() {
-        Expr::Lit(value) => format!("Lit({:?})", value.pretty_print(db)),
-        Expr::Path(Partial::Present(path)) => format!("Path({:?})", path.pretty_print(db)),
-        Expr::Cast(value, Partial::Present(ty)) => {
-            format!(
+/// What a body's names resolved to, so the comparison checks items, not
+/// spellings: a printed path that re-resolves to another item differs here.
+struct Resolved<'a, 'db> {
+    db: &'db DriverDataBase,
+    body: Body<'db>,
+    typed: Option<&'a TypedBody<'db>>,
+}
+
+impl<'db> Resolved<'_, 'db> {
+    fn callable(&self, expr: ExprId) -> String {
+        let Some(callable) = self.typed.and_then(|typed| typed.callable_expr(expr)) else {
+            return "unresolved".into();
+        };
+        let scope = match callable.callable_def() {
+            CallableDef::Func(func) => ItemKind::Func(func).scope(),
+            CallableDef::VariantCtor(variant) => ScopeId::Variant(variant),
+        };
+        scope.pretty_path(self.db).unwrap_or_default()
+    }
+
+    fn value(&self, expr: ExprId) -> String {
+        let Some(typed) = self.typed else {
+            return String::new();
+        };
+        match typed.expr_binding(expr) {
+            Some(LocalBinding::Local { .. }) => "local".into(),
+            Some(LocalBinding::Param { idx, .. }) => format!("param {idx}"),
+            Some(_) => "binding".into(),
+            None => typed
+                .expr_ty(self.db, expr)
+                .pretty_print(self.db)
+                .to_string(),
+        }
+    }
+
+    fn exprs(&self, ids: &[ExprId]) -> Vec<String> {
+        ids.iter().map(|id| self.expr(*id)).collect()
+    }
+
+    fn args(&self, args: &[CallArg<'db>]) -> Vec<(Option<String>, String)> {
+        args.iter()
+            .map(|arg| {
+                (
+                    arg.label.map(|label| label.data(self.db).clone()),
+                    self.expr(arg.expr),
+                )
+            })
+            .collect()
+    }
+
+    fn expr(&self, id: ExprId) -> String {
+        let db = self.db;
+        match id.data(db, self.body).unwrap_ref() {
+            Expr::Lit(value) => format!("Lit({:?})", value.pretty_print(db)),
+            Expr::Path(Partial::Present(path)) => {
+                format!("Path({:?}, {:?})", path.pretty_print(db), self.value(id))
+            }
+            Expr::Cast(value, ty) => format!(
                 "Cast({}, {:?})",
-                expression(db, body, *value),
-                ty.pretty_print(db)
-            )
+                self.expr(*value),
+                ty.to_opt().map(|ty| ty.pretty_print(db))
+            ),
+            Expr::Bin(lhs, rhs, op) => {
+                format!("Bin({op:?}, {}, {})", self.expr(*lhs), self.expr(*rhs))
+            }
+            Expr::Un(value, op) => format!("Un({op:?}, {})", self.expr(*value)),
+            Expr::Call(callee, args) => format!(
+                "Call({}, {:?}, {:?})",
+                self.expr(*callee),
+                self.callable(id),
+                self.args(args)
+            ),
+            Expr::Assert(args) => format!("Assert({:?})", self.args(args)),
+            Expr::MethodCall(receiver, name, generic_args, args) => format!(
+                "MethodCall({}, {:?}, {:?}, {:?}, {:?})",
+                self.expr(*receiver),
+                name.to_opt().map(|name| name.data(db).clone()),
+                generic_args.pretty_print(db),
+                self.callable(id),
+                self.args(args)
+            ),
+            Expr::RecordInit(Partial::Present(path), fields) => format!(
+                "RecordInit({:?}, {:?}, {:?})",
+                path.pretty_print(db),
+                self.value(id),
+                fields
+                    .iter()
+                    .map(|field| (
+                        field
+                            .label_eagerly(db, self.body)
+                            .map(|label| label.data(db).clone()),
+                        self.expr(field.expr)
+                    ))
+                    .collect::<Vec<_>>()
+            ),
+            Expr::Field(base, Partial::Present(field)) => {
+                let field = match field {
+                    FieldIndex::Ident(name) => name.data(db).clone(),
+                    FieldIndex::Index(index) => index.data(db).to_string(),
+                    FieldIndex::Hole(slot) => {
+                        panic!("generated HIR still contains quote field hole {slot}")
+                    }
+                };
+                format!("Field({}, {:?})", self.expr(*base), field)
+            }
+            Expr::Tuple(values) => format!("Tuple({:?})", self.exprs(values)),
+            Expr::Array(values) => format!("Array({:?})", self.exprs(values)),
+            Expr::If(cond, then, otherwise) => format!(
+                "If({}, {}, {:?})",
+                self.cond(*cond),
+                self.expr(*then),
+                otherwise.map(|otherwise| self.expr(otherwise))
+            ),
+            Expr::Match(scrutinee, Partial::Present(arms)) => format!(
+                "Match({}, {:?})",
+                self.expr(*scrutinee),
+                arms.iter()
+                    .filter_map(|arm| arm.parts())
+                    .map(|(pat, body)| (self.pat(pat), self.expr(body)))
+                    .collect::<Vec<_>>()
+            ),
+            Expr::Assign(lhs, rhs) => format!("Assign({}, {})", self.expr(*lhs), self.expr(*rhs)),
+            Expr::AugAssign(lhs, rhs, op) => {
+                format!(
+                    "AugAssign({op:?}, {}, {})",
+                    self.expr(*lhs),
+                    self.expr(*rhs)
+                )
+            }
+            Expr::Block(stmts) => format!(
+                "Block({:?})",
+                stmts
+                    .iter()
+                    .map(|stmt| self.stmt(*stmt))
+                    .collect::<Vec<_>>()
+            ),
+            other => panic!("generated expression needs parity normalization: {other:?}"),
         }
-        Expr::Bin(lhs, rhs, op) => format!(
-            "Bin({op:?}, {}, {})",
-            expression(db, body, *lhs),
-            expression(db, body, *rhs)
-        ),
-        Expr::Call(callee, args) => format!(
-            "Call({}, {:?})",
-            expression(db, body, *callee),
-            args.iter()
-                .map(|arg| (
-                    arg.label.map(|label| label.data(db).clone()),
-                    expression(db, body, arg.expr)
-                ))
-                .collect::<Vec<_>>()
-        ),
-        Expr::Field(base, Partial::Present(field)) => {
-            let field = match field {
-                FieldIndex::Ident(name) => name.data(db).clone(),
-                FieldIndex::Index(index) => index.data(db).to_string(),
-                FieldIndex::Hole(slot) => {
-                    panic!("generated HIR still contains quote field hole {slot}")
-                }
-            };
-            format!("Field({}, {:?})", expression(db, body, *base), field)
-        }
-        Expr::Tuple(values) => format!(
-            "Tuple({:?})",
-            values
-                .iter()
-                .map(|value| expression(db, body, *value))
-                .collect::<Vec<_>>()
-        ),
-        Expr::Block(stmts) => format!(
-            "Block({:?})",
-            stmts
-                .iter()
-                .map(|stmt| statement(db, body, *stmt))
-                .collect::<Vec<_>>()
-        ),
-        other => panic!("generated expression needs parity normalization: {other:?}"),
     }
-}
 
-fn pattern(db: &DriverDataBase, body: Body<'_>, id: PatId) -> String {
-    match id.data(db, body).unwrap_ref() {
-        Pat::Path(Partial::Present(path), mutable) => {
-            format!("Path({:?}, {mutable})", path.pretty_print(db))
+    fn cond(&self, id: CondId) -> String {
+        match &self.body.conds(self.db)[id] {
+            Partial::Present(Cond::Expr(expr)) => self.expr(*expr),
+            Partial::Present(Cond::Let(pat, expr)) => {
+                format!("Let({}, {})", self.pat(*pat), self.expr(*expr))
+            }
+            Partial::Present(Cond::Bin(lhs, rhs, op)) => {
+                format!("CondBin({op:?}, {}, {})", self.cond(*lhs), self.cond(*rhs))
+            }
+            Partial::Absent => panic!("generated condition is absent"),
         }
-        other => panic!("generated pattern needs parity normalization: {other:?}"),
     }
-}
 
-fn statement(db: &DriverDataBase, body: Body<'_>, id: StmtId) -> String {
-    match id.data(db, body).unwrap_ref() {
-        Stmt::Let(pat, ty, value) => format!(
-            "Let({}, {:?}, {:?})",
-            pattern(db, body, *pat),
-            ty.map(|ty| ty.pretty_print(db)),
-            value.map(|value| expression(db, body, value))
-        ),
-        Stmt::Expr(value) => format!("Expr({})", expression(db, body, *value)),
-        other => panic!("generated statement needs parity normalization: {other:?}"),
+    fn pat(&self, id: PatId) -> String {
+        let db = self.db;
+        match id.data(db, self.body).unwrap_ref() {
+            Pat::Path(Partial::Present(path), mutable) => {
+                format!("Path({:?}, {mutable})", path.pretty_print(db))
+            }
+            Pat::WildCard => "WildCard".into(),
+            Pat::Rest => "Rest".into(),
+            Pat::Lit(literal) => format!(
+                "Lit({:?})",
+                literal.to_opt().map(|lit| lit.pretty_print(db))
+            ),
+            Pat::Tuple(pats) => format!(
+                "Tuple({:?})",
+                pats.iter().map(|pat| self.pat(*pat)).collect::<Vec<_>>()
+            ),
+            Pat::PathTuple(Partial::Present(path), pats) => format!(
+                "PathTuple({:?}, {:?})",
+                path.pretty_print(db),
+                pats.iter().map(|pat| self.pat(*pat)).collect::<Vec<_>>()
+            ),
+            Pat::Record(Partial::Present(path), fields) => format!(
+                "Record({:?}, {:?})",
+                path.pretty_print(db),
+                fields
+                    .iter()
+                    .map(|field| (
+                        field
+                            .label(db, self.body)
+                            .map(|label| label.data(db).clone()),
+                        self.pat(field.pat)
+                    ))
+                    .collect::<Vec<_>>()
+            ),
+            Pat::Or(lhs, rhs) => format!("Or({}, {})", self.pat(*lhs), self.pat(*rhs)),
+            other => panic!("generated pattern needs parity normalization: {other:?}"),
+        }
+    }
+
+    fn stmt(&self, id: StmtId) -> String {
+        let db = self.db;
+        match id.data(db, self.body).unwrap_ref() {
+            Stmt::Let(pat, ty, value) => format!(
+                "Let({}, {:?}, {:?})",
+                self.pat(*pat),
+                ty.map(|ty| ty.pretty_print(db)),
+                value.map(|value| self.expr(value))
+            ),
+            Stmt::For(pat, iterable, body, unroll) => format!(
+                "For({}, {}, {}, {unroll:?})",
+                self.pat(*pat),
+                self.expr(*iterable),
+                self.expr(*body)
+            ),
+            Stmt::While(cond, body) => format!("While({}, {})", self.cond(*cond), self.expr(*body)),
+            Stmt::Continue => "Continue".into(),
+            Stmt::Break => "Break".into(),
+            Stmt::Return(value) => format!("Return({:?})", value.map(|value| self.expr(value))),
+            Stmt::Expr(value) => format!("Expr({})", self.expr(*value)),
+        }
     }
 }
 
 fn normalized_function(db: &DriverDataBase, function: Func<'_>) -> (String, String) {
     let body = function.body(db).expect("generated function body");
+    let resolved = Resolved {
+        db,
+        body,
+        typed: Some(&check_func_body(db, function).1),
+    };
     (
         function.pretty_print_signature(db),
-        expression(db, body, body.expr(db)),
+        resolved.expr(body.expr(db)),
     )
 }
 
-/// Generated binders deliberately use names that source code cannot spell.
-/// Give them stable source spellings only for this print-and-reparse oracle.
+/// Generated local binders keep their authored name marked with a trailing
+/// `'`, which source code cannot spell. Give them stable source spellings only
+/// for this print-and-reparse oracle.
 fn replayable_names(source: &str) -> String {
     let mut replayable = String::with_capacity(source.len());
-    let mut remaining = source;
-    while let Some(start) = remaining.find("<quote-") {
-        replayable.push_str(&remaining[..start]);
-        let Some(end) = remaining[start + 1..].find('>') else {
-            replayable.push_str(&remaining[start..]);
-            return replayable;
-        };
-        let name = &remaining[start + 1..start + 1 + end];
-        replayable.push_str("__fe_");
-        replayable.push_str(&name.replace('-', "_"));
-        remaining = &remaining[start + 2 + end..];
+    let mut previous = None;
+    for ch in source.chars() {
+        if ch == '\'' && previous.is_some_and(|p: char| p == '_' || p.is_ascii_alphanumeric()) {
+            replayable.push_str("__fe_quoted");
+        } else {
+            replayable.push(ch);
+        }
+        previous = Some(ch);
     }
-    replayable.push_str(remaining);
     replayable
 }
 
@@ -136,7 +282,12 @@ fn normalized_item(db: &DriverDataBase, item: ItemKind<'_>) -> String {
                     let name = constant.name.to_opt().expect("const name").data(db);
                     let ty = constant.ty.to_opt().expect("const type").pretty_print(db);
                     let body = constant.value.to_opt().expect("const value");
-                    (name.clone(), ty, expression(db, body, body.expr(db)))
+                    let resolved = Resolved {
+                        db,
+                        body,
+                        typed: None,
+                    };
+                    (name.clone(), ty, resolved.expr(body.expr(db)))
                 })
                 .collect::<Vec<_>>();
             let methods = implementation
@@ -313,4 +464,19 @@ fn generated_implementation_roundtrips(fixture: Fixture<&str>) {
 #[dir_test(dir: "$CARGO_MANIFEST_DIR/../fe/tests/fixtures/structural_generation", glob: "abi.fe")]
 fn generated_abi_roundtrips(fixture: Fixture<&str>) {
     assert_parity(fixture, Some(7));
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/generated_hir_parity", glob: "*.fe")]
+fn generated_forms_roundtrip(fixture: Fixture<&str>) {
+    assert_parity(fixture, None);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_forms/allowed", glob: "*.fe")]
+fn quoted_forms_roundtrip(fixture: Fixture<&str>) {
+    assert_parity(fixture, None);
+}
+
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_item_composition", glob: "*.fe")]
+fn composed_items_roundtrip(fixture: Fixture<&str>) {
+    assert_parity(fixture, None);
 }
