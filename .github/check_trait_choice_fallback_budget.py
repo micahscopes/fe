@@ -42,6 +42,25 @@ def inventory(source):
     return fallbacks
 
 
+def constant_record_boundary(source):
+    code = solver_budget.production_code(source)
+    start = code.find('fn lower_const_ref(')
+    if start < 0:
+        raise ValueError('constant lowering entry missing')
+    start = code.find('{', start)
+    depth, end = 1, start + 1
+    while end < len(code) and depth:
+        depth += (code[end] == '{') - (code[end] == '}')
+        end += 1
+    body = code[start:end]
+    if any(re.search(r'\b' + name + r'\b', body) for name in (
+        'infer_body', 'has_param', 'selection_for', 'through_self',
+    )) or 'Expr::Path' in body:
+        raise ValueError('constant lowering restored a syntax heuristic or selection beside the record')
+    if not all(name in body for name in ('choice_ref', 'answer_origin', '.expect(')):
+        raise ValueError('constant premise transport must read a required accepted record')
+
+
 def self_check():
     example = '''enum TraitCallChoice<'db> {
         NotTrait,
@@ -67,6 +86,18 @@ def self_check():
 
 if __name__ == '__main__':
     self_check()
+    lower = (ROOT / 'crates/hir/src/analysis/semantic/lower/body.rs').read_text()
+    constant_record_boundary(lower)
+    for edge in ('has_param', 'selection_for', 'infer_body'):
+        mutant = lower
+        start = mutant.index('{', mutant.index('fn lower_const_ref(')) + 1
+        mutant = mutant[:start] + edge + '();' + mutant[start:]
+        try:
+            constant_record_boundary(mutant)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('retired constant-selection edge escaped guard: ' + edge)
     try:
         remaining = inventory(SOURCE.read_text())
     except ValueError as error:

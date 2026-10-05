@@ -2511,17 +2511,73 @@ impl<'db> TyChecker<'db> {
         }
     }
 
+    fn selection_for_path(
+        &mut self,
+        path: crate::hir_def::PathId<'db>,
+        goal: TraitInstId<'db>,
+        span: DynLazySpan<'db>,
+    ) -> Option<crate::analysis::semantic::SelectedApplication<'db>> {
+        let root = path.segment(self.db, 0)?;
+        let through_self = root.is_self_ty(self.db)
+            || matches!(root.kind(self.db), crate::hir_def::PathKind::QualifiedType { type_, .. }
+                if type_.is_self_ty(self.db));
+        if through_self {
+            let mut scope = self.env.owner().scope();
+            while let Some(parent) = scope.parent(self.db) {
+                if let crate::hir_def::ItemKind::ImplTrait(implementation) = parent.item() {
+                    if implementation.selection_name(self.db).is_none() {
+                        break;
+                    }
+                    let header = crate::analysis::ty::trait_lower::lower_impl_trait_header(
+                        self.db,
+                        implementation,
+                    )?;
+                    if header.trait_(self.db).def(self.db) == goal.def(self.db) {
+                        return match self.prove_static_selection(implementation, goal) {
+                            Ok(selection) => Some(selection),
+                            Err((reason, _)) => {
+                                self.push_diag(BodyDiag::ObligationOpening {
+                                    primary: span,
+                                    reason,
+                                });
+                                None
+                            }
+                        };
+                    }
+                    break;
+                }
+                scope = parent;
+            }
+        }
+        self.env.selection_for_goal(goal)
+    }
+
+    fn context_with_selection(
+        &self,
+        selection: Option<crate::analysis::semantic::SelectedApplication<'db>>,
+    ) -> crate::analysis::semantic::ImplEnv<'db> {
+        let context = self.env.selection_context();
+        let Some(selection) = selection else {
+            return context;
+        };
+        let mut selections = context.selections(self.db).to_vec();
+        selections.retain(|previous| !previous.matches(self.db, selection.goal()));
+        selections.push(selection);
+        context.with_selections(self.db, selections)
+    }
+
     fn check_trait_const_obligation(
         &mut self,
         goal: TraitInstId<'db>,
         span: DynLazySpan<'db>,
+        selection: Option<crate::analysis::semantic::SelectedApplication<'db>>,
     ) -> bool {
         // Binder parameters outside this body's scope await receiver inference.
         if trait_const_goal_has_foreign_params(self.db, goal, self.env.scope()) {
             return true;
         }
         let obligation = env::TraitObligation {
-            context: self.env.selection_context(),
+            context: self.context_with_selection(selection),
             assumptions: self.env.assumptions(),
             goal,
             origin: env::TraitObligationOrigin::GenericConfirmation,

@@ -29,7 +29,7 @@ use crate::{
             ty_check::{
                 BodyOwner, Callable, CodeRegionIntrinsicKind, ConstIntrinsicKind, ConstRef,
                 LocalBinding, PathReadSemantics, RecordInitLowering, RecordLike,
-                SemanticExprLowering, TypedBody, ValuePathRef, infer_body,
+                SemanticExprLowering, TypedBody, ValuePathRef,
             },
             ty_def::{BorrowKind, TyData, TyId},
             ty_is_copy,
@@ -774,40 +774,20 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
 
     fn lower_const_ref(&mut self, expr: ExprId, const_ref: ConstRef<'db>) -> SValueId {
         let ty = self.expr_ty(expr);
-        // A reference written through `Self` remains scoped to the selected
-        // impl even after `Self` has been substituted with a concrete type.
-        // A concrete path in the same body keeps ordinary lookup semantics.
-        let through_self = matches!(
-            expr.data(self.db, self.body).borrowed().to_opt(),
-            Some(Expr::Path(Partial::Present(path)))
-                if path.segment(self.db, 0).is_some_and(|root| root.is_self_ty(self.db))
-        );
-        let inherit_trait_selection = matches!(
-            infer_body(self.db, self.instance.key(self.db).owner(self.db))
-                .1
-                .expr_const_ref(expr),
-            Some(ConstRef::TraitConst(original))
-                if through_self
-                    || original.inst().args(self.db).iter().any(|ty| ty.has_param(self.db))
-                    || original
-                        .inst()
-                        .assoc_type_bindings(self.db)
-                        .values()
-                        .any(|ty| ty.has_param(self.db))
-        );
-        let const_ref = match const_ref {
-            ConstRef::TraitConst(assoc)
-                if assoc.selection().is_none() && inherit_trait_selection =>
-            {
-                let selection = self
-                    .instance
-                    .key(self.db)
-                    .impl_env(self.db)
-                    .selection_for(self.db, assoc.inst());
-                ConstRef::TraitConst(assoc.with_selection(selection))
-            }
-            other => other,
-        };
+        let inherit_trait_selection = matches!(const_ref, ConstRef::TraitConst(_))
+            && matches!(
+                self.typed_body
+                    .decisions()
+                    .choice_ref(
+                        &crate::analysis::ty::ty_check::DecisionSite::trait_reference(
+                            expr.span(self.body).into(),
+                        )
+                    )
+                    .expect("a trait constant reference must retain its accepted choice")
+                    .data(self.db)
+                    .answer_origin(self.db),
+                crate::analysis::ty::trait_def::ImplementorOrigin::Assumption
+            );
         if let Some(const_ref) = resolve_semantic_const_ref_in_instance(
             self.db,
             Some(self.instance.key(self.db)),

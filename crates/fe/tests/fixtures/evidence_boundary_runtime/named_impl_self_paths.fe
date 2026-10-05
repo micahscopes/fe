@@ -1,0 +1,45 @@
+// RD114: Self forms name the enclosing named impl's own items.
+trait Read {
+    const K: u256
+    fn read() -> u256
+    fn via_self_call() -> u256
+    fn via_self_const() -> u256
+    fn via_qualified_self_const() -> u256
+    fn via_qualified_self_call() -> u256
+    fn via_concrete_const() -> u256
+    fn via_concrete_call() -> u256
+}
+struct S {}
+impl Read for S {
+    const K: u256 = 10
+    fn read() -> u256 { 1 }
+    fn via_self_call() -> u256 { Self::read() }
+    fn via_self_const() -> u256 { Self::K }
+    fn via_qualified_self_const() -> u256 { <Self as Read>::K }
+    fn via_qualified_self_call() -> u256 { <Self as Read>::read() }
+    fn via_concrete_const() -> u256 { S::K }
+    fn via_concrete_call() -> u256 { <S as Read>::read() }
+}
+impl Read for S as Alt {
+    const K: u256 = 20
+    fn read() -> u256 { 2 }
+    fn via_self_call() -> u256 { Self::read() }
+    fn via_self_const() -> u256 { Self::K }
+    fn via_qualified_self_const() -> u256 { <Self as Read>::K }
+    fn via_qualified_self_call() -> u256 { <Self as Read>::read() }
+    fn via_concrete_const() -> u256 { S::K }
+    fn via_concrete_call() -> u256 { <S as Read>::read() }
+}
+
+#[test]
+fn self_call() { assert(with (Alt) { <S as Read>::via_self_call() } == 2) }
+#[test]
+fn self_const() { assert(with (Alt) { <S as Read>::via_self_const() } == 20) }
+#[test]
+fn qualified_self_const() { assert(with (Alt) { <S as Read>::via_qualified_self_const() } == 20) }
+#[test]
+fn qualified_self_call() { assert(with (Alt) { <S as Read>::via_qualified_self_call() } == 2) }
+#[test]
+fn concrete_const_is_ordinary() { assert(with (Alt) { <S as Read>::via_concrete_const() } == 10) }
+#[test]
+fn concrete_call_is_ordinary() { assert(with (Alt) { <S as Read>::via_concrete_call() } == 1) }

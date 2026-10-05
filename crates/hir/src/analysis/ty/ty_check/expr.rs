@@ -1489,7 +1489,7 @@ impl<'db> TyChecker<'db> {
         )
     }
 
-    fn prove_static_selection(
+    pub(super) fn prove_static_selection(
         &self,
         candidate: crate::hir_def::ImplTrait<'db>,
         goal: TraitInstId<'db>,
@@ -4452,8 +4452,13 @@ impl<'db> TyChecker<'db> {
                         inst.assoc_type_bindings(self.db).clone(),
                     );
 
-                    let selection = self.env.selection_for_goal(inst);
-                    if !self.check_trait_const_obligation(inst, path_expr_span.clone().into()) {
+                    let selection =
+                        self.selection_for_path(path, inst, path_expr_span.clone().into());
+                    if !self.check_trait_const_obligation(
+                        inst,
+                        path_expr_span.clone().into(),
+                        selection,
+                    ) {
                         return ExprProp::invalid(self.db);
                     }
 

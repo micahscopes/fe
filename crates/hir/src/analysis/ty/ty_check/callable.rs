@@ -1185,8 +1185,18 @@ impl<'db> Callable<'db> {
         // use, even when the method declares no additional trait bounds.
         // Record its conditions through the ordinary obligation path.
         if let Some(goal) = self.trait_inst {
+            let path = match call_expr.data(db, tc.body()).borrowed().to_opt() {
+                Some(crate::hir_def::Expr::Call(callee, _)) => {
+                    match callee.data(db, tc.body()).borrowed().to_opt() {
+                        Some(crate::hir_def::Expr::Path(path)) => path.to_opt(),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let selection = path.and_then(|path| tc.selection_for_path(path, goal, span.clone()));
             let obligation = super::env::TraitObligation {
-                context: tc.env.selection_context(),
+                context: tc.context_with_selection(selection),
                 assumptions: tc.env.assumptions(),
                 goal: tc.normalize_trait_goal(goal),
                 origin: super::env::TraitObligationOrigin::GenericConfirmation,

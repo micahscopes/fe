@@ -1,0 +1,30 @@
+// RD114: Self forms name the enclosing named impl's own items.
+trait Read {
+    const K: u256
+    fn by_pattern(_ x: u256) -> bool
+    fn by_expr(_ x: u256) -> bool
+}
+struct S {}
+impl Read for S {
+    const K: u256 = 10
+    fn by_pattern(_ x: u256) -> bool { match x { Self::K => true, _ => false } }
+    fn by_expr(_ x: u256) -> bool { x == Self::K }
+}
+impl Read for S as Alt {
+    const K: u256 = 20
+    fn by_pattern(_ x: u256) -> bool { match x { Self::K => true, _ => false } }
+    fn by_expr(_ x: u256) -> bool { x == Self::K }
+}
+
+#[test]
+fn forms_agree_on_20() {
+    let p = with (Alt) { <S as Read>::by_pattern(20) }
+    let e = with (Alt) { <S as Read>::by_expr(20) }
+    assert(p == e)
+}
+#[test]
+fn forms_agree_on_10() {
+    let p = with (Alt) { <S as Read>::by_pattern(10) }
+    let e = with (Alt) { <S as Read>::by_expr(10) }
+    assert(p == e)
+}

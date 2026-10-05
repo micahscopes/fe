@@ -523,8 +523,8 @@ impl<'db> TyChecker<'db> {
                 );
 
                 let trait_ = inst.def(self.db);
-                let selection = self.env.selection_for_goal(inst);
-                if !self.check_trait_const_obligation(inst, span.clone().into()) {
+                let selection = self.selection_for_path(*path, inst, span.clone().into());
+                if !self.check_trait_const_obligation(inst, span.clone().into(), selection) {
                     return self.finish_pat_check(
                         pat,
                         expected,

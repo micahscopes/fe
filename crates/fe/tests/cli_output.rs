@@ -4680,3 +4680,35 @@ fn rd111_storage_write_capability_at_o0_and_o2() {
         );
     }
 }
+
+#[test]
+fn rd114_named_impl_self_paths_at_o0_and_o2() {
+    rd114_named_impl_self_items_at_o0_and_o2("named_impl_self_paths.fe");
+}
+
+#[test]
+fn rd114_named_impl_self_const_ctfe_at_o0_and_o2() {
+    rd114_named_impl_self_items_at_o0_and_o2("named_impl_self_const_ctfe.fe");
+}
+
+#[test]
+fn rd114_named_impl_self_pattern_at_o0_and_o2() {
+    rd114_named_impl_self_items_at_o0_and_o2("named_impl_self_pattern.fe");
+}
+
+fn rd114_named_impl_self_items_at_o0_and_o2(name: &str) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime")
+        .join(name);
+    for level in ["0", "2"] {
+        let (output, exit_code) = run_fe_main(&[
+            "test",
+            "--jobs",
+            "1",
+            "--optimize",
+            level,
+            fixture.to_str().expect("fixture path utf8"),
+        ]);
+        assert_eq!(exit_code, 0, "RD114 {name} failed at -O{level}:\n{output}");
+    }
+}

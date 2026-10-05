@@ -1,0 +1,40 @@
+// RD114: Self forms name the enclosing named impl's own items.
+trait Read {
+    const K: u256
+    const fn self_k() -> u256
+    const fn qualified_k() -> u256
+}
+struct S {}
+impl Read for S {
+    const K: u256 = 10
+    const fn self_k() -> u256 { Self::K }
+    const fn qualified_k() -> u256 { <Self as Read>::K }
+}
+impl Read for S as Alt {
+    const K: u256 = 20
+    const fn self_k() -> u256 { Self::K }
+    const fn qualified_k() -> u256 { <Self as Read>::K }
+}
+const fn ct_self() -> u256 { with (Alt) { <S as Read>::self_k() } }
+const fn ct_qual() -> u256 { with (Alt) { <S as Read>::qualified_k() } }
+const CT_SELF: u256 = ct_self()
+const CT_QUAL: u256 = ct_qual()
+
+#[test]
+fn self_k_agrees() {
+    let rt: u256 = ct_self()
+    assert(rt == CT_SELF)
+}
+#[test]
+fn qualified_k_agrees() {
+    let rt: u256 = ct_qual()
+    assert(rt == CT_QUAL)
+}
+#[test]
+fn spellings_agree_at_runtime() { assert(ct_self() == ct_qual()) }
+#[test]
+fn spellings_agree_at_compile_time() { assert(CT_SELF == CT_QUAL) }
+#[test]
+fn ct_self_is_20() { assert(CT_SELF == 20) }
+#[test]
+fn ct_qual_is_20() { assert(CT_QUAL == 20) }
