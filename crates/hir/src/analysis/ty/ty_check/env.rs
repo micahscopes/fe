@@ -594,31 +594,16 @@ impl<'db> TyCheckEnv<'db> {
         );
     }
 
-    pub(super) fn opened_obligations(
-        &self,
-    ) -> impl DoubleEndedIterator<Item = (ExprId, TraitInstId<'db>)> + '_ {
-        self.provisions
-            .visible(self.db)
-            .filter_map(|provision| match provision {
-                Provision::Evidence(value, goal) => Some((value, goal)),
-                Provision::Named(_) => None,
-            })
-    }
-
-    pub(super) fn selections(
-        &self,
-    ) -> impl DoubleEndedIterator<Item = crate::analysis::semantic::SelectedApplication<'db>> + '_
-    {
-        self.provisions
-            .visible(self.db)
-            .filter_map(|provision| match provision {
-                Provision::Evidence(..) => None,
-                Provision::Named(selection) => Some(selection),
-            })
+    pub(super) fn has_opened_evidence(&self) -> bool {
+        self.provisions.opened_evidence(self.db).next().is_some()
     }
 
     pub(super) fn selection_context(&self) -> crate::analysis::semantic::ImplEnv<'db> {
-        selection_context(self.db, self.owner_scope, self.selections().collect())
+        selection_context(
+            self.db,
+            self.owner_scope,
+            self.provisions.selections(self.db).collect(),
+        )
     }
 
     pub(super) fn provision_for_goal(&self, goal: TraitInstId<'db>) -> Option<Provision<'db>> {

@@ -364,11 +364,7 @@ pub(crate) fn call_evidence_at<'db>(
         return Vec::new();
     }
     let evidence = recorded_chain_at(db, typed, expr)
-        .visible(db)
-        .filter_map(|provision| match provision {
-            Provision::Evidence(value, goal) => Some((value, goal)),
-            Provision::Named(_) => None,
-        })
+        .opened_evidence(db)
         .collect::<Vec<_>>();
     if evidence.is_empty() {
         return evidence;

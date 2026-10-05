@@ -65,6 +65,9 @@ def ownership(env, effects):
 
 
 def premise_boundary(env, semantic, provisions):
+    for retired in ('opened_obligations', 'selections'):
+        if goal_lookup.bodies(env, retired):
+            raise ValueError('checker filtered provision adapters must be retired: ' + retired)
     if re.search(r'(?m)^    assumptions:\s*PredicateListId', env):
         raise ValueError('checker root premises must be owned by the semantic chain')
     for name, delegate in (
@@ -117,6 +120,8 @@ if __name__ == '__main__':
             continue
         sys.exit('independent-scope-owner mutation escaped the guard')
     for mutant_env, mutant_semantic, mutant_provisions in [
+        (env + "\nimpl TyCheckEnv { fn selections(&self) {} }\n", semantic, provisions),
+        (env + "\nimpl TyCheckEnv { fn opened_obligations(&self) {} }\n", semantic, provisions),
         (env.replace('self.provisions.evidence_assumptions', 'self.assumptions.list(self.db); self.provisions.evidence_assumptions', 1), semantic, provisions),
         (env.replace('self.provisions.method_lookup_assumptions', 'self.assumptions.list(self.db); self.provisions.method_lookup_assumptions', 1), semantic, provisions),
         (env, semantic.replace('provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 'assumptions.list(db); provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 1), provisions),

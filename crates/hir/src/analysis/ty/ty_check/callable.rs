@@ -1116,7 +1116,7 @@ impl<'db> Callable<'db> {
     ) -> bool {
         let mut progressed = false;
         let db = tc.db;
-        if tc.env.opened_obligations().next().is_some()
+        if tc.env.has_opened_evidence()
             && let Some(target) = self.trait_inst
         {
             let target = tc.normalize_trait_goal(target);

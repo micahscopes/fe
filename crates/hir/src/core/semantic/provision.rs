@@ -191,16 +191,32 @@ impl<'db, Data> Chain<'db, Data> {
             .map(|(_, provision)| provision)
     }
 
+    /// Project accepted named authority after both spellings have shadowed slots.
+    pub fn selections(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> impl DoubleEndedIterator<Item = SelectedApplication<'db>> + '_ {
+        self.visible(db).filter_map(|provision| match provision {
+            Provision::Named(selection) => Some(selection),
+            Provision::Evidence(..) => None,
+        })
+    }
+
+    /// Project accepted evidence operands with the same inner-first visibility.
+    pub fn opened_evidence(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> impl DoubleEndedIterator<Item = (ExprId, TraitInstId<'db>)> + '_ {
+        self.visible(db).filter_map(|provision| match provision {
+            Provision::Evidence(value, goal) => Some((value, goal)),
+            Provision::Named(_) => None,
+        })
+    }
+
     /// Evidence establishes premises; named choices remain separate authority.
     pub fn evidence_assumptions(&self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
         let base = self.root_assumptions();
-        let mut evidence = self
-            .visible(db)
-            .filter_map(|provision| match provision {
-                Provision::Evidence(_, goal) => Some(goal),
-                Provision::Named(_) => None,
-            })
-            .peekable();
+        let mut evidence = self.opened_evidence(db).map(|(_, goal)| goal).peekable();
         if evidence.peek().is_none() {
             return base;
         }

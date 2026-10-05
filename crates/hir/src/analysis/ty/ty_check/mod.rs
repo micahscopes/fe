@@ -3746,7 +3746,8 @@ impl<'db> TyChecker<'db> {
         span: LazyTySpan<'db>,
         star_kind_required: bool,
     ) -> TyId<'db> {
-        let ty = if self.env.selections().next().is_none() {
+        let context = self.env.selection_context();
+        let ty = if context.selections(self.db).is_empty() {
             lower_hir_ty(self.db, hir_ty, self.env.scope(), self.env.assumptions())
         } else {
             let lookup_assumptions = self.env.method_lookup_assumptions();
@@ -3755,7 +3756,7 @@ impl<'db> TyChecker<'db> {
                 scope: self.env.scope(),
                 assumptions: lookup_assumptions,
             })
-            .with_context(self.env.selection_context(), self.env.assumptions());
+            .with_context(context, self.env.assumptions());
             super::ty_lower::lower_hir_ty_with_minter(
                 self.db,
                 hir_ty,
@@ -4455,11 +4456,7 @@ impl<'db> TypedBody<'db> {
             return &[];
         }
         let selections = crate::semantic::recorded_chain_at(db, self, expr)
-            .visible(db)
-            .filter_map(|provision| match provision {
-                crate::semantic::Provision::Named(selection) => Some(selection),
-                crate::semantic::Provision::Evidence(..) => None,
-            })
+            .selections(db)
             .collect();
         const_requirements::selection_context(db, root.normalization_scope(db), selections)
             .selections(db)
