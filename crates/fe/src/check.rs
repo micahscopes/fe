@@ -55,6 +55,20 @@ pub fn check(
         .set_profile(&mut db)
         .to(profile.into());
 
+    // Refuse a directory export before anything is staged on disk.
+    let resolved = resolve_cli_target(&mut db, path, force_standalone);
+    if decisions_out.is_some()
+        && let Ok(CliTarget::Directory(_)) = resolved
+    {
+        return Err(if path.is_dir() {
+            "--decisions-out takes a single .fe file, not a directory".into()
+        } else {
+            "--decisions-out takes a single .fe file; pass --standalone to check a file inside \
+             an ingot on its own"
+                .into()
+        });
+    }
+
     let report_root = report_out
         .map(|out| -> Result<_, String> {
             let staging = create_report_staging_dir("target/fe-check-report-staging")?;
@@ -77,7 +91,7 @@ pub fn check(
         })
         .transpose()?;
 
-    let target = match resolve_cli_target(&mut db, path, force_standalone) {
+    let target = match resolved {
         Ok(target) => target,
         Err(message) => {
             if let Some(report) = report_ctx.as_ref() {
@@ -143,12 +157,6 @@ pub fn check(
             }
         }
         CliTarget::Directory(dir_path) => {
-            if decisions_out.is_some() {
-                return Err(
-                    "format-v1 decision export currently requires a standalone file (--standalone)"
-                        .into(),
-                );
-            }
             check_directory(&mut db, &dir_path, ingot, dump_mir, report_ctx.as_ref())
         }
     };

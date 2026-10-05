@@ -880,3 +880,36 @@ fn retained_evidence_opening_is_explicitly_outside_format_v1() {
     assert_eq!(gap.reason, "evidence opening is outside format v1");
     assert!(gap.site.is_some());
 }
+
+#[test]
+fn cli_export_refuses_ingots_before_staging_a_report() {
+    use std::process::Command;
+    let temp = tempfile::tempdir().unwrap();
+    let ingot = temp.path().join("ingot");
+    std::fs::create_dir_all(ingot.join("src")).unwrap();
+    std::fs::write(
+        ingot.join("fe.toml"),
+        "[ingot]\nname = \"ingot\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(ingot.join("src/lib.fe"), "pub fn f() {}\n").unwrap();
+    for (target, hint) in [
+        (ingot.clone(), "not a directory"),
+        (ingot.join("src/lib.fe"), "--standalone"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fe"))
+            .args(["check", "--decisions-out", "out.jsonl", "--report"])
+            .arg(&target)
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains(hint), "{stderr}");
+        assert!(
+            !temp.path().join("target").exists(),
+            "report staging left behind: {stderr}"
+        );
+        assert!(!temp.path().join("out.jsonl").exists());
+    }
+}
