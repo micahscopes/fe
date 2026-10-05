@@ -60,6 +60,7 @@ impl<'db> crate::analysis::ty::fold::TyFoldable<'db> for Provision<'db> {
 #[derive(Clone, Default)]
 pub(crate) struct Frame<'db, Data = ()> {
     provisions: Vec<Provision<'db>>,
+    root_assumptions: Option<PredicateListId<'db>>,
     data: Data,
 }
 
@@ -68,6 +69,7 @@ impl<'db> Frame<'db> {
     fn from_records(provisions: Vec<Provision<'db>>) -> Self {
         Self {
             provisions,
+            root_assumptions: None,
             data: (),
         }
     }
@@ -97,15 +99,34 @@ pub(crate) struct Chain<'db, Data = ()> {
     frames: Vec<Frame<'db, Data>>,
 }
 
-impl<Data: Default> Default for Chain<'_, Data> {
-    fn default() -> Self {
+impl<'db, Data: Default> Chain<'db, Data> {
+    pub fn new(root_assumptions: PredicateListId<'db>) -> Self {
         Self {
-            frames: vec![Frame::default()],
+            frames: vec![Frame {
+                root_assumptions: Some(root_assumptions),
+                ..Frame::default()
+            }],
         }
     }
 }
 
 impl<'db, Data> Chain<'db, Data> {
+    fn root_assumptions(&self) -> PredicateListId<'db> {
+        self.frames[0]
+            .root_assumptions
+            .expect("the item frame owns root premises")
+    }
+
+    /// Effect registration completes the item root before any lexical opening.
+    pub fn complete_root(&mut self, assumptions: PredicateListId<'db>) {
+        assert_eq!(
+            self.frames.len(),
+            1,
+            "root completion precedes lexical frames"
+        );
+        self.frames[0].root_assumptions = Some(assumptions);
+    }
+
     /// Enter a lexical frame. This is the sole frame-push operation.
     pub fn within(&mut self, frame: Frame<'db, Data>) {
         self.frames.push(frame);
@@ -171,11 +192,8 @@ impl<'db, Data> Chain<'db, Data> {
     }
 
     /// Evidence establishes premises; named choices remain separate authority.
-    pub fn evidence_assumptions(
-        &self,
-        db: &'db dyn HirAnalysisDb,
-        base: PredicateListId<'db>,
-    ) -> PredicateListId<'db> {
+    pub fn evidence_assumptions(&self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
+        let base = self.root_assumptions();
         let mut evidence = self
             .visible(db)
             .filter_map(|provision| match provision {
@@ -193,12 +211,8 @@ impl<'db, Data> Chain<'db, Data> {
 
     /// Lookup may discover methods from a named choice without treating it as
     /// an ordinary proof premise. Keep this projection at the context boundary.
-    pub fn method_lookup_assumptions(
-        &self,
-        db: &'db dyn HirAnalysisDb,
-        base: PredicateListId<'db>,
-    ) -> PredicateListId<'db> {
-        let mut premises = self.evidence_assumptions(db, base).list(db).to_vec();
+    pub fn method_lookup_assumptions(&self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
+        let mut premises = self.evidence_assumptions(db).list(db).to_vec();
         for provision in self.visible(db) {
             if let Provision::Named(selection) = provision {
                 premises.retain(|goal| !selection.matches(db, *goal));
@@ -311,16 +325,13 @@ pub(crate) fn recorded_chain_at<'db>(
     typed: &crate::analysis::ty::ty_check::TypedBody<'db>,
     expr: ExprId,
 ) -> Chain<'db> {
-    let mut chain = Chain {
-        frames: vec![Frame::from_records(
-            typed
-                .root_selections(db)
-                .iter()
-                .copied()
-                .map(Provision::Named)
-                .collect(),
-        )],
-    };
+    let mut chain = Chain::new(typed.assumptions());
+    chain.frames[0].provisions = typed
+        .root_selections(db)
+        .iter()
+        .copied()
+        .map(Provision::Named)
+        .collect();
     if typed.with_choices().len() == 0 {
         return chain;
     }

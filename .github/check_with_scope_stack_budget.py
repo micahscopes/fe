@@ -64,7 +64,9 @@ def ownership(env, effects):
             raise ValueError(f'{name} maintains another scope stack')
 
 
-def premise_boundary(env, semantic):
+def premise_boundary(env, semantic, provisions):
+    if re.search(r'(?m)^    assumptions:\s*PredicateListId', env):
+        raise ValueError('checker root premises must be owned by the semantic chain')
     for name, delegate in (
         ('assumptions', 'evidence_assumptions'),
         ('method_lookup_assumptions', 'method_lookup_assumptions'),
@@ -77,7 +79,8 @@ def premise_boundary(env, semantic):
     bodies = goal_lookup.bodies(semantic, 'context_at')
     if len(bodies) != 1 or 'evidence_assumptions' not in bodies[0]:
         raise ValueError('record context must use the same semantic premise projection')
-    if not re.search(r'\btyped\s*\.\s*assumptions\s*\(\s*\)', bodies[0]):
+    roots = goal_lookup.bodies(provisions, 'recorded_chain_at')
+    if len(roots) != 1 or 'Chain::new(typed.assumptions())' not in roots[0]:
         raise ValueError('body positions must read their completed root premises')
     if re.search(r'\.(?:list|extend_all_bounds)\s*\(', bodies[0]):
         raise ValueError('record context restored a separate premise builder')
@@ -88,10 +91,11 @@ if __name__ == '__main__':
     env = (ROOT / 'crates/hir/src/analysis/ty/ty_check/env.rs').read_text()
     effects = (ROOT / 'crates/hir/src/analysis/ty/ty_check/effect_env.rs').read_text()
     semantic = (ROOT / 'crates/hir/src/core/semantic/mod.rs').read_text()
+    provisions = (ROOT / 'crates/hir/src/core/semantic/provision.rs').read_text()
     try:
         stacks = inventory(source)
         ownership(env, effects)
-        premise_boundary(env, semantic)
+        premise_boundary(env, semantic, provisions)
     except ValueError as error:
         sys.exit(str(error))
     body = goal_lookup.bodies(source, 'check_with')[0]
@@ -112,15 +116,16 @@ if __name__ == '__main__':
         except ValueError:
             continue
         sys.exit('independent-scope-owner mutation escaped the guard')
-    for mutant_env, mutant_semantic in [
-        (env.replace('self.provisions\n            .evidence_assumptions', 'self.assumptions.list(self.db); self.provisions\n            .evidence_assumptions', 1), semantic),
-        (env.replace('self.provisions\n            .method_lookup_assumptions', 'self.assumptions.list(self.db); self.provisions\n            .method_lookup_assumptions', 1), semantic),
-        (env, semantic.replace('provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 'assumptions.list(db); provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 1)),
-        (env, semantic.replace('|(typed, _)| typed.assumptions()', '|(_, _)| param_env(db, scope.item())', 1)),
+    for mutant_env, mutant_semantic, mutant_provisions in [
+        (env.replace('self.provisions.evidence_assumptions', 'self.assumptions.list(self.db); self.provisions.evidence_assumptions', 1), semantic, provisions),
+        (env.replace('self.provisions.method_lookup_assumptions', 'self.assumptions.list(self.db); self.provisions.method_lookup_assumptions', 1), semantic, provisions),
+        (env, semantic.replace('provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 'assumptions.list(db); provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 1), provisions),
+        (env, semantic, provisions.replace('Chain::new(typed.assumptions())', 'Chain::new(PredicateListId::empty_list(db))', 1)),
+        (env.replace('    provisions:', "    assumptions: PredicateListId<'db>,\n    provisions:", 1), semantic, provisions),
     ]:
-        assert mutant_env != env or mutant_semantic != semantic, 'premise mutation must modify actual source'
+        assert mutant_env != env or mutant_semantic != semantic or mutant_provisions != provisions, 'premise mutation must modify actual source'
         try:
-            premise_boundary(mutant_env, mutant_semantic)
+            premise_boundary(mutant_env, mutant_semantic, mutant_provisions)
         except ValueError:
             continue
         sys.exit('duplicate-premise-builder mutation escaped the guard')

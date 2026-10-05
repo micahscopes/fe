@@ -78,7 +78,6 @@ pub(crate) struct TyCheckEnv<'db> {
 
     effect_bounds: ThinVec<TraitInstId<'db>>,
     base_assumptions: PredicateListId<'db>,
-    assumptions: PredicateListId<'db>,
     provisions: keyed_effect_env::EffectEnv<'db>,
     var_env: Vec<BlockEnv<'db>>,
     pending_vars: FxHashMap<IdentId<'db>, LocalBinding<'db>>,
@@ -155,8 +154,7 @@ impl<'db> TyCheckEnv<'db> {
             decisions: Decisions::default(),
             effect_bounds: ThinVec::new(),
             base_assumptions,
-            assumptions: base_assumptions,
-            provisions: Chain::default(),
+            provisions: Chain::new(base_assumptions),
             var_env: vec![BlockEnv::new(owner_scope, 0)],
             pending_vars: FxHashMap::default(),
             loop_stack: Vec::new(),
@@ -247,7 +245,8 @@ impl<'db> TyCheckEnv<'db> {
         // Finalize assumptions by merging in effect-derived bounds
         let mut preds = base_preds.list(db).to_vec();
         preds.extend(env.effect_bounds.iter().copied());
-        env.assumptions = PredicateListId::new(db, preds).extend_all_bounds(db);
+        env.provisions
+            .complete_root(PredicateListId::new(db, preds).extend_all_bounds(db));
 
         Ok(env)
     }
@@ -570,8 +569,7 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     pub(crate) fn assumptions(&self) -> PredicateListId<'db> {
-        self.provisions
-            .evidence_assumptions(self.db, self.assumptions)
+        self.provisions.evidence_assumptions(self.db)
     }
 
     pub(super) fn enter_context_frame(&mut self) {
@@ -645,8 +643,7 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     pub(super) fn method_lookup_assumptions(&self) -> PredicateListId<'db> {
-        self.provisions
-            .method_lookup_assumptions(self.db, self.assumptions)
+        self.provisions.method_lookup_assumptions(self.db)
     }
 
     pub(crate) fn base_assumptions(&self) -> PredicateListId<'db> {

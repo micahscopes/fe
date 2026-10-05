@@ -279,15 +279,8 @@ pub(crate) fn context_at<'db>(
                 item => constraints_for(db, item),
             }
         },
-        |(typed, _)| typed.assumptions(),
+        |(typed, expr)| provision::recorded_chain_at(db, typed, expr).evidence_assumptions(db),
     );
-    let assumptions = if let Some((typed, expr)) =
-        position.filter(|(typed, _)| typed.with_choices().len() != 0)
-    {
-        provision::recorded_chain_at(db, typed, expr).evidence_assumptions(db, assumptions)
-    } else {
-        assumptions
-    };
     let selections = position
         .map(|(typed, expr)| typed.selections_for_expr(db, expr).to_vec())
         .unwrap_or_default();
