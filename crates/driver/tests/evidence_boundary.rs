@@ -688,6 +688,30 @@ const fn local() -> u256 {{
     );
     let mut db = database();
     let file = checked(&mut db, "retained-evidence-openings", &source);
+    use hir::analysis::ty::fold::{TyFoldable, TyFolder};
+    struct Replace<'db> {
+        from: hir::analysis::ty::ty_def::TyId<'db>,
+        to: hir::analysis::ty::ty_def::TyId<'db>,
+    }
+    impl<'db> TyFolder<'db> for Replace<'db> {
+        fn fold_ty(
+            &mut self,
+            db: &'db dyn hir::analysis::HirAnalysisDb,
+            ty: hir::analysis::ty::ty_def::TyId<'db>,
+        ) -> hir::analysis::ty::ty_def::TyId<'db> {
+            if ty == self.from {
+                self.to
+            } else {
+                ty.super_fold_with(db, self)
+            }
+        }
+    }
+    let mut provisions = Vec::new();
+    let mut source_kinds = Vec::new();
+    eprintln!(
+        "provision record bytes: {}",
+        std::mem::size_of::<hir::core::semantic::Provision<'_>>()
+    );
     for name in ["parameter", "local"] {
         let (errors, typed) =
             hir::analysis::ty::ty_check::check_func_body(&db, named(&db, file, name));
@@ -698,11 +722,36 @@ const fn local() -> u256 {{
             "{name}: opening was not retained"
         );
         let record = typed.with_choices().next().unwrap();
-        let hir::core::semantic::Provision::Evidence(value, goal) = record.outcome().unwrap()
-        else {
-            panic!("{name}: expected evidence provision");
-        };
+        let (value, goal) = record
+            .outcome()
+            .unwrap()
+            .evidence_operand()
+            .expect("expected evidence provision");
         assert_eq!(value, record.expression());
+        let binding = typed
+            .expr_binding(value)
+            .expect("recorded evidence binding");
+        assert_eq!(
+            matches!(
+                binding,
+                hir::analysis::ty::ty_check::LocalBinding::Param { .. }
+            ),
+            name == "parameter"
+        );
+        let provision = record.outcome().unwrap();
+        assert_eq!(
+            matches!(
+                provision,
+                hir::core::semantic::Provision::EvidenceParameter(..)
+            ),
+            name == "parameter"
+        );
+        assert_eq!(
+            matches!(provision, hir::core::semantic::Provision::EvidenceLocal(..)),
+            name == "local"
+        );
+        source_kinds.push(std::mem::discriminant(&provision));
+        provisions.push(provision);
         assert_eq!(
             goal.def(&db).name(&db).to_opt().unwrap().data(&db),
             "Compute"
@@ -716,4 +765,28 @@ const fn local() -> u256 {{
             assert_eq!(goal.self_ty(&db).pretty_print(&db), "Subject");
         }
     }
+    let from = provisions[0].goal().self_ty(&db);
+    let to = provisions[1].goal().self_ty(&db);
+    for provision in provisions.iter().copied() {
+        let folded = provision.fold_with(&db, &mut Replace { from, to });
+        assert_eq!(
+            std::mem::discriminant(&folded),
+            std::mem::discriminant(&provision),
+            "substitution changed the source kind"
+        );
+        assert_eq!(
+            folded.goal(),
+            provisions[1].goal(),
+            "both goals become concrete"
+        );
+        assert_eq!(
+            folded.evidence_operand().unwrap().0,
+            provision.evidence_operand().unwrap().0,
+            "substitution changed the witness operand"
+        );
+    }
+    assert_ne!(
+        source_kinds[0], source_kinds[1],
+        "the provision must retain local versus parameter source"
+    );
 }

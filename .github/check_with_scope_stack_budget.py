@@ -110,6 +110,16 @@ def context_fold_boundary(template, folds):
         raise ValueError('instance-key folding must delegate to the context fold')
 
 
+def evidence_source_boundary(provisions):
+    code = goal_lookup.solver_budget.production_code(provisions)
+    enum = re.search(r'enum\s+Provision[^{}]*\{([^{}]*)\}', code)
+    if enum is None or re.search(r'\bEvidence\s*\(', enum[1]):
+        raise ValueError('evidence provisions must retain local versus parameter source')
+    for source in ('EvidenceLocal', 'EvidenceParameter'):
+        if not re.search(r'\b' + source + r"\s*\(\s*ExprId\s*,\s*TraitInstId\s*<[^>]+>\s*\)", enum[1]):
+            raise ValueError('source classification must reuse the operand and goal fields')
+
+
 if __name__ == '__main__':
     source = (ROOT / 'crates/hir/src/analysis/ty/ty_check/expr.rs').read_text()
     env = (ROOT / 'crates/hir/src/analysis/ty/ty_check/env.rs').read_text()
@@ -124,6 +134,7 @@ if __name__ == '__main__':
         premise_boundary(env, semantic, provisions)
         selection_transport_boundary(template)
         context_fold_boundary(template, folds)
+        evidence_source_boundary(provisions)
     except ValueError as error:
         sys.exit(str(error))
     body = goal_lookup.bodies(source, 'check_with')[0]
@@ -182,6 +193,16 @@ if __name__ == '__main__':
         except ValueError:
             continue
         sys.exit('partial-context-fold mutation escaped the guard')
+    for mutant in [
+        provisions.replace('EvidenceParameter(ExprId, TraitInstId', 'EvidenceParameter(usize, ExprId, TraitInstId', 1),
+        provisions.replace('EvidenceLocal(ExprId, TraitInstId', 'Evidence(ExprId, TraitInstId', 1),
+    ]:
+        assert mutant != provisions
+        try:
+            evidence_source_boundary(mutant)
+        except ValueError:
+            continue
+        sys.exit('evidence-source retirement mutation escaped the guard')
     print(f'with-scope stacks: {len(stacks)} (ceiling {BASELINE}, S4 target 1)')
     for stack in stacks:
         print(f'  {stack}')

@@ -373,7 +373,7 @@ pub fn with_records<'db>(
                     Ok(Provision::Bound(_)) => {
                         unreachable!("root premises cannot be lexical opening records")
                     }
-                    Ok(Provision::Evidence(..)) => {
+                    Ok(Provision::EvidenceLocal(..) | Provision::EvidenceParameter(..)) => {
                         return Err("evidence opening is outside format v1".into());
                     }
                     Err(_) => OpeningOutcome::Error(format!(

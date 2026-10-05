@@ -3172,7 +3172,8 @@ fn caller() {
                 .visible(&db)
                 .filter_map(|provision| match provision {
                     crate::core::semantic::Provision::Named(selection) => Some(selection),
-                    crate::core::semantic::Provision::Evidence(..)
+                    crate::core::semantic::Provision::EvidenceLocal(..)
+                    | crate::core::semantic::Provision::EvidenceParameter(..)
                     | crate::core::semantic::Provision::Bound(_) => None,
                 })
                 .collect::<Vec<_>>();
@@ -3201,7 +3202,8 @@ const fn outside<T>() {}
 const fn caller<T>(_ first: Evidence<Compute<T>>, _ second: Evidence<Inspect<T>>) {
     with (first) {
         outer<T>()
-        with (second) { inner<T>() }
+        let local = second
+        with (local) { inner<T>() }
         restored<T>()
     }
     outside<T>()
@@ -3222,11 +3224,27 @@ const fn caller<T>(_ first: Evidence<Compute<T>>, _ second: Evidence<Inspect<T>>
         let inferred = super::super::inferred_body_with_selections(&db, owner, &[]);
         assert!(inferred.result.0.is_empty(), "{:?}", inferred.result.0);
         let typed = &inferred.result.1;
+        let sources = typed
+            .with_choices()
+            .map(|choice| choice.outcome().unwrap())
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            sources[0],
+            crate::core::semantic::Provision::EvidenceParameter(..)
+        ));
+        assert!(matches!(
+            sources[1],
+            crate::core::semantic::Provision::EvidenceLocal(..)
+        ));
         let goals = typed
             .with_choices()
-            .map(|choice| match choice.outcome().unwrap() {
-                crate::core::semantic::Provision::Evidence(_, goal) => goal,
-                _ => panic!("expected evidence opening"),
+            .map(|choice| {
+                choice
+                    .outcome()
+                    .unwrap()
+                    .evidence_operand()
+                    .expect("expected evidence opening")
+                    .1
             })
             .collect::<Vec<_>>();
         assert_eq!(goals.len(), 2);
@@ -3236,10 +3254,11 @@ const fn caller<T>(_ first: Evidence<Compute<T>>, _ second: Evidence<Inspect<T>>
         // An opening does not establish its own premise while its value is evaluated.
         // The inner opening still sees evidence introduced by the outer frame.
         for choice in typed.with_choices() {
-            let crate::core::semantic::Provision::Evidence(_, goal) = choice.outcome().unwrap()
-            else {
-                unreachable!();
-            };
+            let (_, goal) = choice
+                .outcome()
+                .unwrap()
+                .evidence_operand()
+                .expect("expected evidence opening");
             let expected = if goal == goals[0] {
                 &[][..]
             } else {
@@ -3355,7 +3374,8 @@ const fn inherited() { target<Subject>() }",
                 .visible(&db)
                 .filter_map(|provision| match provision {
                     crate::core::semantic::Provision::Named(selection) => Some(selection),
-                    crate::core::semantic::Provision::Evidence(..)
+                    crate::core::semantic::Provision::EvidenceLocal(..)
+                    | crate::core::semantic::Provision::EvidenceParameter(..)
                     | crate::core::semantic::Provision::Bound(_) => None,
                 })
                 .collect::<Vec<_>>();

@@ -3,7 +3,7 @@ use crate::{
     analysis::{
         HirAnalysisDb,
         semantic::SelectedApplication,
-        ty::{trait_def::TraitInstId, trait_resolution::PredicateListId},
+        ty::{trait_def::TraitInstId, trait_resolution::PredicateListId, ty_check::LocalBinding},
     },
     hir_def::ExprId,
 };
@@ -11,7 +11,8 @@ use crate::{
 /// One retained trait provision, shared by lexical frames and body openings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Provision<'db> {
-    Evidence(ExprId, TraitInstId<'db>),
+    EvidenceLocal(ExprId, TraitInstId<'db>),
+    EvidenceParameter(ExprId, TraitInstId<'db>),
     Named(SelectedApplication<'db>),
     /// An item premise, without a selected implementation or evidence operand.
     Bound(TraitInstId<'db>),
@@ -22,13 +23,34 @@ impl<'db> Provision<'db> {
         Self::Named(selection)
     }
 
-    pub(crate) fn evidence(value: ExprId, goal: TraitInstId<'db>) -> Self {
-        Self::Evidence(value, goal)
+    pub(crate) fn evidence(
+        value: ExprId,
+        goal: TraitInstId<'db>,
+        binding: Option<LocalBinding<'db>>,
+    ) -> Self {
+        match binding {
+            Some(LocalBinding::Param { .. } | LocalBinding::EffectParam { .. }) => {
+                Self::EvidenceParameter(value, goal)
+            }
+            Some(LocalBinding::Local { .. }) | None => Self::EvidenceLocal(value, goal),
+        }
+    }
+
+    /// Both evidence sources retain the operand carrying the actual witness.
+    pub fn evidence_operand(self) -> Option<(ExprId, TraitInstId<'db>)> {
+        match self {
+            Self::EvidenceLocal(value, goal) | Self::EvidenceParameter(value, goal) => {
+                Some((value, goal))
+            }
+            Self::Named(_) | Self::Bound(_) => None,
+        }
     }
 
     pub fn goal(self) -> TraitInstId<'db> {
         match self {
-            Self::Evidence(_, goal) | Self::Bound(goal) => goal,
+            Self::EvidenceLocal(_, goal) | Self::EvidenceParameter(_, goal) | Self::Bound(goal) => {
+                goal
+            }
             Self::Named(selection) => selection.goal(),
         }
     }
@@ -40,7 +62,9 @@ impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for Provision<'db> {
         visitor: &mut V,
     ) {
         match self {
-            Self::Evidence(_, goal) | Self::Bound(goal) => goal.visit_with(visitor),
+            Self::EvidenceLocal(_, goal) | Self::EvidenceParameter(_, goal) | Self::Bound(goal) => {
+                goal.visit_with(visitor)
+            }
             Self::Named(selection) => selection.visit_with(visitor),
         }
     }
@@ -53,7 +77,12 @@ impl<'db> crate::analysis::ty::fold::TyFoldable<'db> for Provision<'db> {
         folder: &mut F,
     ) -> Self {
         match self {
-            Self::Evidence(value, goal) => Self::Evidence(value, goal.fold_with(db, folder)),
+            Self::EvidenceLocal(value, goal) => {
+                Self::EvidenceLocal(value, goal.fold_with(db, folder))
+            }
+            Self::EvidenceParameter(value, goal) => {
+                Self::EvidenceParameter(value, goal.fold_with(db, folder))
+            }
             Self::Named(selection) => Self::Named(selection.fold_with(db, folder)),
             Self::Bound(goal) => Self::Bound(goal.fold_with(db, folder)),
         }
@@ -229,7 +258,9 @@ impl<'db, Data> Chain<'db, Data> {
     ) -> impl DoubleEndedIterator<Item = SelectedApplication<'db>> + '_ {
         self.visible(db).filter_map(|provision| match provision {
             Provision::Named(selection) => Some(selection),
-            Provision::Evidence(..) | Provision::Bound(_) => None,
+            Provision::EvidenceLocal(..)
+            | Provision::EvidenceParameter(..)
+            | Provision::Bound(_) => None,
         })
     }
 
@@ -238,10 +269,7 @@ impl<'db, Data> Chain<'db, Data> {
         &self,
         db: &'db dyn HirAnalysisDb,
     ) -> impl DoubleEndedIterator<Item = (ExprId, TraitInstId<'db>)> + '_ {
-        self.visible(db).filter_map(|provision| match provision {
-            Provision::Evidence(value, goal) => Some((value, goal)),
-            Provision::Named(_) | Provision::Bound(_) => None,
-        })
+        self.visible(db).filter_map(Provision::evidence_operand)
     }
 
     /// Evidence establishes premises; named choices remain separate authority.

@@ -1589,16 +1589,12 @@ impl<'db> TyChecker<'db> {
                     if let [term] = args
                         && let TyData::ConstraintTerm(goal) = term.data(self.db)
                     {
-                        if !self.insert_with_provision(
-                            binding.value,
-                            Provision::evidence(binding.value, *goal),
-                        ) {
+                        let provision =
+                            Provision::evidence(binding.value, *goal, value_prop.binding);
+                        if !self.insert_with_provision(binding.value, provision) {
                             continue;
                         }
-                        self.env.record_with_choice(
-                            binding.value,
-                            Ok(Provision::evidence(binding.value, *goal)),
-                        );
+                        self.env.record_with_choice(binding.value, Ok(provision));
                         continue;
                     }
                     self.push_diag(BodyDiag::ObligationOpening {

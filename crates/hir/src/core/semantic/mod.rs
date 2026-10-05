@@ -423,14 +423,13 @@ pub(crate) fn instance_call_evidence_at<'db>(
     applicable
         .into_iter()
         .map(|(value, _)| {
-            let Provision::Evidence(_, goal) = typed
+            let (_, goal) = typed
                 .with_choice(value)
                 .expect("an applicable opening must retain its record")
                 .outcome()
                 .expect("an applicable opening must remain accepted")
-            else {
-                panic!("an evidence opening must retain its source kind");
-            };
+                .evidence_operand()
+                .expect("an evidence opening must retain its source kind");
             (value, goal)
         })
         .collect()

@@ -621,10 +621,9 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     pub(super) fn opened_for_goal(&self, goal: TraitInstId<'db>) -> Option<ExprId> {
-        match self.provision_for_goal(goal) {
-            Some(Provision::Evidence(value, _)) => Some(value),
-            _ => None,
-        }
+        self.provision_for_goal(goal)
+            .and_then(Provision::evidence_operand)
+            .map(|(value, _)| value)
     }
 
     pub(super) fn method_lookup_assumptions(&self) -> PredicateListId<'db> {
