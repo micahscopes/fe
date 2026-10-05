@@ -491,3 +491,90 @@ fn call_h(_ b: bool) -> u256 {
             .replace("return 0", "return h<7>(b)"),
     );
 }
+
+#[test]
+#[ignore = "RD115 pending: query-owned cycle recovery and stable diagnostics"]
+fn mutual_payload_cycles_have_one_error_across_orders_and_edits() {
+    use fe_hir::{analysis::ty::ty_check::check_func_body, hir_def::ItemKind};
+
+    fn signature(
+        db: &HirAnalysisTestDb,
+        file: common::file::File,
+        first: &str,
+    ) -> Vec<(String, String, Vec<String>)> {
+        let (top, _) = db.top_mod(file);
+        let function = top
+            .all_items(db)
+            .iter()
+            .find_map(|item| match item {
+                ItemKind::Func(function)
+                    if function
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(db) == first) =>
+                {
+                    Some(*function)
+                }
+                _ => None,
+            })
+            .unwrap();
+        // Demand either use before module analysis, rather than relying on
+        // the declaration pass's traversal order to hide an order dependence.
+        let _ = check_func_body(db, function);
+        db.run_on_top_mod(top)
+            .iter()
+            .map(|voucher| {
+                let diagnostic = voucher.to_complete(db);
+                (
+                    diagnostic.error_code.to_string(),
+                    diagnostic.message,
+                    diagnostic
+                        .sub_diagnostics
+                        .into_iter()
+                        .map(|label| label.message)
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    let sources = [
+        include_str!("fixtures/computed_types/pending/mutual_payload_a.fe"),
+        include_str!("fixtures/computed_types/pending/mutual_payload_b.fe"),
+    ];
+    let mut expected = None;
+    for source in sources {
+        for first in ["use_alpha", "use_beta"] {
+            let mut db = HirAnalysisTestDb::default();
+            let file = db.new_stand_alone("mutual_payload.fe".into(), "");
+            let acyclic = source.replace("core::size_of<Alpha<0>>()", "0");
+            for (text, cyclic) in [(source, true), (acyclic.as_str(), false), (source, true)] {
+                file.set_text(&mut db).to(text.to_owned());
+                let actual = signature(&db, file, first);
+                let mut fresh = HirAnalysisTestDb::default();
+                let fresh_file = fresh.new_stand_alone("mutual_payload.fe".into(), text);
+                assert_eq!(
+                    actual,
+                    signature(&fresh, fresh_file, first),
+                    "warm/fresh: {first}"
+                );
+                if cyclic {
+                    assert_eq!(actual.len(), 1, "{actual:?}");
+                    assert_eq!(actual[0].1, "evaluation/reduction cycle", "{actual:?}");
+                    for participant in ["Alpha", "Beta"] {
+                        assert!(
+                            actual[0].2.iter().any(|label| label.contains(participant)),
+                            "{actual:?}"
+                        );
+                    }
+                    match &expected {
+                        Some(expected) => assert_eq!(&actual, expected, "{first}"),
+                        None => expected = Some(actual),
+                    }
+                } else {
+                    assert!(actual.is_empty(), "{actual:?}");
+                }
+            }
+        }
+    }
+}
