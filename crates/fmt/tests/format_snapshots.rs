@@ -214,3 +214,11 @@ fn arm_splices_keep_comments_and_parse_after_formatting() {
         );
     }
 }
+
+#[test]
+fn record_field_label_splices_survive_formatting() {
+    let source = "const fn f(x: Code<Expr>) -> Code<Expr> { quote { Self { ${x}: 7, y: 2 } } }";
+    let formatted = format_str(source, &Config::default()).unwrap();
+    assert!(formatted.contains("${x}: 7"), "{formatted}");
+    assert_eq!(format_str(&formatted, &Config::default()).unwrap(), formatted);
+}
