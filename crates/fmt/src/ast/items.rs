@@ -1563,16 +1563,91 @@ impl ToDoc for ast::TypeAlias {
 
 impl ToDoc for ast::RecursiveTypeFn {
     fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
-        // Preserve the complete declaration, including comments and type arms.
-        // The ordinary item token walker does not handle the match or return kind.
-        intersperse(
-            &ctx.alloc,
-            ctx.snippet_trimmed(self)
-                .lines()
-                .map(|line| ctx.alloc.text(line.to_owned())),
-            ctx.alloc.hardline(),
-        )
+        let alloc = &ctx.alloc;
+        let indent = ctx.config.indent_width as isize;
+
+        if has_comment_tokens(self.syntax()) {
+            // Keep a commented declaration as written, re-indented as a whole
+            // so that formatting it again changes nothing.
+            return intersperse(
+                alloc,
+                dedented_lines(&ctx.snippet_trimmed(self)).map(|line| alloc.text(line)),
+                alloc.hardline(),
+            );
+        }
+
+        let name = self
+            .name()
+            .map_or_else(|| alloc.nil(), |name| alloc.text(ctx.token(&name)));
+        let ret_kind = self.ret_kind().map_or_else(
+            || alloc.nil(),
+            |kind| {
+                alloc
+                    .text(" -> ")
+                    .append(alloc.text(ctx.snippet_trimmed(&kind)))
+            },
+        );
+        let body = self.body().and_then(|body| body.match_()).map_or_else(
+            || alloc.nil(),
+            |match_| {
+                let subject = match_
+                    .subject()
+                    .map_or_else(|| alloc.nil(), |subject| alloc.text(ctx.token(&subject)));
+                let arms = match_.arms().into_iter().flatten().map(|arm| {
+                    let pat = arm
+                        .pat()
+                        .map_or_else(|| alloc.nil(), |pat| alloc.text(ctx.snippet_trimmed(&pat)));
+                    let ty = arm.ty().map_or_else(|| alloc.nil(), |ty| ty.to_doc(ctx));
+                    pat.append(alloc.text(" => ")).append(ty)
+                });
+                let arms = intersperse(alloc, arms, alloc.hardline());
+                alloc
+                    .text(" {")
+                    .append(
+                        alloc
+                            .hardline()
+                            .append(alloc.text("match "))
+                            .append(subject)
+                            .append(alloc.text(" {"))
+                            .append(alloc.hardline().append(arms).nest(indent))
+                            .append(alloc.hardline())
+                            .append(alloc.text("}"))
+                            .nest(indent),
+                    )
+                    .append(alloc.hardline())
+                    .append(alloc.text("}"))
+            },
+        );
+
+        attrs_doc(self, ctx)
+            .append(modifier_doc(self, ctx))
+            .append(alloc.text("recursive type fn "))
+            .append(name)
+            .append(generics_doc(self, ctx))
+            .append(alloc.text("()"))
+            .append(ret_kind)
+            .append(where_doc(self, ctx))
+            .append(body)
     }
+}
+
+/// The lines of `text` without the indentation they all share after the
+/// first, which starts at the item.
+fn dedented_lines(text: &str) -> impl Iterator<Item = String> + '_ {
+    let common = text
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    text.lines().enumerate().map(move |(index, line)| {
+        if index == 0 || line.len() < common {
+            line.trim_start().to_owned()
+        } else {
+            line[common..].to_owned()
+        }
+    })
 }
 
 impl ToDoc for ast::Mod {
