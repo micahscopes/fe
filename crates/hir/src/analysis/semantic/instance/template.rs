@@ -19,7 +19,6 @@ use crate::{
     hir_def::{CallableDef, GenericParamOwner, IdentId, scope_graph::ScopeId},
     semantic::ProviderBinding,
 };
-use salsa::plumbing::AsId;
 
 #[derive(Clone, Debug)]
 pub struct TypedBodyTemplate<'db> {
@@ -252,28 +251,14 @@ impl<'db> ImplEnv<'db> {
         if *self.selections(db) == selections {
             return self;
         }
-        let mut by_goal = common::indexmap::IndexMap::new();
-        for selection in selections {
-            let goal = selection.goal();
-            let key = TraitInstId::new(
-                db,
-                goal.def(db),
-                goal.args(db).clone(),
-                common::indexmap::IndexMap::new(),
-            );
-            by_goal.insert(key, selection);
-        }
-        let mut selections = by_goal.into_iter().collect::<Vec<_>>();
-        selections.sort_by_key(|(goal, _)| goal.as_id());
+        // Visibility is established by the source chain. Transport preserves
+        // its order; substitution must not merge accepted authored choices.
         Self::new_with_choices(
             db,
             self.normalization_scope(db),
             self.assumptions(db),
             self.witnesses(db).clone(),
-            selections
-                .into_iter()
-                .map(|(_, selection)| selection)
-                .collect::<Vec<_>>(),
+            selections,
             self.bound_choices(db).clone(),
         )
     }

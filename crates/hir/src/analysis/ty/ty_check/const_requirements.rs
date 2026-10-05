@@ -3133,6 +3133,22 @@ fn caller() {
             })
             .collect::<Vec<_>>();
         assert_eq!(openings.len(), 2);
+        // A transported sequence retains authored choices and their order. The
+        // shared goal reader alone chooses the innermost answer, in either order.
+        let transport = crate::analysis::semantic::ImplEnv::empty(&db, caller.scope());
+        for ordered in [openings.clone(), openings.iter().rev().copied().collect()] {
+            let transported = transport.with_selections(&db, ordered.clone());
+            assert_eq!(
+                transported.selections(&db),
+                &ordered,
+                "transport loses records"
+            );
+            assert_eq!(
+                transported.selection_for(&db, ordered[0].goal()),
+                ordered.last().copied(),
+                "the shared reader preserves inner-first precedence"
+            );
+        }
         let body = caller.body(&db).unwrap();
         let mut checked = 0;
         for expr in body.exprs(&db).keys() {

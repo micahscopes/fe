@@ -91,16 +91,28 @@ def premise_boundary(env, semantic, provisions):
         raise ValueError('record context restored a separate premise builder')
 
 
+def selection_transport_boundary(template):
+    code = goal_lookup.solver_budget.production_code(template)
+    methods = goal_lookup.bodies(code, 'with_selections')
+    if len(methods) != 1:
+        raise ValueError('expected one selection transport method')
+    body = methods[0]
+    if re.search(r'IndexMap|TraitInstId::new|\.(?:sort\w*|retain|dedup\w*)\s*\(', body):
+        raise ValueError('selection transport must not normalize accepted source choices')
+
+
 if __name__ == '__main__':
     source = (ROOT / 'crates/hir/src/analysis/ty/ty_check/expr.rs').read_text()
     env = (ROOT / 'crates/hir/src/analysis/ty/ty_check/env.rs').read_text()
     effects = (ROOT / 'crates/hir/src/analysis/ty/ty_check/effect_env.rs').read_text()
     semantic = (ROOT / 'crates/hir/src/core/semantic/mod.rs').read_text()
     provisions = (ROOT / 'crates/hir/src/core/semantic/provision.rs').read_text()
+    template = (ROOT / 'crates/hir/src/analysis/semantic/instance/template.rs').read_text()
     try:
         stacks = inventory(source)
         ownership(env, effects)
         premise_boundary(env, semantic, provisions)
+        selection_transport_boundary(template)
     except ValueError as error:
         sys.exit(str(error))
     body = goal_lookup.bodies(source, 'check_with')[0]
@@ -137,6 +149,16 @@ if __name__ == '__main__':
         except ValueError:
             continue
         sys.exit('duplicate-premise-builder mutation escaped the guard')
+    transport_source = goal_lookup.solver_budget.production_code(template)
+    transport_body = goal_lookup.bodies(transport_source, 'with_selections')[0]
+    for mutation in ['selections.sort_by_key(|s| s.goal());', 'selections.dedup();', 'let by_goal = IndexMap::new();']:
+        mutant = transport_source.replace(transport_body, '{' + mutation + transport_body[1:], 1)
+        assert mutant != transport_source
+        try:
+            selection_transport_boundary(mutant)
+        except ValueError:
+            continue
+        sys.exit('selection-renormalization mutation escaped the guard')
     print(f'with-scope stacks: {len(stacks)} (ceiling {BASELINE}, S4 target 1)')
     for stack in stacks:
         print(f'  {stack}')
