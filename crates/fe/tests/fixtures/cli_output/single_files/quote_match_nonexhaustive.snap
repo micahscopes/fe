@@ -4,6 +4,8 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/quote_match_nonexhaustive.fe
 ---
 === STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_match_nonexhaustive.fe
+
 error[8-0034]: non-exhaustive patterns: type `Mode` is not covered
    ┌─ quote_match_nonexhaustive.fe:21:40
    │

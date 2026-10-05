@@ -4,6 +4,8 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/enum_forged_record.fe
 ---
 === STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/enum_forged_record.fe
+
 file://<project>/crates/fe/tests/fixtures/cli_output/single_files/enum_forged_record.fe: error[2-0003]: `seal` is not visible
   ┌─ enum_forged_record.fe:4:44
   │

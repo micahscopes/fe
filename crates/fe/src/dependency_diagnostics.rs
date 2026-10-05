@@ -134,6 +134,19 @@ impl<'db> DependencyIssues<'db> {
         }
     }
 
+    /// The located errors of the dependencies. A dependency without source
+    /// files has no location and is left out.
+    pub(crate) fn complete_diagnostics(&self, db: &DriverDataBase) -> Vec<CompleteDiagnostic> {
+        let mut diagnostics = Vec::new();
+        for issue in &self.issues {
+            if let DependencyIssue::Diagnostics { hir, mir, .. } = issue {
+                diagnostics.extend(hir.complete_diags(db));
+                diagnostics.extend(mir.iter().cloned());
+            }
+        }
+        diagnostics
+    }
+
     pub(crate) fn format(&self, db: &DriverDataBase) -> String {
         let mut out = String::new();
         let _ = writeln!(out, "Error: {}", self.message());

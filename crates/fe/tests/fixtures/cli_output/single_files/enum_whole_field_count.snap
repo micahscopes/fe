@@ -4,6 +4,8 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/enum_whole_field_count.fe
 ---
 === STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/enum_whole_field_count.fe
+
 error[19-0001]: `field_count` needs a struct or a selected variant; `Shape` is an enum, so select a payload with `variant(record, i)`
   ┌─ enum_whole_field_count.fe:4:17
   │
@@ -12,7 +14,6 @@ error[19-0001]: `field_count` needs a struct or a selected variant; `Shape` is a
   ·
 9 │ #[generate(ingot::author::emit)]
   │ -------------------------------- generated here
-
 
 
 === EXIT CODE: 1 ===

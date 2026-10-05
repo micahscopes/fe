@@ -4,6 +4,8 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/quote_binder_same_group_nested.fe
 ---
 === STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_binder_same_group_nested.fe
+
 error[19-0004]: invalid generated declaration: binder group already bound in an enclosing pattern
    ┌─ quote_binder_same_group_nested.fe:14:44
    │
@@ -12,7 +14,6 @@ error[19-0004]: invalid generated declaration: binder group already bound in an 
    ·
 21 │ #[generate(ingot::author::emit)]
    │ -------------------------------- generated here
-
 
 
 === EXIT CODE: 1 ===

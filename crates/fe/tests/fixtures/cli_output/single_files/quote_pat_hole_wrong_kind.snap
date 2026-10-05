@@ -4,6 +4,8 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/quote_pat_hole_wrong_kind.fe
 ---
 === STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_pat_hole_wrong_kind.fe
+
 file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_pat_hole_wrong_kind.fe: error[8-0104]: this splice cannot stand for a pattern
    ┌─ quote_pat_hole_wrong_kind.fe:17:15
    │

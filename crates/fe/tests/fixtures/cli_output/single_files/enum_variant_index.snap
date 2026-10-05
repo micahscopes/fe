@@ -4,6 +4,8 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/enum_variant_index.fe
 ---
 === STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/enum_variant_index.fe
+
 error[19-0001]: variant index is out of bounds
   ┌─ enum_variant_index.fe:4:33
   │
@@ -12,7 +14,6 @@ error[19-0001]: variant index is out of bounds
   ·
 9 │ #[generate(ingot::author::emit)]
   │ -------------------------------- generated here
-
 
 
 === EXIT CODE: 1 ===

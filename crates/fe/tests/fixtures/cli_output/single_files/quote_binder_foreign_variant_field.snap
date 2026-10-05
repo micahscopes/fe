@@ -4,6 +4,8 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/quote_binder_foreign_variant_field.fe
 ---
 === STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_binder_foreign_variant_field.fe
+
 error[19-0001]: `.at` field belongs to another owner or variant
    ┌─ quote_binder_foreign_variant_field.fe:13:41
    │
@@ -12,7 +14,6 @@ error[19-0001]: `.at` field belongs to another owner or variant
    ·
 18 │ #[generate(ingot::author::emit)]
    │ -------------------------------- generated here
-
 
 
 === EXIT CODE: 1 ===

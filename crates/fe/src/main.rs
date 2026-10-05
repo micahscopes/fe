@@ -8,6 +8,7 @@ mod dependency_diagnostics;
 mod doc;
 #[cfg(feature = "doc-server")]
 mod doc_serve;
+mod generation;
 mod metadata_input;
 #[cfg(feature = "cranelift")]
 mod native;

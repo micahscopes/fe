@@ -4,6 +4,8 @@ expression: output
 input_file: tests/fixtures/cli_output/single_files/quote_impl_const_type_error.fe
 ---
 === STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_impl_const_type_error.fe
+
 error[8-0000]: type mismatch
    ┌─ quote_impl_const_type_error.fe:11:37
    │

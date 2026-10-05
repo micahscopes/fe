@@ -55,6 +55,20 @@ pub fn check(
         .set_profile(&mut db)
         .to(profile.into());
 
+    // Refuse a directory export before anything is staged on disk.
+    let resolved = resolve_cli_target(&mut db, path, force_standalone);
+    if decisions_out.is_some()
+        && let Ok(CliTarget::Directory(_)) = resolved
+    {
+        return Err(if path.is_dir() {
+            "--decisions-out takes a single .fe file, not a directory".into()
+        } else {
+            "--decisions-out takes a single .fe file; pass --standalone to check a file inside \
+             an ingot on its own"
+                .into()
+        });
+    }
+
     let report_root = report_out
         .map(|out| -> Result<_, String> {
             let staging = create_report_staging_dir("target/fe-check-report-staging")?;
@@ -77,7 +91,7 @@ pub fn check(
         })
         .transpose()?;
 
-    let target = match resolve_cli_target(&mut db, path, force_standalone) {
+    let target = match resolved {
         Ok(target) => target,
         Err(message) => {
             if let Some(report) = report_ctx.as_ref() {
@@ -126,22 +140,23 @@ pub fn check(
                 eprintln!("Error: {INGOT_REQUIRES_WORKSPACE_ROOT}");
                 true
             } else {
-                check_single_file(
-                    &mut db,
-                    &file_path,
-                    dump_mir,
-                    report_ctx.as_ref(),
-                    decisions_out,
-                )
+                if let Some(output) = decisions_out
+                    && let Err(error) = remove_old_export(output)
+                {
+                    eprintln!("Error: {error}");
+                    true
+                } else {
+                    check_single_file(
+                        &mut db,
+                        &file_path,
+                        dump_mir,
+                        report_ctx.as_ref(),
+                        decisions_out,
+                    )
+                }
             }
         }
         CliTarget::Directory(dir_path) => {
-            if decisions_out.is_some() {
-                return Err(
-                    "format-v1 decision export currently requires a standalone file (--standalone)"
-                        .into(),
-                );
-            }
             check_directory(&mut db, &dir_path, ingot, dump_mir, report_ctx.as_ref())
         }
     };
@@ -280,8 +295,8 @@ fn check_ingot_url(
         return true;
     }
 
-    let mut seen = HashSet::new();
-    check_ingot_and_dependencies(db, ingot_url, dump_mir, report, &mut seen)
+    let mut checked = CheckedIngots::default();
+    check_ingot_and_dependencies(db, ingot_url, dump_mir, report, &mut checked)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -343,7 +358,7 @@ fn check_workspace(
     };
     let selected_member_paths: HashSet<Utf8PathBuf> = selected_member_paths.into_iter().collect();
 
-    let mut seen = HashSet::new();
+    let mut checked = CheckedIngots::default();
     let mut has_errors = false;
     for member in members {
         let member_path = dir_path.join(member.path.as_str());
@@ -352,11 +367,21 @@ fn check_workspace(
         }
         let member_url = member.url;
         let member_has_errors =
-            check_ingot_and_dependencies(db, &member_url, dump_mir, report, &mut seen);
+            check_ingot_and_dependencies(db, &member_url, dump_mir, report, &mut checked);
         has_errors |= member_has_errors;
     }
 
     has_errors
+}
+
+/// What earlier workspace members already covered.
+#[derive(Default)]
+struct CheckedIngots {
+    /// Ingots whose diagnostics were already reported.
+    seen: HashSet<Url>,
+    /// Generation errors already printed. Members that share a dependency fail
+    /// generation with the same error.
+    generation_errors: HashSet<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -365,20 +390,21 @@ fn check_ingot_and_dependencies(
     ingot_url: &Url,
     dump_mir: bool,
     report: Option<&ReportContext>,
-    seen: &mut HashSet<Url>,
+    checked: &mut CheckedIngots,
 ) -> bool {
-    let prepared = match driver::elaboration::prepare_target(db, ingot_url) {
+    if !checked.seen.insert(ingot_url.clone()) {
+        return false;
+    }
+    let prepared = match crate::generation::prepare(db, ingot_url) {
         Ok(prepared) => prepared,
         Err(error) => {
-            eprintln!("{}", error.render(db));
+            if checked.generation_errors.insert(error.render(db)) {
+                crate::generation::report(db, &error, None);
+            }
             return true;
         }
     };
-    let db = prepared.as_ref().unwrap_or(db);
-
-    if !seen.insert(ingot_url.clone()) {
-        return false;
-    }
+    let db = &*prepared;
 
     let Some(ingot) = db.workspace().containing_ingot(db, ingot_url.clone()) else {
         eprintln!("Error: Could not resolve ingot {ingot_url}");
@@ -390,7 +416,7 @@ fn check_ingot_and_dependencies(
         return true;
     }
 
-    let diagnostics = CompilationDiagnostics::for_ingot_with_seen(db, ingot, seen);
+    let diagnostics = CompilationDiagnostics::for_ingot_with_seen(db, ingot, &mut checked.seen);
     let mut has_errors = false;
 
     if !diagnostics.hir.is_empty() {
@@ -463,14 +489,26 @@ fn check_single_file(
     // Add the file to the workspace
     db.workspace().touch(db, file_url.clone(), Some(content));
 
-    let prepared = match driver::elaboration::prepare_target(db, &file_url) {
+    let prepared = match crate::generation::prepare(db, &file_url) {
         Ok(prepared) => prepared,
         Err(error) => {
-            eprintln!("{}", error.render(db));
+            crate::generation::report(db, &error, Some(&file_url));
+            if let Some(output) = decisions_out
+                && let Some(file) = db.workspace().get(db, &file_url)
+            {
+                let diagnostic = error.diagnostic(db);
+                let records =
+                    fe::decision_export::generation_failure_records(db, file, diagnostic.as_ref());
+                if let Err(error) =
+                    fe::decision_export::write_records(&records, output.as_std_path())
+                {
+                    eprintln!("Error: {error}");
+                }
+            }
             return true;
         }
     };
-    let db = prepared.as_ref().unwrap_or(db);
+    let db = &*prepared;
 
     // Try to get the file and check it for errors
     if let Some(file) = db.workspace().get(db, &file_url) {
@@ -509,13 +547,9 @@ fn check_single_file(
         if let Some(output) = decisions_out {
             let mut completed = diagnostics.hir.complete_diags(db);
             completed.extend(diagnostics.mir.iter().cloned());
-            if let Err(error) = fe::decision_export::write_module(
-                db,
-                top_mod,
-                file,
-                &completed,
-                output.as_std_path(),
-            ) {
+            completed.extend(diagnostics.dependencies.complete_diagnostics(db));
+            let records = fe::decision_export::module_records(db, top_mod, file, &completed);
+            if let Err(error) = fe::decision_export::write_records(&records, output.as_std_path()) {
                 eprintln!("Error: {error}");
                 return true;
             }
@@ -535,6 +569,18 @@ fn check_single_file(
     }
 
     false
+}
+
+/// Remove an export left by an earlier run, so a run that stops before writing
+/// one leaves no file rather than a stale one.
+fn remove_old_export(output: &Utf8PathBuf) -> Result<(), String> {
+    match std::fs::remove_file(output) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot remove old decision export {output}: {error}"
+        )),
+    }
 }
 
 fn dump_module_mir(db: &DriverDataBase, top_mod: TopLevelMod<'_>) {

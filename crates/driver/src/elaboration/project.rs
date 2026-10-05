@@ -178,9 +178,11 @@ impl ElaborationError {
         Some((line, column))
     }
 
-    pub fn render(&self, db: &DriverDataBase) -> String {
-        if let Some(rendered) = self.rendered() {
-            return rendered;
+    /// The error as a located diagnostic, when it has a source span and was not
+    /// already rendered by the provider.
+    pub fn diagnostic(&self, db: &DriverDataBase) -> Option<CompleteDiagnostic> {
+        if self.rendered().is_some() {
+            return None;
         }
         let message = self.message();
         let quote = self
@@ -191,29 +193,39 @@ impl ElaborationError {
             .span
             .as_ref()
             .and_then(|range| source_span(db, &self.url, range));
-        if let Some(primary) = quote.clone().or_else(|| invocation.clone()) {
-            let mut labels = vec![SubDiagnostic::new(
-                LabelStyle::Primary,
-                message.clone(),
-                Some(primary),
-            )];
-            if quote.is_some()
-                && let Some(invocation) = invocation
-            {
-                labels.push(SubDiagnostic::new(
-                    LabelStyle::Secondary,
-                    "generated here".into(),
-                    Some(invocation),
-                ));
-            }
-            return db.format_complete_diagnostics(&[CompleteDiagnostic::new(
-                Severity::Error,
-                message,
-                labels,
-                Vec::new(),
-                GlobalErrorCode::new(DiagnosticPass::Generation, self.code()),
-            )]);
+        let primary = quote.clone().or_else(|| invocation.clone())?;
+        let mut labels = vec![SubDiagnostic::new(
+            LabelStyle::Primary,
+            message.clone(),
+            Some(primary),
+        )];
+        if quote.is_some()
+            && let Some(invocation) = invocation
+        {
+            labels.push(SubDiagnostic::new(
+                LabelStyle::Secondary,
+                "generated here".into(),
+                Some(invocation),
+            ));
         }
+        Some(CompleteDiagnostic::new(
+            Severity::Error,
+            message,
+            labels,
+            Vec::new(),
+            GlobalErrorCode::new(DiagnosticPass::Generation, self.code()),
+        ))
+    }
+
+    /// Plain text for reports and test output.
+    pub fn render(&self, db: &DriverDataBase) -> String {
+        if let Some(rendered) = self.rendered() {
+            return rendered;
+        }
+        if let Some(diagnostic) = self.diagnostic(db) {
+            return db.format_complete_diagnostics(&[diagnostic]);
+        }
+        let message = self.message();
         match self.position(db) {
             Some((line, column)) => {
                 format!("{}:{line}:{column}: {}", self.url, message)
