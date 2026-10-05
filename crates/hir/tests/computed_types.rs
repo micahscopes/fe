@@ -95,6 +95,7 @@ fn consume(x: Tree<3>) -> Pair<Term<3>, Pair<Term<2>, Pair<Term<1>, bool>>> { x 
         let (top, _) = db.top_mod(file);
         let actual = format_diagnostics(&db, &db.run_on_top_mod(top));
         assert_eq!(actual.is_empty(), accepted, "{actual}");
+        assert!(accepted || actual.contains("type mismatch"), "{actual}");
         let mut fresh = HirAnalysisTestDb::default();
         let fresh_file = fresh.new_stand_alone(Utf8PathBuf::from("payload_edit.fe"), &source);
         let (fresh_top, _) = fresh.top_mod(fresh_file);
@@ -174,6 +175,7 @@ fn generic<T: Item>(x: Tree<T, 2>) -> <T as Item>::Out { x }
             let (top, _) = db.top_mod(file);
             let actual = format_diagnostics(&db, &db.run_on_top_mod(top));
             assert_eq!(actual.is_empty(), accepted, "{actual}");
+            assert!(accepted || actual.contains("type mismatch"), "{actual}");
             let mut fresh = HirAnalysisTestDb::default();
             let fresh_file =
                 fresh.new_stand_alone(Utf8PathBuf::from("projection_body.fe"), &source);
@@ -292,6 +294,10 @@ fn symbolic_computed_membership_requires_component_and_constructor_premises() {
         let (top, _) = db.top_mod(file);
         let actual = format_diagnostics(&db, &db.run_on_top_mod(top));
         assert_eq!(actual.is_empty(), accepted, "{actual}");
+        assert!(
+            accepted || actual.contains("doesn't implement `Reduce`"),
+            "{actual}"
+        );
         let mut fresh = HirAnalysisTestDb::default();
         let fresh_file = fresh.new_stand_alone(Utf8PathBuf::from("symbolic_membership.fe"), text);
         let (fresh_top, _) = fresh.top_mod(fresh_file);
@@ -356,6 +362,10 @@ fn symbolic_induction_checks_constructor_bounds_in_recursive_arms() {
         let (top, _) = db.top_mod(file);
         let actual = format_diagnostics(&db, &db.run_on_top_mod(top));
         assert_eq!(actual.is_empty(), accepted, "{actual}");
+        assert!(
+            accepted || actual.contains("doesn't implement `Reduce`"),
+            "{actual}"
+        );
         let mut fresh = HirAnalysisTestDb::default();
         let fresh_file = fresh.new_stand_alone("constructor.fe".into(), text);
         let (fresh_top, _) = fresh.top_mod(fresh_file);
