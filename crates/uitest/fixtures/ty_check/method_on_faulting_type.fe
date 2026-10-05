@@ -1,0 +1,6 @@
+// A receiver type whose const faults reports the fault, not a missing method.
+struct S<const N: usize> {}
+trait Pick { fn pick() -> u256 }
+struct W<T> {}
+impl Pick for W<bool> { fn pick() -> u256 { 1 } }
+fn go() -> u256 { W<S<{1 / 0}>>::pick() }

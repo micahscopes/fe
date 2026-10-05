@@ -1381,6 +1381,13 @@ pub enum ImplDiag<'db> {
         is_nominal: bool,
     },
 
+    /// `impl<const N: usize> Tree<N>` for a computed type `Tree`: the target
+    /// has no fixed shape while its subject is generic.
+    InherentImplOnGenericComputedType {
+        primary: DynLazySpan<'db>,
+        ty: TyId<'db>,
+    },
+
     TypeNotDefinedInTrait {
         primary: DynLazySpan<'db>,
         trait_: Trait<'db>,
@@ -1520,6 +1527,7 @@ impl ImplDiag<'_> {
             Self::TypeNotDefinedInTrait { .. } => 23,
             Self::MethodConstPredicateMismatch { .. } => 29,
             Self::NamedCopyImpl { .. } => 30,
+            Self::InherentImplOnGenericComputedType { .. } => 31,
         }
     }
 }

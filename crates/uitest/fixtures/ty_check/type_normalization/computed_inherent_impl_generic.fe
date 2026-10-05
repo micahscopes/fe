@@ -1,0 +1,14 @@
+// An inherent impl on a computed type needs a literal subject.
+pub struct Node<T> {}
+recursive type fn Tree<const N: usize>() -> (*) {
+    match N {
+        0 => bool
+        _ => Node<Tree<{N - 1}>>
+    }
+}
+impl<const N: usize> Tree<N> {
+    fn depth(self) -> usize { N }
+}
+impl Tree<1> {
+    fn one(self) -> usize { 1 }
+}

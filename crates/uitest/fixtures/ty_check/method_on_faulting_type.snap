@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/method_on_faulting_type.fe
+---
+error[3-0025]: division by zero in const context
+  ┌─ method_on_faulting_type.fe:6:23
+  │
+6 │ fn go() -> u256 { W<S<{1 / 0}>>::pick() }
+  │                       ^^^^^^^ cannot divide by zero

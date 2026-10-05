@@ -1126,6 +1126,19 @@ impl DiagnosticVoucher for PathResDiag<'_> {
                 method_name,
                 receiver,
             } => {
+                // A receiver whose type faulted while being computed: report
+                // the fault, not the missing method on an invalid type.
+                if let Either::Left(ty) = receiver
+                    && let Some(cause) =
+                        crate::analysis::ty::ty_error::first_invalid_ty_cause(db, *ty)
+                    && crate::analysis::ty::ty_error::is_const_fault(&cause)
+                    && let Some(diag) = crate::analysis::ty::ty_error::diag_from_invalid_cause(
+                        primary.clone(),
+                        &cause,
+                    )
+                {
+                    return diag.to_complete(db);
+                }
                 let (recv_name, recv_ty, recv_kind) = match receiver {
                     Either::Left(ty) => (
                         ty.pretty_print(db),
@@ -5602,8 +5615,8 @@ impl DiagnosticVoucher for TraitConstraintDiag<'_> {
 
             Self::NormalizationFault(span) => primary_diag(
                 severity,
-                "type or constant normalization failed during trait matching",
-                "a ground value needed to choose an implementation could not be normalized",
+                "could not compute a type while choosing an implementation",
+                "choosing an implementation here needs a type whose computation failed",
                 span.resolve(db),
                 error_code,
             ),
@@ -6232,6 +6245,24 @@ impl DiagnosticVoucher for ImplDiag<'_> {
                     },
                 ],
                 notes: vec![],
+                error_code,
+            },
+
+            Self::InherentImplOnGenericComputedType { primary, ty } => CompleteDiagnostic {
+                severity,
+                message: "invalid inherent implementation".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: format!(
+                        "`{}` cannot be computed while its subject is generic",
+                        ty.pretty_print(db)
+                    ),
+                    span: primary.resolve(db),
+                }],
+                notes: vec![
+                    "an inherent impl on a computed type needs a literal subject, such as `1`"
+                        .to_string(),
+                ],
                 error_code,
             },
 

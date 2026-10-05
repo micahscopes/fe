@@ -740,6 +740,19 @@ impl<'db> Impl<'db> {
             InherentImplAdmissibility::Admissible { .. } => {}
             InherentImplAdmissibility::NotAllowed { ty, is_nominal } => {
                 let base = ty.base_ty(db);
+                if matches!(
+                    base.data(db),
+                    ty::ty_def::TyData::TyBase(ty::ty_def::TyBase::TypeFn(_))
+                ) {
+                    out.push(
+                        ImplDiag::InherentImplOnGenericComputedType {
+                            primary: self.span().target_ty().into(),
+                            ty: base,
+                        }
+                        .into(),
+                    );
+                    return out;
+                }
                 out.push(
                     ImplDiag::InherentImplIsNotAllowed {
                         primary: self.span().target_ty().into(),
