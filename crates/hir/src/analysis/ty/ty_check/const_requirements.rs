@@ -3108,6 +3108,100 @@ fn caller() {
     }
 
     #[test]
+    fn context_view_reads_evidence_frames_and_restores_outer_premises() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "evidence_context_positions.fe".into(),
+            "use core::obligations::Evidence
+trait Compute {}
+trait Inspect {}
+const fn outer<T>() {}
+const fn inner<T>() {}
+const fn restored<T>() {}
+const fn outside<T>() {}
+const fn caller<T>(_ first: Evidence<Compute<T>>, _ second: Evidence<Inspect<T>>) {
+    with (first) {
+        outer<T>()
+        with (second) { inner<T>() }
+        restored<T>()
+    }
+    outside<T>()
+}",
+        );
+        let (top, _) = db.top_mod(file);
+        let caller = top
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|func| {
+                func.name(&db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(&db) == "caller")
+            })
+            .unwrap();
+        let owner = super::super::BodyOwner::Func(caller);
+        let inferred = super::super::inferred_body_with_selections(&db, owner, &[]);
+        assert!(inferred.result.0.is_empty(), "{:?}", inferred.result.0);
+        let typed = &inferred.result.1;
+        let goals = typed
+            .with_choices()
+            .map(|choice| match choice.outcome().unwrap() {
+                crate::core::semantic::Provision::Evidence(_, goal) => goal,
+                _ => panic!("expected evidence opening"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(goals.len(), 2);
+        let body = caller.body(&db).unwrap();
+        let canonical = crate::semantic::param_env(&db, caller.into());
+        assert!(goals.iter().all(|goal| !canonical.list(&db).contains(goal)));
+        // An opening does not establish its own premise while its value is evaluated.
+        // The inner opening still sees evidence introduced by the outer frame.
+        for choice in typed.with_choices() {
+            let crate::core::semantic::Provision::Evidence(_, goal) = choice.outcome().unwrap()
+            else {
+                unreachable!();
+            };
+            let expected = if goal == goals[0] {
+                &[][..]
+            } else {
+                &goals[..1]
+            };
+            let mut premises = canonical.list(&db).to_vec();
+            premises.extend_from_slice(expected);
+            let expected =
+                crate::analysis::ty::PredicateListId::new(&db, premises).extend_all_bounds(&db);
+            let context =
+                crate::semantic::context_at(&db, body.scope(), Some((typed, choice.expression())));
+            assert_eq!(context.assumptions(&db), expected, "opening prefix");
+        }
+        let mut checked = 0;
+        for expr in body.exprs(&db).keys() {
+            let Some(callable) = typed.callable_expr(expr) else {
+                continue;
+            };
+            let crate::hir_def::CallableDef::Func(func) = callable.callable_def() else {
+                continue;
+            };
+            let name = func.name(&db).to_opt().unwrap();
+            let expected = match name.data(&db).as_str() {
+                "outer" | "restored" => &goals[..1],
+                "inner" => goals.as_slice(),
+                "outside" => &[],
+                _ => continue,
+            };
+            let context = crate::semantic::context_at(&db, body.scope(), Some((typed, expr)));
+            let mut premises = canonical.list(&db).to_vec();
+            premises.extend_from_slice(expected);
+            let expected =
+                crate::analysis::ty::PredicateListId::new(&db, premises).extend_all_bounds(&db);
+            assert_eq!(context.assumptions(&db), expected, "{}", name.data(&db));
+            assert!(context.selections(&db).is_empty());
+            checked += 1;
+        }
+        assert_eq!(checked, 4);
+    }
+
+    #[test]
     fn requirement_reports_read_the_retained_outcome() {
         let source = "fn read<const N: usize>() -> u256 where N > 0 { 7 }\nfn caller() -> u256 { read<0>() }\n";
         let mut db = HirAnalysisTestDb::default();

@@ -59,6 +59,16 @@ pub(crate) struct Frame<'db, Data = ()> {
     data: Data,
 }
 
+impl<'db> Frame<'db> {
+    /// Reading accepted opening records does not validate or decide again.
+    fn from_records(provisions: Vec<Provision<'db>>) -> Self {
+        Self {
+            provisions,
+            data: (),
+        }
+    }
+}
+
 impl<'db, Data> Frame<'db, Data> {
     /// Associated equalities constrain an answer; they do not create another slot.
     pub fn insert(
@@ -163,4 +173,127 @@ impl<'db, Data> Chain<'db, Data> {
     ) -> Option<Provision<'db>> {
         super::lookup_trait_goal(db, goal, self.iter(), |p| p.goal())
     }
+}
+
+/// Syntax only: a position's innermost with-expression and binding prefix.
+/// Parent links share the enclosing path, without copying semantic provisions.
+#[derive(Debug, PartialEq, Eq)]
+struct OpeningPositions {
+    positions: rustc_hash::FxHashMap<ExprId, (ExprId, usize)>,
+    parents: rustc_hash::FxHashMap<ExprId, (ExprId, usize)>,
+}
+
+#[salsa::tracked(return_ref)]
+fn opening_positions<'db>(
+    db: &'db dyn crate::HirDb,
+    body: crate::hir_def::Body<'db>,
+) -> OpeningPositions {
+    use crate::{hir_def::Partial, visitor::Visitor};
+    struct Index<'db> {
+        body: crate::hir_def::Body<'db>,
+        current: Option<(ExprId, usize)>,
+        result: OpeningPositions,
+    }
+    impl<'db> Visitor<'db> for Index<'db> {
+        fn visit_item(
+            &mut self,
+            _: &mut crate::visitor::VisitorCtxt<'db, crate::span::item::LazyItemSpan<'db>>,
+            _: crate::hir_def::ItemKind<'db>,
+        ) {
+        }
+
+        fn visit_expr(
+            &mut self,
+            ctxt: &mut crate::visitor::VisitorCtxt<'db, crate::span::expr::LazyExprSpan<'db>>,
+            expr: ExprId,
+            data: &crate::hir_def::Expr<'db>,
+        ) {
+            if ctxt.body() != self.body {
+                return;
+            }
+            if let Some(current) = self.current {
+                self.result.positions.insert(expr, current);
+            }
+            let crate::hir_def::Expr::With(bindings, inner) = data else {
+                crate::visitor::walk_expr(self, ctxt, expr);
+                return;
+            };
+            let outer = self.current;
+            if let Some(outer) = outer {
+                self.result.parents.insert(expr, outer);
+            }
+            for (prefix, binding) in bindings.iter().enumerate() {
+                self.current = Some((expr, prefix));
+                let Partial::Present(data) = binding.value.data(ctxt.db(), self.body) else {
+                    continue;
+                };
+                let mut child = crate::visitor::VisitorCtxt::with_expr(
+                    ctxt.db(),
+                    self.body.scope(),
+                    self.body,
+                    binding.value,
+                );
+                self.visit_expr(&mut child, binding.value, data);
+            }
+            self.current = Some((expr, bindings.len()));
+            if let Partial::Present(data) = inner.data(ctxt.db(), self.body) {
+                let mut child = crate::visitor::VisitorCtxt::with_expr(
+                    ctxt.db(),
+                    self.body.scope(),
+                    self.body,
+                    *inner,
+                );
+                self.visit_expr(&mut child, *inner, data);
+            }
+            self.current = outer;
+        }
+    }
+    let mut index = Index {
+        body,
+        current: None,
+        result: OpeningPositions {
+            positions: rustc_hash::FxHashMap::default(),
+            parents: rustc_hash::FxHashMap::default(),
+        },
+    };
+    if let Partial::Present(data) = body.expr(db).data(db, body) {
+        let mut ctxt =
+            crate::visitor::VisitorCtxt::with_expr(db, body.scope(), body, body.expr(db));
+        index.visit_expr(&mut ctxt, body.expr(db), data);
+    }
+    index.result
+}
+
+pub(super) fn recorded_chain_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    typed: &crate::analysis::ty::ty_check::TypedBody<'db>,
+    expr: ExprId,
+) -> Chain<'db> {
+    let mut chain = Chain::default();
+    if typed.with_choices().len() == 0 {
+        return chain;
+    }
+    let body = typed
+        .body()
+        .expect("opening records must retain their HIR body");
+    let index = opening_positions(db, body);
+    let mut position = index.positions.get(&expr).copied();
+    let mut frames = Vec::new();
+    while let Some((frame, prefix)) = position {
+        frames.push((frame, prefix));
+        position = index.parents.get(&frame).copied();
+    }
+    for (frame, prefix) in frames.into_iter().rev() {
+        let crate::hir_def::Partial::Present(crate::hir_def::Expr::With(bindings, _)) =
+            frame.data(db, body)
+        else {
+            unreachable!("opening position must name a with-expression");
+        };
+        let provisions = bindings[..prefix]
+            .iter()
+            .filter_map(|binding| typed.with_choice(binding.value)?.outcome().ok())
+            .collect();
+        chain.within(Frame::from_records(provisions));
+    }
+    chain
 }

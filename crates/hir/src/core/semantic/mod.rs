@@ -275,6 +275,27 @@ pub(crate) fn context_at<'db>(
         ItemKind::Func(_) => param_env(db, enclosing.item()),
         item => constraints_for(db, item),
     };
+    let assumptions = if let Some((typed, expr)) =
+        position.filter(|(typed, _)| typed.with_choices().len() != 0)
+    {
+        let chain = provision::recorded_chain_at(db, typed, expr);
+        let mut evidence = chain
+            .visible(db)
+            .filter_map(|provision| match provision {
+                Provision::Evidence(_, goal) => Some(goal),
+                Provision::Named(_) => None,
+            })
+            .peekable();
+        if evidence.peek().is_none() {
+            assumptions
+        } else {
+            let mut premises = assumptions.list(db).to_vec();
+            premises.extend(evidence);
+            PredicateListId::new(db, premises).extend_all_bounds(db)
+        }
+    } else {
+        assumptions
+    };
     let selections = position
         .map(|(typed, expr)| typed.selections_for_expr(db, expr).to_vec())
         .unwrap_or_default();

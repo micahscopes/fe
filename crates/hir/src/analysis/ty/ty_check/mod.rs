@@ -4341,6 +4341,10 @@ impl<'db> TypedBody<'db> {
         self.decisions.openings.values()
     }
 
+    pub(crate) fn with_choice(&self, expression: ExprId) -> Option<&WithChoice<'db>> {
+        self.decisions.openings.get(&expression)
+    }
+
     /// Accepted solver/selection answers, finalized with this body's inference.
     pub fn trait_choices(
         &self,
