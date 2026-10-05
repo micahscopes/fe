@@ -327,11 +327,20 @@ pub(crate) fn semantic_callee_key_with_effect_providers<'db>(
     origin: SemOrigin<'db>,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
     let caller = SemanticInstance::new(db, caller_key);
+    let lexical_selections = match origin {
+        SemOrigin::Expr(expr) => crate::core::semantic::call_selections_at(
+            db,
+            &crate::analysis::ty::ty_check::infer_body(db, caller_key.owner(db)).1,
+            expr,
+        ),
+        _ => Vec::new(),
+    };
     semantic_callee_key_with_assumptions(
         db,
         Some(caller),
         caller_key.impl_env(db),
         callable,
+        &lexical_selections,
         effect_args,
         effect_providers,
         caller.assumptions(db),
@@ -350,11 +359,20 @@ pub(crate) fn provisional_semantic_callee_key<'db>(
     inherit_trait_selection: bool,
     origin: SemOrigin<'db>,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
+    let lexical_selections = match origin {
+        SemOrigin::Expr(expr) => crate::core::semantic::call_selections_at(
+            db,
+            &crate::analysis::ty::ty_check::infer_body(db, caller_key.owner(db)).1,
+            expr,
+        ),
+        _ => Vec::new(),
+    };
     semantic_callee_key_with_assumptions(
         db,
         Some(SemanticInstance::new(db, caller_key)),
         caller_key.impl_env(db),
         callable,
+        &lexical_selections,
         effect_args,
         callable.effect_providers(),
         assumptions,
@@ -405,6 +423,7 @@ pub fn generated_callee_key<'db>(
         None,
         ImplEnv::new(db, scope, assumptions, Vec::new()),
         &callable,
+        &[],
         &[],
         &[],
         assumptions,
@@ -564,6 +583,7 @@ fn semantic_callee_key_with_assumptions<'db>(
     caller: Option<SemanticInstance<'db>>,
     impl_env: ImplEnv<'db>,
     callable: &Callable<'db>,
+    lexical_selections: &[crate::analysis::semantic::SelectedApplication<'db>],
     effect_args: &[ResolvedEffectArg<'db>],
     effect_providers: &[EffectProviderSpecialization<'db>],
     assumptions: PredicateListId<'db>,
@@ -580,7 +600,7 @@ fn semantic_callee_key_with_assumptions<'db>(
             .selections(db)
             .iter()
             .copied()
-            .chain(callable.context.selections(db).iter().copied())
+            .chain(lexical_selections.iter().copied())
             .collect(),
     );
     let requirements = callable.selection_requirements(db);
@@ -633,7 +653,13 @@ fn semantic_callee_key_with_assumptions<'db>(
                     if inherit_trait_selection {
                         impl_env
                     } else {
-                        callable.context
+                        ImplEnv::new_with_selections(
+                            db,
+                            callable.callable_def.scope(),
+                            PredicateListId::empty_list(db),
+                            Vec::new(),
+                            lexical_selections.to_vec(),
+                        )
                     },
                 ),
             }

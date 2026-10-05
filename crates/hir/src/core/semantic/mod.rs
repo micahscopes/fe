@@ -287,6 +287,34 @@ pub(crate) fn context_at<'db>(
     )
 }
 
+/// The selections a call is allowed to pass on at its recorded position.
+/// Freeze against the checked declaration before generic specialization, so
+/// an unrelated concrete choice cannot become applicable to a rigid parameter.
+pub(crate) fn call_selections_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    typed: &crate::analysis::ty::ty_check::TypedBody<'db>,
+    expr: crate::hir_def::ExprId,
+) -> Vec<crate::analysis::semantic::SelectedApplication<'db>> {
+    let selections = typed.selections_for_expr(db, expr);
+    if selections.is_empty() {
+        return Vec::new();
+    }
+    let Some(callable) = typed.callable_expr(expr) else {
+        return Vec::new();
+    };
+    let requirements = callable.selection_requirements(db);
+    selections
+        .iter()
+        .copied()
+        .filter(|selection| {
+            requirements
+                .list(db)
+                .iter()
+                .any(|goal| selection.matches(db, *goal))
+        })
+        .collect()
+}
+
 /// Trait header validation must not assume `Self: Trait` yet.
 ///
 /// The synthetic self-predicate from [`constraints_for`] is only valid once the trait

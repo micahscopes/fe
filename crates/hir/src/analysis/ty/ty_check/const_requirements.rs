@@ -1537,11 +1537,7 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
             .filter(|_| args.iter().any(|ty| ty.has_param(db)));
         // Conditions must see the same lexical implementation choices as
         // the resolved call, including choices introduced by `with`.
-        let selections = self
-            .typed
-            .callable_expr(expr)
-            .map(|callable| callable.context.selections(db).as_slice())
-            .unwrap_or_default();
+        let selections = crate::semantic::call_selections_at(db, self.typed, expr);
         for &predicate in predicates
             .iter()
             .filter(|&&predicate| checked_at_uses(db, predicate))
