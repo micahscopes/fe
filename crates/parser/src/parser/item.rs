@@ -852,11 +852,22 @@ impl super::Parse for ImplScope {
 
         parse_type(parser, None)?;
 
-        if is_impl_trait
-            && parser.bump_if(SyntaxKind::AsKw)
-            && parser.find(SyntaxKind::Ident, ExpectedKind::Name(SyntaxKind::ImplTrait))?
-        {
-            parser.bump();
+        // `as Name` names a trait impl. A malformed name is reported here and
+        // the rest of the impl is still parsed.
+        if parser.bump_if(SyntaxKind::AsKw) {
+            if !is_impl_trait {
+                parser.error("only trait impls can be named");
+            }
+            if parser.bump_if(SyntaxKind::Ident) {
+                if matches!(
+                    parser.current_kind(),
+                    Some(SyntaxKind::Colon2 | SyntaxKind::Lt)
+                ) {
+                    parser.error("an impl name is a single identifier");
+                }
+            } else {
+                parser.error("expected a name for the impl after `as`");
+            }
         }
 
         parser.expect_and_pop_recovery_stack()?;
