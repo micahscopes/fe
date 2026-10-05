@@ -34,7 +34,7 @@ use url::Url;
 use super::{ElaborationErrorKind, EvaluationFault, RecordInput, invocations};
 use crate::DriverDataBase;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ElaborationError {
     pub url: Box<Url>,
     pub kind: ElaborationErrorKind,

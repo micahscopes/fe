@@ -136,7 +136,11 @@ fn accepted(fixture: Fixture<&str>) {
             values.push_str(&format!("{name}() = {}\n", evaluate(&db, file, &name)));
         }
     }
-    snap_test!(values, fixture.path());
+    // Different fixture directories can reuse a basename. This assertion has
+    // its own snapshot path and must not inherit the process-wide name counter.
+    test_utils::_macro_support::_insta::allow_duplicates! {
+        snap_test!(values, fixture.path());
+    }
 }
 
 #[test]

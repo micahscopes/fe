@@ -913,3 +913,37 @@ fn cli_export_refuses_ingots_before_staging_a_report() {
         assert!(!temp.path().join("out.jsonl").exists());
     }
 }
+
+#[test]
+fn cli_export_preserves_its_input_source_and_aliases() {
+    use std::process::Command;
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("input.fe");
+    let contents = "pub fn f() {}\n";
+    std::fs::write(&source, contents).unwrap();
+    let mut outputs = vec![source.clone()];
+    #[cfg(unix)]
+    {
+        let alias = temp.path().join("alias.fe");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        outputs.push(alias);
+    }
+    for output in outputs {
+        let result = Command::new(env!("CARGO_BIN_EXE_fe"))
+            .args(["check", "--standalone", "--report", "--decisions-out"])
+            .arg(&output)
+            .arg(&source)
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(result.status.code(), Some(1), "{stderr}");
+        assert!(
+            stderr.contains("must differ from the input source file"),
+            "{stderr}"
+        );
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), contents);
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), contents);
+        assert!(!temp.path().join("target").exists(), "{stderr}");
+    }
+}

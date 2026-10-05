@@ -69,6 +69,14 @@ pub fn check(
         });
     }
 
+    if let (Some(output), Ok(CliTarget::StandaloneFile(input))) = (decisions_out, &resolved)
+        && let (Ok(input), Ok(output)) =
+            (std::fs::canonicalize(input), std::fs::canonicalize(output))
+        && input == output
+    {
+        return Err("--decisions-out must differ from the input source file".into());
+    }
+
     let report_root = report_out
         .map(|out| -> Result<_, String> {
             let staging = create_report_staging_dir("target/fe-check-report-staging")?;
@@ -381,7 +389,7 @@ struct CheckedIngots {
     seen: HashSet<Url>,
     /// Generation errors already printed. Members that share a dependency fail
     /// generation with the same error.
-    generation_errors: HashSet<String>,
+    generation_errors: Vec<driver::elaboration::ElaborationError>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -398,8 +406,9 @@ fn check_ingot_and_dependencies(
     let prepared = match crate::generation::prepare(db, ingot_url) {
         Ok(prepared) => prepared,
         Err(error) => {
-            if checked.generation_errors.insert(error.render(db)) {
+            if !checked.generation_errors.contains(&error) {
                 crate::generation::report(db, &error, None);
+                checked.generation_errors.push(error);
             }
             return true;
         }
