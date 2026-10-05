@@ -1,6 +1,10 @@
 //! Lexical trait provisions. Insertion is local to a frame; lookup is inner-first.
 use crate::{
-    analysis::{HirAnalysisDb, semantic::SelectedApplication, ty::trait_def::TraitInstId},
+    analysis::{
+        HirAnalysisDb,
+        semantic::SelectedApplication,
+        ty::{trait_def::TraitInstId, trait_resolution::PredicateListId},
+    },
     hir_def::ExprId,
 };
 
@@ -164,6 +168,44 @@ impl<'db, Data> Chain<'db, Data> {
                     .is_some_and(|(winner, _)| winner == *position)
             })
             .map(|(_, provision)| provision)
+    }
+
+    /// Evidence establishes premises; named choices remain separate authority.
+    pub fn evidence_assumptions(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        base: PredicateListId<'db>,
+    ) -> PredicateListId<'db> {
+        let mut evidence = self
+            .visible(db)
+            .filter_map(|provision| match provision {
+                Provision::Evidence(_, goal) => Some(goal),
+                Provision::Named(_) => None,
+            })
+            .peekable();
+        if evidence.peek().is_none() {
+            return base;
+        }
+        let mut premises = base.list(db).to_vec();
+        premises.extend(evidence);
+        PredicateListId::new(db, premises).extend_all_bounds(db)
+    }
+
+    /// Lookup may discover methods from a named choice without treating it as
+    /// an ordinary proof premise. Keep this projection at the context boundary.
+    pub fn method_lookup_assumptions(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        base: PredicateListId<'db>,
+    ) -> PredicateListId<'db> {
+        let mut premises = self.evidence_assumptions(db, base).list(db).to_vec();
+        for provision in self.visible(db) {
+            if let Provision::Named(selection) = provision {
+                premises.retain(|goal| !selection.matches(db, *goal));
+                premises.push(selection.goal());
+            }
+        }
+        PredicateListId::new(db, premises).extend_all_bounds(db)
     }
 
     pub fn lookup(

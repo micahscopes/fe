@@ -64,13 +64,32 @@ def ownership(env, effects):
             raise ValueError(f'{name} maintains another scope stack')
 
 
+def premise_boundary(env, semantic):
+    for name, delegate in (
+        ('assumptions', 'evidence_assumptions'),
+        ('method_lookup_assumptions', 'method_lookup_assumptions'),
+    ):
+        bodies = goal_lookup.bodies(env, name)
+        if len(bodies) != 1 or delegate not in bodies[0]:
+            raise ValueError(name + ' must read the semantic chain projection')
+        if re.search(r'\.(?:list|retain|extend_all_bounds)\s*\(', bodies[0]):
+            raise ValueError(name + ' restored checker-owned premise construction')
+    bodies = goal_lookup.bodies(semantic, 'context_at')
+    if len(bodies) != 1 or 'evidence_assumptions' not in bodies[0]:
+        raise ValueError('record context must use the same semantic premise projection')
+    if re.search(r'\.(?:list|extend_all_bounds)\s*\(', bodies[0]):
+        raise ValueError('record context restored a separate premise builder')
+
+
 if __name__ == '__main__':
     source = (ROOT / 'crates/hir/src/analysis/ty/ty_check/expr.rs').read_text()
     env = (ROOT / 'crates/hir/src/analysis/ty/ty_check/env.rs').read_text()
     effects = (ROOT / 'crates/hir/src/analysis/ty/ty_check/effect_env.rs').read_text()
+    semantic = (ROOT / 'crates/hir/src/core/semantic/mod.rs').read_text()
     try:
         stacks = inventory(source)
         ownership(env, effects)
+        premise_boundary(env, semantic)
     except ValueError as error:
         sys.exit(str(error))
     body = goal_lookup.bodies(source, 'check_with')[0]
@@ -91,6 +110,16 @@ if __name__ == '__main__':
         except ValueError:
             continue
         sys.exit('independent-scope-owner mutation escaped the guard')
+    for mutant_env, mutant_semantic in [
+        (env.replace('self.provisions\n            .evidence_assumptions', 'self.assumptions.list(self.db); self.provisions\n            .evidence_assumptions', 1), semantic),
+        (env.replace('self.provisions\n            .method_lookup_assumptions', 'self.assumptions.list(self.db); self.provisions\n            .method_lookup_assumptions', 1), semantic),
+        (env, semantic.replace('provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 'assumptions.list(db); provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 1)),
+    ]:
+        try:
+            premise_boundary(mutant_env, mutant_semantic)
+        except ValueError:
+            continue
+        sys.exit('duplicate-premise-builder mutation escaped the guard')
     print(f'with-scope stacks: {len(stacks)} (ceiling {BASELINE}, S4 target 1)')
     for stack in stacks:
         print(f'  {stack}')

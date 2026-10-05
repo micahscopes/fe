@@ -279,21 +279,7 @@ pub(crate) fn context_at<'db>(
     let assumptions = if let Some((typed, expr)) =
         position.filter(|(typed, _)| typed.with_choices().len() != 0)
     {
-        let chain = provision::recorded_chain_at(db, typed, expr);
-        let mut evidence = chain
-            .visible(db)
-            .filter_map(|provision| match provision {
-                Provision::Evidence(_, goal) => Some(goal),
-                Provision::Named(_) => None,
-            })
-            .peekable();
-        if evidence.peek().is_none() {
-            assumptions
-        } else {
-            let mut premises = assumptions.list(db).to_vec();
-            premises.extend(evidence);
-            PredicateListId::new(db, premises).extend_all_bounds(db)
-        }
+        provision::recorded_chain_at(db, typed, expr).evidence_assumptions(db, assumptions)
     } else {
         assumptions
     };

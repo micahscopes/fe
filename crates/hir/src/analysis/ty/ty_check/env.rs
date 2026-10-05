@@ -580,15 +580,8 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     pub(crate) fn assumptions(&self) -> PredicateListId<'db> {
-        // Item and effect-parameter bounds are stable. Evidence contributes
-        // premises through the visible frame entries, never by editing this list.
-        let mut opened = self.opened_obligations().peekable();
-        if opened.peek().is_none() {
-            return self.assumptions;
-        }
-        let mut premises = self.assumptions.list(self.db).to_vec();
-        premises.extend(opened.map(|(_, goal)| goal));
-        PredicateListId::new(self.db, premises).extend_all_bounds(self.db)
+        self.provisions
+            .evidence_assumptions(self.db, self.assumptions)
     }
 
     pub(super) fn enter_context_frame(&mut self) {
@@ -662,12 +655,8 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     pub(super) fn method_lookup_assumptions(&self) -> PredicateListId<'db> {
-        let mut premises = self.assumptions().list(self.db).to_vec();
-        for selection in self.selections() {
-            premises.retain(|goal| !selection.matches(self.db, *goal));
-            premises.push(selection.goal());
-        }
-        PredicateListId::new(self.db, premises).extend_all_bounds(self.db)
+        self.provisions
+            .method_lookup_assumptions(self.db, self.assumptions)
     }
 
     pub(crate) fn base_assumptions(&self) -> PredicateListId<'db> {
