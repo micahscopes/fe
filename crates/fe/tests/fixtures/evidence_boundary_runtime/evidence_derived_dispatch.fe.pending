@@ -1,0 +1,63 @@
+// Pending: derived evidence dispatch needs context-aware projection normalization.
+// Draft e38bdc41b passes dispatch controls but regresses ABI/layout; see STEP2_DERIVED_EVIDENCE_DISPATCH_2026-10-05.md.
+use core::obligations::{Evidence, prove}
+trait Base { const fn base() -> u256 }
+trait Compute { const fn compute() -> u256 }
+struct Subject {}
+struct Wrap<T> {}
+impl Base for Subject { const fn base() -> u256 { 1 } }
+impl Base for Subject as Alternative { const fn base() -> u256 { 2 } }
+impl<T: Base> Compute for Wrap<T> { const fn compute() -> u256 { T::base() } }
+const fn helper<T: Compute>() -> u256 { T::compute() }
+const fn direct<T>(_ e: Evidence<Base<T>>) -> u256 {
+    with (e) { <Wrap<T> as Compute>::compute() }
+}
+const fn indirect<T>(_ e: Evidence<Base<T>>) -> u256 {
+    with (e) { helper<Wrap<T>>() }
+}
+const fn ordinary() -> u256 {
+    let e = prove<Base<Subject>>()
+    direct<Subject>(e) * 10 + indirect<Subject>(e)
+}
+const fn selected() -> u256 {
+    let e = with (Alternative) { prove<Base<Subject>>() }
+    direct<Subject>(e) * 10 + indirect<Subject>(e)
+}
+const fn named() -> u256 {
+    with (Alternative) {
+        <Wrap<Subject> as Compute>::compute() * 10 + helper<Wrap<Subject>>()
+    }
+}
+const fn forward() -> u256 {
+    let ordinary = prove<Base<Subject>>()
+    let selected = with (Alternative) { prove<Base<Subject>>() }
+    with (ordinary) {
+        let a = <Wrap<Subject> as Compute>::compute()
+        let b = with (selected) { <Wrap<Subject> as Compute>::compute() }
+        let c = <Wrap<Subject> as Compute>::compute()
+        a * 100 + b * 10 + c
+    }
+}
+const fn reverse() -> u256 {
+    let ordinary = prove<Base<Subject>>()
+    let selected = with (Alternative) { prove<Base<Subject>>() }
+    with (selected) {
+        let a = <Wrap<Subject> as Compute>::compute()
+        let b = with (ordinary) { <Wrap<Subject> as Compute>::compute() }
+        let c = <Wrap<Subject> as Compute>::compute()
+        a * 100 + b * 10 + c
+    }
+}
+const ORDINARY: u256 = ordinary()
+const SELECTED: u256 = selected()
+const NAMED: u256 = named()
+const FORWARD: u256 = forward()
+const REVERSE: u256 = reverse()
+#[test]
+fn check() {
+    assert(ORDINARY == 11)
+    assert(SELECTED == 22)
+    assert(NAMED == 22)
+    assert(FORWARD == 121)
+    assert(REVERSE == 212)
+}
