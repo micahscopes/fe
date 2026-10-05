@@ -1,0 +1,10 @@
+// A computed type whose written-out size doubles with each step. It must
+// stop at the work limit instead of being walked as a tree.
+struct Pair<A, B> {}
+recursive type fn Tree<const N: usize>() -> (*) {
+    match N {
+        0 => bool
+        _ => Pair<Tree<{N - 1}>, Tree<{N - 1}>>
+    }
+}
+fn take(x: Tree<40>) -> Tree<40> { x }

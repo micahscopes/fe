@@ -68,50 +68,6 @@ impl ReductionBudget {
     }
 }
 
-/// The number of nodes in `ty` read as a tree, if at most `limit`. Interned
-/// types share subtrees, so a type can be small as a DAG and exponentially
-/// large as a tree; resolving a projection walks its trait arguments as a tree
-/// (canonicalization, containment), so this is what it costs.
-fn tree_size_within<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>, limit: usize) -> Option<usize> {
-    struct Children<'db> {
-        db: &'db dyn HirAnalysisDb,
-        children: Vec<TyId<'db>>,
-    }
-    impl<'db> TyVisitor<'db> for Children<'db> {
-        fn db(&self) -> &'db dyn HirAnalysisDb {
-            self.db
-        }
-        fn visit_ty(&mut self, ty: TyId<'db>) {
-            self.children.push(ty);
-        }
-    }
-    fn size<'db>(
-        db: &'db dyn HirAnalysisDb,
-        ty: TyId<'db>,
-        limit: usize,
-        memo: &mut FxHashMap<TyId<'db>, usize>,
-    ) -> Option<usize> {
-        if let Some(&known) = memo.get(&ty) {
-            return Some(known);
-        }
-        let mut children = Children {
-            db,
-            children: Vec::new(),
-        };
-        walk_ty(&mut children, ty);
-        let mut total = 1usize;
-        for child in children.children {
-            total = total.checked_add(size(db, child, limit, memo)?)?;
-            if total > limit {
-                return None;
-            }
-        }
-        memo.insert(ty, total);
-        Some(total)
-    }
-    size(db, ty, limit, &mut FxHashMap::default())
-}
-
 // Checked constant occurrences carry a source tree as well as a canonical
 // term. Substituting an occurrence can traverse that tree many times before
 // the reducer reaches another type node, so count the transport work in the
@@ -353,6 +309,10 @@ struct ReductionKey<'db> {
 struct Reduced<'db> {
     ty: TyId<'db>,
     depth: usize,
+    /// Nodes in `ty` written out as a tree. Interned types share subtrees, so
+    /// a type small as a graph can be exponentially large as a tree, and later
+    /// passes walk types as trees.
+    size: usize,
 }
 
 enum ReductionTask<'db> {
@@ -457,6 +417,7 @@ impl<'db> TypeNormalizer<'db> {
                     Some(Reduced {
                         ty: invalid,
                         depth: 0,
+                        size: 1,
                     }),
                 );
             }
@@ -482,6 +443,7 @@ impl<'db> TypeNormalizer<'db> {
                                 TyId::invalid(db, InvalidCause::TypeLoweringCycle)
                             },
                             depth: 0,
+                            size: 1,
                         });
                         if depth.saturating_add(reduced.depth) >= NORMALIZATION_DEPTH_LIMIT {
                             return self.abort(&active, InvalidCause::TypeNormalizationLimit);
@@ -541,17 +503,21 @@ impl<'db> TypeNormalizer<'db> {
                             policy: child_policy,
                         },
                     );
-                    let child_depth = children
-                        .iter()
-                        .map(|&ty| {
-                            results[&ReductionKey {
-                                ty,
-                                policy: child_policy,
-                            }]
-                                .depth
-                        })
-                        .max()
-                        .unwrap_or(0);
+                    let child_results = children.iter().map(|&ty| {
+                        results[&ReductionKey {
+                            ty,
+                            policy: child_policy,
+                        }]
+                    });
+                    let child_depth = child_results.clone().map(|r| r.depth).max().unwrap_or(0);
+                    // The written-out size of a result counts against the
+                    // same work limit as the reduction steps: a result too
+                    // large to write out is as unusable as one that takes
+                    // too many steps.
+                    let size = child_results.fold(1usize, |total, r| total.saturating_add(r.size));
+                    if size > NORMALIZATION_WORK_LIMIT {
+                        return self.abort(&active, InvalidCause::TypeNormalizationLimit);
+                    }
                     let rewrite = match self.rewrite_head(ty, depth, key.policy) {
                         Ok(rewrite) => rewrite,
                         Err(cause) => return self.abort(&active, cause),
@@ -577,6 +543,7 @@ impl<'db> TypeNormalizer<'db> {
                         let reduced = Reduced {
                             ty,
                             depth: child_depth.max(own_depth),
+                            size,
                         };
                         self.cache.insert(key, Some(reduced));
                         results.insert(key, reduced);
@@ -592,6 +559,7 @@ impl<'db> TypeNormalizer<'db> {
                     let reduced = Reduced {
                         ty: target.ty,
                         depth: child_depth.max(cost.saturating_add(target.depth)),
+                        size: target.size,
                     };
                     self.cache.insert(key, Some(reduced));
                     results.insert(key, reduced);
@@ -700,12 +668,6 @@ impl<'db> TypeNormalizer<'db> {
 
         if let TyData::AssocTy(assoc) = ty.data(db) {
             if depth.saturating_add(PROJECTION_DEPTH_COST) >= NORMALIZATION_DEPTH_LIMIT {
-                return Err(InvalidCause::TypeNormalizationLimit);
-            }
-            // A projection whose replacement grows never repeats, so the
-            // depth limit alone does not bound its work: charge its size.
-            let remaining = NORMALIZATION_WORK_LIMIT - self.budget.work;
-            if !tree_size_within(db, ty, remaining).is_some_and(|size| self.budget.charge(size)) {
                 return Err(InvalidCause::TypeNormalizationLimit);
             }
             let saved = (self.nested_depth, self.nested_policy);
