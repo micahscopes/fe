@@ -2217,7 +2217,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             else {
                 return Err(invalid());
             };
-            if selection.goal() != goal || env.selection_for(db, goal).is_some() {
+            if selection.goal() != goal {
                 return Err(invalid());
             }
             let proof = selection
@@ -2226,6 +2226,9 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             if opened_call.is_some_and(|(required, _)| required == goal) {
                 opened_method = Some(proof);
             }
+            // Opening in this callee is a new frame. Its validated witness
+            // shadows any choice inherited through the callee's bounds.
+            selections.retain(|inherited| !inherited.matches(db, goal));
             selections.push(*selection);
         }
         let env = env.with_selections(db, selections);

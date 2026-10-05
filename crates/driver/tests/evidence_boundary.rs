@@ -85,6 +85,20 @@ fn evaluate(db: &DriverDataBase, file: File, name: &str) -> String {
 }
 
 #[test]
+fn evidence_reopening_in_a_bounded_callee_shadows_the_inherited_choice() {
+    let mut db = database();
+    let file = checked(
+        &mut db,
+        "evidence-reopen-across-call",
+        include_str!(
+            "../../fe/tests/fixtures/evidence_boundary_runtime/evidence_reopen_across_call.fe"
+        ),
+    );
+    assert_eq!(evaluate(&db, file, "forward"), "211");
+    assert_eq!(evaluate(&db, file, "reverse"), "122");
+}
+
+#[test]
 fn same_goal_evidence_parameters_keep_each_operands_choice_in_both_orders() {
     let mut db = database();
     let file = checked(

@@ -1,0 +1,34 @@
+use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+impl Read for Subject as Alternative { const fn read() -> u256 { 2 } }
+const fn read<T: Read>() -> u256 { <T as Read>::read() }
+const fn inner<T: Read>(_ evidence: Evidence<Read<T>>) -> u256 {
+    with (evidence) { read<T>() }
+}
+const fn outer<T>(_ left: Evidence<Read<T>>, _ right: Evidence<Read<T>>) -> u256 {
+    with (left) {
+        let inner_choice = inner<T>(right)
+        let reopened = inner<T>(left)
+        let restored = read<T>()
+        inner_choice * 100 + reopened * 10 + restored
+    }
+}
+const fn forward() -> u256 {
+    let ordinary = prove<Read<Subject>>()
+    let selected = with (Alternative) { prove<Read<Subject>>() }
+    outer<Subject>(ordinary, selected)
+}
+const fn reverse() -> u256 {
+    let ordinary = prove<Read<Subject>>()
+    let selected = with (Alternative) { prove<Read<Subject>>() }
+    outer<Subject>(selected, ordinary)
+}
+const FORWARD: u256 = forward()
+const REVERSE: u256 = reverse()
+#[test]
+fn callee_opening_shadows_and_restores_inherited_choices() {
+    assert(FORWARD == 211)
+    assert(REVERSE == 122)
+}
