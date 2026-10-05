@@ -1143,7 +1143,12 @@ impl<'db> ImplTrait<'db> {
 
             let expected_ty = normalize_ty(db, expected_ty, scope, assumptions);
             let impl_header_ty = normalize_ty(db, impl_header_ty, scope, assumptions);
-            if expected_ty != impl_header_ty {
+            // Const arguments can be written differently and still be equal,
+            // so compare as unification does rather than by identity.
+            if ty::unify::UnificationTable::new(db)
+                .unify(expected_ty, impl_header_ty)
+                .is_err()
+            {
                 diags.push(
                     ImplDiag::ConstTyMismatchWithTrait {
                         primary: impl_const.span().ty().into(),

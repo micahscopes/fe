@@ -985,3 +985,38 @@ fn an_unmet_family_bound_on_a_default_is_reported_at_the_default() {
     assert!(result.contains("default_span.fe:4:"), "{result}");
     assert!(!result.contains("default_span.fe:2:"), "{result}");
 }
+
+#[test]
+fn a_generic_impl_can_write_out_an_associated_const_type() {
+    check_cases(&[
+        (
+            "trait Local {
+    type S
+    const X: Self::S
+}
+pub struct Foo<const N: u256> { v: u256 }
+pub struct Baz<T> { v: T }
+impl<const N: u256> Local for Foo<N> {
+    type S = String<3>
+    const X: String<3> = \"abc\"
+}
+impl<T> Local for Baz<T> {
+    type S = [u8; 2]
+    const X: [u8; 2] = [1, 2]
+}",
+            None,
+        ),
+        (
+            "trait Local {
+    type S
+    const X: Self::S
+}
+pub struct Foo<const N: u256> { v: u256 }
+impl<const N: u256> Local for Foo<N> {
+    type S = String<3>
+    const X: String<4> = \"abc\"
+}",
+            Some("associated const `X` has incompatible type"),
+        ),
+    ]);
+}
