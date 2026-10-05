@@ -4082,11 +4082,21 @@ fn use_it() -> u256 { read<7>() }";
             fold::{TyFoldable, TyFolder},
             ty_def::TyData,
         };
+        use crate::hir_def::scope_graph::ScopeId;
         struct Replace<'db> {
             from: TyId<'db>,
             to: TyId<'db>,
+            from_scope: ScopeId<'db>,
+            to_scope: ScopeId<'db>,
         }
         impl<'db> TyFolder<'db> for Replace<'db> {
+            fn fold_scope(&mut self, scope: ScopeId<'db>) -> ScopeId<'db> {
+                if scope == self.from_scope {
+                    self.to_scope
+                } else {
+                    scope
+                }
+            }
             fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
                 if ty == self.from {
                     self.to
@@ -4134,13 +4144,55 @@ fn use_it() -> u256 { read<7>() }";
             .expect("generic argument");
         let sites: Vec<_> = choices.iter().map(|choice| choice.site()).collect();
         assert_ne!(sites[0], sites[1], "distinct semantic use sites");
-        let folded = typed.clone().fold_with(
+        let from_scope = function.scope();
+        let to_scope = function.body(&db).unwrap().scope();
+        assert_ne!(from_scope, to_scope);
+        let replacement = || Replace {
+            from,
+            to: TyId::u8(&db),
+            from_scope,
+            to_scope,
+        };
+        let bound_choices = choices
+            .iter()
+            .map(|choice| {
+                let (_, _, slot) = choice.call_constraint().unwrap();
+                (slot, typed.decisions().choice_ref(&choice.site()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let env = crate::analysis::semantic::ImplEnv::new_with_choices(
             &db,
-            &mut Replace {
-                from,
-                to: TyId::u8(&db),
-            },
+            from_scope,
+            typed.assumptions(),
+            Vec::new(),
+            Vec::new(),
+            bound_choices.clone(),
         );
+        let key = crate::analysis::semantic::SemanticInstanceKey::new(
+            &db,
+            super::super::BodyOwner::Func(function),
+            crate::analysis::semantic::GenericSubst::none(&db),
+            crate::analysis::semantic::EffectProviderSubst::empty(&db),
+            env,
+        );
+        let expected_slots = bound_choices
+            .iter()
+            .map(|&(slot, choice)| (slot, choice.fold_with(&db, &mut replacement())))
+            .collect::<Vec<_>>();
+        let folded_env = env.fold_with(&db, &mut replacement());
+        let folded_key_env = key.fold_with(&db, &mut replacement()).impl_env(&db);
+        // Both paths must honor scope replacement and preserve authored slots,
+        // even when substitution makes their goals identical.
+        let actual = [folded_env, folded_key_env]
+            .map(|env| (env.normalization_scope(&db), env.bound_choices(&db).clone()));
+        assert_eq!(
+            actual,
+            [
+                (to_scope, expected_slots.clone()),
+                (to_scope, expected_slots)
+            ]
+        );
+        let folded = typed.clone().fold_with(&db, &mut replacement());
         let choices: Vec<_> = folded
             .trait_choices(&db)
             .filter(|choice| choice.call_constraint().is_some())

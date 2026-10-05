@@ -15,7 +15,7 @@ use crate::analysis::{
     HirAnalysisDb,
     place::{Place, PlaceBase, PlaceProjection},
     semantic::{
-        EffectProviderSubst, GenericSubst, ImplEnv, SemConstId, SemConstValue, SemanticInstanceKey,
+        EffectProviderSubst, GenericSubst, SemConstId, SemConstValue, SemanticInstanceKey,
         sem_const_from_ty,
     },
     ty::const_expr::{ConstExpr, ConstExprId, ConstInvocation},
@@ -261,7 +261,6 @@ impl<'db> TyFoldable<'db> for SemanticInstanceKey<'db> {
             }
             owner => owner,
         };
-        let env = self.impl_env(db);
         Self::new(
             db,
             owner,
@@ -279,13 +278,7 @@ impl<'db> TyFoldable<'db> for SemanticInstanceKey<'db> {
                     .clone()
                     .fold_with(db, folder),
             ),
-            ImplEnv::new(
-                db,
-                folder.fold_scope(env.normalization_scope(db)),
-                env.assumptions(db).fold_with(db, folder),
-                env.witnesses(db).clone().fold_with(db, folder),
-            )
-            .with_selections(db, env.selections(db).clone().fold_with(db, folder)),
+            self.impl_env(db).fold_with(db, folder),
         )
     }
 }

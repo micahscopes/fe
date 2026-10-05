@@ -101,6 +101,15 @@ def selection_transport_boundary(template):
         raise ValueError('selection transport must not normalize accepted source choices')
 
 
+def context_fold_boundary(template, folds):
+    env = goal_lookup.bodies(template[template.index("TyFoldable<'db> for ImplEnv"):], 'super_fold_with')[0]
+    key = goal_lookup.bodies(folds[folds.index("TyFoldable<'db> for SemanticInstanceKey"):], 'super_fold_with')[0]
+    if 'folder.fold_scope(self.normalization_scope(db))' not in env or 'self.bound_choices(db)' not in env:
+        raise ValueError('context folding must retain bound slots and apply scope substitution')
+    if 'self.impl_env(db).fold_with(db, folder)' not in key or re.search(r'ImplEnv::new', key):
+        raise ValueError('instance-key folding must delegate to the context fold')
+
+
 if __name__ == '__main__':
     source = (ROOT / 'crates/hir/src/analysis/ty/ty_check/expr.rs').read_text()
     env = (ROOT / 'crates/hir/src/analysis/ty/ty_check/env.rs').read_text()
@@ -108,11 +117,13 @@ if __name__ == '__main__':
     semantic = (ROOT / 'crates/hir/src/core/semantic/mod.rs').read_text()
     provisions = (ROOT / 'crates/hir/src/core/semantic/provision.rs').read_text()
     template = (ROOT / 'crates/hir/src/analysis/semantic/instance/template.rs').read_text()
+    folds = (ROOT / 'crates/hir/src/analysis/ty/fold.rs').read_text()
     try:
         stacks = inventory(source)
         ownership(env, effects)
         premise_boundary(env, semantic, provisions)
         selection_transport_boundary(template)
+        context_fold_boundary(template, folds)
     except ValueError as error:
         sys.exit(str(error))
     body = goal_lookup.bodies(source, 'check_with')[0]
@@ -159,6 +170,18 @@ if __name__ == '__main__':
         except ValueError:
             continue
         sys.exit('selection-renormalization mutation escaped the guard')
+    env_fold_start = template.index("TyFoldable<'db> for ImplEnv")
+    for mutant_template, mutant_folds in [
+        (template.replace('folder.fold_scope(self.normalization_scope(db))', 'self.normalization_scope(db)', 1), folds),
+        (template[:env_fold_start] + template[env_fold_start:].replace('self.bound_choices(db)', 'Vec::new()', 1), folds),
+        (template, folds.replace('self.impl_env(db).fold_with(db, folder)', 'ImplEnv::empty(db, owner.scope())', 1)),
+    ]:
+        assert mutant_template != template or mutant_folds != folds
+        try:
+            context_fold_boundary(mutant_template, mutant_folds)
+        except ValueError:
+            continue
+        sys.exit('partial-context-fold mutation escaped the guard')
     print(f'with-scope stacks: {len(stacks)} (ceiling {BASELINE}, S4 target 1)')
     for stack in stacks:
         print(f'  {stack}')

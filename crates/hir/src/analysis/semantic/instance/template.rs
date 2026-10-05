@@ -304,7 +304,7 @@ impl<'db> TyFoldable<'db> for ImplEnv<'db> {
     fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
         Self::new_with_choices(
             db,
-            self.normalization_scope(db),
+            folder.fold_scope(self.normalization_scope(db)),
             self.assumptions(db).fold_with(db, folder),
             self.witnesses(db).clone().fold_with(db, folder),
             self.selections(db).clone().fold_with(db, folder),
