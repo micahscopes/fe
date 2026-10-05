@@ -449,3 +449,35 @@ fn call<F: Reduce, const N: usize>() { need<RPow<F, N>>() }
         "fn call<F: Reduce, const N: usize>() where RPow<F, N>: Reduce {",
     ));
 }
+
+#[test]
+fn a_computed_return_type_that_faults_at_a_call_is_reported() {
+    let source = r#"
+struct Node<T> {}
+recursive type fn Tree<const N: usize>() -> (*) {
+    match N {
+        0 => bool
+        _ => Node<Tree<{N - 1}>>
+    }
+}
+fn h<const N: usize>(_ b: bool) -> Tree<{N - 5}> { h<N>(b) }
+fn call_h(_ b: bool) -> u256 {
+    if b { return 0 }
+    h<2>(b)
+}
+"#;
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(Utf8PathBuf::from("computed_return.fe"), source);
+    let (top, _) = db.top_mod(file);
+    let result = format_diagnostics(&db, &db.run_on_top_mod(top));
+    assert!(
+        result.contains("the return type cannot be computed for these generic arguments"),
+        "{result}"
+    );
+    check(
+        &source
+            .replace("h<2>(b)", "h<7>(b)")
+            .replace("-> u256", "-> Tree<2>")
+            .replace("return 0", "return h<7>(b)"),
+    );
+}

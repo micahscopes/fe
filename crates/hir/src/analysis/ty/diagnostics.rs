@@ -608,6 +608,9 @@ pub enum BodyDiag<'db> {
         origin: String,
         reason: String,
     },
+    /// A constant in a callee's return type has no value for the generic
+    /// arguments of this call.
+    ReturnTypeNotComputable(DynLazySpan<'db>),
     WhereConstPredicateFailed(DynLazySpan<'db>),
     WhereTypeBoundMissing(DynLazySpan<'db>),
     GenericConstPredicateUnsupported(DynLazySpan<'db>),
@@ -1142,6 +1145,7 @@ impl<'db> BodyDiag<'db> {
             Self::ConstValueMustBeKnown(..) => 64,
             Self::ConstDependencyMustBeKnown { .. } => 90,
             Self::ConstEvaluationFailed { .. } => 89,
+            Self::ReturnTypeNotComputable(..) => 117,
             Self::WhereConstPredicateFailed(..) => 91,
             Self::GenericConstPredicateUnsupported(..) => 92,
             Self::RecursiveConstRequirement(..) => 94,

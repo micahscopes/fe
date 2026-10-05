@@ -3973,6 +3973,14 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 error_code,
             ),
 
+            Self::ReturnTypeNotComputable(primary) => primary_diag(
+                severity,
+                "the return type cannot be computed for these generic arguments",
+                "a constant in this call's return type has no value",
+                primary.resolve(db),
+                error_code,
+            ),
+
             Self::ConstEvaluationFailed {
                 primary,
                 const_name,
