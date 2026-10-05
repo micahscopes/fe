@@ -19,6 +19,7 @@ completions:
   - Bytes (Struct)
   - Call (Interface)
   - Clone (Interface)
+  - Constraint (Struct)
   - Copy (Interface)
   - Create (Interface)
   - Ctx (Interface)
@@ -106,6 +107,7 @@ note:
 completions:
   - Address (Struct)
   - Bytes (Struct)
+  - Constraint (Struct)
   - DynVec (Struct)
   - Evm (Struct)
   - FixedMemBuffer (Struct)
@@ -183,6 +185,7 @@ note:
 completions:
   - Address (Struct)
   - Bytes (Struct)
+  - Constraint (Struct)
   - DynVec (Struct)
   - Evm (Struct)
   - FixedMemBuffer (Struct)
@@ -250,6 +253,7 @@ note:
 completions:
   - Address (Struct)
   - Bytes (Struct)
+  - Constraint (Struct)
   - DynVec (Struct)
   - Evm (Struct)
   - FixedMemBuffer (Struct)
@@ -278,6 +282,7 @@ note:
 completions:
   - Address (Struct)
   - Bytes (Struct)
+  - Constraint (Struct)
   - DynVec (Struct)
   - Evm (Struct)
   - FixedMemBuffer (Struct)
