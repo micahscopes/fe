@@ -36,6 +36,11 @@ module.exports = grammar({
     $._generic_open,
     $._comparison_lt,
     $._key_generic_open,
+    // `quote` and `recursive` are contextual: the scanner reports them only
+    // where the compiler reads them as keywords, so elsewhere they are
+    // ordinary identifiers.
+    $._quote_keyword,
+    $._recursive_keyword,
   ],
 
   word: $ => $.identifier,
@@ -82,6 +87,8 @@ module.exports = grammar({
     [$._expression, $._path, $.path_segment],
     [$._expression, $._path],
     [$._expression, $._condition_atom_no_let],
+    [$.where_clause, $._condition_atom_no_let],
+    [$.where_clause, $._expression, $._condition_atom_no_let],
     [$._expression, $._condition_let_value],
     [$._condition_atom, $._condition_no_or_no_let],
     // attribute name can be identifier or path (path starts with path_segment which is identifier)
@@ -435,6 +442,7 @@ module.exports = grammar({
       optional($.attribute_list),
       'type',
       field('name', $.identifier),
+      optional($.generic_param_list),
       optional(seq(':', $.type_bound_list)),
       optional(seq('=', $._type)),
     ),
@@ -489,7 +497,7 @@ module.exports = grammar({
     ),
 
     type_function_definition: $ => seq(
-      optional($.attribute_list), optional($.visibility), 'recursive',
+      optional($.attribute_list), optional($.visibility), alias($._recursive_keyword, 'recursive'),
       'type', 'fn', field('name', $.identifier),
       optional($.generic_param_list), $.parameter_list,
       '->', field('return_kind', $.kind_bound),
@@ -951,11 +959,11 @@ module.exports = grammar({
 
     record_field: $ => choice(
       seq(
-        field('name', $.identifier),
+        field('name', choice($.identifier, $.quote_splice)),
         ':',
         field('value', $._expression),
       ),
-      field('value', $.identifier),
+      field('value', choice($.identifier, $.quote_splice)),
     ),
 
     tuple_expression: $ => seq(
@@ -1020,6 +1028,7 @@ module.exports = grammar({
       $.range_expression,
       $.qualified_path_expression,
       $.mode_expression,
+      $.quote_splice,
     ),
 
     // Condition expression atoms, including let-conditions.
@@ -1154,7 +1163,7 @@ module.exports = grammar({
 
     // The body holds an expression, items, or where predicates.
     quote_expression: $ => seq(
-      'quote',
+      alias($._quote_keyword, 'quote'),
       optional($.quote_open_list),
       field('body', choice($.block, $.quote_where, $.match_arm_list)),
     ),
@@ -1171,7 +1180,17 @@ module.exports = grammar({
       ')',
     ),
 
+    // `<Type as Trait>` names the impl a `with` block selects.
+    with_selection: $ => seq(
+      $._generic_open,
+      field('type', $._type),
+      'as',
+      field('trait', $.trait_ref),
+      '>',
+    ),
+
     with_param: $ => choice(
+      field('selection', $.with_selection),
       // Key = Value, where Key can be a generic type like Storage<u8>
       seq(
         field('key', $.path),
@@ -1392,6 +1411,12 @@ module.exports = grammar({
       ']',
     ),
 
+    // A path of two or more segments; a single identifier is a key.
+    _attribute_path: $ => seq(
+      $.path_segment,
+      repeat1(seq('::', $.path_segment)),
+    ),
+
     attribute_arg_list: $ => seq(
       '(',
       sepTrailing($.attribute_arg, ','),
@@ -1406,6 +1431,8 @@ module.exports = grammar({
           field('value', $._attribute_value),
         )),
       ),
+      // Path argument: #[generate(ingot::author::emit)]
+      field('path', alias($._attribute_path, $.path)),
       // Bare literal in attr args: #[selector(0x01)]
       $.integer_literal,
       $.string_literal,

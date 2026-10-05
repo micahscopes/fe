@@ -867,3 +867,24 @@ fn generic_match_pattern_paths_keep_the_function_body() {
         );
     }
 }
+
+#[test]
+fn new_syntax_parses_in_both_frontends() {
+    let mut parser = new_parser();
+    for source in [
+        "const fn f(x: Code<Expr>) -> Code<Expr> { quote { Self { ${x}: 7, y: 2 } } }",
+        "const fn f(v: Code<Expr>) -> Code<Expr> { quote { Subject { ${v} } } }",
+        "const fn f(b: Code<Expr>, n: Code<Expr>) -> Code<Expr> { quote { if ${b} { ${n} } else { 0 } } }",
+        "const fn f(t: Code<Expr>) -> Code<Expr> { quote { head<${t}, Option<${t}>>() } }",
+        "trait Family { type Out<T> }",
+        "fn d() -> u256 { with (<Subject as Compute>) { Subject::compute() } }",
+        "struct Prices { quote: u256 }\nfn recursive(_ n: u256) -> u256 { n }\nfn total(p: Prices) -> u256 {\n    let quote: u256 = p.quote\n    recursive(quote) + quote\n}",
+        "#[generate(ingot::author::emit)]\nstruct A {}",
+        "pub recursive type fn Tree<const N: usize>() -> (*) {\n    match N {\n        0 => Leaf\n        _ => Node<Leaf, Tree<{N - 1}>>\n    }\n}",
+    ] {
+        let (_, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(errors.is_empty(), "parser: {source}: {errors:?}");
+        let errors = parse_errors(&mut parser, source);
+        assert!(errors.is_empty(), "tree-sitter: {source}: {errors:?}");
+    }
+}

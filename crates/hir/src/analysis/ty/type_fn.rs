@@ -682,7 +682,8 @@ pub(super) fn declaration_shape<'db>(
     }
 
     match def.ret_kind(db).to_opt() {
-        None => report(def.span().into(), "an explicit return kind is required"),
+        // The parser reports a missing return kind.
+        None => {}
         Some(kind)
             if let Some(name) = super::ty_lower::unknown_named_kind(db, def.scope(), &kind) =>
         {

@@ -9,6 +9,8 @@ enum TokenType {
   GENERIC_OPEN,
   COMPARISON_LT,
   KEY_GENERIC_OPEN,
+  QUOTE_KEYWORD,
+  RECURSIVE_KEYWORD,
 };
 
 void *tree_sitter_fe_external_scanner_create(void) { return NULL; }
@@ -349,6 +351,56 @@ static bool can_follow_generic_path_expr(TSLexer *lexer) {
   return true;
 }
 
+static bool is_ident_char(int32_t c) {
+  return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9');
+}
+
+// Consumes `word` when it is the whole identifier at the lookahead.
+static bool scan_word(TSLexer *lexer, const char *word) {
+  for (const char *c = word; *c; c++) {
+    if (lexer->lookahead != *c) return false;
+    advance(lexer);
+  }
+  return !is_ident_char(lexer->lookahead);
+}
+
+static void skip_spaces(TSLexer *lexer) {
+  while (lexer->lookahead == ' ' || lexer->lookahead == '\t' || lexer->lookahead == '\r') {
+    advance(lexer);
+  }
+}
+
+// `quote` starts a quote, as in the compiler, only when its body opens on the
+// same line: `quote {` or `quote(names) {`.
+static bool scan_quote_keyword(TSLexer *lexer) {
+  if (!scan_word(lexer, "quote")) return false;
+  lexer->mark_end(lexer);
+  skip_spaces(lexer);
+  if (lexer->lookahead == '(') {
+    int depth = 0;
+    do {
+      if (lexer->lookahead == '(') depth++;
+      if (lexer->lookahead == ')') depth--;
+      if (lexer->lookahead == '\n' || lexer->eof(lexer)) return false;
+      advance(lexer);
+    } while (depth > 0);
+    skip_spaces(lexer);
+  }
+  return lexer->lookahead == '{';
+}
+
+// `recursive` is a keyword only before `type`.
+static bool scan_recursive_keyword(TSLexer *lexer) {
+  if (!scan_word(lexer, "recursive")) return false;
+  lexer->mark_end(lexer);
+  while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
+         lexer->lookahead == '\r' || lexer->lookahead == '\n') {
+    advance(lexer);
+  }
+  return scan_word(lexer, "type");
+}
+
 bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
                                           const bool *valid_symbols) {
   (void)payload;
@@ -369,6 +421,21 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
       return true;
     }
     // Automatic semicolon not needed -- fall through to check other tokens
+  }
+
+  if (valid_symbols[QUOTE_KEYWORD] || valid_symbols[RECURSIVE_KEYWORD]) {
+    while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
+           lexer->lookahead == '\r' || lexer->lookahead == '\n') {
+      skip(lexer);
+    }
+    if (valid_symbols[QUOTE_KEYWORD] && lexer->lookahead == 'q') {
+      lexer->result_symbol = QUOTE_KEYWORD;
+      return scan_quote_keyword(lexer);
+    }
+    if (valid_symbols[RECURSIVE_KEYWORD] && lexer->lookahead == 'r') {
+      lexer->result_symbol = RECURSIVE_KEYWORD;
+      return scan_recursive_keyword(lexer);
+    }
   }
 
   // A with-key is a type path, even when an expression branch also exists.
@@ -569,6 +636,20 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
                 }
               }
               advance(lexer);
+              continue;
+            case '$':
+              // A quote splice `${...}` stands for one argument; skip its
+              // balanced braces.
+              advance(lexer);
+              if (lexer->lookahead == '{') {
+                int splice_depth = 0;
+                do {
+                  if (lexer->lookahead == '{') splice_depth++;
+                  if (lexer->lookahead == '}') splice_depth--;
+                  advance(lexer);
+                } while (splice_depth > 0 && !lexer->eof(lexer));
+              }
+              if (paren_depth == 0 && bracket_depth == 0 && brace_depth == 0) last_top_char = '$';
               continue;
             case ' ': case '\t': case '\r': case '\n':
               advance(lexer);
