@@ -1150,3 +1150,63 @@ fn caller() {
     assert_eq!(errors.matches("8-0093").count(), 1, "{errors}");
     assert!(errors.contains("let outside: Holder<Subject>"), "{errors}");
 }
+
+#[test]
+fn inferred_type_conditions_read_the_expression_context() {
+    for (ordinary, selected, accepted) in [("false", "true", true), ("true", "false", false)] {
+        let declarations = format!(
+            r#"
+trait Flag {{ const OK: bool }}
+struct Subject {{}}
+impl Flag for Subject {{ const OK: bool = {ordinary} }}
+impl Flag for Subject as Chosen {{ const OK: bool = {selected} }}
+struct Gate<T: Flag> where T::OK {{ value: u256 }}
+struct Outer<T> {{ value: T }}
+fn make<T: Flag>() -> Gate<T> where T::OK {{ Gate<T> {{ value: 17 }} }}
+fn make_outer<T: Flag>() -> Outer<Gate<T>> where T::OK {{ Outer {{ value: make<T>() }} }}
+"#
+        );
+        for (name, use_site) in [
+            ("result", "let value = make<Subject>()"),
+            ("nested_result", "let value = make_outer<Subject>()"),
+        ] {
+            let mut db = database();
+            let source =
+                format!("{declarations}\nfn caller() {{ with (Chosen) {{ {use_site} }} }}");
+            let file = input(&mut db, name, &source);
+            let errors = diagnostics(&db, file);
+            if accepted {
+                assert!(errors.is_empty(), "{name}: {errors}");
+            } else {
+                assert!(errors.contains("8-0093"), "{name}: {errors}");
+            }
+        }
+    }
+}
+
+#[test]
+fn inferred_type_conditions_restore_the_outer_expression_context() {
+    let mut db = database();
+    let file = input(
+        &mut db,
+        "restored_inferred_condition",
+        r#"
+trait Flag { const OK: bool }
+struct Subject {}
+impl Flag for Subject { const OK: bool = false }
+impl Flag for Subject as Chosen { const OK: bool = true }
+struct Gate<T: Flag> where T::OK { value: u256 }
+fn make<T: Flag>() -> Gate<T> where T::OK { Gate<T> { value: 17 } }
+fn caller() {
+    with (Chosen) {
+        let inside = make<Subject>()
+    }
+    let outside = make<Subject>()
+}
+"#,
+    );
+    let errors = diagnostics(&db, file);
+    assert!(errors.contains("8-0093"), "{errors}");
+    assert!(errors.contains("let outside"), "{errors}");
+    assert!(!errors.contains("let inside"), "{errors}");
+}

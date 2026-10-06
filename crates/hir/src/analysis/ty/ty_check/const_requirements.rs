@@ -1384,6 +1384,9 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 ty,
                 self.scope,
                 &self.written,
+                crate::semantic::context_at(self.db, self.scope, Some((self.typed, expr)))
+                    .selections(self.db)
+                    .as_slice(),
                 &mut ConditionCapture {
                     site: expr.span(self.body).into(),
                     conditions: &mut self.check.conditions,
@@ -1467,6 +1470,9 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 definition.ret_ty(self.db).instantiate(self.db, args),
                 self.scope,
                 &self.written,
+                crate::semantic::context_at(self.db, self.scope, Some((self.typed, expr)))
+                    .selections(self.db)
+                    .as_slice(),
                 &mut ConditionCapture {
                     site: expr.span(self.body).into(),
                     conditions: &mut self.check.conditions,
@@ -1611,6 +1617,9 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                     ty,
                     scope,
                     &reported,
+                    crate::semantic::context_at(db, scope, Some((typed, expr)))
+                        .selections(db)
+                        .as_slice(),
                     &mut ConditionCapture {
                         site: expr.span(body).into(),
                         conditions: &mut check.conditions,
@@ -1834,7 +1843,7 @@ fn check_path_application<'db>(
     if ty.decompose_ty_app(db).1.len() != arity {
         return None;
     }
-    check_selected_type_requirements(db, ty, scope, reported, selections, capture)
+    check_type_requirements(db, ty, scope, reported, selections, capture)
 }
 
 /// The anonymous constants a body writes in expression and pattern
@@ -2115,6 +2124,9 @@ fn check_entered_header<'db>(
                 header,
                 scope,
                 written,
+                crate::semantic::context_at(db, scope, Some((typed, expr)))
+                    .selections(db)
+                    .as_slice(),
                 &mut ConditionCapture {
                     site: expr.span(body).into(),
                     conditions,
@@ -2148,23 +2160,13 @@ fn check_type_requirements<'db>(
     ty: TyId<'db>,
     scope: ScopeId<'db>,
     reported: &FxHashSet<TyId<'db>>,
-    capture: &mut ConditionCapture<'_, 'db>,
-) -> Option<TypeRequirementFailure<'db>> {
-    check_selected_type_requirements(db, ty, scope, reported, &[], capture)
-}
-
-fn check_selected_type_requirements<'db>(
-    db: &'db dyn HirAnalysisDb,
-    ty: TyId<'db>,
-    scope: ScopeId<'db>,
-    reported: &FxHashSet<TyId<'db>>,
     selections: &[SelectedApplication<'db>],
     capture: &mut ConditionCapture<'_, 'db>,
 ) -> Option<TypeRequirementFailure<'db>> {
     let (base, args) = ty.decompose_ty_app(db);
     for &arg in args {
         if let Some(failure) =
-            check_selected_type_requirements(db, arg, scope, reported, selections, capture)
+            check_type_requirements(db, arg, scope, reported, selections, capture)
         {
             return Some(failure);
         }
@@ -2842,7 +2844,7 @@ fn written_type_check_query<'db>(
                 let unmet = written
                     .lowered
                     .and_then(|ty| {
-                        check_selected_type_requirements(
+                        check_type_requirements(
                             db,
                             ty,
                             written.scope,
