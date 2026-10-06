@@ -548,6 +548,15 @@ pub(crate) fn instantiate_selected_impl<'db>(
     selected: ImplementorId<'db>,
     inst: TraitInstId<'db>,
 ) -> Option<ResolvedImplInstance<'db>> {
+    instantiate_selected_impl_with_normalizer(db, selected, inst, None)
+}
+
+pub(crate) fn instantiate_selected_impl_with_normalizer<'db>(
+    db: &'db dyn HirAnalysisDb,
+    selected: ImplementorId<'db>,
+    mut inst: TraitInstId<'db>,
+    normalizer: Option<&mut super::normalize::TypeNormalizer<'db>>,
+) -> Option<ResolvedImplInstance<'db>> {
     if matches!(selected.origin(db), ImplementorOrigin::Assumption) {
         return Some(ResolvedImplInstance {
             selected,
@@ -557,7 +566,21 @@ pub(crate) fn instantiate_selected_impl<'db>(
     }
 
     let mut table = UnificationTable::new(db);
-    let instantiated = table.instantiate_with_fresh_vars(selected);
+    let mut instantiated = table.instantiate_with_fresh_vars(selected);
+    if let Some(normalizer) = normalizer {
+        // Infer the application before reducing outputs that depend on its
+        // parameters. The complete goal, including equalities, is checked below.
+        let positional = |goal: TraitInstId<'db>| {
+            TraitInstId::new_simple(db, goal.def(db), goal.args(db).to_vec())
+        };
+        table
+            .unify(positional(instantiated.trait_inst(db)), positional(inst))
+            .ok()?;
+        instantiated = instantiated
+            .fold_with(db, &mut table)
+            .fold_with(db, normalizer);
+        inst = inst.fold_with(db, &mut table).fold_with(db, normalizer);
+    }
     table.unify(instantiated.trait_inst(db), inst).ok()?;
     Some(ResolvedImplInstance {
         selected,

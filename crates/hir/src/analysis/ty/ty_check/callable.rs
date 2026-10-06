@@ -24,8 +24,8 @@ use crate::analysis::{
         normalize::{normalize_ty, normalize_with_trait_evidence},
         trait_def::TraitInstId,
         trait_resolution::{
-            GoalSatisfiability, PredicateListId, TraitSolveCx, check_trait_inst_wf,
-            constraint::collect_func_decl_constraints, is_goal_satisfiable,
+            PredicateListId, TraitSolveCx, check_trait_inst_wf,
+            constraint::collect_func_decl_constraints,
         },
         ty_def::{BorrowKind, CapabilityKind},
         ty_def::{InvalidCause, TyBase, TyData, TyFlags, TyId},
@@ -1116,28 +1116,6 @@ impl<'db> Callable<'db> {
     ) -> bool {
         let mut progressed = false;
         let db = tc.db;
-        if tc.env.has_opened_evidence()
-            && let Some(target) = self.trait_inst
-        {
-            let target = tc.normalize_trait_goal(target);
-            let directly_opened = tc.env.opened_for_goal(target).is_some();
-            if !directly_opened
-                && !matches!(
-                    is_goal_satisfiable(
-                        db,
-                        TraitSolveCx::new(db, tc.env.scope())
-                            .with_assumptions(tc.env.base_assumptions()),
-                        target
-                    ),
-                    GoalSatisfiability::Satisfied(_)
-                )
-            {
-                tc.push_diag(BodyDiag::ObligationOpening {
-                    primary: span.clone(),
-                    reason: "open evidence for the called trait explicitly; derived selection transport is not yet supported",
-                });
-            }
-        }
         let constraints = collect_func_decl_constraints(db, self.callable_def, true);
         let declared = constraints.instantiate_identity();
         let instantiated = constraints.instantiate(db, &self.generic_args);
@@ -1176,6 +1154,16 @@ impl<'db> Callable<'db> {
                 TraitObligationOutcome::Requeue(obligation) => {
                     pending_obligations.push(obligation);
                 }
+            }
+            let goal = tc.normalize_trait_goal(goal);
+            if tc
+                .env
+                .requires_explicit_supertrait_evidence(call_expr.span(tc.body()).into(), goal)
+            {
+                tc.push_diag(BodyDiag::ObligationOpening {
+                    primary: span.clone(),
+                    reason: "open evidence for the called supertrait explicitly; derived selection transport is not yet supported",
+                });
             }
         }
         for (constraint_idx, (&constraint, &declared_constraint)) in instantiated

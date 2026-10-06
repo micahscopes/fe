@@ -629,7 +629,22 @@ fn semantic_callee_key_with_assumptions<'db>(
             .chain(lexical_selections.iter().copied())
             .collect(),
     );
-    let requirements = callable.selection_requirements(db);
+    let mut requirements = callable.selection_requirements(db).list(db).to_vec();
+    let method_choice = match &source_choice.method {
+        TraitCallChoice::Recorded(choice) => Some(*choice),
+        TraitCallChoice::NotTrait | TraitCallChoice::UntransportedBound => None,
+    };
+    for record in method_choice
+        .into_iter()
+        .chain(source_choice.bounds.iter().map(|(_, choice)| *choice))
+    {
+        let choice = record.data(db);
+        requirements.extend(
+            crate::semantic::recorded_impl_bounds(db, impl_env, choice.goal(), choice.via())
+                .list(db),
+        );
+    }
+    let requirements = PredicateListId::new(db, requirements).extend_all_bounds(db);
     let mut retained_selections = impl_env
         .selections(db)
         .iter()

@@ -4828,6 +4828,11 @@ fn evidence_impl_bound_use_context_at_o0_and_o2() {
 }
 
 #[test]
+fn evidence_derived_dispatch_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_derived_dispatch.fe");
+}
+
+#[test]
 fn evidence_scope_is_frozen_before_specialization_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("evidence_scope_freeze.fe");
 }

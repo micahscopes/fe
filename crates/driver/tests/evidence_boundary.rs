@@ -115,6 +115,65 @@ fn witness_dispatch_uses_the_impl_bound_choices_at_the_use() {
 }
 
 #[test]
+fn derived_calls_use_opened_evidence_for_their_impl_bounds() {
+    let mut db = database();
+    let file = checked(
+        &mut db,
+        "evidence-derived-dispatch",
+        include_str!(
+            "../../fe/tests/fixtures/evidence_boundary_runtime/evidence_derived_dispatch.fe"
+        ),
+    );
+    for (name, expected) in [
+        ("ordinary", "11"),
+        ("selected", "22"),
+        ("named", "22"),
+        ("forward", "121"),
+        ("reverse", "212"),
+    ] {
+        assert_eq!(evaluate(&db, file, name), expected, "{name}");
+    }
+}
+
+#[test]
+fn derived_calls_still_require_evidence_for_their_actual_bound() {
+    let mut db = database();
+    let declarations = "use core::obligations::Evidence
+trait Base { const fn base() -> u256 }
+trait Compute { const fn compute() -> u256 }
+struct Subject {}
+struct Wrap<T> {}
+impl Base for Subject { const fn base() -> u256 { 1 } }
+impl<T: Base> Compute for Wrap<T> { const fn compute() -> u256 { T::base() } }
+";
+    for (name, body) in [
+        (
+            "missing",
+            "const fn run<T>() -> u256 { <Wrap<T> as Compute>::compute() }",
+        ),
+        (
+            "wrong-type",
+            "const fn run<T>(_ e: Evidence<Base<Subject>>) -> u256 { with (e) { <Wrap<T> as Compute>::compute() } }",
+        ),
+        (
+            "wrong-trait",
+            "const fn run<T>(_ e: Evidence<Compute<T>>) -> u256 { with (e) { <Wrap<T> as Compute>::compute() } }",
+        ),
+    ] {
+        let file = input(
+            &mut db,
+            &format!("derived-bound-{name}"),
+            &format!("{declarations}{body}"),
+        );
+        let errors = diagnostics(&db, file);
+        assert!(
+            !errors.is_empty(),
+            "unproven derived bound accepted: {name}"
+        );
+    }
+}
+
+#[test]
 fn same_goal_evidence_parameters_keep_each_operands_choice_in_both_orders() {
     let mut db = database();
     let file = checked(

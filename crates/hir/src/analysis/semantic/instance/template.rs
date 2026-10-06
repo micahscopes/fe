@@ -124,6 +124,10 @@ impl<'db> SelectedApplication<'db> {
         }
     }
 
+    pub(crate) fn candidate(self) -> ImplementorId<'db> {
+        self.candidate
+    }
+
     pub fn goal(self) -> TraitInstId<'db> {
         self.goal
     }

@@ -123,6 +123,17 @@ fn valid_generic_type_default_fixtures_pass_check() {
         assert!(!run.timed_out, "{fixture} timed out: {}", run.combined);
         assert_eq!(run.code, 0, "{fixture}: {}", run.combined);
     }
+
+    // This HIR fixture still has a known full-pipeline call-body mapping error.
+    // Normalizing the retained application must preserve that diagnostic,
+    // rather than panic while matching its associated output.
+    let wrapper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../hir/test_files/ty_check/associated_types_wrapper.fe");
+    let run = run_fe_check(&wrapper);
+    assert!(!run.timed_out, "wrapper timed out: {}", run.combined);
+    assert_eq!(run.code, 1, "wrapper: {}", run.combined);
+    assert!(run.combined.contains("error[16-0004]"), "{}", run.combined);
+    assert!(!run.combined.contains("panicked"), "{}", run.combined);
 }
 
 #[test]

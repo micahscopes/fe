@@ -315,6 +315,43 @@ fn call_trait_goal_at<'db>(
     )
 }
 
+/// Project the declared bounds of a recorded answer without selecting again.
+pub(crate) fn recorded_impl_bounds<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: crate::analysis::semantic::ImplEnv<'db>,
+    goal: TraitInstId<'db>,
+    via: crate::analysis::ty::ty_check::TraitChoiceVia<'db>,
+) -> PredicateListId<'db> {
+    let selected = match via {
+        crate::analysis::ty::ty_check::TraitChoiceVia::Implementation(selected) => selected,
+        crate::analysis::ty::ty_check::TraitChoiceVia::Selected(selection) => selection.candidate(),
+    };
+    let ImplementorOrigin::Hir(item) = selected.origin(db) else {
+        return PredicateListId::empty_list(db);
+    };
+    let mut normalizer = crate::analysis::ty::normalize::TypeNormalizer::new(
+        db,
+        context.normalization_scope(db),
+        context.assumptions(db),
+    );
+    let goal = goal.fold_with(db, &mut normalizer);
+    let selected = selected.fold_with(db, &mut normalizer);
+    let instance = crate::analysis::ty::trait_def::instantiate_selected_impl_with_normalizer(
+        db,
+        selected,
+        goal,
+        Some(&mut normalizer),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "an accepted implementation must match its recorded goal: answer={}, goal={}",
+            selected.trait_(db).pretty_print(db, true),
+            goal.pretty_print(db, true),
+        )
+    });
+    collect_candidate_constraints(db, item.into()).instantiate(db, instance.impl_args(db))
+}
+
 /// Read nominal requirements and bounds of the already accepted implementation.
 pub(crate) fn call_requirements_at<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -328,24 +365,25 @@ pub(crate) fn call_requirements_at<'db>(
     let Some(body) = typed.body() else {
         return declared;
     };
-    let Some(choice) = body.decision_at(typed, expr.span(body).into()) else {
-        return declared;
-    };
-    let choice = choice.data(db);
     let mut requirements = declared.list(db).to_vec();
-    requirements.push(choice.goal());
-    if let ImplementorOrigin::Hir(item) = choice.answer_origin(db) {
-        // Project bounds from the already accepted impl. This reads the
-        // recorded answer; it neither searches nor rechecks its conditions.
-        let selected = crate::analysis::ty::trait_lower::lower_impl_trait(db, item)
-            .expect("an accepted implementation must retain its declaration");
-        let instance =
-            crate::analysis::ty::trait_def::instantiate_selected_impl(db, selected, choice.goal())
-                .expect("an accepted implementation must match its recorded goal");
+    for choice in typed.trait_choices(db).filter(|choice| {
+        choice
+            .call_constraint()
+            .is_some_and(|(call, _, _)| call == expr)
+            || choice.site()
+                == crate::analysis::ty::ty_check::DecisionSite::trait_reference(
+                    expr.span(body).into(),
+                )
+    }) {
+        requirements.push(choice.goal());
         requirements.extend(
-            collect_candidate_constraints(db, item.into())
-                .instantiate(db, instance.impl_args(db))
-                .list(db),
+            recorded_impl_bounds(
+                db,
+                context_at(db, body.scope(), Some((typed, expr))),
+                choice.goal(),
+                choice.via(),
+            )
+            .list(db),
         );
     }
     PredicateListId::new(db, requirements).extend_all_bounds(db)

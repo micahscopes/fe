@@ -597,10 +597,6 @@ impl<'db> TyCheckEnv<'db> {
         );
     }
 
-    pub(super) fn has_opened_evidence(&self) -> bool {
-        self.provisions.opened_evidence(self.db).next().is_some()
-    }
-
     pub(super) fn selection_context(&self) -> crate::analysis::semantic::ImplEnv<'db> {
         selection_context(
             self.db,
@@ -623,10 +619,35 @@ impl<'db> TyCheckEnv<'db> {
         }
     }
 
-    pub(super) fn opened_for_goal(&self, goal: TraitInstId<'db>) -> Option<ExprId> {
-        self.provision_for_goal(goal)
-            .and_then(Provision::evidence_operand)
-            .map(|(value, _)| value)
+    pub(super) fn requires_explicit_supertrait_evidence(
+        &self,
+        span: DynLazySpan<'db>,
+        goal: TraitInstId<'db>,
+    ) -> bool {
+        let Some(choice) = self
+            .decisions
+            .choice(self.db, &DecisionSite::trait_reference(span))
+        else {
+            return false;
+        };
+        if !matches!(
+            choice.answer_origin(self.db),
+            crate::analysis::ty::trait_def::ImplementorOrigin::Assumption
+        ) || self.provision_for_goal(goal).is_some()
+            || self
+                .base_assumptions
+                .extend_all_bounds(self.db)
+                .list(self.db)
+                .contains(&goal)
+        {
+            return false;
+        }
+        self.provisions.opened_evidence(self.db).any(|(_, opened)| {
+            PredicateListId::new(self.db, vec![opened])
+                .extend_all_bounds(self.db)
+                .list(self.db)
+                .contains(&goal)
+        })
     }
 
     pub(super) fn method_lookup_assumptions(&self) -> PredicateListId<'db> {
