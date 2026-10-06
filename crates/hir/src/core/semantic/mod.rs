@@ -239,6 +239,12 @@ fn item_body_assumptions<'db>(
     })
 }
 
+/// Solver view of the canonical premises at an item position.
+fn item_solver_context<'db>(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> TraitSolveCx<'db> {
+    let context = context_at(db, scope, None);
+    TraitSolveCx::new(db, context.normalization_scope(db)).with_assumptions(context.assumptions(db))
+}
+
 /// Declared body premises at an anonymous constant's source position.
 pub(crate) fn body_assumptions_at<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -1670,12 +1676,8 @@ impl<'db> FuncParamView<'db> {
         }
 
         // Well-formedness / trait-bound satisfaction for parameter type
-        if let Some(diag) = check_ty_wf(
-            db,
-            TraitSolveCx::new(db, func.scope()).with_assumptions(param_env(db, func.into())),
-            ty,
-        )
-        .into_diag(ty_span.clone())
+        if let Some(diag) =
+            check_ty_wf(db, item_solver_context(db, func.scope()), ty).into_diag(ty_span.clone())
         {
             out.push(diag);
         }
@@ -3736,12 +3738,8 @@ impl<'db> TypeAlias<'db> {
         };
         let assumptions = constraints_for(db, self.into());
         let ty = lower_hir_ty(db, hir_ty, self.scope(), assumptions);
-        if let Some(diag) = check_ty_wf(
-            db,
-            TraitSolveCx::new(db, self.scope()).with_assumptions(param_env(db, self.into())),
-            ty,
-        )
-        .into_diag(self.span().ty().into())
+        if let Some(diag) = check_ty_wf(db, item_solver_context(db, self.scope()), ty)
+            .into_diag(self.span().ty().into())
         {
             vec![diag]
         } else {
@@ -4181,11 +4179,7 @@ impl<'db> Impl<'db> {
                 is_nominal: !base.is_param(db),
             };
         }
-        match check_ty_wf(
-            db,
-            TraitSolveCx::new(db, self.scope()).with_assumptions(param_env(db, self.into())),
-            ty,
-        ) {
+        match check_ty_wf(db, item_solver_context(db, self.scope()), ty) {
             WellFormedness::WellFormed => InherentImplAdmissibility::Admissible { ty },
             error => InherentImplAdmissibility::IllFormed { ty, error },
         }
@@ -4730,12 +4724,8 @@ impl<'db> ImplTrait<'db> {
             return (None, Vec::new());
         }
 
-        if let Some(diag) = check_ty_wf(
-            db,
-            TraitSolveCx::new(db, self.scope()).with_assumptions(param_env(db, self.into())),
-            ty,
-        )
-        .into_diag(self.span().ty().into())
+        if let Some(diag) = check_ty_wf(db, item_solver_context(db, self.scope()), ty)
+            .into_diag(self.span().ty().into())
         {
             return (None, vec![diag]);
         }
@@ -4989,10 +4979,10 @@ impl<'db> ImplAssocTypeView<'db> {
         if let Some(diag) = normalized.emit_diag(db, ty_span.clone().into()) {
             return vec![diag];
         }
+        let context = item_solver_context(db, self.scope());
         if let Some(diag) = check_ty_wf(
             db,
-            TraitSolveCx::new(db, self.scope())
-                .with_assumptions(self.with_parameter_bounds(db, param_env(db, self.owner.into()))),
+            context.with_assumptions(self.with_parameter_bounds(db, context.assumptions())),
             ty,
         )
         .into_diag(ty_span.into())
@@ -5944,12 +5934,8 @@ impl<'db> FieldView<'db> {
 
         // Trait-bound well-formedness for field type.
         let owner_item = self.owner_item();
-        if let Some(diag) = check_ty_wf(
-            db,
-            TraitSolveCx::new(db, owner_item.scope()).with_assumptions(param_env(db, owner_item)),
-            ty,
-        )
-        .into_diag(span.clone())
+        if let Some(diag) =
+            check_ty_wf(db, item_solver_context(db, owner_item.scope()), ty).into_diag(span.clone())
         {
             out.push(diag);
             return out;
