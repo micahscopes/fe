@@ -1210,3 +1210,68 @@ fn caller() {
     assert!(errors.contains("let outside"), "{errors}");
     assert!(!errors.contains("let inside"), "{errors}");
 }
+
+#[test]
+fn indirect_calls_check_conditions_in_the_call_context() {
+    for (selected, accepted) in [("false", false), ("true", true)] {
+        for (name, setup, call) in [
+            ("binding", "", "reader()"),
+            ("copied_binding", "let copied = reader", "copied()"),
+        ] {
+            let mut db = database();
+            let source = format!(
+                r#"
+trait Flag {{ const OK: bool }}
+struct Subject {{}}
+impl Flag for Subject {{ const OK: bool = true }}
+impl Flag for Subject as Chosen {{ const OK: bool = {selected} }}
+fn read<T: Flag>() -> u256 where T::OK {{ 7 }}
+fn caller() {{
+    let reader = read<Subject>
+    with (Chosen) {{
+        {setup}
+        let value = {call}
+    }}
+}}
+"#
+            );
+            let file = input(&mut db, name, &source);
+            let errors = diagnostics(&db, file);
+            if accepted {
+                assert!(errors.is_empty(), "{name}: {errors}");
+            } else {
+                assert!(errors.contains("8-0093"), "{name}: {errors}");
+                assert!(errors.contains(call), "{name}: {errors}");
+                assert!(!errors.contains("let reader"), "{name}: {errors}");
+            }
+        }
+    }
+}
+
+#[test]
+fn function_values_check_conditions_at_each_position() {
+    let declarations = r#"
+trait Flag { const OK: bool }
+struct Subject {}
+impl Flag for Subject { const OK: bool = false }
+impl Flag for Subject as Chosen { const OK: bool = true }
+fn read<T: Flag>() -> u256 where T::OK { 7 }
+"#;
+    let mut db = database();
+    let source = format!(
+        "{declarations}\nfn caller() {{ with (Chosen) {{ let reader = read<Subject>\nlet value = reader() }} }}"
+    );
+    let file = input(&mut db, "same_frame_function_value", &source);
+    let errors = diagnostics(&db, file);
+    assert!(errors.is_empty(), "{errors}");
+
+    let mut db = database();
+    let source = format!(
+        "{declarations}\nfn caller() {{ let reader = with (Chosen) {{ read<Subject> }}\nlet value = reader() }}"
+    );
+    let file = input(&mut db, "call_frame_function_value", &source);
+    let errors = diagnostics(&db, file);
+    assert!(errors.contains("8-0093"), "{errors}");
+    assert!(errors.contains("reader()"), "{errors}");
+    assert!(!errors.contains("let reader"), "{errors}");
+}

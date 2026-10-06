@@ -1204,6 +1204,56 @@ pub(super) fn check_body_requirements<'db>(
         }
     }
     let mut check = checker.check_inferred_types(&entered);
+    // Retain every call's discharge, but prefer an already-failing value
+    // formation over a repeated report in the same implementation context.
+    let value_sites: FxHashSet<DynLazySpan<'db>> = body
+        .exprs(db)
+        .iter()
+        .filter(|(expr, _)| {
+            typed.callable_expr(*expr).is_none()
+                && typed.expr_binding(*expr).is_none()
+                && matches!(
+                    expr.data(db, body).borrowed().to_opt(),
+                    Some(Expr::Path(..))
+                )
+        })
+        .map(|(expr, _)| expr.span(body).into())
+        .collect();
+    let indirect_sites: FxHashSet<DynLazySpan<'db>> = body
+        .exprs(db)
+        .iter()
+        .filter_map(|(expr, data)| {
+            let Expr::Call(callee, _) = data.borrowed().to_opt()? else {
+                return None;
+            };
+            (typed.expr_binding(*callee).is_some()
+                || !matches!(
+                    callee.data(db, body).borrowed().to_opt(),
+                    Some(Expr::Path(..))
+                ))
+            .then(|| expr.span(body).into())
+        })
+        .collect();
+    let failed_values: FxHashSet<_> = check
+        .conditions
+        .values()
+        .filter(|use_| {
+            value_sites.contains(use_.span()) && matches!(use_.outcome(), Discharge::Fails(_))
+        })
+        .map(|use_| (use_.predicate, use_.args.clone(), use_.caller, use_.context))
+        .collect();
+    check.reports.retain(|report| {
+        let RequirementReport::Condition(site, _) = report else {
+            return true;
+        };
+        !indirect_sites.contains(&site.span)
+            || !failed_values.contains(&(
+                site.predicate,
+                site.args.clone(),
+                site.caller,
+                site.context,
+            ))
+    });
     check.extend(check_recorded_condition_uses(db, condition_inputs));
     for (nested, expected) in expression_const_bodies(db, body, typed) {
         check.extend(anon_const_position_check(db, nested, expected, &[]));
@@ -1420,15 +1470,8 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
         if callable.is_none() && self.direct_callees.contains(&expr) {
             return;
         }
-        // A function value enters the body where it is written, at a path
-        // that names the function. A call through anything else, such as a
-        // binding, block, branch or field, calls such a value, whose
-        // requirements were checked there.
-        if let Some(Expr::Call(callee, _)) = data.borrowed().to_opt()
-            && !self.names_function_value(*callee)
-        {
-            return;
-        }
+        // Value formation cannot establish conditions for a later call in
+        // a different provision frame. Calls check their own recorded choices.
         let (definition, args) = match callable {
             Some(callable) => (callable.callable_def(), callable.generic_args()),
             // Any other expression with a function type, such as a field

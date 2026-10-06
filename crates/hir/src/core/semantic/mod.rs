@@ -358,10 +358,11 @@ pub(crate) fn call_requirements_at<'db>(
     typed: &crate::analysis::ty::ty_check::TypedBody<'db>,
     expr: ExprId,
 ) -> PredicateListId<'db> {
-    let Some(callable) = typed.callable_expr(expr) else {
-        return PredicateListId::empty_list(db);
-    };
-    let declared = callable.selection_requirements(db);
+    // A function value has path-bound records even without a call entry.
+    let declared = typed
+        .callable_expr(expr)
+        .map(|callable| callable.selection_requirements(db))
+        .unwrap_or_else(|| PredicateListId::empty_list(db));
     let Some(body) = typed.body() else {
         return declared;
     };

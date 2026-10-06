@@ -4335,6 +4335,11 @@ impl<'db> TyChecker<'db> {
                         return ExprProp::invalid(self.db);
                     }
 
+                    if !is_call_callee {
+                        // A function value owns its checked bounds at this path,
+                        // just as a direct call owns them at its call expression.
+                        callable.process_constraints(self, expr, path_expr_span.clone().into());
+                    }
                     self.env
                         .register_value_path_ref(expr, ValuePathRef::FunctionItem);
                     ExprProp::new(callable.ty(self.db), true)
