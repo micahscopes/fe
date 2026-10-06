@@ -26,6 +26,7 @@ use crate::analysis::ty::pattern_ir::{
 };
 use crate::analysis::{
     HirAnalysisDb,
+    semantic::SelectedApplication,
     ty::{
         const_ty::CallableInputLayoutHoleOrigin,
         corelib::resolve_lib_type_path,
@@ -39,7 +40,9 @@ use crate::analysis::{
         normalize::normalize_ty,
         provider::ProviderAddressSpace,
         trait_def::TraitInstId,
-        trait_resolution::{PredicateListId, constraint::collect_func_effect_provider_constraints},
+        trait_resolution::{
+            PredicateListId, TraitSolveCx, constraint::collect_func_effect_provider_constraints,
+        },
         ty_contains_const_hole,
         ty_def::{InvalidCause, StringFallback, TyData, TyId, TyVarSort},
         ty_is_copy,
@@ -1956,6 +1959,27 @@ pub struct TraitChoiceId<'db> {
 }
 
 impl<'db> TraitChoiceId<'db> {
+    /// Transport the accepted selection into a context that independently
+    /// proves it. Ordinary answers already have no selection context to shed.
+    pub(crate) fn in_proven_context(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        context: TraitSolveCx<'db>,
+    ) -> Result<Self, crate::analysis::ty::trait_def::SelectedEvidenceError> {
+        let choice = self.data(db);
+        let TraitChoiceVia::Selected(selection) = choice.via else {
+            return Ok(self);
+        };
+        let proof = selection.revalidate(db, context, choice.goal)?;
+        Ok(Self::new(
+            db,
+            TraitChoice {
+                goal: choice.goal,
+                via: TraitChoiceVia::Selected(SelectedApplication::from_evidence(&proof)),
+            },
+        ))
+    }
+
     /// Record an implementation already accepted by a generated-call producer.
     pub fn for_resolved_implementation(
         db: &'db dyn HirAnalysisDb,

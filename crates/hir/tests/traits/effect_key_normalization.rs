@@ -5981,3 +5981,39 @@ fn root_semantic_instance_keys_are_closed_under_root_provider_subst() {
         panic!("test root should have a closed effect env under synthesized root subst: {err:?}")
     });
 }
+
+#[test]
+fn equal_selected_impls_share_callee_instances_across_positions() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        Utf8PathBuf::from("selected_impl_instance_sharing.fe"),
+        r#"
+trait Read { fn read() -> u256 }
+struct S {}
+impl Read for S { fn read() -> u256 { 1 } }
+impl Read for S as Alt { fn read() -> u256 { 2 } }
+impl Read for S as Other { fn read() -> u256 { 3 } }
+fn needs<T: Read>() -> u256 { T::read() * 1000 + 7 }
+fn left() -> u256 { with (Alt) { needs<S>() } }
+fn right() -> u256 { with (Alt) { needs<S>() } }
+fn other() -> u256 { with (Other) { needs<S>() } }
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+    let key_for = |name| {
+        let func = find_func(&db, top_mod, name);
+        let instance = get_or_build_semantic_instance(
+            &db,
+            root_semantic_instance_key(&db, BodyOwner::Func(func)).unwrap(),
+        );
+        let callees = instance.body(&db).callees();
+        assert_eq!(callees.len(), 1);
+        callees[0].key
+    };
+    let left = key_for("left");
+    let right = key_for("right");
+    let other = key_for("other");
+    assert_eq!(left, right, "equal selected impls should share a callee");
+    assert_ne!(left, other, "different selected impls must stay distinct");
+}

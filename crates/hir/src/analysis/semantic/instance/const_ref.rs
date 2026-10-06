@@ -630,7 +630,7 @@ fn semantic_callee_key_with_assumptions<'db>(
             .collect(),
     );
     let requirements = callable.selection_requirements(db);
-    let retained_selections = impl_env
+    let mut retained_selections = impl_env
         .selections(db)
         .iter()
         .copied()
@@ -935,6 +935,21 @@ fn semantic_callee_key_with_assumptions<'db>(
     } else {
         (false, true)
     };
+    if context_independent {
+        // Keep the accepted candidate, but use one callee proof context when
+        // it establishes the same application without caller premises. A
+        // context-dependent selection retains its original validating context.
+        for selection in &mut retained_selections {
+            if let Ok(proof) = selection.revalidate(db, independent_context, selection.goal()) {
+                *selection = super::SelectedApplication::from_evidence(&proof);
+            }
+        }
+        for (_, choice) in &mut source_choice.bounds {
+            if let Ok(proven) = choice.in_proven_context(db, independent_context) {
+                *choice = proven;
+            }
+        }
+    }
     let mut witnesses: IndexSet<_> = if context_independent {
         IndexSet::new()
     } else {
