@@ -1275,3 +1275,93 @@ fn read<T: Flag>() -> u256 where T::OK { 7 }
     assert!(errors.contains("reader()"), "{errors}");
     assert!(!errors.contains("let reader"), "{errors}");
 }
+
+#[test]
+fn written_family_arguments_read_the_position_choice() {
+    let declarations = r#"
+trait Mark { type Output }
+struct Subject {}
+impl Mark for Subject as Chosen { type Output = u8 }
+trait Factory { type Out<T: Mark> }
+struct Maker {}
+impl Factory for Maker { type Out<T> = u8 }
+struct Holder<T> { value: T }
+fn require<T: Mark>() {}
+"#;
+    for (name, body) in [
+        (
+            "named_family_argument",
+            "fn caller() { with (Chosen) { require<Subject>()
+let value: Maker::Out<Subject> = 7 } }",
+        ),
+        (
+            "nested_family_argument",
+            "fn caller() { with (Chosen) { let value: Holder<Maker::Out<Subject>> = Holder { value: 7 } } }",
+        ),
+        (
+            "named_family_origin",
+            "impl Factory for Subject as FamilyChoice { type Out<T> = u8 }
+fn caller() { with (Chosen, FamilyChoice) { let value: Subject::Out<Subject> = 7 } }",
+        ),
+    ] {
+        let mut db = database();
+        let file = input(&mut db, name, &format!("{declarations}\n{body}"));
+        let errors = diagnostics(&db, file);
+        assert!(errors.is_empty(), "{name}: {errors}");
+    }
+}
+
+#[test]
+fn written_family_arguments_preserve_missing_and_incompatible_bounds() {
+    let declarations = r#"
+trait Mark { type Output }
+struct Subject {}
+struct Wrong {}
+impl Mark for Subject as Chosen { type Output = u8 }
+trait Factory { type Out<T: Mark> }
+trait StrictFactory { type Out<T: Mark<Output = u16>> }
+struct Maker {}
+impl Factory for Maker { type Out<T> = u8 }
+impl Factory for Subject as FamilyChoice { type Out<T> = u8 }
+impl StrictFactory for Maker { type Out<T> = u8 }
+"#;
+    for (name, body) in [
+        (
+            "named_origin_missing_argument",
+            "fn caller() { with (FamilyChoice) { let value: Subject::Out<Subject> } }",
+        ),
+        (
+            "named_origin_wrong_argument",
+            "fn caller() { with (Chosen, FamilyChoice) { let value: Subject::Out<Wrong> } }",
+        ),
+        (
+            "missing_family_argument",
+            "fn caller() { let value: Maker::Out<Subject> }",
+        ),
+        (
+            "wrong_family_argument",
+            "fn caller() { with (Chosen) { let value: Maker::Out<Wrong> } }",
+        ),
+        (
+            "incompatible_family_argument",
+            "fn caller() { with (Chosen) { let value: <Maker as StrictFactory>::Out<Subject> } }",
+        ),
+        (
+            "restored_family_argument",
+            "fn caller() { with (Chosen) { let inside: Maker::Out<Subject> }
+let outside: Maker::Out<Subject> }",
+        ),
+    ] {
+        let mut db = database();
+        let file = input(&mut db, name, &format!("{declarations}\n{body}"));
+        let errors = diagnostics(&db, file);
+        assert!(errors.contains("6-0003"), "{name}: {errors}");
+        if name == "restored_family_argument" {
+            assert!(
+                errors.contains("let outside: Maker::Out<Subject>"),
+                "{errors}"
+            );
+            assert_eq!(errors.matches("error[6-0003]").count(), 1, "{errors}");
+        }
+    }
+}

@@ -605,7 +605,7 @@ fn check_ty_formation<'db>(
             pending.extend(args.iter().rev().map(|&arg| (arg, false)));
             continue;
         }
-        let family_wf = check_type_application_requirements(db, solve_cx, ty);
+        let family_wf = check_type_application_requirements(db, solve_cx, ty, lexical_context);
         if !family_wf.is_wf() {
             return family_wf;
         }
@@ -901,6 +901,7 @@ pub(crate) fn check_type_application_requirements<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
     ty: TyId<'db>,
+    lexical_context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> WellFormedness<'db> {
     if let Some(name) = ty.lacks_args_for_parameter_bounds(db) {
         return WellFormedness::FamilyNeedsAllArgs { name };
@@ -915,7 +916,11 @@ pub(crate) fn check_type_application_requirements<'db>(
     };
     if let Some(requirements) = requirements {
         for &goal in requirements.list(db) {
-            if !bound_holds_for_every_argument(db, solve_cx, goal) {
+            let holds = match lexical_context.and_then(|context| context.selection_for(db, goal)) {
+                Some(selection) => selection.revalidate(db, solve_cx, goal).is_ok(),
+                None => bound_holds_for_every_argument(db, solve_cx, goal),
+            };
+            if !holds {
                 return WellFormedness::IllFormed {
                     goal,
                     subgoal: None,

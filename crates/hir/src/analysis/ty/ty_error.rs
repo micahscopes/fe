@@ -171,10 +171,12 @@ pub(crate) fn collect_application_requirement_errors<'db>(
     hir_ty: TypeId<'db>,
     span: LazyTySpan<'db>,
     assumptions: PredicateListId<'db>,
+    context: crate::analysis::semantic::ImplEnv<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
     let mut visitor = ApplicationRequirementVisitor {
         db,
         assumptions,
+        context,
         diags: Vec::new(),
     };
     let mut ctxt = VisitorCtxt::new(db, scope, span);
@@ -190,6 +192,7 @@ fn application_requirement_diags<'db>(
     assumptions: PredicateListId<'db>,
     path_span: &LazyPathSpan<'db>,
     type_uses: Vec<(PathId<'db>, TyId<'db>)>,
+    context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> Vec<TyDiagCollection<'db>> {
     use super::trait_resolution::{TraitSolveCx, check_type_application_requirements};
     let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
@@ -200,7 +203,7 @@ fn application_requirement_diags<'db>(
                 .clone()
                 .segment(used_path.segment_index(db))
                 .into();
-            check_type_application_requirements(db, solve_cx, ty)
+            check_type_application_requirements(db, solve_cx, ty, context)
                 .into_diag(span.clone())
                 .or_else(|| projection_const_fault(db, scope, assumptions, ty, span))
         })
@@ -256,6 +259,7 @@ pub(crate) fn is_const_fault(cause: &InvalidCause<'_>) -> bool {
 struct ApplicationRequirementVisitor<'db> {
     db: &'db dyn HirAnalysisDb,
     assumptions: PredicateListId<'db>,
+    context: crate::analysis::semantic::ImplEnv<'db>,
     diags: Vec<TyDiagCollection<'db>>,
 }
 
@@ -284,7 +288,8 @@ impl<'db> Visitor<'db> for ApplicationRequirementVisitor<'db> {
                 assumptions: self.assumptions,
             },
             ConstBodyLowering::Eager,
-        );
+        )
+        .with_context(self.context, self.assumptions);
         // Resolution errors are reported by lowering; only uses that resolved
         // are checked here.
         let _ = resolve_path_with_observer_and_minter(
@@ -302,6 +307,7 @@ impl<'db> Visitor<'db> for ApplicationRequirementVisitor<'db> {
             self.assumptions,
             &path_span,
             type_uses,
+            Some(self.context),
         ));
         walk_path(self, ctxt, path);
     }
@@ -568,6 +574,7 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
             self.assumptions,
             &path_span,
             type_uses,
+            None,
         ));
 
         if !matches!(res, PathRes::Ty(_) | PathRes::TyAlias(..)) {

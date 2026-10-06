@@ -1342,6 +1342,7 @@ where
                 ident,
                 assumptions,
                 minter.const_bodies(),
+                minter.selection_context(),
             ) {
                 Ok(assoc_tys) => assoc_tys,
                 Err(FindAssociatedTypeError::InfiniteBoundRecursion) => {
@@ -1912,7 +1913,15 @@ pub(crate) fn find_associated_type<'db>(
     name: IdentId<'db>,
     assumptions: PredicateListId<'db>,
 ) -> Result<SmallVec<(TraitInstId<'db>, TyId<'db>), 4>, FindAssociatedTypeError> {
-    find_associated_type_in_mode(db, scope, ty, name, assumptions, ConstBodyLowering::Eager)
+    find_associated_type_in_mode(
+        db,
+        scope,
+        ty,
+        name,
+        assumptions,
+        ConstBodyLowering::Eager,
+        None,
+    )
 }
 
 /// The bounds implied by a trait's own `Self: Trait` predicate.
@@ -1966,6 +1975,7 @@ fn find_associated_type_in_mode<'db>(
     name: IdentId<'db>,
     assumptions: PredicateListId<'db>,
     const_bodies: ConstBodyLowering,
+    context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> Result<SmallVec<(TraitInstId<'db>, TyId<'db>), 4>, FindAssociatedTypeError> {
     let canonical_ty = ty.canonical();
     let original_ty = ty.original();
@@ -1974,6 +1984,7 @@ fn find_associated_type_in_mode<'db>(
     // `trait Sub: Super { .. }` makes `Super`'s associated types reachable
     // through `T::Item`.
     let assumptions = assumptions.extend_all_bounds(db);
+    let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
 
     // Qualified type: `<A as T>::B`. Always construct the associated type projection
     // against the qualified trait instance; bindings (if any) will be handled downstream.
@@ -2026,7 +2037,6 @@ fn find_associated_type_in_mode<'db>(
     }
 
     if let Some((_, bounds)) = original_ty.family_declared_bounds(db) {
-        let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
         for &bound in bounds.list(db) {
             if bound.def(db).assoc_ty(db, name).is_some()
                 && matches!(
@@ -2169,6 +2179,22 @@ fn find_associated_type_in_mode<'db>(
 
         Ok(())
     })?;
+
+    if let Some(context) = context {
+        // A checked lexical choice supplies its associated members even for
+        // concrete receivers, and replaces ordinary candidates for that slot.
+        candidates.retain(|(goal, _)| context.selection_for(db, *goal).is_none());
+        for selection in context.selections(db) {
+            let goal = selection.goal();
+            if goal.self_ty(db) == original_ty
+                && let Ok(evidence) = selection.revalidate(db, solve_cx, goal)
+                && let Some(associated) =
+                    evidence.resolved_instance().instantiated_assoc_ty(db, name)
+            {
+                candidates.push((goal, associated));
+            }
+        }
+    }
 
     // Supertrait and contextual bounds can reach the same projection, e.g. a
     // method that restates a bound the enclosing trait already implies. Two

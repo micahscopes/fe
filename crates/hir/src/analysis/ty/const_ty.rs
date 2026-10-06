@@ -515,6 +515,10 @@ impl<'db> LoweringContext<'db> {
         self
     }
 
+    pub(crate) fn selection_context(&self) -> Option<ImplEnv<'db>> {
+        self.selection_context
+    }
+
     pub(crate) fn const_assumptions(&self, default: PredicateListId<'db>) -> PredicateListId<'db> {
         self.selected_const_assumptions.unwrap_or(default)
     }

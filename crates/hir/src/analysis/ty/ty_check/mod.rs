@@ -3809,6 +3809,7 @@ impl<'db> TyChecker<'db> {
                 hir_ty,
                 span.clone(),
                 self.env.assumptions(),
+                context,
             );
             if !diags.is_empty() {
                 for d in diags {
