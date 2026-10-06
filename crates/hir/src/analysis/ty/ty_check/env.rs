@@ -14,7 +14,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use salsa::Update;
 use thin_vec::ThinVec;
 
-use super::const_requirements::{ConstConditionUse, selection_context};
+use super::const_requirements::ConstConditionUse;
 use super::effect_env as keyed_effect_env;
 use super::owner::BodyOwner;
 use super::{
@@ -598,11 +598,7 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     pub(super) fn selection_context(&self) -> crate::analysis::semantic::ImplEnv<'db> {
-        selection_context(
-            self.db,
-            self.owner_scope,
-            self.provisions.selections(self.db).collect(),
-        )
+        self.provisions.context(self.db, self.owner_scope)
     }
 
     pub(super) fn provision_for_goal(&self, goal: TraitInstId<'db>) -> Option<Provision<'db>> {

@@ -272,6 +272,21 @@ impl<'db, Data> Chain<'db, Data> {
         self.visible(db).filter_map(Provision::evidence_operand)
     }
 
+    /// Project one position context without copying or deciding its provisions.
+    pub fn context(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    ) -> crate::analysis::semantic::ImplEnv<'db> {
+        crate::analysis::semantic::ImplEnv::new_with_selections(
+            db,
+            scope,
+            self.evidence_assumptions(db),
+            Vec::new(),
+            self.selections(db).collect(),
+        )
+    }
+
     /// Evidence establishes premises; named choices remain separate authority.
     pub fn evidence_assumptions(&self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
         let base = self.root_assumptions(db);

@@ -4002,6 +4002,25 @@ fn use_it() -> u256 { read<7>() }";
     }
 
     #[test]
+    fn checker_context_preserves_the_chain_declared_premises() {
+        let source = "trait Read {}\nfn use_it<T: Read>() {}\n";
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("checker_context_premises.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        let function = top.all_funcs(&db)[0];
+        let checker =
+            super::super::TyChecker::new(&db, super::BodyOwner::Func(function)).expect("checker");
+        let premises = checker.env.assumptions();
+        assert!(
+            !premises.list(&db).is_empty(),
+            "fixture must have a declared premise"
+        );
+        let context = checker.env.selection_context();
+        assert_eq!(context.normalization_scope(&db), function.scope());
+        assert_eq!(context.assumptions(&db), premises);
+    }
+
+    #[test]
     fn discarded_probe_does_not_retain_an_impl_choice() {
         let source = "trait Read { fn read() -> u256 }\nstruct S {}\nimpl Read for S { fn read() -> u256 { 1 } }\nfn use_it() -> u256 { 1 }\n";
         let mut db = HirAnalysisTestDb::default();

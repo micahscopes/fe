@@ -271,29 +271,17 @@ pub(crate) fn context_at<'db>(
         crate::hir_def::ExprId,
     )>,
 ) -> crate::analysis::semantic::ImplEnv<'db> {
-    let assumptions = position.map_or_else(
-        || {
-            let mut enclosing = scope;
-            while matches!(enclosing.item(), ItemKind::Body(_)) {
-                let Some(parent) = enclosing.parent(db) else {
-                    break;
-                };
-                enclosing = parent;
-            }
-            param_env(db, enclosing.item())
-        },
-        |(typed, expr)| provision::recorded_chain_at(db, typed, expr).evidence_assumptions(db),
-    );
-    let selections = position
-        .map(|(typed, expr)| typed.selections_for_expr(db, expr).to_vec())
-        .unwrap_or_default();
-    crate::analysis::semantic::ImplEnv::new_with_selections(
-        db,
-        scope,
-        assumptions,
-        Vec::new(),
-        selections,
-    )
+    if let Some((typed, expr)) = position {
+        return provision::recorded_chain_at(db, typed, expr).context(db, scope);
+    }
+    let mut enclosing = scope;
+    while matches!(enclosing.item(), ItemKind::Body(_)) {
+        let Some(parent) = enclosing.parent(db) else {
+            break;
+        };
+        enclosing = parent;
+    }
+    crate::analysis::semantic::ImplEnv::new(db, scope, param_env(db, enclosing.item()), Vec::new())
 }
 
 /// The direct trait goal belongs to the accepted record, not a copied callable link.

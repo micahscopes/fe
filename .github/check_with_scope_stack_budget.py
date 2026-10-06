@@ -82,8 +82,16 @@ def premise_boundary(env, semantic, provisions):
         if re.search(r'\.(?:list|retain|extend_all_bounds)\s*\(', bodies[0]):
             raise ValueError(name + ' restored checker-owned premise construction')
     bodies = goal_lookup.bodies(semantic, 'context_at')
-    if len(bodies) != 1 or 'evidence_assumptions' not in bodies[0]:
+    if len(bodies) != 1 or 'recorded_chain_at(db, typed, expr).context(db, scope)' not in bodies[0]:
         raise ValueError('record context must use the same semantic premise projection')
+    projections = goal_lookup.bodies(provisions, 'context')
+    if len(projections) != 1 or not all(token in projections[0] for token in (
+        'self.evidence_assumptions(db)', 'self.selections(db).collect()',
+    )):
+        raise ValueError('chain context must project the canonical premises and named choices')
+    checker_context = goal_lookup.bodies(env, 'selection_context')
+    if len(checker_context) != 1 or 'self.provisions.context(self.db, self.owner_scope)' not in checker_context[0]:
+        raise ValueError('checker context must use the same chain projection as the record')
     roots = goal_lookup.bodies(provisions, 'recorded_chain_at')
     if len(roots) != 1 or 'Chain::new(db, typed.assumptions())' not in roots[0]:
         raise ValueError('body positions must read their completed root premises')
@@ -161,7 +169,10 @@ if __name__ == '__main__':
         (env + "\nimpl TyCheckEnv { fn opened_obligations(&self) {} }\n", semantic, provisions),
         (env.replace('self.provisions.evidence_assumptions', 'self.assumptions.list(self.db); self.provisions.evidence_assumptions', 1), semantic, provisions),
         (env.replace('self.provisions.method_lookup_assumptions', 'self.assumptions.list(self.db); self.provisions.method_lookup_assumptions', 1), semantic, provisions),
-        (env, semantic.replace('provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 'assumptions.list(db); provision::recorded_chain_at(db, typed, expr).evidence_assumptions', 1), provisions),
+        (env, semantic.replace('provision::recorded_chain_at(db, typed, expr).context', 'assumptions.list(db); provision::recorded_chain_at(db, typed, expr).context', 1), provisions),
+        (env, semantic, provisions.replace('self.evidence_assumptions(db)', 'PredicateListId::empty_list(db)', 1)),
+        (env, semantic, provisions.replace('self.selections(db).collect()', 'Vec::new()', 1)),
+        (env.replace('self.provisions.context(self.db, self.owner_scope)', 'selection_context(self.db, self.owner_scope, Vec::new())', 1), semantic, provisions),
         (env, semantic, provisions.replace('Chain::new(db, typed.assumptions())', 'Chain::new(db, PredicateListId::empty_list(db))', 1)),
         (env.replace('    provisions:', "    assumptions: PredicateListId<'db>,\n    provisions:", 1), semantic, provisions),
     ]:
