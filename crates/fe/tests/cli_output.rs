@@ -4875,3 +4875,8 @@ fn evidence_boundary_runtime_at_o0_and_o2(name: &str) {
         assert_eq!(exit_code, 0, "{name} failed at -O{level}:\n{output}");
     }
 }
+
+#[test]
+fn effect_provider_recorded_choice_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("effect_provider_recorded_choice.fe");
+}

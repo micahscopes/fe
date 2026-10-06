@@ -6032,3 +6032,112 @@ fn other() -> u256 { with (Other) { needs<S>() } }
     assert_eq!(left, right, "equal selected impls should share a callee");
     assert_ne!(left, other, "different selected impls must stay distinct");
 }
+
+#[test]
+fn trait_effect_provider_choices_are_recorded_at_calls() {
+    use fe_hir::analysis::ty::ty_check::TraitChoiceVia;
+
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "trait_effect_provider_choices.fe".into(),
+        r#"
+trait Tick { fn tick(mut self) }
+struct Count {}
+impl Tick for Count { fn tick(mut self) {} }
+impl Tick for Count as Double { fn tick(mut self) {} }
+fn consume() uses (t: mut Tick) { t.tick() }
+fn plain() {
+    let mut c = Count {}
+    with (Tick = c) { consume() }
+}
+fn selected() {
+    let mut c = Count {}
+    with (Double, Tick = c) { consume() }
+}
+"#,
+    );
+    let (top, _) = db.top_mod(file);
+    let consume = find_func(&db, top, "consume");
+    for (name, selected) in [("plain", false), ("selected", true)] {
+        let caller = find_func(&db, top, name);
+        let (diagnostics, typed) = check_func_body(&db, caller);
+        assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
+        let choices: Vec<_> = typed
+            .trait_choices(&db)
+            .filter(|choice| {
+                choice
+                    .call_constraint()
+                    .is_some_and(|(_, definition, _)| definition == CallableDef::Func(consume))
+            })
+            .collect();
+        assert_eq!(
+            choices.len(),
+            1,
+            "{name}: retain the provider's accepted answer"
+        );
+        assert_eq!(
+            matches!(choices[0].via(), TraitChoiceVia::Selected(_)),
+            selected,
+            "{name}: the retained answer must preserve selection authority",
+        );
+    }
+}
+
+#[test]
+fn trait_effect_provider_classification_preserves_unrelated_unknown_types() {
+    for (name, calls, rejected) in [
+        ("explicit_generic", "needs<u256>(x: 1)", false),
+        ("unknown_first", "needs(x: 1)\nneeds<u256>(x: 1)", true),
+        ("unknown_last", "needs<u256>(x: 1)\nneeds(x: 1)", true),
+    ] {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            format!("provider_unknown_{name}.fe").into(),
+            &format!(
+                r#"
+trait Cap<T> {{}}
+struct Slot<const ROOT: u256 = _> {{}}
+fn needs<T>(_: u256) uses (cap: Cap<Slot>) {{}}
+fn caller() uses (cap: Cap<Slot>) {{ {calls} }}
+"#
+            ),
+        );
+        let (top, _) = db.top_mod(file);
+        let diagnostics = diagnostics_for(&db, top);
+        if rejected {
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diag| diag.message.contains("type annotation is needed")),
+                "{name}: {diagnostics:?}"
+            );
+        } else {
+            assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
+        }
+    }
+}
+
+#[test]
+fn named_only_trait_effect_providers_use_the_checked_selection() {
+    for binding in ["Tick = c", "c"] {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "named_only_trait_provider.fe".into(),
+            &format!(
+                r#"
+trait Tick {{ fn tick(mut self) }}
+struct Count {{}}
+impl Tick for Count as Double {{ fn tick(mut self) {{}} }}
+fn consume() uses (t: mut Tick) {{ t.tick() }}
+fn caller() {{
+    let mut c = Count {{}}
+    with (Double, {binding}) {{ consume() }}
+}}
+"#
+            ),
+        );
+        let (top, _) = db.top_mod(file);
+        let diagnostics = diagnostics_for(&db, top);
+        assert!(diagnostics.is_empty(), "{binding}: {diagnostics:?}");
+    }
+}

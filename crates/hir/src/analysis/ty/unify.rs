@@ -465,6 +465,13 @@ where
             .new_key(InferenceValue::Unbound(kind.clone(), sort))
     }
 
+    /// Preserve classifications of an inference variable when unification
+    /// changes its representative. This does not classify variables nested
+    /// inside a type to which the original variable has been bound.
+    pub(crate) fn canonical_key(&mut self, key: InferenceKey<'db>) -> InferenceKey<'db> {
+        self.table.find(key)
+    }
+
     fn probe_impl(&mut self, key: InferenceKey<'db>) -> Either<TyId<'db>, TyVar<'db>> {
         let root_key = self.table.find(key);
         match self.table.probe_value(key) {

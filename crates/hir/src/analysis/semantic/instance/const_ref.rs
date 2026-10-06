@@ -29,7 +29,11 @@ use crate::{
             trait_lower::complete_selected_impl,
             trait_resolution::{
                 GoalSatisfiability, PredicateListId, Selection, TraitSolveCx,
-                constraint::collect_func_decl_constraints, is_goal_satisfiable,
+                constraint::{
+                    collect_func_decl_constraints, collect_func_def_constraints,
+                    is_trait_effect_provider_constraint,
+                },
+                is_goal_satisfiable,
             },
             ty_check::{
                 BodyOwner, Callable, ConstRef, DecisionSite, EffectParamSite,
@@ -529,7 +533,7 @@ fn supplied_bound_choice<'db>(
     let template = &crate::analysis::ty::ty_check::infer_body(db, caller.owner(db)).1;
     let original = template.decisions().choice(db, site)?;
     let declared =
-        collect_func_decl_constraints(db, CallableDef::Func(owner), true).instantiate_identity();
+        collect_func_def_constraints(db, CallableDef::Func(owner), true).instantiate_identity();
     let slot = declared
         .list(db)
         .iter()
@@ -564,7 +568,17 @@ fn source_method_choice<'db>(
         .choice_ref(&site)
         .expect("a source trait call must retain its accepted choice");
     if inherit_trait_selection {
+        let symbolic_provider = record.data(db).goal().self_ty(db).has_param(db)
+            && matches!(caller.owner(db), BodyOwner::Func(owner)
+                if crate::analysis::ty::ty_check::infer_body(db, caller.owner(db)).1.decisions().choice(db, &site)
+                    .is_some_and(|original| is_trait_effect_provider_constraint(db, owner, original.goal())));
         match supplied_bound_choice(db, caller, &site, record) {
+            Some(answer)
+                if symbolic_provider && answer.data(db).goal() != record.data(db).goal() =>
+            {
+                // A concrete target answer cannot dispatch a symbolic carrier.
+                TraitCallChoice::Recorded(record)
+            }
             Some(answer)
                 if !matches!(
                     answer.data(db).answer_origin(db),

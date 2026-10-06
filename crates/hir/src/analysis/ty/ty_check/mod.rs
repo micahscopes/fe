@@ -2616,7 +2616,7 @@ impl<'db> TyChecker<'db> {
     ) -> TraitObligationOutcome<'db> {
         let db = self.db;
         let scope = self.env.scope();
-        let assumptions = obligation.assumptions;
+        let assumptions = obligation.assumptions.fold_with(db, &mut self.table);
 
         if self.has_dead_inference_keys(&obligation.goal) {
             return TraitObligationOutcome::Discharged;
@@ -3173,6 +3173,14 @@ impl<'db> TyChecker<'db> {
                                     true,
                                 );
 
+                                self.specialize_callable_layout_args(
+                                    &mut callable,
+                                    Some(receiver),
+                                    call_args,
+                                );
+
+                                self.check_callable_effects(pending.expr, &mut callable);
+
                                 callable.process_constraints(
                                     self,
                                     pending.expr,
@@ -3199,14 +3207,6 @@ impl<'db> TyChecker<'db> {
                                         continue;
                                     }
                                 }
-
-                                self.specialize_callable_layout_args(
-                                    &mut callable,
-                                    Some(receiver),
-                                    call_args,
-                                );
-
-                                self.check_callable_effects(pending.expr, &mut callable);
 
                                 if let Some(kind) =
                                     self.code_region_method_kind(recv_ty, pending.method_name)
@@ -6951,6 +6951,11 @@ impl<'db> TyCheckerFinalizer<'db> {
                 })
                 .collect()
         });
+        let effect_provider_keys = checker
+            .effect_provider_keys
+            .into_iter()
+            .map(|key| checker.table.canonical_key(key))
+            .collect();
 
         Self {
             db: checker.db,
@@ -6958,7 +6963,7 @@ impl<'db> TyCheckerFinalizer<'db> {
             conditions,
             assumptions,
             ty_vars: FxHashSet::default(),
-            effect_provider_keys: checker.effect_provider_keys,
+            effect_provider_keys,
             direct_call_callees,
             diags: checker.diags,
         }

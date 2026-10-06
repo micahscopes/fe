@@ -1255,6 +1255,35 @@ impl<'db> TyChecker<'db> {
                 && let Some(forwarder) =
                     seed_forwarder_from_requirement(self, &req, provided, func.scope(), assumptions)
             {
+                if let crate::analysis::ty::effects::ForwardedEffectKey::Trait(key) = &forwarder.key
+                {
+                    // The premise and forwarder share the persistent body-local
+                    // layout variables, so one specialization updates both views.
+                    let goal = TraitInstId::new(
+                        self.db,
+                        key.def,
+                        std::iter::once(provided.ty)
+                            .chain(key.args_no_self.iter().copied())
+                            .collect::<Vec<_>>(),
+                        key.assoc_bindings
+                            .iter()
+                            .copied()
+                            .collect::<common::indexmap::IndexMap<_, _>>(),
+                    );
+                    let premises = self.env.assumptions().list(self.db).iter().copied().map(|old| {
+                        if old.def(self.db) == key.def
+                            && old.self_ty(self.db) == provided.ty
+                            && crate::analysis::ty::trait_resolution::constraint::is_trait_effect_provider_constraint(self.db, func, old)
+                        {
+                            goal
+                        } else {
+                            old
+                        }
+                    }).collect::<Vec<_>>();
+                    self.env
+                        .provisions
+                        .complete_root(self.db, PredicateListId::new(self.db, premises));
+                }
                 self.env
                     .effect_env_mut()
                     .insert_forwarder(self.db, forwarder);

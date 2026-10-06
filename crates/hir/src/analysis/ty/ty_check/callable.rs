@@ -25,7 +25,10 @@ use crate::analysis::{
         trait_def::TraitInstId,
         trait_resolution::{
             PredicateListId, TraitSolveCx, check_trait_inst_wf,
-            constraint::collect_func_decl_constraints,
+            constraint::{
+                collect_func_decl_constraints, collect_func_def_constraints,
+                is_trait_effect_provider_constraint,
+            },
         },
         ty_def::{BorrowKind, CapabilityKind},
         ty_def::{InvalidCause, TyBase, TyData, TyFlags, TyId},
@@ -321,7 +324,7 @@ impl<'db> Callable<'db> {
         &self,
         db: &'db dyn HirAnalysisDb,
     ) -> PredicateListId<'db> {
-        let declared = collect_func_decl_constraints(db, self.callable_def, true)
+        let declared = collect_func_def_constraints(db, self.callable_def, true)
             .instantiate(db, &self.generic_args);
         // A method's enclosing trait also contributes inherited requirements.
         PredicateListId::new(
@@ -1116,7 +1119,11 @@ impl<'db> Callable<'db> {
     ) -> bool {
         let mut progressed = false;
         let db = tc.db;
-        let constraints = collect_func_decl_constraints(db, self.callable_def, true);
+        let declared_count = collect_func_decl_constraints(db, self.callable_def, true)
+            .instantiate_identity()
+            .list(db)
+            .len();
+        let constraints = collect_func_def_constraints(db, self.callable_def, true);
         let declared = constraints.instantiate_identity();
         let instantiated = constraints.instantiate(db, &self.generic_args);
         let definition_assumptions = match self.callable_def {
@@ -1172,6 +1179,15 @@ impl<'db> Callable<'db> {
             .zip(declared.list(db))
             .enumerate()
         {
+            // Provider matching establishes the hidden argument. Viability
+            // probes cannot infer it by solving an implicit bound first.
+            if constraint_idx >= declared_count
+                && (self.effect_providers.is_empty()
+                    || !matches!(self.callable_def, CallableDef::Func(func)
+                        if is_trait_effect_provider_constraint(db, func, declared_constraint)))
+            {
+                continue;
+            }
             // The declaration pass reports ill-formed bounds at their source.
             // Do not turn the same malformed template into a downstream call
             // error merely because candidate signatures are intentionally

@@ -911,3 +911,51 @@ const fn local() -> u256 {{
         "the provision must retain local versus parameter source"
     );
 }
+
+#[test]
+fn trait_effect_provider_admission_does_not_substitute_an_unrelated_choice() {
+    let declaration = r#"
+trait Tick { fn tick(mut self) }
+struct Count {}
+struct Wrong {}
+impl Tick for Count as Double { fn tick(mut self) {} }
+fn consume() uses (t: mut Tick) { t.tick() }
+"#;
+    for (name, body, code) in [
+        (
+            "missing_keyed",
+            "fn caller() { let mut c = Count {}\nwith (Tick = c) { consume() } }",
+            "8-0075",
+        ),
+        (
+            "missing_unkeyed",
+            "fn caller() { let mut c = Count {}\nwith (c) { consume() } }",
+            "8-0036",
+        ),
+        (
+            "wrong_keyed",
+            "fn caller() { let mut c = Wrong {}\nwith (Double, Tick = c) { consume() } }",
+            "8-0075",
+        ),
+        (
+            "wrong_unkeyed",
+            "fn caller() { let mut c = Wrong {}\nwith (Double, c) { consume() } }",
+            "8-0036",
+        ),
+        (
+            "restored_keyed",
+            "fn caller() { let mut c = Count {}\nwith (Double, Tick = c) { consume() }\nwith (Tick = c) { consume() } }",
+            "8-0075",
+        ),
+        (
+            "invalid_selected",
+            "impl Tick for Count { fn tick(mut self) {} }\nimpl Tick for Count as Broken where false { fn tick(mut self) {} }\nfn caller() { let mut c = Count {}\nwith (Broken, Tick = c) { consume() } }",
+            "8-0101",
+        ),
+    ] {
+        let mut db = database();
+        let file = input(&mut db, name, &format!("{declaration}\n{body}"));
+        let errors = diagnostics(&db, file);
+        assert!(errors.contains(code), "{name}: {errors}");
+    }
+}

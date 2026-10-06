@@ -145,6 +145,27 @@ pub(crate) fn collect_func_effect_provider_constraints<'db>(
     out
 }
 
+/// Trait providers carry an impl choice; type-key providers use transport proofs.
+pub(crate) fn is_trait_effect_provider_constraint<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: Func<'db>,
+    goal: TraitInstId<'db>,
+) -> bool {
+    let providers = place_effect_provider_param_index_map(db, func);
+    let params = CallableDef::Func(func).params(db);
+    func.effect_requirements(db).iter().any(|binding| {
+        let Some(trait_key) = binding.key.key_trait() else {
+            return false;
+        };
+        let provider = providers
+            .get(binding.binding_idx as usize)
+            .copied()
+            .flatten()
+            .and_then(|index| params.get(index));
+        trait_key.def(db) == goal.def(db) && provider == Some(&goal.self_ty(db))
+    })
+}
+
 /// Returns a constraints list which is derived from the given type.
 #[salsa::tracked]
 pub(crate) fn ty_constraints<'db>(

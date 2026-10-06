@@ -1,6 +1,3 @@
-// Pending Step 2: provider recording draft parked at local/step2-effect-provider-pending-20261005 (3a72b3d35).
-// Parent O0/O2: 3 pass, 3 fail. Draft: controls pass, two existing SolArray tests regress.
-// Named-only admission remains open; see STEP2_EFFECT_PROVIDER_CHOICE_2026-10-05.md.
 pub trait Tick { fn tick(mut self, _ cost: u256) }
 pub struct Count { pub n: u256 }
 impl Tick for Count { fn tick(mut self, _ cost: u256) { self.n = self.n + cost } }
@@ -55,4 +52,36 @@ fn provider_choice_restores_after_nested_opening() {
         f()
     }
     assert!(c.n == 32)
+}
+
+pub struct OnlyCount { pub n: u256 }
+impl Tick for OnlyCount as OnlyDouble {
+    fn tick(mut self, _ cost: u256) { self.n = self.n + 2 * cost }
+}
+impl Tick for OnlyCount as OnlyTriple {
+    fn tick(mut self, _ cost: u256) { self.n = self.n + 3 * cost }
+}
+fn forward() uses (t: mut Tick) { f() }
+
+#[test]
+fn named_only_keyed_provider() {
+    let mut c = OnlyCount { n: 0 }
+    with (OnlyDouble, Tick = c) { forward() }
+    assert!(c.n == 16)
+}
+#[test]
+fn named_only_unkeyed_provider() {
+    let mut c = OnlyCount { n: 0 }
+    with (OnlyDouble, c) { forward() }
+    assert!(c.n == 16)
+}
+#[test]
+fn named_only_nested_provider_restores() {
+    let mut c = OnlyCount { n: 0 }
+    with (OnlyDouble, Tick = c) {
+        forward()
+        with (OnlyTriple) { forward() }
+        forward()
+    }
+    assert!(c.n == 56)
 }

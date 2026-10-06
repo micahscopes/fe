@@ -2665,7 +2665,7 @@ impl<'db> TyChecker<'db> {
         if provider_ty.has_var(self.db) {
             return None;
         }
-        let instantiated = instantiate_trait_pattern_in(self.db, &mut self.table, query);
+        let instantiated = instantiate_trait_pattern_in(self.db, &mut self.table, query.clone());
         let args = std::iter::once(provider_ty)
             .chain(instantiated.args(self.db).iter().skip(1).copied())
             .collect::<Vec<_>>();
@@ -2675,6 +2675,39 @@ impl<'db> TyChecker<'db> {
             args,
             instantiated.assoc_type_bindings(self.db).clone(),
         );
+        if let Some(selection) = self.env.selection_for_goal(trait_goal) {
+            let goal = selection
+                .revalidate(
+                    self.db,
+                    self.trait_effect_solve_context(self.env.scope(), self.env.assumptions()),
+                    trait_goal,
+                )
+                .and_then(|proof| proof.goal_with_associated_bindings())
+                .ok()?;
+            let StoredEffectKey::Trait(witness) = finalize_stored_effect_key(
+                self.db,
+                StoredEffectKey::Trait(StoredTraitKey {
+                    def: goal.def(self.db),
+                    args_no_self: goal.args(self.db)[1..].iter().copied().collect(),
+                    assoc_bindings: goal.assoc_ty_bindings(self.db).into_iter().collect(),
+                    family: query.family,
+                }),
+                self.env.scope(),
+                self.env.assumptions(),
+            )?
+            else {
+                unreachable!("a finalized trait witness retains its key kind")
+            };
+            return Some(EffectEvidence::UnkeyedTrait {
+                provider,
+                commit: EffectCommitPlan {
+                    key_match: Some(KeyMatchCommit::WitnessTrait { query, witness }),
+                    ..Default::default()
+                },
+                arg_style: EffectArgStyle::Value,
+                layout_view: EffectArgLayoutView::Direct,
+            });
+        }
         let GoalSatisfiability::Satisfied(solution) =
             self.trait_effect_goal_satisfiability(trait_goal)
         else {
@@ -3139,13 +3172,21 @@ impl<'db> TyChecker<'db> {
         )
     }
 
+    fn trait_effect_solve_context(
+        &self,
+        scope: crate::hir_def::scope_graph::ScopeId<'db>,
+        assumptions: PredicateListId<'db>,
+    ) -> TraitSolveCx<'db> {
+        TraitSolveCx::new(self.db, scope).with_assumptions(assumptions)
+    }
+
     pub(super) fn trait_effect_goal_satisfiability_in_scope(
         &self,
         scope: crate::hir_def::scope_graph::ScopeId<'db>,
         assumptions: PredicateListId<'db>,
         trait_goal: TraitInstId<'db>,
     ) -> GoalSatisfiability<'db> {
-        let solve_cx = TraitSolveCx::new(self.db, scope).with_assumptions(assumptions);
+        let solve_cx = self.trait_effect_solve_context(scope, assumptions);
         let query = crate::analysis::ty::trait_resolution::CanonicalGoalQuery::new(
             self.db,
             trait_goal,
@@ -3695,9 +3736,30 @@ impl<'db> TyChecker<'db> {
                     args,
                     instantiated.assoc_type_bindings(self.db).clone(),
                 );
-                let GoalSatisfiability::Satisfied(solution) =
+                let solved_inst = if let Some(selection) = self.env.selection_for_goal(trait_goal) {
+                    selection
+                        .revalidate(
+                            self.db,
+                            self.trait_effect_solve_context(scope, assumptions),
+                            trait_goal,
+                        )
+                        .and_then(|proof| proof.goal_with_associated_bindings())
+                        .ok()
+                } else if let GoalSatisfiability::Satisfied(solution) =
                     self.trait_effect_goal_satisfiability_in_scope(scope, assumptions, trait_goal)
-                else {
+                {
+                    let canonical_goal = Canonicalized::new(self.db, trait_goal);
+                    let solved = canonical_goal.extract_solution(&mut table, solution);
+                    Some(
+                        solved
+                            .implementor
+                            .trait_inst(self.db)
+                            .fold_with(self.db, &mut table),
+                    )
+                } else {
+                    None
+                };
+                let Some(solved_inst) = solved_inst else {
                     if emit_diag {
                         self.push_diag(BodyDiag::WithEffectTraitUnsatisfied {
                             primary: span.clone(),
@@ -3714,12 +3776,6 @@ impl<'db> TyChecker<'db> {
                         },
                     }));
                 };
-                let canonical_goal = Canonicalized::new(self.db, trait_goal);
-                let solved = canonical_goal.extract_solution(&mut table, solution);
-                let solved_inst = solved
-                    .implementor
-                    .trait_inst(self.db)
-                    .fold_with(self.db, &mut table);
                 let instantiated = reify_unresolved_pattern_slots(
                     self.db,
                     instantiated.fold_with(self.db, &mut table),
