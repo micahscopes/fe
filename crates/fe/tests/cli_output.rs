@@ -4832,6 +4832,11 @@ fn evidence_impl_conditions_keep_authored_and_bound_contexts_at_o0_and_o2() {
 }
 
 #[test]
+fn evidence_prove_captures_open_operands_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_prove_open_operand.fe");
+}
+
+#[test]
 fn rd103_known_evidence_ordinary_functions_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("evidence_known_ordinary_function.fe");
 }

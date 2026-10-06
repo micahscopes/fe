@@ -367,6 +367,16 @@ pub(crate) fn call_requirements_at<'db>(
         return declared;
     };
     let mut requirements = declared.list(db).to_vec();
+    // Proving a goal consumes its visible provision just like a trait call.
+    // Retain the operand through the existing call-evidence projection.
+    if let Some(callable) = typed.callable_expr(expr)
+        && let crate::hir_def::CallableDef::Func(func) = callable.callable_def()
+        && crate::analysis::ty::corelib::lib_func_matches(db, func, "core::obligations::prove")
+        && let [term] = callable.generic_args()
+        && let crate::analysis::ty::ty_def::TyData::ConstraintTerm(goal) = term.data(db)
+    {
+        requirements.push(*goal);
+    }
     for choice in typed.trait_choices(db).filter(|choice| {
         choice
             .call_constraint()

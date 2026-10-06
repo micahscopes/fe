@@ -2297,7 +2297,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             .with_assumptions(context.assumptions(db));
         let evidence = if let crate::analysis::ty::ty_def::TyData::ConstraintTerm(goal) =
             term.data(db)
-            && let Some(selection) = context.selection_for(db, *goal)
+            && let Some(selection) = invocation.key(db).impl_env(db).selection_for(db, *goal)
         {
             selection
                 .revalidate(db, solve_cx, *goal)

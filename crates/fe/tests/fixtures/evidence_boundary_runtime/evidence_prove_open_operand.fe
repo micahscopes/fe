@@ -1,0 +1,31 @@
+use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+impl Read for Subject as Alternative { const fn read() -> u256 { 2 } }
+impl Read for Subject as Third { const fn read() -> u256 { 3 } }
+const fn reopen(_ evidence: Evidence<Read<Subject>>) -> Evidence<Read<Subject>> {
+    with (evidence) { prove<Read<Subject>>() }
+}
+const fn read(_ evidence: Evidence<Read<Subject>>) -> u256 {
+    with (evidence) { <Subject as Read>::read() }
+}
+const fn evaluate() -> u256 {
+    let ordinary = prove<Read<Subject>>()
+    let selected = with (Alternative) { prove<Read<Subject>>() }
+    let copied = selected
+    let one = read(reopen(ordinary))
+    let two = with (selected) { read(prove<Read<Subject>>()) }
+    let copied_two = read(reopen(copied))
+    let restored = with (Third) {
+        let before = read(prove<Read<Subject>>())
+        let inside = with (selected) { read(prove<Read<Subject>>()) }
+        let after = read(prove<Read<Subject>>())
+        before * 100 + inside * 10 + after
+    }
+    one * 100000 + two * 10000 + copied_two * 1000 + restored
+}
+#[test]
+fn prove_captures_the_actual_local_or_parameter_and_restores_the_outer_choice() {
+    assert(evaluate() == 122323)
+}
