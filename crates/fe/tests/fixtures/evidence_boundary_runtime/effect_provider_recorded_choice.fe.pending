@@ -1,0 +1,58 @@
+// Pending Step 2: provider recording draft parked at local/step2-effect-provider-pending-20261005 (3a72b3d35).
+// Parent O0/O2: 3 pass, 3 fail. Draft: controls pass, two existing SolArray tests regress.
+// Named-only admission remains open; see STEP2_EFFECT_PROVIDER_CHOICE_2026-10-05.md.
+pub trait Tick { fn tick(mut self, _ cost: u256) }
+pub struct Count { pub n: u256 }
+impl Tick for Count { fn tick(mut self, _ cost: u256) { self.n = self.n + cost } }
+impl Tick for Count as Double { fn tick(mut self, _ cost: u256) { self.n = self.n + 2 * cost } }
+
+fn f() uses (t: mut Tick) {
+    t.tick(5)
+    t.tick(3)
+}
+fn g<T: Tick>(_ t: mut T) {
+    t.tick(5)
+    t.tick(3)
+}
+
+#[test]
+fn provider_plain() {
+    let mut c = Count { n: 0 }
+    with (Tick = c) { f() }
+    assert!(c.n == 8)
+}
+#[test]
+fn provider_with_named() {
+    let mut c = Count { n: 0 }
+    with (Double, Tick = c) { f() }
+    assert!(c.n == 16)
+}
+#[test]
+fn provider_with_named_nested() {
+    let mut c = Count { n: 0 }
+    with (Double) { with (Tick = c) { f() } }
+    assert!(c.n == 16)
+}
+#[test]
+fn generic_control() {
+    let mut c = Count { n: 0 }
+    with (Double) { g(mut c) }
+    assert!(c.n == 16)
+}
+#[test]
+fn direct_control() {
+    let mut c = Count { n: 0 }
+    with (Double) { c.tick(5) }
+    assert!(c.n == 10)
+}
+
+#[test]
+fn provider_choice_restores_after_nested_opening() {
+    let mut c = Count { n: 0 }
+    with (Tick = c) {
+        f()
+        with (Double) { f() }
+        f()
+    }
+    assert!(c.n == 32)
+}
