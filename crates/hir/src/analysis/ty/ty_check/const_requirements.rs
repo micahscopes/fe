@@ -2536,6 +2536,7 @@ enum WrittenEntry<'db> {
 struct WrittenType<'db> {
     span: DynLazySpan<'db>,
     scope: ScopeId<'db>,
+    hir_ty: crate::hir_def::TypeId<'db>,
     /// The enclosing expression, whose inferred lexical selections apply here.
     expr: Option<ExprId>,
     /// Its lowering, unless that is invalid.
@@ -2742,6 +2743,7 @@ fn written_types_query<'db>(
                 self.entries.push(WrittenEntry::Type(WrittenType {
                     span,
                     scope,
+                    hir_ty,
                     expr: self.expr,
                     lowered: (!ty.has_invalid(db)).then_some(ty),
                     applications,
@@ -2835,6 +2837,42 @@ fn written_type_check_query<'db>(
                 let context =
                     crate::semantic::context_at(db, written.scope, typed.zip(written.expr));
                 let selections = context.selections(db);
+                let contextual;
+                let written = if selections.is_empty() {
+                    written
+                } else {
+                    let assumptions = context.assumptions(db);
+                    let minter = LoweringContext::new(HoleAnchor::TemplateTy {
+                        ty: written.hir_ty,
+                        scope: written.scope,
+                        assumptions,
+                    })
+                    .with_context(context, assumptions)
+                    .recording_resolutions();
+                    let ty = super::super::ty_lower::lower_hir_ty_with_minter(
+                        db,
+                        written.hir_ty,
+                        written.scope,
+                        assumptions,
+                        &minter,
+                    );
+                    let ty = crate::analysis::ty::normalize::normalize_from_assumptions(
+                        db,
+                        ty,
+                        written.scope,
+                        assumptions,
+                    );
+                    contextual = WrittenType {
+                        lowered: (!ty.has_invalid(db)).then_some(ty),
+                        applications: minter
+                            .into_resolutions()
+                            .iter()
+                            .flat_map(|(_, res)| constrained_applications(db, res))
+                            .collect(),
+                        ..written.clone()
+                    };
+                    &contextual
+                };
                 let solve_cx = TraitSolveCx::new(db, context.normalization_scope(db))
                     .with_assumptions(context.assumptions(db));
                 let mut uses = Vec::new();

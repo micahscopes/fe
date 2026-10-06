@@ -1365,3 +1365,51 @@ let outside: Maker::Out<Subject> }",
         }
     }
 }
+
+#[test]
+fn written_named_family_results_check_conditions_in_the_position_context() {
+    let declarations = r#"
+trait Flag { const OK: bool }
+struct Subject {}
+impl Flag for Subject { const OK: bool = true }
+impl Flag for Subject as FalseFlag { const OK: bool = false }
+struct Gate<T: Flag> where T::OK { value: u256 }
+trait Factory { type Out<T> }
+struct Maker {}
+impl Factory for Maker as Chosen { type Out<T> = Gate<Subject> }
+"#;
+    for (name, body, expected) in [
+        (
+            "valid_named_result",
+            "fn caller() { with (Chosen) { let value: Maker::Out<u8> } }",
+            0,
+        ),
+        (
+            "direct_false_result",
+            "fn caller() { with (FalseFlag) { let value: Gate<Subject> } }",
+            1,
+        ),
+        (
+            "named_false_result",
+            "fn caller() { with (FalseFlag, Chosen) { let value: Maker::Out<u8> } }",
+            1,
+        ),
+        (
+            "restored_named_result",
+            "fn caller() { with (Chosen) { with (FalseFlag) { let invalid: Maker::Out<u8> } let valid: Maker::Out<u8> } }",
+            1,
+        ),
+    ] {
+        let mut db = database();
+        let file = input(&mut db, name, &format!("{declarations}\n{body}"));
+        let errors = diagnostics(&db, file);
+        assert_eq!(
+            errors.matches("8-0093").count(),
+            expected,
+            "{name}: {errors}"
+        );
+        if expected == 0 {
+            assert!(errors.is_empty(), "{name}: {errors}");
+        }
+    }
+}
