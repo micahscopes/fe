@@ -882,8 +882,20 @@ fn semantic_callee_key_with_assumptions<'db>(
             .iter()
             .copied()
             .enumerate()
-            .all(
-                |(slot, bound)| match is_goal_satisfiable(db, independent_context, bound) {
+            .all(|(slot, bound)| {
+                if let Some((_, choice)) = source_choice
+                    .bounds
+                    .iter()
+                    .find(|(index, _)| *index == slot)
+                    && matches!(choice.data(db).via(), TraitChoiceVia::Selected(_))
+                {
+                    // Independence concerns the recorded answer, including
+                    // a named-only implementation. Never substitute an
+                    // ordinary answer when this candidate needs its caller.
+                    return choice.data(db).goal() == bound
+                        && choice.in_proven_context(db, independent_context).is_ok();
+                }
+                match is_goal_satisfiable(db, independent_context, bound) {
                     GoalSatisfiability::Satisfied(solution) => {
                         if opened_provisions.is_empty()
                             && !retained_selections
@@ -905,8 +917,8 @@ fn semantic_callee_key_with_assumptions<'db>(
                         true
                     }
                     _ => false,
-                },
-            )
+                }
+            })
             && (0..nominal_func.arg_tys(db).len()).all(|idx| {
                 same_without_caller(
                     callable

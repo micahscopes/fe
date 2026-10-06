@@ -5984,10 +5984,17 @@ fn root_semantic_instance_keys_are_closed_under_root_provider_subst() {
 
 #[test]
 fn equal_selected_impls_share_callee_instances_across_positions() {
+    assert_selected_impl_instance_sharing(true);
+}
+
+#[test]
+fn named_only_selected_impls_share_callee_instances_across_positions() {
+    assert_selected_impl_instance_sharing(false);
+}
+
+fn assert_selected_impl_instance_sharing(ordinary_impl: bool) {
     let mut db = HirAnalysisTestDb::default();
-    let file = db.new_stand_alone(
-        Utf8PathBuf::from("selected_impl_instance_sharing.fe"),
-        r#"
+    let source = r#"
 trait Read { fn read() -> u256 }
 struct S {}
 impl Read for S { fn read() -> u256 { 1 } }
@@ -5997,7 +6004,15 @@ fn needs<T: Read>() -> u256 { T::read() * 1000 + 7 }
 fn left() -> u256 { with (Alt) { needs<S>() } }
 fn right() -> u256 { with (Alt) { needs<S>() } }
 fn other() -> u256 { with (Other) { needs<S>() } }
-"#,
+"#;
+    let source = if ordinary_impl {
+        source.to_string()
+    } else {
+        source.replace("impl Read for S { fn read() -> u256 { 1 } }\n", "")
+    };
+    let file = db.new_stand_alone(
+        Utf8PathBuf::from("selected_impl_instance_sharing.fe"),
+        &source,
     );
     let (top_mod, _) = db.top_mod(file);
     db.assert_no_diags(top_mod);
