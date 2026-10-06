@@ -4832,6 +4832,17 @@ fn evidence_impl_conditions_keep_authored_and_bound_contexts_at_o0_and_o2() {
 }
 
 #[test]
+#[ignore = "RD6: concrete evidence premises must retain supplied authority"]
+fn evidence_prove_named_only_dispatch_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_prove_named_only_dispatch.fe");
+}
+
+#[test]
+fn evidence_prove_named_only_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_prove_named_only.fe");
+}
+
+#[test]
 fn evidence_prove_captures_open_operands_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("evidence_prove_open_operand.fe");
 }

@@ -889,21 +889,29 @@ pub(crate) fn resolve_ordinary_impl_evidence<'db>(
         .map_err(|_| OrdinaryEvidenceError::PrerequisitesNotProven)
 }
 
-/// Introduces a ground public obligation through ordinary coherent lookup.
-/// Source admission and CTFE use the same proof boundary. Scoped selection is
-/// separate: this operation must not silently pick among competing candidates.
-pub(crate) fn introduce_obligation<'db>(
+/// Validates the public goal before either scoped capture or ordinary discovery.
+pub(crate) fn concrete_obligation_goal<'db>(
     db: &'db dyn HirAnalysisDb,
-    context: TraitSolveCx<'db>,
     term: TyId<'db>,
-) -> Result<SelectedImplEvidence<'db>, &'static str> {
+) -> Result<TraitInstId<'db>, &'static str> {
     let super::ty_def::TyData::ConstraintTerm(goal) = term.data(db) else {
         return Err("expected a concrete trait goal");
     };
     if term.has_param(db) || term.has_var(db) || term.has_invalid(db) || term.has_projection(db) {
         return Err("goal must be concrete and resolved");
     }
-    resolve_ordinary_impl_evidence(db, context, *goal).map_err(|error| match error {
+    Ok(*goal)
+}
+
+/// Introduces a ground public obligation through ordinary coherent lookup.
+/// Scoped capture validates its goal with the same admission boundary.
+pub(crate) fn introduce_obligation<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    term: TyId<'db>,
+) -> Result<SelectedImplEvidence<'db>, &'static str> {
+    let goal = concrete_obligation_goal(db, term)?;
+    resolve_ordinary_impl_evidence(db, context, goal).map_err(|error| match error {
         OrdinaryEvidenceError::NotUnique => {
             "ordinary lookup did not establish a unique implementation"
         }

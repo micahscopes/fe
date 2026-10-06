@@ -1,0 +1,27 @@
+use core::obligations::{Evidence, prove}
+trait Mark {}
+struct Subject {}
+impl Mark for Subject as First {}
+impl Mark for Subject as Second {}
+const fn reopen(_ evidence: Evidence<Mark<Subject>>) -> Evidence<Mark<Subject>> {
+    with (evidence) { prove<Mark<Subject>>() }
+}
+const fn confirm(_ evidence: Evidence<Mark<Subject>>) -> bool {
+    with (evidence) {
+        let captured = prove<Mark<Subject>>()
+        true
+    }
+}
+const fn evaluate() -> bool {
+    let first = with (First) { prove<Mark<Subject>>() }
+    let second = with (Second) { prove<Mark<Subject>>() }
+    let copy = first
+    confirm(reopen(copy)) && with (Second) {
+        let before = prove<Mark<Subject>>()
+        let inside = with (first) { prove<Mark<Subject>>() }
+        let after = prove<Mark<Subject>>()
+        confirm(reopen(before)) && confirm(reopen(inside)) && confirm(reopen(after))
+    } && confirm(reopen(second))
+}
+#[test]
+fn prove_captures_named_only_provisions() { assert(evaluate()) }

@@ -2295,16 +2295,16 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         );
         let solve_cx = TraitSolveCx::new(db, context.normalization_scope(db))
             .with_assumptions(context.assumptions(db));
-        let evidence = if let crate::analysis::ty::ty_def::TyData::ConstraintTerm(goal) =
-            term.data(db)
-            && let Some(selection) = invocation.key(db).impl_env(db).selection_for(db, *goal)
-        {
-            selection
-                .revalidate(db, solve_cx, *goal)
-                .map_err(|_| invalid("selected implementation prerequisites were not proved"))?
-        } else {
-            introduce_obligation(db, solve_cx, *term).map_err(invalid)?
-        };
+        let goal =
+            crate::analysis::ty::trait_def::concrete_obligation_goal(db, *term).map_err(invalid)?;
+        let evidence =
+            if let Some(selection) = invocation.key(db).impl_env(db).selection_for(db, goal) {
+                selection
+                    .revalidate(db, solve_cx, goal)
+                    .map_err(|_| invalid("selected implementation prerequisites were not proved"))?
+            } else {
+                introduce_obligation(db, solve_cx, *term).map_err(invalid)?
+            };
         self.structural_value(
             result_ty,
             StructuralHandle::Evidence(

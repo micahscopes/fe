@@ -320,12 +320,24 @@ impl<'db> TyChecker<'db> {
         let reason = match callable.generic_args() {
             [term] => {
                 let term = self.normalize_ty(*term);
-                crate::analysis::ty::trait_def::introduce_obligation(
-                    self.db,
-                    crate::analysis::ty::TraitSolveCx::new(self.db, self.env.scope()),
-                    term,
-                )
-                .err()
+                let context = TraitSolveCx::new(self.db, self.env.scope())
+                    .with_assumptions(self.env.assumptions());
+                crate::analysis::ty::trait_def::concrete_obligation_goal(self.db, term)
+                    .and_then(|goal| match self.env.provision_for_goal(goal) {
+                        Some(Provision::Named(selection)) => selection
+                            .revalidate(self.db, context, goal)
+                            .map(|_| ())
+                            .map_err(|_| "selected implementation prerequisites were not proved"),
+                        Some(Provision::EvidenceLocal(..) | Provision::EvidenceParameter(..)) => {
+                            // The call carries this operand; CTFE validates its actual witness.
+                            Ok(())
+                        }
+                        _ => crate::analysis::ty::trait_def::introduce_obligation(
+                            self.db, context, term,
+                        )
+                        .map(|_| ()),
+                    })
+                    .err()
             }
             _ => Some("expected one concrete trait goal"),
         };
