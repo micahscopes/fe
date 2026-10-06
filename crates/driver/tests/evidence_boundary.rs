@@ -1090,3 +1090,63 @@ fn caller() { with (Chosen) { let value: Holder<Subject> } }
     let errors = diagnostics(&db, file);
     assert!(errors.contains("6-0003"), "{errors}");
 }
+
+#[test]
+fn authored_trait_bound_conditions_match_the_call_position() {
+    for (ordinary, selected, accepted) in [("false", "true", true), ("true", "false", false)] {
+        let declarations = format!(
+            r#"
+trait Flag {{ const OK: bool }}
+struct Subject {{}}
+impl Flag for Subject {{ const OK: bool = {ordinary} }}
+impl Flag for Subject as Chosen {{ const OK: bool = {selected} }}
+trait Mark {{}}
+impl<T: Flag> Mark for T where T::OK {{}}
+struct Holder<T: Mark> {{ value: T }}
+struct Outer<T> {{ value: T }}
+fn require<T: Mark>() {{}}
+"#
+        );
+        for (name, use_site) in [
+            ("call", "require<Subject>()"),
+            ("annotation", "let value: Holder<Subject>"),
+            ("nested_annotation", "let value: Outer<Holder<Subject>>"),
+        ] {
+            let mut db = database();
+            let source =
+                format!("{declarations}\nfn caller() {{ with (Chosen) {{ {use_site} }} }}");
+            let file = input(&mut db, name, &source);
+            let errors = diagnostics(&db, file);
+            if accepted {
+                assert!(errors.is_empty(), "{name}: {errors}");
+            } else {
+                assert!(errors.contains("8-0093"), "{name}: {errors}");
+            }
+        }
+    }
+}
+
+#[test]
+fn authored_trait_bound_conditions_restore_the_outer_position() {
+    let mut db = database();
+    let file = input(
+        &mut db,
+        "restored_bound_condition",
+        r#"
+trait Flag { const OK: bool }
+struct Subject {}
+impl Flag for Subject { const OK: bool = false }
+impl Flag for Subject as Chosen { const OK: bool = true }
+trait Mark {}
+impl<T: Flag> Mark for T where T::OK {}
+struct Holder<T: Mark> { value: T }
+fn caller() {
+    with (Chosen) { let inside: Holder<Subject> }
+    let outside: Holder<Subject>
+}
+"#,
+    );
+    let errors = diagnostics(&db, file);
+    assert_eq!(errors.matches("8-0093").count(), 1, "{errors}");
+    assert!(errors.contains("let outside: Holder<Subject>"), "{errors}");
+}

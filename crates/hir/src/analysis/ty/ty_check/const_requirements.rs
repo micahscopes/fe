@@ -2815,8 +2815,14 @@ fn written_type_check_query<'db>(
                         )
                     };
                     if let Some(conditions) =
-                        crate::analysis::ty::trait_resolution::check_ty_wf(db, solve_cx, ty)
-                            .conditions()
+                        crate::analysis::ty::trait_resolution::check_ty_wf_with_lexical_context(
+                            db,
+                            solve_cx,
+                            ty,
+                            PredicateListId::empty_list(db),
+                            context,
+                        )
+                        .conditions()
                     {
                         uses.extend(selected_impl_condition_uses(
                             db,

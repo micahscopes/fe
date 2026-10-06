@@ -689,14 +689,13 @@ fn check_ty_formation<'db>(
                 }
                 continue;
             }
-            let query = CanonicalGoalQuery::new(db, goal, assumptions);
-            if let GoalSatisfiability::UnSat(subgoal) =
-                is_goal_query_satisfiable(db, solve_cx, &query)
-                && let Some(ill_formed) =
-                    ill_formed_unless_by_induction(db, solve_cx, goal, &query, subgoal)
-            {
-                return ill_formed;
+            // Structural proof retains conditions for the authored use-site
+            // reader; proof search itself never evaluates those conditions.
+            let bound = unsatisfied_goal(db, solve_cx, goal);
+            if !bound.is_wf() {
+                return bound;
             }
+            formation = formation.merge(db, bound);
         }
     }
 
