@@ -1,0 +1,17 @@
+use core::obligations::{Evidence, prove}
+trait Flag { const OK: bool }
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Flag for Subject { const OK: bool = true }
+impl Flag for Subject as FalseFlag { const OK: bool = false }
+impl Read for Subject { const fn read() -> u256 { 1 } }
+impl Read for Subject as Alternative where Subject::OK { const fn read() -> u256 { 2 } }
+const fn captured() -> Evidence<Read<Subject>> {
+    with (Alternative) { prove<Read<Subject>>() }
+}
+#[test]
+fn use_site_condition_must_be_checked() {
+    let evidence = captured()
+    let value = with (FalseFlag) { with (evidence) { <Subject as Read>::read() } }
+    assert(value == 2)
+}

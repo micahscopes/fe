@@ -4806,6 +4806,37 @@ fn rd114_named_impl_self_pattern_at_o0_and_o2() {
 }
 
 #[test]
+fn evidence_impl_conditions_keep_authored_and_bound_contexts_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_use_condition_concrete.fe");
+    evidence_boundary_runtime_at_o0_and_o2("evidence_use_condition_true.fe");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/evidence_use_condition_false.fe");
+    for level in ["0", "2"] {
+        let (output, exit_code) = run_fe_main(&[
+            "test",
+            "--jobs",
+            "1",
+            "--optimize",
+            level,
+            fixture.to_str().expect("fixture path utf8"),
+        ]);
+        assert_ne!(
+            exit_code, 0,
+            "false selected-impl condition accepted at -O{level}:\n{output}"
+        );
+        assert!(
+            output.contains("error[8-0093]") && output.contains("condition evaluated to `false`"),
+            "unexpected rejection at -O{level}:\n{output}"
+        );
+    }
+}
+
+#[test]
+fn rd103_known_evidence_ordinary_functions_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_known_ordinary_function.fe");
+}
+
+#[test]
 #[ignore = "RD103 Q9: runtime evidence transport must replace the MIR provision rejection"]
 fn rd103_evidence_ordinary_function_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("evidence_runtime_choice.fe");

@@ -1578,14 +1578,6 @@ impl<'db> TyChecker<'db> {
                         if record.top_mod(self.db).ingot(self.db).kind(self.db) == IngotKind::Core)
                 });
                 if core_record && is_core_evidence_ty(self.db, self.env.scope(), ty) {
-                    if !matches!(self.env.owner(), BodyOwner::Func(func) if func.is_const(self.db))
-                    {
-                        self.push_diag(BodyDiag::ObligationOpening {
-                            primary: binding.value.span(self.body()).into(),
-                            reason: "evidence opening is currently limited to const functions",
-                        });
-                        continue;
-                    }
                     if let [term] = args
                         && let TyData::ConstraintTerm(goal) = term.data(self.db)
                     {
