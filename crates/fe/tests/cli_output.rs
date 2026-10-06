@@ -4885,3 +4885,8 @@ fn effect_provider_recorded_choice_at_o0_and_o2() {
 fn authored_bound_annotations_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("authored_bound_annotations.fe");
 }
+
+#[test]
+fn loop_noncopy_array_fields_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("loop_noncopy_array_fields.fe");
+}

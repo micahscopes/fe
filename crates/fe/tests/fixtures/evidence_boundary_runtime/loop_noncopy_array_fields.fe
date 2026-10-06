@@ -1,0 +1,10 @@
+struct Cell { value: u256 }
+fn sum(_ values: [Cell; 2]) -> u256 {
+    let mut result: u256 = 0
+    for Cell { value } in values { result += value }
+    result
+}
+#[test]
+fn noncopy_array_loop_projects_fields() {
+    assert(sum([Cell { value: 3 }, Cell { value: 4 }]) == 7)
+}
