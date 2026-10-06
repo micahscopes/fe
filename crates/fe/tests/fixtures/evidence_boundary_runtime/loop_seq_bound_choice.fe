@@ -21,3 +21,26 @@ fn loop_reads_the_callers_bound_choice() {
     assert(sum(Three {}) == 3)
     assert(with (Two) { sum(Three {}) } == 21)
 }
+
+// Pending with the generic Seq loop migration: preserve the caller's Item width.
+struct ByteValues {}
+impl Seq for ByteValues {
+    type Item = u8
+    fn len(self) -> usize { 1 }
+    fn get(self, _ i: usize) -> u8 { 1 }
+}
+impl Seq for ByteValues as NarrowSeq {
+    type Item = u8
+    fn len(self) -> usize { 1 }
+    fn get(self, _ i: usize) -> u8 { 200 }
+}
+fn sum_bytes<T: Seq<Item = u8>>(_ values: T) -> u8 {
+    let mut total: u8 = 0
+    for x in values { total += x }
+    total
+}
+#[test]
+fn loop_keeps_the_callers_u8_item() {
+    assert(sum_bytes(ByteValues {}) == 1)
+    assert(with (NarrowSeq) { sum_bytes(ByteValues {}) } == 200)
+}

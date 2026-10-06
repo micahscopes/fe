@@ -4890,3 +4890,8 @@ fn authored_bound_annotations_at_o0_and_o2() {
 fn loop_noncopy_array_fields_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("loop_noncopy_array_fields.fe");
 }
+
+#[test]
+fn loop_custom_integer_inference_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("loop_custom_integer_inference.fe");
+}

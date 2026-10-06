@@ -1,0 +1,14 @@
+use core::seq::Seq
+struct Values<T> { values: [T; 2] }
+impl<T: Copy> Seq for Values<T> {
+    type Item = T
+    fn len(self) -> usize { 2 }
+    fn get(self, _ i: usize) -> T { self.values[i] }
+}
+#[test]
+fn custom_sequence_keeps_body_inference() {
+    let values = Values { values: [1, 2] }
+    let mut total: u8 = 0
+    for x in values { total += x }
+    assert(total == 3)
+}
