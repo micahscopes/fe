@@ -4776,6 +4776,28 @@ impl<'db> TyChecker<'db> {
         if let Err(diag) = rec_checker.finalize(span.into(), false) {
             self.push_diag(diag);
         }
+        let ty = match record_like {
+            RecordLike::Type(ty) => *ty,
+            RecordLike::EnumVariant(variant) => variant.ty,
+        }
+        .fold_with(self.db, &mut self.table);
+        for (constraint_idx, &goal) in
+            crate::analysis::ty::trait_resolution::constraint::ty_constraints(self.db, ty)
+                .list(self.db)
+                .iter()
+                .enumerate()
+        {
+            let selection = self.env.selection_for_goal(goal);
+            self.check_trait_const_obligation_at(
+                goal,
+                expr.span(self.body()).into(),
+                selection,
+                super::env::TraitObligationOrigin::ConstructorConstraint {
+                    constructor: expr,
+                    constraint_idx,
+                },
+            );
+        }
     }
 
     fn check_field(&mut self, expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {

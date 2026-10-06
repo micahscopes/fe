@@ -782,3 +782,92 @@ fn constants_used_in_types_their_requirements_evaluate_converge_in_any_query_ord
         }
     }
 }
+
+#[test]
+fn constructed_type_bounds_check_the_selected_impl_conditions() {
+    let declaration = r#"
+trait Compute { const OK: bool }
+struct S {}
+impl Compute for S { const OK: bool = false }
+trait Mark {}
+struct Wrap<T> {}
+impl<T: Compute> Mark for Wrap<T> where T::OK {}
+impl Mark for Wrap<S> as Chosen {}
+trait Extra {}
+impl Extra for Wrap<S> {}
+struct MultiGate<T: Mark + Extra> {}
+struct Gate<T: Mark> {}
+enum EnumGate<T: Mark> { Case {} }
+"#;
+    for (name, body, rejected) in [
+        (
+            "ordinary_constructor",
+            "fn f() { let x: Gate<Wrap<S>> = Gate {} }",
+            true,
+        ),
+        (
+            "selected_constructor",
+            "fn f() { with (Chosen) { let x: Gate<Wrap<S>> = Gate {} } }",
+            false,
+        ),
+        (
+            "restored_constructor",
+            "fn f() { with (Chosen) { let x: Gate<Wrap<S>> = Gate {} }; let y: Gate<Wrap<S>> = Gate {} }",
+            true,
+        ),
+        (
+            "ordinary_record_variant",
+            "fn f() { let x: EnumGate<Wrap<S>> = EnumGate::Case {} }",
+            true,
+        ),
+        (
+            "selected_record_variant",
+            "fn f() { with (Chosen) { let x: EnumGate<Wrap<S>> = EnumGate::Case {} } }",
+            false,
+        ),
+        (
+            "multiple_constructor_bounds",
+            "fn f() { with (Chosen) { let x: MultiGate<Wrap<S>> = MultiGate {} } }",
+            false,
+        ),
+        (
+            "ordinary_call",
+            "fn needs<T: Mark>() {}\nfn f() { needs<Wrap<S>>() }",
+            true,
+        ),
+        (
+            "selected_call",
+            "fn needs<T: Mark>() {}\nfn f() { with (Chosen) { needs<Wrap<S>>() } }",
+            false,
+        ),
+    ] {
+        let mut db = database();
+        let file = virtual_input(&mut db, name, &format!("{declaration}\n{body}\n"));
+        let errors = diagnostics(&db, file);
+        if rejected {
+            assert!(
+                errors.contains("const requirement is not satisfied"),
+                "{name}: missing impl condition diagnostic:\n{errors}"
+            );
+        } else {
+            assert!(
+                errors.is_empty(),
+                "{name}: selected impl rejected:\n{errors}"
+            );
+        }
+    }
+    let named_only = declaration.replace("impl<T: Compute> Mark for Wrap<T> where T::OK {}\n", "");
+    let mut db = database();
+    let file = virtual_input(
+        &mut db,
+        "named_only_constructor",
+        &format!(
+            "{named_only}\nfn f() {{ with (Chosen) {{ let x: Gate<Wrap<S>> = Gate {{}} }} }}\n"
+        ),
+    );
+    let errors = diagnostics(&db, file);
+    assert!(
+        errors.is_empty(),
+        "named-only constructor rejected:\n{errors}"
+    );
+}

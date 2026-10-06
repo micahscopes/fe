@@ -2572,6 +2572,21 @@ impl<'db> TyChecker<'db> {
         span: DynLazySpan<'db>,
         selection: Option<crate::analysis::semantic::SelectedApplication<'db>>,
     ) -> bool {
+        self.check_trait_const_obligation_at(
+            goal,
+            span,
+            selection,
+            env::TraitObligationOrigin::GenericConfirmation,
+        )
+    }
+
+    fn check_trait_const_obligation_at(
+        &mut self,
+        goal: TraitInstId<'db>,
+        span: DynLazySpan<'db>,
+        selection: Option<crate::analysis::semantic::SelectedApplication<'db>>,
+        origin: env::TraitObligationOrigin<'db>,
+    ) -> bool {
         // Binder parameters outside this body's scope await receiver inference.
         if trait_const_goal_has_foreign_params(self.db, goal, self.env.scope()) {
             return true;
@@ -2580,7 +2595,7 @@ impl<'db> TyChecker<'db> {
             context: self.context_with_selection(selection),
             assumptions: self.env.assumptions(),
             goal,
-            origin: env::TraitObligationOrigin::GenericConfirmation,
+            origin,
             span,
         };
         let final_pass = !collect_flags(self.db, goal).contains(TyFlags::HAS_VAR);
@@ -2747,7 +2762,8 @@ impl<'db> TyChecker<'db> {
                                 constraint_idx,
                                 ..
                             } => self.call_constraint_diag_info(callable_def, constraint_idx),
-                            env::TraitObligationOrigin::GenericConfirmation => None,
+                            env::TraitObligationOrigin::GenericConfirmation
+                            | env::TraitObligationOrigin::ConstructorConstraint { .. } => None,
                         };
                         self.push_diag(BodyDiag::AmbiguousTraitInst {
                             primary: obligation.span.clone(),
@@ -2772,7 +2788,8 @@ impl<'db> TyChecker<'db> {
                             constraint_idx,
                             ..
                         } => self.call_constraint_diag_info(callable_def, constraint_idx),
-                        env::TraitObligationOrigin::GenericConfirmation => None,
+                        env::TraitObligationOrigin::GenericConfirmation
+                        | env::TraitObligationOrigin::ConstructorConstraint { .. } => None,
                     };
                     let unsat = subgoal.map(|goal| query.extract_subgoal(&mut self.table, goal));
                     let call_bound = match obligation.origin {
@@ -2781,7 +2798,8 @@ impl<'db> TyChecker<'db> {
                             constraint_idx,
                             ..
                         } => Some((callable_def, constraint_idx)),
-                        env::TraitObligationOrigin::GenericConfirmation => None,
+                        env::TraitObligationOrigin::GenericConfirmation
+                        | env::TraitObligationOrigin::ConstructorConstraint { .. } => None,
                     };
                     let capability_hint =
                         capability_only_unsat_ty(db, solve_cx, goal, call_bound, unsat);
@@ -6861,7 +6879,21 @@ impl<'db> Visitor<'db> for TyCheckerFinalizer<'db> {
             let is_direct_call_callee =
                 matches!(expr_data, Expr::Path(..)) && self.direct_call_callees.contains(&expr);
             if prop.binding.is_none() && !is_direct_call_callee {
-                self.check_wf(prop.ty, span.into());
+                let span: DynLazySpan<'db> = span.into();
+                let answers = if matches!(expr_data, Expr::RecordInit(..)) {
+                    let choice_span: DynLazySpan<'db> = expr.span(self.body.body().unwrap()).into();
+                    PredicateListId::new(
+                        self.db,
+                        self.body
+                            .trait_choices(self.db)
+                            .filter(|choice| choice.span() == &choice_span)
+                            .map(|choice| choice.goal())
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    PredicateListId::empty_list(self.db)
+                };
+                self.check_wf(prop.ty, span, answers);
             }
         }
 
@@ -6964,14 +6996,20 @@ impl<'db> TyCheckerFinalizer<'db> {
         }
     }
 
-    fn check_wf(&mut self, ty: TyId<'db>, span: DynLazySpan<'db>) {
+    fn check_wf(&mut self, ty: TyId<'db>, span: DynLazySpan<'db>, answers: PredicateListId<'db>) {
         let flags = ty.flags(self.db);
         if flags.contains(TyFlags::HAS_INVALID) || flags.contains(TyFlags::HAS_VAR) {
             return;
         }
 
         let solve_cx = TraitSolveCx::new(self.db, self.body.body().unwrap().scope());
-        if let Some(diag) = ty.emit_wf_diag(self.db, solve_cx, self.assumptions, span) {
+        let formation = crate::analysis::ty::trait_resolution::check_ty_wf_with_answers(
+            self.db,
+            solve_cx.with_assumptions(self.assumptions),
+            ty,
+            answers,
+        );
+        if let Some(diag) = formation.into_diag(span) {
             self.diags.push(diag.into());
         }
     }

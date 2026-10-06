@@ -1784,6 +1784,10 @@ pub(super) enum TraitObligationOrigin<'db> {
         callable_def: CallableDef<'db>,
         constraint_idx: usize,
     },
+    ConstructorConstraint {
+        constructor: ExprId,
+        constraint_idx: usize,
+    },
     GenericConfirmation,
 }
 
@@ -2105,7 +2109,8 @@ impl<'db> TraitChoiceUse<'_, 'db> {
                 callable_def,
                 constraint_idx,
             } => Some((call_expr, callable_def, constraint_idx)),
-            TraitObligationOrigin::GenericConfirmation => None,
+            TraitObligationOrigin::GenericConfirmation
+            | TraitObligationOrigin::ConstructorConstraint { .. } => None,
         }
     }
 }

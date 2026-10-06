@@ -550,6 +550,20 @@ pub(crate) fn check_ty_wf<'db>(
     solve_cx: TraitSolveCx<'db>,
     ty: TyId<'db>,
 ) -> WellFormedness<'db> {
+    check_ty_wf_with_answers(db, solve_cx, ty, PredicateListId::empty_list(db))
+}
+
+/// Formation at a checked constructor reads its accepted root-bound answers.
+/// These are decisions, not assumptions: concrete goals deliberately cannot
+/// use assumptions in ordinary proof search. Nested formation is still checked.
+#[salsa::tracked]
+pub(crate) fn check_ty_wf_with_answers<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    root: TyId<'db>,
+    answers: PredicateListId<'db>,
+) -> WellFormedness<'db> {
+    let ty = root;
     let mut formation = WellFormedness::WellFormed;
     // Check arguments before their enclosing application without nesting a
     // tracked Salsa query for every node in a deep finite type. The base's
@@ -634,6 +648,9 @@ pub(crate) fn check_ty_wf<'db>(
         };
 
         for &goal in normalized_constraints.list(db) {
+            if ty == root && answers.list(db).contains(&goal) {
+                continue;
+            }
             let query = CanonicalGoalQuery::new(db, goal, assumptions);
             if let GoalSatisfiability::UnSat(subgoal) =
                 is_goal_query_satisfiable(db, solve_cx, &query)
