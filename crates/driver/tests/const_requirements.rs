@@ -871,3 +871,98 @@ enum EnumGate<T: Mark> { Case {} }
         "named-only constructor rejected:\n{errors}"
     );
 }
+
+#[test]
+fn authored_projection_conditions_read_the_position_choice() {
+    let declaration = r#"
+trait Compute { const OK: bool }
+struct S {}
+impl Compute for S { const OK: bool = false }
+trait Mark { type Output }
+struct Wrap<T> {}
+impl<T: Compute> Mark for Wrap<T> where T::OK { type Output = u256 }
+impl Mark for Wrap<S> as Chosen { type Output = u256 }
+trait Other { type Output }
+impl<T: Compute> Other for Wrap<T> where T::OK { type Output = u256 }
+"#;
+    for (name, body, rejected) in [
+        (
+            "ordinary_projection_condition",
+            "fn f() { let x: <Wrap<S> as Mark>::Output = 1 }",
+            true,
+        ),
+        (
+            "selected_projection_condition",
+            "fn f() { with (Chosen) { let x: <Wrap<S> as Mark>::Output = 1 } }",
+            false,
+        ),
+        (
+            "restored_projection_condition",
+            "fn f() { with (Chosen) { let x: <Wrap<S> as Mark>::Output = 1 }; let y: <Wrap<S> as Mark>::Output = 1 }",
+            true,
+        ),
+        (
+            "nested_projection_condition",
+            "fn f() { with (Chosen) { let x: (<Wrap<S> as Mark>::Output, <Wrap<S> as Mark>::Output) = (1, 2) } }",
+            false,
+        ),
+        (
+            "unrelated_projection_condition",
+            "fn f() { with (Chosen) { let x: <Wrap<S> as Other>::Output = 1 } }",
+            true,
+        ),
+    ] {
+        let mut db = database();
+        let file = virtual_input(&mut db, name, &format!("{declaration}\n{body}\n"));
+        let errors = diagnostics(&db, file);
+        if rejected {
+            assert!(
+                errors.contains("const requirement is not satisfied"),
+                "{name}: {errors}"
+            );
+        } else {
+            assert!(errors.is_empty(), "{name}: {errors}");
+        }
+    }
+}
+
+#[test]
+fn authored_projection_does_not_certify_an_invalid_named_application() {
+    let mut db = database();
+    let file = virtual_input(
+        &mut db,
+        "invalid_projection_selection",
+        r#"
+trait Mark { type Output }
+struct S {}
+impl Mark for S { type Output = u256 }
+impl Mark for S as Invalid where false { type Output = u256 }
+fn f() { with (Invalid) { let x: <S as Mark>::Output = 1 } }
+"#,
+    );
+    let errors = diagnostics(&db, file);
+    assert!(!errors.is_empty(), "invalid named application was accepted");
+}
+
+#[test]
+fn authored_projection_preserves_unrelated_family_bounds() {
+    let mut db = database();
+    let file = virtual_input(
+        &mut db,
+        "unrelated_family_bound",
+        r#"
+trait Mark { type Output }
+struct S {}
+impl Mark for S { type Output = u256 }
+impl Mark for S as Chosen { type Output = u256 }
+trait Show {}
+impl Show for u8 {}
+trait Family { type Out<T: Show> = T }
+struct A {}
+impl Family for A {}
+fn f() { with (Chosen) { let y: A::Out<bool> = true } }
+"#,
+    );
+    let errors = diagnostics(&db, file);
+    assert!(errors.contains("doesn't implement `Show`"), "{errors}");
+}

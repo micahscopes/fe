@@ -4838,6 +4838,11 @@ fn evidence_scope_is_frozen_before_specialization_at_o0_and_o2() {
 }
 
 #[test]
+fn authored_projection_conditions_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("authored_projection_conditions.fe");
+}
+
+#[test]
 fn rd103_impl_bound_condition_and_body_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("impl_bound_condition_and_body.fe");
 }

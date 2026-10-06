@@ -1,0 +1,21 @@
+trait Compute { const OK: bool }
+struct S {}
+impl Compute for S { const OK: bool = false }
+trait Mark { type Output }
+struct Wrap<T> {}
+impl<T: Compute> Mark for Wrap<T> where T::OK { type Output = u256 }
+impl Mark for Wrap<S> as Chosen { type Output = u256 }
+
+const fn selected() -> u256 {
+    with (Chosen) {
+        let x: <Wrap<S> as Mark>::Output = 41
+        x + 1
+    }
+}
+const SELECTED: u256 = selected()
+
+#[test]
+fn authored_projection_reads_selected_conditions() {
+    assert(SELECTED == 42)
+    assert(selected() == 42)
+}

@@ -2793,9 +2793,29 @@ fn written_type_check_query<'db>(
                 let solve_cx = TraitSolveCx::new(db, context.normalization_scope(db))
                     .with_assumptions(context.assumptions(db));
                 let mut uses = Vec::new();
+                let equalities = PredicateListId::new(
+                    db,
+                    selections
+                        .iter()
+                        .map(|choice| choice.goal())
+                        .collect::<Vec<_>>(),
+                );
                 for ty in written.lowered.iter().chain(&written.applications) {
+                    // The opening already checked this application's conditions.
+                    // Read its accepted associated equalities before formation;
+                    // ordinary lookup must not choose conditions for that slot.
+                    let ty = if selections.is_empty() {
+                        *ty
+                    } else {
+                        crate::analysis::ty::normalize::normalize_from_assumptions(
+                            db,
+                            *ty,
+                            context.normalization_scope(db),
+                            equalities,
+                        )
+                    };
                     if let Some(conditions) =
-                        crate::analysis::ty::trait_resolution::check_ty_wf(db, solve_cx, *ty)
+                        crate::analysis::ty::trait_resolution::check_ty_wf(db, solve_cx, ty)
                             .conditions()
                     {
                         uses.extend(selected_impl_condition_uses(
