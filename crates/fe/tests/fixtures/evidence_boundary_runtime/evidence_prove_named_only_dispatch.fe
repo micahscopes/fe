@@ -26,3 +26,17 @@ const fn evaluate() -> u256 {
 fn prove_uses_named_only_local_parameter_and_restored_choices() {
     assert(evaluate() == 23323)
 }
+
+const fn read_pair(_ first: Evidence<Read<Subject>>, _ second: Evidence<Read<Subject>>) -> u256 {
+    let before = with (first) { <Subject as Read>::read() }
+    let middle = with (second) { <Subject as Read>::read() }
+    let after = with (first) { <Subject as Read>::read() }
+    before * 100 + middle * 10 + after
+}
+#[test]
+fn two_same_goal_parameters_keep_their_operand_choices_in_both_orders() {
+    let first = with (First) { prove<Read<Subject>>() }
+    let second = with (Second) { prove<Read<Subject>>() }
+    assert(read_pair(first, second) == 232)
+    assert(read_pair(second, first) == 323)
+}

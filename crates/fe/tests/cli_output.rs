@@ -4835,6 +4835,14 @@ fn evidence_impl_conditions_keep_authored_and_bound_contexts_at_o0_and_o2() {
 #[ignore = "RD6: concrete evidence premises must retain supplied authority"]
 fn evidence_prove_named_only_dispatch_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("evidence_prove_named_only_dispatch.fe");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/evidence_selected_body_borrow_rejected.fe");
+    let (output, exit_code) = run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+    assert_ne!(exit_code, 0, "invalid selected body accepted: {output}");
+    assert!(
+        output.contains("error[16-0001]") && output.contains("error[16-0002]"),
+        "selected body borrowing was not validated: {output}"
+    );
 }
 
 #[test]

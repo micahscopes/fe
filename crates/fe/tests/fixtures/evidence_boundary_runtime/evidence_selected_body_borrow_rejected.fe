@@ -1,0 +1,20 @@
+use core::obligations::prove
+trait Read { const fn read() -> u256 }
+struct Subject {}
+struct Item { n: u256 }
+const fn consume(_ item: own Item) {}
+const fn inspect(_ item: ref Item) -> u256 { item.n }
+impl Read for Subject as Bad {
+    const fn read() -> u256 {
+        let mut item = Item { n: 7 }
+        let borrowed = ref item
+        consume(item)
+        inspect(borrowed)
+    }
+}
+const fn evaluate() -> u256 {
+    let evidence = with (Bad) { prove<Read<Subject>>() }
+    with (evidence) { <Subject as Read>::read() }
+}
+#[test]
+fn selected_body_is_checked() { assert(evaluate() == 7) }
