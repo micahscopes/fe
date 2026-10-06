@@ -1,0 +1,15 @@
+trait Mark {}
+struct Needs<T: Mark> { value: T }
+recursive type fn Good<T: Mark, const N: usize>() -> (*) {
+    match N {
+        0 => Needs<T>
+        _ => Good<T, {N - 1}>
+    }
+}
+
+recursive type fn Bad<T, const N: usize>() -> (*) {
+    match N {
+        0 => Needs<T>
+        _ => Bad<T, {N - 1}>
+    }
+}

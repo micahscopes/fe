@@ -274,10 +274,7 @@ pub(crate) fn context_at<'db>(
                 };
                 enclosing = parent;
             }
-            match enclosing.item() {
-                ItemKind::Func(_) => param_env(db, enclosing.item()),
-                item => constraints_for(db, item),
-            }
+            param_env(db, enclosing.item())
         },
         |(typed, expr)| provision::recorded_chain_at(db, typed, expr).evidence_assumptions(db),
     );
@@ -6150,6 +6147,55 @@ impl<'db> TyId<'db> {
         match self.adt_ref(db)? {
             AdtRef::Struct(s) => Some(FieldParent::Struct(s)),
             AdtRef::Enum(_) => None, // Enums don't have direct field access
+        }
+    }
+}
+
+#[cfg(test)]
+mod item_context_tests {
+    use super::*;
+    use crate::test_db::HirAnalysisTestDb;
+
+    #[test]
+    fn computed_item_context_preserves_declared_bounds_without_inventing_missing_ones() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "computed_item_context.fe".into(),
+            include_str!("../../../tests/fixtures/assumption_contexts/computed_item.fe"),
+        );
+        let (module, _) = db.top_mod(file);
+        for (name, expected) in [("Bad", false), ("Good", true)] {
+            let def = module
+                .children_non_nested(&db)
+                .find_map(|item| match item {
+                    ItemKind::TypeFn(def)
+                        if def
+                            .name(&db)
+                            .to_opt()
+                            .is_some_and(|id| id.data(&db) == name) =>
+                    {
+                        Some(def)
+                    }
+                    _ => None,
+                })
+                .expect("fixture type function");
+            let assumptions = param_env(&db, def.into());
+            let arm = def.arms(&db)[0].ty.to_opt().expect("base arm");
+            let ty = lower_hir_ty(&db, arm, def.scope(), assumptions);
+            let old = TraitSolveCx::new(&db, def.scope()).with_assumptions(assumptions);
+            assert_eq!(
+                check_ty_wf(&db, old, ty).is_wf(),
+                expected,
+                "existing computed-item authority: {name}"
+            );
+            let context = context_at(&db, def.scope(), None);
+            let shared = TraitSolveCx::new(&db, context.normalization_scope(&db))
+                .with_assumptions(context.assumptions(&db));
+            assert_eq!(
+                check_ty_wf(&db, shared, ty).is_wf(),
+                expected,
+                "shared computed-item authority: {name}"
+            );
         }
     }
 }
