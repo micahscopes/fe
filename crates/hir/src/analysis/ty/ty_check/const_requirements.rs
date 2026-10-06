@@ -4171,6 +4171,7 @@ fn use_it() -> u256 { read<7>() }";
         use crate::analysis::ty::{
             TyId,
             fold::{TyFoldable, TyFolder},
+            trait_resolution::PredicateListId,
             ty_def::TyData,
         };
         use crate::hir_def::scope_graph::ScopeId;
@@ -4259,6 +4260,20 @@ fn use_it() -> u256 { read<7>() }";
             Vec::new(),
             bound_choices.clone(),
         );
+        let lowering = super::super::super::const_ty::LoweringContext::new(
+            super::super::super::const_ty::HoleAnchor::GenericDefault {
+                owner: function.into(),
+                param_idx: 0,
+            },
+        )
+        .with_context(env, PredicateListId::empty_list(&db));
+        let transported = lowering.const_impl_env(&db, to_scope).unwrap();
+        assert_eq!(transported.normalization_scope(&db), to_scope);
+        assert_eq!(
+            transported.assumptions(&db),
+            PredicateListId::empty_list(&db)
+        );
+        assert_eq!(transported.bound_choices(&db), env.bound_choices(&db));
         let key = crate::analysis::semantic::SemanticInstanceKey::new(
             &db,
             super::super::BodyOwner::Func(function),

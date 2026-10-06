@@ -538,10 +538,14 @@ impl<'db> LoweringContext<'db> {
     ) -> Option<ImplEnv<'db>> {
         let context = self.selection_context?;
         let assumptions = self.selected_const_assumptions?;
-        Some(
-            ImplEnv::new(db, scope, assumptions, Vec::new())
-                .with_selections(db, context.selections(db).to_vec()),
-        )
+        Some(ImplEnv::new_with_choices(
+            db,
+            scope,
+            assumptions,
+            context.witnesses(db).to_vec(),
+            context.selections(db).to_vec(),
+            context.bound_choices(db).to_vec(),
+        ))
     }
 
     /// Makes this lowering keep every path segment it resolves, with the
