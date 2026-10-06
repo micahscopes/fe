@@ -6841,7 +6841,6 @@ struct TyCheckerFinalizer<'db> {
     db: &'db dyn HirAnalysisDb,
     body: TypedBody<'db>,
     conditions: Vec<ConstConditionUse<'db>>,
-    assumptions: PredicateListId<'db>,
     ty_vars: FxHashSet<InferenceKey<'db>>,
     effect_provider_keys: FxHashSet<InferenceKey<'db>>,
     direct_call_callees: FxHashSet<ExprId>,
@@ -6904,7 +6903,7 @@ impl<'db> Visitor<'db> for TyCheckerFinalizer<'db> {
                 } else {
                     PredicateListId::empty_list(self.db)
                 };
-                self.check_wf(prop.ty, span, answers);
+                self.check_wf(expr, prop.ty, span, answers);
             }
         }
 
@@ -6935,7 +6934,6 @@ impl<'db> Visitor<'db> for TyCheckerFinalizer<'db> {
 
 impl<'db> TyCheckerFinalizer<'db> {
     fn new(mut checker: TyChecker<'db>) -> Self {
-        let assumptions = checker.env.assumptions();
         checker.resolve_deferred();
         let (mut body, conditions) = checker.env.finish(&mut checker.table);
         body.tables_mut().return_borrow_provider = checker
@@ -6961,7 +6959,6 @@ impl<'db> TyCheckerFinalizer<'db> {
             db: checker.db,
             body,
             conditions,
-            assumptions,
             ty_vars: FxHashSet::default(),
             effect_provider_keys,
             direct_call_callees,
@@ -7012,18 +7009,30 @@ impl<'db> TyCheckerFinalizer<'db> {
         }
     }
 
-    fn check_wf(&mut self, ty: TyId<'db>, span: DynLazySpan<'db>, answers: PredicateListId<'db>) {
+    fn check_wf(
+        &mut self,
+        expr: ExprId,
+        ty: TyId<'db>,
+        span: DynLazySpan<'db>,
+        answers: PredicateListId<'db>,
+    ) {
         let flags = ty.flags(self.db);
         if flags.contains(TyFlags::HAS_INVALID) || flags.contains(TyFlags::HAS_VAR) {
             return;
         }
 
-        let solve_cx = TraitSolveCx::new(self.db, self.body.body().unwrap().scope());
-        let formation = crate::analysis::ty::trait_resolution::check_ty_wf_with_answers(
+        let context = crate::semantic::context_at(
             self.db,
-            solve_cx.with_assumptions(self.assumptions),
+            self.body.body().unwrap().scope(),
+            Some((&self.body, expr)),
+        );
+        let solve_cx = TraitSolveCx::new(self.db, context.normalization_scope(self.db));
+        let formation = crate::analysis::ty::trait_resolution::check_ty_wf_with_lexical_context(
+            self.db,
+            solve_cx.with_assumptions(context.assumptions(self.db)),
             ty,
             answers,
+            context,
         );
         if let Some(diag) = formation.into_diag(span) {
             self.diags.push(diag.into());

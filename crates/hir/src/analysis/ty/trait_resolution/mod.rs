@@ -563,6 +563,30 @@ pub(crate) fn check_ty_wf_with_answers<'db>(
     root: TyId<'db>,
     answers: PredicateListId<'db>,
 ) -> WellFormedness<'db> {
+    check_ty_formation(db, solve_cx, root, answers, None)
+}
+
+/// Checked lexical choices are available throughout the written type, unlike
+/// answers recorded only for a constructor's root application. They remain
+/// accepted decisions rather than ordinary proof-search assumptions.
+#[salsa::tracked]
+pub(crate) fn check_ty_wf_with_lexical_context<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    root: TyId<'db>,
+    root_answers: PredicateListId<'db>,
+    context: crate::analysis::semantic::ImplEnv<'db>,
+) -> WellFormedness<'db> {
+    check_ty_formation(db, solve_cx, root, root_answers, Some(context))
+}
+
+fn check_ty_formation<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    root: TyId<'db>,
+    root_answers: PredicateListId<'db>,
+    lexical_context: Option<crate::analysis::semantic::ImplEnv<'db>>,
+) -> WellFormedness<'db> {
     let ty = root;
     let mut formation = WellFormedness::WellFormed;
     // Check arguments before their enclosing application without nesting a
@@ -648,7 +672,21 @@ pub(crate) fn check_ty_wf_with_answers<'db>(
         };
 
         for &goal in normalized_constraints.list(db) {
-            if ty == root && answers.list(db).contains(&goal) {
+            if ty == root && root_answers.list(db).contains(&goal) {
+                continue;
+            }
+            if let Some(selection) =
+                lexical_context.and_then(|context| context.selection_for(db, goal))
+            {
+                // Slot matching is not proof of associated equalities. Read the
+                // checked application and validate the complete requested goal;
+                // an incompatible selection cannot fall back to ordinary lookup.
+                if selection.revalidate(db, solve_cx, goal).is_err() {
+                    return WellFormedness::IllFormed {
+                        goal,
+                        subgoal: None,
+                    };
+                }
                 continue;
             }
             let query = CanonicalGoalQuery::new(db, goal, assumptions);

@@ -128,12 +128,18 @@ impl<'db> TyChecker<'db> {
             }
         } else {
             let ascription = ascription.unwrap_or_else(|| self.fresh_ty());
-            if let Some(diag) = ascription.emit_wf_diag(
-                self.db,
-                TraitSolveCx::new(self.db, self.env.scope()),
-                self.env.assumptions(),
-                span.ty().into(),
-            ) {
+            let context = self.env.selection_context();
+            if let Some(diag) =
+                crate::analysis::ty::trait_resolution::check_ty_wf_with_lexical_context(
+                    self.db,
+                    TraitSolveCx::new(self.db, self.env.scope())
+                        .with_assumptions(self.env.assumptions()),
+                    ascription,
+                    crate::analysis::ty::trait_resolution::PredicateListId::empty_list(self.db),
+                    context.fold_with(self.db, &mut self.table),
+                )
+                .into_diag(span.ty().into())
+            {
                 self.push_diag(diag);
             }
             self.check_pat(*pat, ascription);

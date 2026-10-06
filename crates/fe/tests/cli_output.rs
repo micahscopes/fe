@@ -4880,3 +4880,8 @@ fn evidence_boundary_runtime_at_o0_and_o2(name: &str) {
 fn effect_provider_recorded_choice_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("effect_provider_recorded_choice.fe");
 }
+
+#[test]
+fn authored_bound_annotations_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("authored_bound_annotations.fe");
+}

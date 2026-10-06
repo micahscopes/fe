@@ -1,0 +1,25 @@
+trait Mark { fn read(self) -> u256 }
+struct Subject { n: u256 }
+impl Mark for Subject as Chosen {
+    fn read(self) -> u256 { self.n + 1 }
+}
+struct Holder<T: Mark> { value: T }
+struct Outer<T> { value: T }
+
+#[test]
+fn annotation_reads_the_named_only_bound() {
+    with (Chosen) {
+        let mut holder: Holder<Subject>
+        holder = Holder { value: Subject { n: 41 } }
+        assert!(holder.value.read() == 42)
+    }
+}
+
+#[test]
+fn nested_annotation_reads_the_named_only_bound() {
+    with (Chosen) {
+        let mut outer: Outer<Holder<Subject>>
+        outer = Outer { value: Holder { value: Subject { n: 40 } } }
+        assert!(outer.value.value.read() == 41)
+    }
+}

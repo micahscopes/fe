@@ -959,3 +959,134 @@ fn consume() uses (t: mut Tick) { t.tick() }
         assert!(errors.contains(code), "{name}: {errors}");
     }
 }
+
+#[test]
+fn authored_trait_bound_annotations_read_the_lexical_choice() {
+    let declarations = r#"
+trait Mark {}
+struct Subject {}
+struct Wrong {}
+impl Mark for Subject as Chosen {}
+impl Mark for Wrong as OtherChoice {}
+struct Holder<T: Mark> { value: T }
+struct Outer<T> { value: T }
+fn require<T: Mark>() {}
+"#;
+    for (name, body) in [
+        (
+            "ordinary_call_comparison",
+            "fn caller() { with (Chosen) { require<Subject>() } }",
+        ),
+        (
+            "named_annotation",
+            "fn caller() { with (Chosen) { let value: Holder<Subject> } }",
+        ),
+        (
+            "nested_named_annotation",
+            "fn caller() { with (Chosen) { let value: Outer<Holder<Subject>> } }",
+        ),
+        (
+            "same_trait_other_subject_keeps_outer_choice",
+            "fn caller() { with (Chosen) { with (OtherChoice) { let value: Holder<Subject> } } }",
+        ),
+        (
+            "ordinary_annotation",
+            "impl Mark for Subject {}\nfn caller() { let value: Holder<Subject> }",
+        ),
+    ] {
+        let mut db = database();
+        let file = input(&mut db, name, &format!("{declarations}\n{body}"));
+        let errors = diagnostics(&db, file);
+        assert!(errors.is_empty(), "{name}: {errors}");
+    }
+}
+
+#[test]
+fn authored_trait_bound_annotations_preserve_missing_and_unrelated_bounds() {
+    let declarations = r#"
+trait Mark {}
+trait Read {}
+struct Subject {}
+struct Wrong {}
+impl Mark for Subject as Chosen {}
+struct Holder<T: Mark> { value: T }
+struct Unrelated<T: Read> { value: T }
+struct Outer<T> { value: T }
+"#;
+    for (name, body, code) in [
+        (
+            "missing_annotation",
+            "fn caller() { let value: Holder<Subject> }",
+            "6-0003",
+        ),
+        (
+            "wrong_subject_annotation",
+            "fn caller() { with (Chosen) { let value: Holder<Wrong> } }",
+            "6-0003",
+        ),
+        (
+            "unrelated_trait_annotation",
+            "fn caller() { with (Chosen) { let value: Unrelated<Subject> } }",
+            "6-0003",
+        ),
+        (
+            "nested_unrelated_annotation",
+            "fn caller() { with (Chosen) { let value: Outer<Unrelated<Subject>> } }",
+            "6-0003",
+        ),
+        (
+            "restored_annotation",
+            "fn caller() { with (Chosen) { let inside: Holder<Subject> }\nlet outside: Holder<Subject> }",
+            "6-0003",
+        ),
+        (
+            "invalid_selected_annotation",
+            "impl Mark for Subject {}\nimpl Mark for Subject as Broken where false {}\nfn caller() { with (Broken) { let value: Holder<Subject> } }",
+            "8-0101",
+        ),
+    ] {
+        let mut db = database();
+        let file = input(&mut db, name, &format!("{declarations}\n{body}"));
+        let errors = diagnostics(&db, file);
+        assert!(errors.contains(code), "{name}: {errors}");
+        if name == "restored_annotation" {
+            assert!(errors.contains("let outside: Holder<Subject>"), "{errors}");
+            assert_eq!(errors.matches("error[6-0003]").count(), 1, "{errors}");
+        }
+    }
+}
+
+#[test]
+fn authored_bound_annotations_accept_a_checked_stronger_associated_goal() {
+    let mut db = database();
+    checked(
+        &mut db,
+        "stronger_associated_goal_annotation",
+        r#"
+trait Mark { type Output }
+struct Subject {}
+impl Mark for Subject as Chosen { type Output = u8 }
+struct Holder<T: Mark> { value: T }
+fn caller() { with (Chosen) { let value: Holder<Subject> } }
+"#,
+    );
+}
+
+#[test]
+fn authored_bound_annotations_do_not_fall_back_on_incompatible_associated_output() {
+    let mut db = database();
+    let file = input(
+        &mut db,
+        "incompatible_associated_goal_annotation",
+        r#"
+trait Mark { type Output }
+struct Subject {}
+impl Mark for Subject { type Output = u8 }
+impl Mark for Subject as Chosen { type Output = u8 }
+struct Holder<T: Mark<Output = u16>> { value: T }
+fn caller() { with (Chosen) { let value: Holder<Subject> } }
+"#,
+    );
+    let errors = diagnostics(&db, file);
+    assert!(errors.contains("6-0003"), "{errors}");
+}
