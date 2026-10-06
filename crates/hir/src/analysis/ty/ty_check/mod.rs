@@ -3818,6 +3818,17 @@ impl<'db> TyChecker<'db> {
             }
         }
 
+        if let Some(diag) = super::ty_error::normalization_limit_diag(
+            self.db,
+            self.env.scope(),
+            ty,
+            self.env.assumptions(),
+            span.clone().into(),
+        ) {
+            self.push_diag(diag);
+            return TyId::invalid(self.db, InvalidCause::Other);
+        }
+
         if let Some(diag) = ty.emit_diag(self.db, span.clone().into()) {
             self.push_diag(diag)
         }

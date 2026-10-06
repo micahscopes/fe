@@ -80,9 +80,31 @@ fn collect_hir_ty_diags_in_mode<'db>(
 
     // Fall back to semantic errors
     let ty = lower_hir_ty_in_mode(db, hir_ty, scope, assumptions, const_bodies);
-    emit_invalid_ty_error(db, ty, span.into())
+    emit_invalid_ty_error(db, ty, span.clone().into())
+        .or_else(|| normalization_limit_diag(db, scope, ty, assumptions, span.into()))
         .into_iter()
         .collect()
+}
+
+/// Surface a reduction limit at the written projection before later passes
+/// consume its invalid normalized result. The existing reducer owns the limit.
+pub(crate) fn normalization_limit_diag<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    ty: TyId<'db>,
+    assumptions: PredicateListId<'db>,
+    span: DynLazySpan<'db>,
+) -> Option<TyDiagCollection<'db>> {
+    if !ty.has_projection(db) {
+        return None;
+    }
+    let normalized = super::normalize::normalize_ty(db, ty, scope, assumptions);
+    super::fold::ty_contains(
+        db,
+        normalized,
+        TyId::invalid(db, InvalidCause::TypeNormalizationLimit),
+    )
+    .then(|| TyLowerDiag::TypeNormalizationLimit(span).into())
 }
 
 pub fn collect_ty_lower_errors<'db>(

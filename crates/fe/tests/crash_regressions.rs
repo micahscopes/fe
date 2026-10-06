@@ -137,6 +137,52 @@ fn valid_generic_type_default_fixtures_pass_check() {
 }
 
 #[test]
+fn family_normalization_limits_are_reported_at_written_types() {
+    let directory = tempfile::tempdir().unwrap();
+    let declarations = "trait Tr { type Out<T> }\nstruct Base {}\nstruct Wrap<U> {}\n\
+        impl Tr for Base { type Out<T> = T }\n\
+        impl<U: Tr> Tr for Wrap<U> { type Out<T> = <U as Tr>::Out<(T, T)> }\n";
+    let mut failures = Vec::new();
+    for (name, layers, body, expected_limit) in [
+        ("return_literal", 14, "fn f() -> TYPE { 0 }", true),
+        ("parameter_used", 14, "fn f(_ x: TYPE) -> u8 { x }", true),
+        ("parameter_unused", 24, "fn f(_ x: TYPE) {}", true),
+        ("field", 14, "struct S { value: TYPE }", true),
+        ("alias", 14, "type Result = TYPE", true),
+        ("local", 14, "fn f() { let x: TYPE = 0 }", true),
+        ("below_limit", 13, "fn f(_ x: TYPE) {}", false),
+    ] {
+        let nested = "Wrap<".repeat(layers) + "Base" + &">".repeat(layers);
+        let ty = format!("<{nested} as Tr>::Out<u8>");
+        let path = directory.path().join(format!("{name}.fe"));
+        fs::write(
+            &path,
+            format!("{declarations}{}", body.replace("TYPE", &ty)),
+        )
+        .unwrap();
+        let run = run_fe_check(&path);
+        let limits = run
+            .combined
+            .matches("type normalization limit exceeded")
+            .count();
+        if run.timed_out
+            || run.code != i32::from(expected_limit)
+            || limits != usize::from(expected_limit)
+            || run.combined.contains("panicked")
+            || run.combined.contains("internal borrow checking error")
+        {
+            failures.push(format!(
+                "{name}: exit={}, limits={limits}, timed_out={}; {}",
+                run.code,
+                run.timed_out,
+                run.combined.lines().take(8).collect::<Vec<_>>().join("\n")
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn crash_regressions_do_not_panic() {
     let dir = fixtures_dir();
     let mut fixtures: Vec<PathBuf> = fs::read_dir(&dir)

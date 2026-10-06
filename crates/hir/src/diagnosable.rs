@@ -511,6 +511,14 @@ impl<'db> Func<'db> {
                 diags.push(TyLowerDiag::NormalTypeExpected { span, given: ret }.into());
             } else if ty::ty_contains_const_hole(db, ret) {
                 diags.push(TyLowerDiag::ConstHoleInValuePosition { span, ty: ret }.into());
+            } else if let Some(diag) = ty::ty_error::normalization_limit_diag(
+                db,
+                self.scope(),
+                ret,
+                param_env(db, self.into()),
+                span.clone(),
+            ) {
+                diags.push(diag);
             } else if let Some(diag) = ty::trait_resolution::check_ty_wf(
                 db,
                 ty::trait_resolution::TraitSolveCx::new(db, self.scope())

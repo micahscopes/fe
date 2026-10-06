@@ -8,3 +8,15 @@ error[3-0057]: type normalization limit exceeded
   │
 3 │ impl<T> Grow for W<T> { type Out = <W<W<T>> as Grow>::Out }
   │                                    ^^^^^^^^^^^^^^^^^^^^^^ this type requires more nested reductions than supported
+
+error[3-0057]: type normalization limit exceeded
+  ┌─ growing_plain_projection.fe:4:13
+  │
+4 │ fn probe(x: <W<bool> as Grow>::Out) -> <W<bool> as Grow>::Out { x }
+  │             ^^^^^^^^^^^^^^^^^^^^^^ this type requires more nested reductions than supported
+
+error[3-0057]: type normalization limit exceeded
+  ┌─ growing_plain_projection.fe:4:40
+  │
+4 │ fn probe(x: <W<bool> as Grow>::Out) -> <W<bool> as Grow>::Out { x }
+  │                                        ^^^^^^^^^^^^^^^^^^^^^^ this type requires more nested reductions than supported

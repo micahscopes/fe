@@ -3709,7 +3709,15 @@ impl<'db> TypeAlias<'db> {
                 .into_iter()
                 .collect()
         } else {
-            Vec::new()
+            crate::analysis::ty::ty_error::normalization_limit_diag(
+                db,
+                self.scope(),
+                ty,
+                assumptions,
+                self.span().ty().into(),
+            )
+            .into_iter()
+            .collect()
         }
     }
 
