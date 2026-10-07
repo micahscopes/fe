@@ -829,7 +829,7 @@ impl<'db> TypeNormalizer<'db> {
                     self.db,
                     ingot,
                     canonical_trait_inst,
-                    self.premises.assumptions(),
+                    self.premises,
                 ) {
                     let Some(implementor) =
                         complete_candidate_impl_assoc_ty(self.db, implementor, assoc.name)

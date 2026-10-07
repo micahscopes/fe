@@ -300,6 +300,21 @@ impl<'db> TraitSolveCx<'db> {
         }
     }
 
+    /// Implementation search: the implementations of `ingot` whose
+    /// constraints can hold under the caller's premises. The scope is the root
+    /// of the ingot being searched, because the question is about that set of
+    /// implementations rather than about a program position; under the orphan
+    /// rule the caller's own scope cannot change which of them are visible.
+    /// Only the caller's assumptions are read from `premises`. Used only by
+    /// the constrained implementation search in `trait_def`.
+    pub(in crate::analysis::ty) fn ingot_impl_search(
+        db: &'db dyn HirAnalysisDb,
+        ingot: Ingot<'db>,
+        premises: crate::analysis::semantic::SolverPremises<'db>,
+    ) -> Self {
+        Self::new(db, ingot.root_mod(db).scope()).with_assumptions(premises.assumptions())
+    }
+
     /// The canonical proof query for `goal` under this context's premises.
     pub(crate) fn goal_query(
         self,

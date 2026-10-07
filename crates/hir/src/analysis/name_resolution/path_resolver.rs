@@ -1879,7 +1879,10 @@ fn select_assoc_const_candidate<'db>(
                 db,
                 ingot,
                 receiver.canonical(),
-                assumptions,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    assumptions,
+                ),
             ) {
                 let declared = candidate.trait_(db);
                 if declared.def(db).const_(db, name).is_none() {
@@ -2091,9 +2094,15 @@ fn find_associated_type_in_mode<'db>(
         // traits on external types and external traits on local types are both visible.
         if !matches!(original_ty.data(db), TyData::TyParam(_)) {
             for ingot in search_ingots.into_iter().flatten() {
-                for impl_ in
-                    impls_for_ty_with_satisfied_constraints(db, ingot, canonical_ty, assumptions)
-                {
+                for impl_ in impls_for_ty_with_satisfied_constraints(
+                    db,
+                    ingot,
+                    canonical_ty,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        scope,
+                        assumptions,
+                    ),
+                ) {
                     let impl_ = match const_bodies {
                         ConstBodyLowering::Eager => {
                             let Some(impl_) = complete_impl_assoc_ty(db, impl_, name) else {
