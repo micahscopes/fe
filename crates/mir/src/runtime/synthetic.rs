@@ -516,8 +516,16 @@ impl<'db> SyntheticBodyBuilder<'db> {
             projected_fields,
         } = plan.input
         {
-            let host = self.emit_target_root_provider(cont_bb, &host)?;
-            if let Some(decoded) = self.push_call(cont_bb, decode_args_fn, vec![host]) {
+            let semantic = decode_args_fn
+                .key(self.db)
+                .semantic(self.db)
+                .expect("ContractHost::decode_args should be semantic");
+            let mut args = Vec::new();
+            for entry in runtime_visible_binding_plans(self.db, semantic) {
+                assert!(matches!(entry.binding, LocalBinding::Param { idx: 0, .. }));
+                args.push(self.emit_target_root_provider(cont_bb, &host)?);
+            }
+            if let Some(decoded) = self.push_call(cont_bb, decode_args_fn, args) {
                 call_args.extend(self.extract_selected_tuple_fields(
                     cont_bb,
                     decoded,

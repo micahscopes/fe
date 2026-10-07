@@ -6,9 +6,6 @@ input_file: crates/codegen/tests/fixtures/explicit_raw_boundaries.fe
 ---
 target = "evm-ethereum-osaka"
 
-type @layout_0 = {};
-type @layout_1 = {@layout_0};
-
 func private %alloc__ge513() -> i256 {
     block0:
         jump block1;
@@ -104,12 +101,12 @@ func private %main_root() {
         evm_stop;
 }
 
-func private %mstore(v0.objref<@layout_1>, v1.i256, v2.i256) {
+func private %mstore(v0.i256, v1.i256) {
     block0:
         jump block1;
 
     block1:
-        mstore v1 v2 i256;
+        mstore v0 v1 i256;
         return;
 }
 
@@ -119,7 +116,7 @@ func private %raw_store__g6e74(v0.i256) {
 
     block1:
         v2.i256 = call %byte_ptr v0;
-        call %mstore undef.objref<@layout_1> v2 8.i256;
+        call %mstore v2 8.i256;
         return;
 }
 
@@ -129,7 +126,7 @@ func private %raw_store__g64c6(v0.i256) {
 
     block1:
         v2.i256 = call %byte_ptr v0;
-        call %mstore undef.objref<@layout_1> v2 8.i256;
+        call %mstore v2 8.i256;
         return;
 }
 

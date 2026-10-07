@@ -2294,6 +2294,11 @@ pub(crate) fn desired_runtime_param_plan<'db>(
             })
             .unwrap_or(RuntimeParamPlan::Erased);
     }
+    if runtime_zero_sized_effect_value_is_inert(db, semantic_binding_ty, scope, assumptions)
+        && !binding_forwards_runtime_transport(db, semantic, binding)
+    {
+        return RuntimeParamPlan::Erased;
+    }
     if let Some(class) =
         runtime_class_for_explicit_root_provider_param(db, env, binding, binding_ty)
     {
@@ -2304,11 +2309,6 @@ pub(crate) fn desired_runtime_param_plan<'db>(
             env,
             RuntimeBoundarySpec::default_exact_boundary_for_class(class),
         ));
-    }
-    if runtime_zero_sized_effect_value_is_inert(db, binding_ty, scope, assumptions)
-        && !binding_forwards_runtime_transport(db, semantic, binding)
-    {
-        return RuntimeParamPlan::Erased;
     }
     let interface_ty = runtime_interface_ty_in_env(db, env, binding_ty);
     let repr_ty = runtime_repr_ty_in_env(db, env, binding_ty);
@@ -3490,6 +3490,59 @@ fn caller(_ x: Slot<7>) { <bool as Has>::take(x) }
                 } | RuntimeClass::RawAddr { .. }
             )),
             "visible return selection must preserve transport, not only the semantic pointee class:\nselected={selected_returns:#?}",
+        );
+    }
+
+    #[test]
+    fn inert_evm_receivers_are_absent_from_the_shared_call_abi() {
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///inert_evm_receiver_abi.fe").unwrap();
+        db.workspace().touch(
+            &mut db,
+            url.clone(),
+            Some(
+                include_str!("../../../../codegen/tests/fixtures/code_region_qualified.fe")
+                    .to_string(),
+            ),
+        );
+        let file = db.workspace().get(&db, &url).unwrap();
+        let module = db.top_mod(file);
+        let mut checked = 0;
+        for name in ["init", "runtime"] {
+            let root = runtime_instance_for_semantic(
+                &db,
+                semantic_instance_for_named_func(&db, module, name),
+            );
+            for call in root.calls(&db) {
+                let Some(semantic) = call.callee.key(&db).semantic(&db) else {
+                    continue;
+                };
+                let BodyOwner::Func(func) = semantic.key(&db).owner(&db) else {
+                    continue;
+                };
+                let Some(method) = func.name(&db).to_opt() else {
+                    continue;
+                };
+                let visible = match method.data(&db).as_str() {
+                    "codecopy" => 4,
+                    "return_data" => 1,
+                    _ => continue,
+                };
+                let plans = runtime_param_plans(&db, semantic);
+                assert!(
+                    matches!(plans.first(), Some(RuntimeParamPlan::Erased)),
+                    "{name} calls {} with an inert Evm receiver: {plans:#?}",
+                    method.data(&db),
+                );
+                let abi = runtime_declaration_abi_plan(&db, call.callee.key(&db));
+                assert_eq!(abi.visible_params.len(), visible);
+                assert_eq!(call.callee.interface_signature(&db), abi.signature());
+                checked += 1;
+            }
+        }
+        assert_eq!(
+            checked, 3,
+            "check both codecopy and the two return_data calls"
         );
     }
 

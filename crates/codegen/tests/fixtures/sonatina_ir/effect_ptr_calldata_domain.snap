@@ -6,17 +6,15 @@ input_file: crates/codegen/tests/fixtures/effect_ptr_calldata_domain.fe
 ---
 target = "evm-ethereum-osaka"
 
-type @layout_0 = {};
-type @layout_1 = {@layout_0};
-type @layout_2 = {i256};
+type @layout_0 = {i256};
 
-func private %calldata_ptr(v0.objref<@layout_1>, v1.i256) -> @layout_2 {
+func private %calldata_ptr(v0.i256) -> @layout_0 {
     block0:
         jump block1;
 
     block1:
-        v5.@layout_2 = insert_value undef.@layout_2 0.i256 v1;
-        return v5;
+        v4.@layout_0 = insert_value undef.@layout_0 0.i256 v0;
+        return v4;
 }
 
 func private %main() {
@@ -37,7 +35,7 @@ func private %main_root() {
         evm_stop;
 }
 
-func private %raw(v0.@layout_2) -> i256 {
+func private %raw(v0.@layout_0) -> i256 {
     block0:
         jump block1;
 
@@ -60,9 +58,9 @@ func private %test_calldata_ptr_domain() {
         jump block1;
 
     block1:
-        v2.@layout_2 = call %calldata_ptr undef.objref<@layout_1> 0.i256;
-        v3.i256 = call %raw v2;
-        v4.i256 = call %read_x v3;
+        v1.@layout_0 = call %calldata_ptr 0.i256;
+        v2.i256 = call %raw v1;
+        v3.i256 = call %read_x v2;
         return;
 }
 
