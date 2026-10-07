@@ -1,7 +1,7 @@
 use crate::analysis::HirAnalysisDb;
 use crate::analysis::semantic::instance::recorded_method_instance;
 use crate::analysis::ty::diagnostics::{BodyDiag, FuncBodyDiag};
-use crate::analysis::ty::trait_resolution::{Selection, TraitSolveCx};
+use crate::analysis::ty::trait_resolution::Selection;
 use crate::analysis::ty::ty_check::{
     Callable, EffectArgLayoutView, EffectParamSite, EffectPassMode, TraitChoiceId, TypedBody,
 };
@@ -77,12 +77,13 @@ impl<'db> ConstFnChecker<'db, '_> {
     /// reported one.
     fn check_callable(
         &mut self,
+        position: ExprId,
         primary: DynLazySpan<'db>,
         callable: &Callable<'db>,
         opened: Option<(ExprId, super::trait_def::TraitInstId<'db>)>,
     ) -> bool {
         let choice = self.body.decision_at(self.typed_body, primary.clone());
-        let Some(callee) = self.callable_func(callable, choice, opened.is_some()) else {
+        let Some(callee) = self.callable_func(position, callable, choice, opened.is_some()) else {
             return false;
         };
 
@@ -130,6 +131,7 @@ impl<'db> ConstFnChecker<'db, '_> {
 
     fn callable_func(
         &self,
+        position: ExprId,
         callable: &Callable<'db>,
         choice: Option<TraitChoiceId<'db>>,
         opened: bool,
@@ -154,8 +156,12 @@ impl<'db> ConstFnChecker<'db, '_> {
             && let Some(name) = func.name(self.db).to_opt()
             && let Selection::Unique(method) = recorded_method_instance(
                 self.db,
-                TraitSolveCx::new(self.db, self.body.scope())
-                    .with_assumptions(self.typed_body.assumptions()),
+                crate::semantic::context_at(
+                    self.db,
+                    self.body.scope(),
+                    Some((self.typed_body, position)),
+                )
+                .solver_context(self.db),
                 choice?,
                 name,
             )
@@ -179,7 +185,7 @@ impl<'db> ConstFnChecker<'db, '_> {
             .body
             .decision_at(self.typed_body, expr.span(self.body).into())
             .and_then(|_| crate::semantic::opened_call_at(self.db, self.typed_body, expr));
-        if self.check_callable(expr.span(self.body).into(), callable, opened) {
+        if self.check_callable(expr, expr.span(self.body).into(), callable, opened) {
             return;
         }
         if self.typed_body.call_effect_args(expr).is_some_and(|args| {
@@ -218,8 +224,9 @@ impl<'db> ConstFnChecker<'db, '_> {
                 self.check_expr(*iter);
                 if let Some(seq) = self.typed_body.for_loop_seq(stmt) {
                     let span: DynLazySpan<'db> = stmt.span(self.body).into();
-                    self.check_callable(span.clone(), &seq.len_callable, None);
-                    self.check_callable(span, &seq.get_callable, None);
+                    // The loop's sequence calls are made where its iterator is.
+                    self.check_callable(*iter, span.clone(), &seq.len_callable, None);
+                    self.check_callable(*iter, span, &seq.get_callable, None);
                 }
                 self.check_expr(*body);
             }
