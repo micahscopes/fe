@@ -263,7 +263,7 @@ impl<'db> SolverPremises<'db> {
 
     /// The solver view of these premises.
     pub fn solver_context(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
-        TraitSolveCx::new(db, self.scope).with_assumptions(self.assumptions)
+        TraitSolveCx::at_position(db, self)
     }
 }
 

@@ -221,6 +221,14 @@ pub struct TraitSolveCx<'db> {
 }
 
 impl<'db> TraitSolveCx<'db> {
+    /// The sole solver construction from a position's premise projection.
+    pub fn at_position(
+        db: &'db dyn HirAnalysisDb,
+        premises: crate::analysis::semantic::SolverPremises<'db>,
+    ) -> Self {
+        Self::new(db, premises.scope()).with_assumptions(premises.assumptions())
+    }
+
     pub fn new(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> Self {
         Self {
             scope,

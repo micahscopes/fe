@@ -6,7 +6,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SOLVER = ROOT / "crates/hir/src/analysis/ty/trait_resolution"
-BASELINE = 34  # Approved H1 position-context projections remove five constructions.
+BASELINE = 29  # Combined H1/H2 projections and the sole at_position construction.
 TYPES = ("TraitSolveCx", "CanonicalGoalQuery", "TraitSolverQuery")
 RAW = re.compile(r'(?:br|cr|r)(#*)"')
 CHAR = re.compile(r"'(?:\\(?:u\{[^}]*\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'")
