@@ -605,12 +605,15 @@ impl<'db> TyCheckEnv<'db> {
         self.provisions.context(self.db, self.owner_scope)
     }
 
-    /// Solver view of the live position context: the provisions in force here,
-    /// projected at the current lexical scope.
+    /// The live position context: the provisions in force here, projected at
+    /// the current lexical scope.
+    pub(super) fn position_context(&self) -> crate::analysis::semantic::ImplEnv<'db> {
+        self.provisions.context(self.db, self.scope())
+    }
+
+    /// Solver view of the live position context.
     pub(super) fn solver_context(&self) -> TraitSolveCx<'db> {
-        self.provisions
-            .context(self.db, self.scope())
-            .solver_context(self.db)
+        self.position_context().solver_context(self.db)
     }
 
     pub(super) fn provision_for_goal(&self, goal: TraitInstId<'db>) -> Option<Provision<'db>> {

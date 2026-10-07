@@ -169,21 +169,22 @@ pub(crate) fn collect_generic_arg_errors<'db>(
 /// as the bounds on a family's parameters. Lowering normalizes, so a type that
 /// lowers without error can still have applied a family to arguments that do
 /// not meet those bounds.
+///
+/// `context` is the position context of the written type: its normalization
+/// scope is the type's lexical scope and its premises are those in force there.
 pub(crate) fn collect_application_requirement_errors<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
     hir_ty: TypeId<'db>,
     span: LazyTySpan<'db>,
-    assumptions: PredicateListId<'db>,
     context: crate::analysis::semantic::ImplEnv<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
     let mut visitor = ApplicationRequirementVisitor {
         db,
-        assumptions,
+        assumptions: context.assumptions(db),
         context,
         diags: Vec::new(),
     };
-    let mut ctxt = VisitorCtxt::new(db, scope, span);
+    let mut ctxt = VisitorCtxt::new(db, context.normalization_scope(db), span);
     visitor.visit_ty(&mut ctxt, hir_ty);
     visitor.diags
 }
@@ -192,14 +193,13 @@ pub(crate) fn collect_application_requirement_errors<'db>(
 /// path segment.
 fn application_requirement_diags<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     path_span: &LazyPathSpan<'db>,
     type_uses: Vec<(PathId<'db>, TyId<'db>)>,
     context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> Vec<TyDiagCollection<'db>> {
-    use super::trait_resolution::{TraitSolveCx, check_type_application_requirements};
-    let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+    use super::trait_resolution::check_type_application_requirements;
+    let solve_cx = premises.solver_context(db);
     type_uses
         .into_iter()
         .filter_map(|(used_path, ty)| {
@@ -209,7 +209,7 @@ fn application_requirement_diags<'db>(
                 .into();
             check_type_application_requirements(db, solve_cx, ty, context)
                 .into_diag(span.clone())
-                .or_else(|| projection_const_fault(db, scope, assumptions, ty, span))
+                .or_else(|| projection_const_fault(db, premises, ty, span))
         })
         .collect()
 }
@@ -220,19 +220,14 @@ fn application_requirement_diags<'db>(
 /// projection is where the user sees it.
 fn projection_const_fault<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     ty: TyId<'db>,
     span: DynLazySpan<'db>,
 ) -> Option<TyDiagCollection<'db>> {
     if !matches!(ty.data(db), TyData::AssocTy(_) | TyData::QualifiedTy(_)) {
         return None;
     }
-    let normalized = super::normalize::normalize_ty(
-        db,
-        ty,
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
-    );
+    let normalized = super::normalize::normalize_ty(db, ty, premises);
     let cause = normalized.invalid_cause(db)?;
     if is_const_fault(&cause) {
         diag_from_invalid_cause(span, &cause)
@@ -309,10 +304,13 @@ impl<'db> Visitor<'db> for ApplicationRequirementVisitor<'db> {
             &mut collect,
             &context,
         );
+        // The visitor's root scope is the context's normalization scope, and
+        // written types introduce no scopes of their own (const bodies are
+        // skipped above), so these are the premises of this path's position.
+        debug_assert_eq!(scope, self.context.normalization_scope(self.db));
         self.diags.extend(application_requirement_diags(
             self.db,
-            scope,
-            self.assumptions,
+            self.context.premises(self.db),
             &path_span,
             type_uses,
             Some(self.context),
@@ -578,8 +576,10 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
 
         self.diags.extend(application_requirement_diags(
             self.db,
-            scope,
-            self.assumptions,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                scope,
+                self.assumptions,
+            ),
             &path_span,
             type_uses,
             None,

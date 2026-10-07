@@ -3934,11 +3934,9 @@ impl<'db> TyChecker<'db> {
             // with it the bounds on its parameters; check the written type.
             let diags = super::ty_error::collect_application_requirement_errors(
                 self.db,
-                self.env.scope(),
                 hir_ty,
                 span.clone(),
-                self.env.assumptions(),
-                context,
+                self.env.position_context(),
             );
             if !diags.is_empty() {
                 for d in diags {
