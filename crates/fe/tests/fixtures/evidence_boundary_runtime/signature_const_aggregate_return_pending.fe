@@ -1,5 +1,6 @@
 // Pending Step 2: the signature now accepts length2, but the returned nominal
-// field reads ordinary length1 outside the selection (8-0084); model expects8.
+// field reads ordinary length1 even inside the selection (8-0084); model expects8.
+// Retain that field shape through a local move and a generic forwarding call.
 trait Compute { const N: usize }
 struct Subject {}
 impl Compute for Subject { const N: usize = 1 }
@@ -10,5 +11,28 @@ fn leak() -> u256 {
     let b = with (Other) { make<Subject>([7, 8]) }
     b.a[1]
 }
+fn inside() -> u256 {
+    with (Other) {
+        let b = make<Subject>([7, 8])
+        b.a[1]
+    }
+}
+fn moved() -> u256 {
+    let b = with (Other) { make<Subject>([7, 8]) }
+    let next = b
+    next.a[1]
+}
+fn pass<T: Compute>(_ b: own Buf<T>) -> Buf<T> { b }
+fn forwarded() -> u256 {
+    let b = with (Other) { make<Subject>([7, 8]) }
+    let next = pass<Subject>(b)
+    next.a[1]
+}
 #[test]
-fn t() { assert!(leak() == 8) }
+fn t() {
+    assert!(leak() == 8)
+    assert!(inside() == 8)
+    assert!(moved() == 8)
+    assert!(forwarded() == 8)
+    assert!(make<Subject>([7]).a[0] == 7)
+}
