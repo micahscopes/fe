@@ -1,0 +1,15 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/impl_concrete_where_condition.fe
+---
+error[6-0003]: trait bound is not satisfied
+  ┌─ impl_concrete_where_condition.fe:9:17
+  │
+8 │ fn need<T: Foo>() {}
+  │            --- required by this bound on `need`
+9 │ fn use_dead() { need<Dead>() }
+  │                 ^^^^^^^^^^
+  │                 │
+  │                 `Dead` doesn't implement `Foo`
+  │                 trait bound `DeadPeer: Foo` is not satisfied

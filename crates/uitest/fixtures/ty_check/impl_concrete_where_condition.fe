@@ -1,0 +1,9 @@
+// Impl where-clauses are applicability conditions, not rejected at their
+// declaration: an impl whose condition fails does not apply.
+trait Foo {}
+struct Dead {}
+struct DeadPeer {}
+impl Foo for Dead where DeadPeer: Foo {}
+impl Foo for DeadPeer where Dead: Foo {}
+fn need<T: Foo>() {}
+fn use_dead() { need<Dead>() }

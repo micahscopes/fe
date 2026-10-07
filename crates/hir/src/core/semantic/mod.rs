@@ -90,8 +90,7 @@ use crate::analysis::ty::trait_lower::{
     TraitRefLowerError, collect_trait_impls, lower_trait_ref, lower_trait_ref_deferred,
 };
 use crate::analysis::ty::trait_resolution::constraint::{
-    collect_candidate_constraints, collect_constraints, collect_func_decl_constraints,
-    collect_func_def_constraints,
+    collect_candidate_constraints, collect_constraints,
 };
 use crate::analysis::ty::ty_def::{TyBase, TyData, TyParam};
 use crate::analysis::ty::ty_lower::{GenericParamTypeSet, collect_generic_params};
@@ -161,27 +160,34 @@ fn push_predicate<'db>(
     PredicateListId::new(db, merged)
 }
 
-/// Consolidated assumptions for any item kind.
+/// Consolidated assumptions for any item kind. Bounds rejected at their
+/// declaration are never assumed (they are still required of callers).
 pub fn constraints_for<'db>(
     db: &'db dyn HirAnalysisDb,
     item: ItemKind<'db>,
 ) -> PredicateListId<'db> {
+    use crate::analysis::ty::trait_resolution::constraint::decl_premises;
     match item {
-        ItemKind::Struct(s) => collect_constraints(db, s.into()).instantiate_identity(),
-        ItemKind::Enum(e) => collect_constraints(db, e.into()).instantiate_identity(),
         // Contracts have no generic parameters, so no constraints
         ItemKind::Contract(_) => PredicateListId::empty_list(db),
-        ItemKind::Func(f) => {
-            collect_func_def_constraints(db, f.into(), true).instantiate_identity()
+        ItemKind::Trait(t) => {
+            push_predicate(db, decl_premises(db, t.into()), trait_self_predicate(db, t))
         }
-        ItemKind::Impl(i) => collect_constraints(db, i.into()).instantiate_identity(),
-        ItemKind::Trait(t) => push_predicate(
-            db,
-            collect_constraints(db, t.into()).instantiate_identity(),
-            trait_self_predicate(db, t),
-        ),
-        ItemKind::ImplTrait(i) => collect_constraints(db, i.into()).instantiate_identity(),
-        _ => PredicateListId::empty_list(db),
+        item => GenericParamOwner::from_item_opt(item)
+            .filter(|_| {
+                matches!(
+                    item,
+                    ItemKind::Struct(_)
+                        | ItemKind::Enum(_)
+                        | ItemKind::Func(_)
+                        | ItemKind::Impl(_)
+                        | ItemKind::ImplTrait(_)
+                )
+            })
+            .map_or_else(
+                || PredicateListId::empty_list(db),
+                |owner| decl_premises(db, owner),
+            ),
     }
 }
 
@@ -215,16 +221,16 @@ fn item_body_assumptions<'db>(
     item: ItemKind<'db>,
     include_effect_bounds: bool,
 ) -> PredicateListId<'db> {
+    // Bounds rejected at their declaration are never assumed.
+    use crate::analysis::ty::trait_resolution::constraint::{
+        collect_func_decl_premises, decl_premises,
+    };
     let preds = match item {
-        ItemKind::Func(func) if include_effect_bounds => {
-            collect_func_def_constraints(db, func.into(), true).instantiate_identity()
-        }
-        ItemKind::Func(func) => {
-            collect_func_decl_constraints(db, func.into(), true).instantiate_identity()
-        }
+        ItemKind::Func(func) if include_effect_bounds => decl_premises(db, func.into()),
+        ItemKind::Func(func) => collect_func_decl_premises(db, func.into()),
         item => GenericParamOwner::from_item_opt(item).map_or_else(
             || PredicateListId::empty_list(db),
-            |owner| collect_constraints(db, owner).instantiate_identity(),
+            |owner| decl_premises(db, owner),
         ),
     };
     let trait_ = match item {
@@ -693,7 +699,10 @@ fn func_effect_requirements_canonical<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
 ) -> Vec<EffectRequirement<'db>> {
-    let assumptions = collect_func_decl_constraints(db, func.into(), true).instantiate_identity();
+    let assumptions = crate::analysis::ty::trait_resolution::constraint::collect_func_decl_premises(
+        db,
+        func.into(),
+    );
     let layout_args = callable_input_layout_args(db, func);
     func.effects(db)
         .data(db)
@@ -752,7 +761,10 @@ fn func_provider_bindings_canonical<'db>(
     func: Func<'db>,
 ) -> Vec<ProviderBinding<'db>> {
     let requirements = func_effect_requirements_canonical(db, func);
-    let assumptions = collect_func_decl_constraints(db, func.into(), true).instantiate_identity();
+    let assumptions = crate::analysis::ty::trait_resolution::constraint::collect_func_decl_premises(
+        db,
+        func.into(),
+    );
     let scope = func.scope();
     let provider_map = place_effect_provider_param_index_map(db, func);
     let provider_params = CallableDef::Func(func).params(db);

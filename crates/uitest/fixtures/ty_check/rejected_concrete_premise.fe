@@ -1,0 +1,26 @@
+// A where-clause on a concrete type is rejected at its declaration (6-0005)
+// and is not a premise inside the body: `<Plain as Tr>::A` keeps its
+// implementation's meaning, and `Number` gains no `Gate` method.
+trait Tr {
+    type A
+}
+
+pub struct Plain {}
+
+impl Tr for Plain {
+    type A = Plain
+}
+
+fn body_norm() where Plain: Tr<A = u256> {
+    let x: <Plain as Tr>::A = Plain {}
+}
+
+trait Gate {
+    fn open() -> u256
+}
+
+pub struct Number {}
+
+fn uses_rejected() -> u256 where Number: Gate {
+    Number::open()
+}

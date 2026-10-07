@@ -1,0 +1,42 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/rejected_premise_signature.fe
+---
+error[6-0003]: trait bound is not satisfied
+  ┌─ rejected_premise_signature.fe:8:19
+  │
+7 │ fn f(_ x: <Plain as Tr>::A) -> Plain where Plain: Tr<A = u256> { x }
+  │                                                   ------------ required by this bound on `f`
+8 │ fn g() -> Plain { f(Plain {}) }
+  │                   ^ `Plain` doesn't implement `Tr<A = u256>`
+
+error[6-0003]: trait bound is not satisfied
+  ┌─ rejected_premise_signature.fe:9:19
+  │
+7 │ fn f(_ x: <Plain as Tr>::A) -> Plain where Plain: Tr<A = u256> { x }
+  │                                                   ------------ required by this bound on `f`
+8 │ fn g() -> Plain { f(Plain {}) }
+9 │ fn h() -> Plain { f(1) }
+  │                   ^ `Plain` doesn't implement `Tr<A = u256>`
+
+error[6-0005]: trait bound for concrete type is not allowed
+  ┌─ rejected_premise_signature.fe:7:44
+  │
+7 │ fn f(_ x: <Plain as Tr>::A) -> Plain where Plain: Tr<A = u256> { x }
+  │                                            ^^^^^ `Plain` is a concrete type
+
+error[8-0000]: type mismatch
+  ┌─ rejected_premise_signature.fe:9:21
+  │
+9 │ fn h() -> Plain { f(1) }
+  │                     ^ expected `Plain`, but `{integer}` is given
+
+error[8-0031]: type annotation is needed
+  ┌─ rejected_premise_signature.fe:9:21
+  │
+9 │ fn h() -> Plain { f(1) }
+  │                     ^
+  │                     │
+  │                     type annotation is needed
+  │                     no default type is provided for an integer type. consider giving integer type

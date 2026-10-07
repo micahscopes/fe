@@ -47,7 +47,6 @@ use super::{
         PredicateListId,
         constraint::{
             collect_callable_shape_constraints, collect_candidate_constraints, collect_constraints,
-            collect_func_decl_constraints,
         },
     },
     ty_def::{InvalidCause, Kind, PrimTy, TyBase, TyData, TyId, TyParam},
@@ -818,9 +817,9 @@ pub(crate) fn generic_param_owner_assumptions<'db>(
         || PredicateListId::empty_list(db),
         |owner| match owner {
             GenericParamOwner::Func(func) => {
-                collect_func_decl_constraints(db, func.into(), true).instantiate_identity()
+                super::trait_resolution::constraint::collect_func_decl_premises(db, func.into())
             }
-            _ => collect_constraints(db, owner).instantiate_identity(),
+            _ => super::trait_resolution::constraint::decl_premises(db, owner),
         },
     )
 }
@@ -1907,7 +1906,7 @@ fn callable_input_assumptions<'db>(
 ) -> PredicateListId<'db> {
     match const_bodies {
         ConstBodyLowering::Eager => {
-            collect_func_decl_constraints(db, func.into(), true).instantiate_identity()
+            super::trait_resolution::constraint::collect_func_decl_premises(db, func.into())
         }
         ConstBodyLowering::Deferred => collect_callable_shape_constraints(db, func),
     }
@@ -2667,7 +2666,8 @@ pub(crate) fn instantiate_callable_effect_layout_args<'db>(
     actual_key_ty: TyId<'db>,
     subst_args: &mut [TyId<'db>],
 ) {
-    let assumptions = collect_func_decl_constraints(db, func.into(), true).instantiate_identity();
+    let assumptions =
+        super::trait_resolution::constraint::collect_func_decl_premises(db, func.into());
     let Some(key_ty) = func
         .effect_params(db)
         .nth(effect_idx)
@@ -3094,7 +3094,8 @@ pub fn callable_input_layout_backing_sources<'db>(
             });
         }
     }
-    let assumptions = collect_func_decl_constraints(db, func.into(), true).instantiate_identity();
+    let assumptions =
+        super::trait_resolution::constraint::collect_func_decl_premises(db, func.into());
     for effect in func.effect_params(db) {
         let Some(key_ty) = effect.key_ty(db) else {
             continue;
@@ -3437,7 +3438,7 @@ pub(crate) fn callable_input_layout_origin_ty<'db>(
         }
         CallableInputLayoutHoleOrigin::Effect(effect_idx) => {
             let assumptions =
-                collect_func_decl_constraints(db, func.into(), true).instantiate_identity();
+                super::trait_resolution::constraint::collect_func_decl_premises(db, func.into());
             let key_ty = func.effect_params(db).nth(effect_idx)?.key_ty(db)?;
             let ResolvedEffectKey::Type(schema) =
                 resolve_callable_input_effect_key(db, func, effect_idx, key_ty, assumptions)

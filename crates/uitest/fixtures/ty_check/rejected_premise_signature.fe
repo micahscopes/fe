@@ -1,0 +1,9 @@
+// A where-clause rejected at its declaration (6-0005) is never assumed: the
+// signature reads the parameter as `Plain`, as the body does, so `f(1)` is a
+// type mismatch. It is still required of callers (6-0003 at each call).
+trait Tr { type A }
+pub struct Plain {}
+impl Tr for Plain { type A = Plain }
+fn f(_ x: <Plain as Tr>::A) -> Plain where Plain: Tr<A = u256> { x }
+fn g() -> Plain { f(Plain {}) }
+fn h() -> Plain { f(1) }

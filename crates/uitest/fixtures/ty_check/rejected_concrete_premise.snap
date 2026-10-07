@@ -1,0 +1,22 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/rejected_concrete_premise.fe
+---
+error[2-0010]: no method named `open` found for struct `Number`
+   ┌─ rejected_concrete_premise.fe:25:13
+   │
+25 │     Number::open()
+   │             ^^^^ method not found in `Number`
+
+error[6-0005]: trait bound for concrete type is not allowed
+   ┌─ rejected_concrete_premise.fe:14:22
+   │
+14 │ fn body_norm() where Plain: Tr<A = u256> {
+   │                      ^^^^^ `Plain` is a concrete type
+
+error[6-0005]: trait bound for concrete type is not allowed
+   ┌─ rejected_concrete_premise.fe:24:34
+   │
+24 │ fn uses_rejected() -> u256 where Number: Gate {
+   │                                  ^^^^^^ `Number` is a concrete type

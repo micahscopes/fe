@@ -359,6 +359,109 @@ fn collect_func_def_constraints_cycle_recover<'db>(
     salsa::CycleRecoveryAction::Iterate
 }
 
+/// A written bound the program rejects at its declaration: a where-clause
+/// bound on a const type (6-0006) or on a fully concrete type (6-0005), using
+/// the declaration diagnostic's subject tests. Only struct, enum, function and
+/// trait where-clauses are checked that way; impl and type-function
+/// where-clauses are applicability conditions and are never rejected.
+///
+/// A rejected bound is never assumed, but it is still required of callers:
+/// premise readers use the `*_premises` lists below, requirement readers keep
+/// the full declared lists.
+fn rejected_at_declaration<'db>(
+    db: &'db dyn HirAnalysisDb,
+    inst: TraitInstId<'db>,
+    source: PredicateSource<'db>,
+) -> bool {
+    let PredicateSource::WherePredicateBound {
+        owner, pred_idx, ..
+    } = source
+    else {
+        return false;
+    };
+    if !matches!(
+        owner,
+        WhereClauseOwner::Struct(_)
+            | WhereClauseOwner::Enum(_)
+            | WhereClauseOwner::Func(_)
+            | WhereClauseOwner::Trait(_)
+    ) {
+        return false;
+    }
+    // A subject with a parameter is neither concrete nor a const value.
+    if inst.self_ty(db).has_param(db) && !inst.self_ty(db).is_const_ty(db) {
+        return false;
+    }
+    let Some(hir_ty) = owner
+        .where_clause(db)
+        .type_predicates(db)
+        .find(|(idx, _)| *idx == pred_idx)
+        .and_then(|(_, pred)| pred.ty.to_opt())
+    else {
+        return false;
+    };
+    // A rejected subject has no parameters or projections, so it lowers the
+    // same way without premises; lowering it with none asks nothing of the
+    // constraint lists being filtered.
+    let subject = lower_hir_ty(
+        db,
+        hir_ty,
+        ItemKind::from(owner).scope(),
+        PredicateListId::empty_list(db),
+    );
+    subject.is_const_ty(db)
+        || (!subject.has_invalid(db) && !subject.has_param(db) && !subject.has_projection(db))
+}
+
+fn premises_from_pairs<'db>(
+    db: &'db dyn HirAnalysisDb,
+    pairs: &[(TraitInstId<'db>, PredicateSource<'db>)],
+) -> Vec<TraitInstId<'db>> {
+    pairs
+        .iter()
+        .filter(|&&(inst, source)| !rejected_at_declaration(db, inst, source))
+        .map(|&(inst, _)| inst)
+        .collect()
+}
+
+/// The declared bounds a callable's own signature and body may assume: those
+/// `collect_func_decl_constraints(.., true)` lists, without the ones rejected
+/// at their declaration.
+pub(crate) fn collect_func_decl_premises<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: CallableDef<'db>,
+) -> PredicateListId<'db> {
+    PredicateListId::new(
+        db,
+        premises_from_pairs(db, &collect_func_decl_constraint_pairs(db, func)),
+    )
+}
+
+/// The declared bounds an owner may assume: its declared
+/// constraints without the ones rejected at their declaration.
+pub(crate) fn decl_premises<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: GenericParamOwner<'db>,
+) -> PredicateListId<'db> {
+    match owner {
+        GenericParamOwner::Func(func) => {
+            let mut premises = collect_func_decl_premises(db, func.into())
+                .list(db)
+                .to_vec();
+            for inst in collect_func_effect_provider_constraints(db, func) {
+                if !premises.contains(&inst) {
+                    premises.push(inst);
+                }
+            }
+            PredicateListId::new(db, premises)
+        }
+        owner => PredicateListId::new(
+            db,
+            premises_from_pairs(db, decl_constraint_pairs(db, owner)),
+        ),
+    }
+}
+
 /// Where a collected predicate was written. Recorded during constraint
 /// collection so diagnostics can point at the originating bound without
 /// re-deriving it from a list index: the final list is parent-first,
@@ -451,7 +554,8 @@ pub(crate) fn collect_callable_shape_constraints<'db>(
         ConstBodyLowering::Deferred,
         Some(owner),
     );
-    let mut predicates = pairs.into_iter().map(|(inst, _)| inst).collect::<Vec<_>>();
+    // Layout discovery lowers the callable's inputs, so it reads premises.
+    let mut predicates = premises_from_pairs(db, &pairs);
     if let Some(ItemKind::Trait(trait_)) = func.scope().parent_item(db) {
         predicates.push(trait_self_predicate(db, trait_));
     }
