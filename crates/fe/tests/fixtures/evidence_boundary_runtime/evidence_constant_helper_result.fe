@@ -1,0 +1,23 @@
+// A helper return and its parameters retain the same opened provision.
+use core::obligations::{Evidence, prove}
+trait Width { const N: usize }
+struct Subject {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+const fn len<T: Width>(_ x: [u256; T::N]) -> usize { T::N }
+const fn make<T: Width>(_ x: [u256; T::N]) -> [u256; T::N] { x }
+const fn ret_only<T: Width>(_ e: Evidence<Width<T>>) -> usize {
+    with (e) { let y: [u256; T::N] = [7; T::N]
+        let z = make<T>(y)
+        T::N }
+}
+const fn ret_concrete(_ e: Evidence<Width<Subject>>) -> usize {
+    with (e) { let y: [u256; Subject::N] = [7; Subject::N]
+        len<Subject>(make<Subject>(y)) }
+}
+const R: usize = ret_only<Subject>(with (Wide) { prove<Width<Subject>>() })
+const C: usize = ret_concrete(with (Wide) { prove<Width<Subject>>() })
+#[test]
+fn r() { assert(R == 2) }
+#[test]
+fn c() { assert(C == 2) }

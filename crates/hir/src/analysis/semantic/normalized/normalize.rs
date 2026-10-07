@@ -415,9 +415,14 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
                     let mut normalized =
                         self.normalize_expr(raw_block, statement.origin, *dst, expr)?;
                     let mut source = Some(statement.id);
-                    if let NExpr::Call { callee, .. } = &normalized {
+                    if let NExpr::Call {
+                        callee, call_site, ..
+                    } = &normalized
+                    {
                         let callee = get_or_build_semantic_instance(self.db, callee.key);
-                        let returned_ty = callee.normalized_result_ty(self.db);
+                        let returned_ty = self
+                            .instance
+                            .normalized_call_result_ty(self.db, callee, *call_site);
                         let target_ty = self.normalized_local_ty(*dst);
                         if returned_ty.as_borrow(self.db).is_some()
                             && target_ty.as_capability(self.db).is_none()
@@ -445,11 +450,15 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
                             };
                         }
                     }
-                    if let NExpr::Call { callee, .. } = &normalized
+                    if let NExpr::Call {
+                        callee, call_site, ..
+                    } = &normalized
                         && let Some(target) = self.normalized_local_ty(*dst).as_view(self.db)
                     {
                         let callee = get_or_build_semantic_instance(self.db, callee.key);
-                        let returned_ty = callee.normalized_result_ty(self.db);
+                        let returned_ty = self
+                            .instance
+                            .normalized_call_result_ty(self.db, callee, *call_site);
                         if returned_ty.as_capability(self.db).is_none()
                             && !returned_ty.is_never(self.db)
                         {

@@ -5111,3 +5111,8 @@ fn evidence_constant_same_opening_physical_array_at_o0_and_o2() {
 fn evidence_constant_compound_signature_rejects_other_provision_length() {
     reject_evidence_constant_wrong_length("evidence_constant_compound_wrong_length.fe");
 }
+
+#[test]
+fn evidence_constant_helper_result_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_constant_helper_result.fe");
+}

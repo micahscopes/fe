@@ -15,6 +15,7 @@ use crate::{
         },
         ty::{
             adt_def::AdtRef,
+            const_ty::ty_is_fully_ground,
             provider::{ProviderLayoutEvidence, provider_semantics},
             ty_check::{BodyOwner, EffectPassMode},
             ty_def::{BorrowKind, CapabilityKind, PrimTy, TyBase, TyData, TyId},
@@ -530,10 +531,16 @@ fn verify_expr<'db>(
             let typed_body = callee.key(db).typed_body(db);
             let mut param_tys = Vec::new();
             while let Some(binding) = typed_body.param_binding(param_tys.len()) {
-                param_tys.push(
-                    body.owner
-                        .normalized_call_param_ty(db, callee, *call_site, binding),
-                );
+                let expected = body
+                    .owner
+                    .normalized_call_param_ty(db, callee, *call_site, binding);
+                verify_known_call_type(
+                    db,
+                    body.owner,
+                    expected,
+                    callee.normalized_binding_ty(db, binding),
+                )?;
+                param_tys.push(expected);
             }
             if args.len() != param_tys.len() {
                 return Err(NormalizedBodyVerifyError::ExpressionType);
@@ -599,7 +606,8 @@ fn verify_expr<'db>(
             {
                 return Err(NormalizedBodyVerifyError::ExpressionType);
             }
-            let expected = callee.normalized_result_ty(db);
+            let expected = body.owner.normalized_call_result_ty(db, callee, *call_site);
+            verify_known_call_type(db, body.owner, expected, callee.normalized_result_ty(db))?;
             let compatible = expected.has_invalid(db)
                 || structural_types_are_boundary_compatible(db, body.owner, result_ty, expected)
                 || expected.is_never(db);
@@ -1432,5 +1440,22 @@ fn collect_structural_leaves<'db>(
         }
     }
     visiting.remove(&ty);
+    Ok(())
+}
+
+/// Independently compare the instantiated callee with the position projection
+/// when neither type retains a symbolic constant or an unresolved provision.
+fn verify_known_call_type<'db>(
+    db: &'db dyn HirAnalysisDb,
+    caller: SemanticInstance<'db>,
+    position: TyId<'db>,
+    instance: TyId<'db>,
+) -> Result<(), NormalizedBodyVerifyError> {
+    if ty_is_fully_ground(db, position)
+        && ty_is_fully_ground(db, instance)
+        && !structural_types_are_boundary_compatible(db, caller, position, instance)
+    {
+        return Err(NormalizedBodyVerifyError::ExpressionType);
+    }
     Ok(())
 }

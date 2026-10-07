@@ -2499,9 +2499,14 @@ impl<'db> Borrowck<'db> {
         statement: &NStatement<'db>,
     ) -> Result<CapabilityValue<'db>, SemanticDiagnostic<'db>> {
         let NStatementKind::Define {
-            expr: NExpr::Call {
-                args, effect_args, ..
-            },
+            expr:
+                NExpr::Call {
+                    callee,
+                    call_site,
+                    args,
+                    effect_args,
+                    ..
+                },
             ..
         } = &statement.kind
         else {
@@ -2523,8 +2528,26 @@ impl<'db> Borrowck<'db> {
             effects: effect_args,
             origin: statement.origin,
         };
-        let returned =
-            self.instantiate_value(state, &call.summary.result, &template, result, inputs)?;
+        let returned = if !call.summary.result.shape().contains_capability(self.db) {
+            // A plain result transports no referent payload. Its structural
+            // extent belongs to this call's provision, just like its arguments.
+            // Keep the transfer invariant by constructing that approved shape;
+            // capability-carrying summaries still use their source graph below.
+            let instance = get_or_build_semantic_instance(self.db, callee.key);
+            let result_ty = self
+                .instance
+                .normalized_call_result_ty(self.db, instance, *call_site);
+            let shape = self.shape(result_ty)?;
+            if shape != self.inventory.shapes[result.index()] {
+                return Err(self.internal_diag(
+                    statement.origin,
+                    "call result differs from its position signature".into(),
+                ));
+            }
+            self.inventory.values.empty(shape, template.scope())
+        } else {
+            self.instantiate_value(state, &call.summary.result, &template, result, inputs)?
+        };
         let mut updates: Vec<(RegionSet<'db>, CapabilityValue<'db>)> = Vec::new();
         for (update, template) in call.summary.mutable_inputs.iter().zip(&call.updates) {
             let value = self.instantiate_value(state, &update.value, template, result, inputs)?;
