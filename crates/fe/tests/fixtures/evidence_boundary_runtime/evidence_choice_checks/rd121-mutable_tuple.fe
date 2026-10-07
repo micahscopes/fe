@@ -1,0 +1,6 @@
+use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+fn read() { let mut e = (prove<Read<Subject>>(), 0 as u256)
+}

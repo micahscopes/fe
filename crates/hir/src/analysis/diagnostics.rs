@@ -4327,6 +4327,18 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 error_code,
             },
 
+            Self::EvidenceChoiceNotCompileTime { primary } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "evidence choice must be known at compile time".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: "evidence requires a compile-time origin and an immutable place".to_string(),
+                    span: primary.resolve(db),
+                }],
+                notes: vec![],
+                error_code,
+            },
+
             Self::MutableBindingCannotBeCapability { primary, ty } => CompleteDiagnostic {
                 severity: Severity::Error,
                 message: "invalid mutable local binding".to_string(),

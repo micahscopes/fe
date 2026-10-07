@@ -483,6 +483,10 @@ impl<'db> TyCheckEnv<'db> {
         self.callables[expr].as_ref()
     }
 
+    pub(super) fn expr_value_path_ref(&self, expr: ExprId) -> Option<ValuePathRef<'db>> {
+        self.value_path_refs[expr]
+    }
+
     pub(super) fn expr_const_ref(&self, expr: ExprId) -> Option<ConstRef<'db>> {
         self.const_refs[expr]
     }
@@ -811,6 +815,10 @@ impl<'db> TyCheckEnv<'db> {
 
     pub(super) fn leave_expr(&mut self) {
         self.expr_stack.pop();
+    }
+
+    pub(super) fn active_exprs(&self) -> &[ExprId] {
+        &self.expr_stack
     }
 
     pub(super) fn parent_expr(&self) -> Option<ExprId> {

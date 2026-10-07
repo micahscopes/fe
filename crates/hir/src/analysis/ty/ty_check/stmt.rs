@@ -1,7 +1,7 @@
 use salsa::Update;
 
 use crate::analysis::HirAnalysisDb;
-use crate::core::hir_def::{ExprId, IdentId, Partial, Pat, PatId, Stmt, StmtId};
+use crate::core::hir_def::{Expr, ExprId, IdentId, Partial, Pat, PatId, Stmt, StmtId};
 
 use super::{
     Callable, DecisionSite, LocalBinding, TraitChoice, TraitChoiceVia, TyChecker,
@@ -9,8 +9,9 @@ use super::{
 };
 use crate::analysis::ty::{
     LayoutBundlePathStep,
+    adt_def::instantiate_adt_field_shape,
     canonical::Canonical,
-    corelib::resolve_core_trait,
+    corelib::{is_core_evidence_ty, resolve_core_trait},
     diagnostics::BodyDiag,
     fold::{TyFoldable, TyFolder},
     trait_def::{TraitInstId, impls_for_ty},
@@ -147,6 +148,43 @@ impl<'db> TyChecker<'db> {
         TyId::unit(self.db)
     }
 
+    /// Structural containment checks fields, including every enum variant.
+    /// A mutable aggregate cannot hide a compiler-known evidence value.
+    pub(super) fn type_contains_evidence(&mut self, ty: TyId<'db>) -> bool {
+        let mut pending = vec![ty];
+        let mut visited = std::collections::HashSet::new();
+        while let Some(ty) = pending.pop() {
+            let ty = ty.fold_with(self.db, &mut self.table);
+            if !visited.insert(ty) || ty.has_invalid(self.db) {
+                continue;
+            }
+            if is_core_evidence_ty(self.db, self.env.scope(), ty) {
+                return true;
+            }
+            if let Some((_, inner)) = ty.as_capability(self.db) {
+                pending.push(inner);
+            } else if let Some(adt) = ty.adt_def(self.db) {
+                for (variant, fields) in adt.fields(self.db).iter().enumerate() {
+                    for field in 0..fields.num_types() {
+                        pending.push(instantiate_adt_field_shape(
+                            self.db,
+                            adt,
+                            variant,
+                            field,
+                            ty.generic_args(self.db),
+                        ));
+                    }
+                }
+            } else {
+                pending.extend(ty.field_types(self.db));
+                if ty.is_array(self.db) {
+                    pending.extend(ty.generic_args(self.db).first().copied());
+                }
+            }
+        }
+        false
+    }
+
     fn check_mutable_pattern_bindings(&mut self, pat: PatId) {
         let Partial::Present(pat_data) = pat.data(self.db, self.body()) else {
             return;
@@ -162,6 +200,12 @@ impl<'db> TyChecker<'db> {
                     return;
                 };
                 let ty = self.env.lookup_binding_ty(&binding);
+                if !ty.has_invalid(self.db) && self.type_contains_evidence(ty) {
+                    self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
+                        primary: pat.span(self.body()).into_path_pat().mut_token().into(),
+                    });
+                    return;
+                }
                 if ty.has_invalid(self.db) || ty.as_capability(self.db).is_none() {
                     return;
                 }
@@ -467,6 +511,25 @@ impl<'db> TyChecker<'db> {
             } else {
                 (None, None, TyId::unit(self.db), false)
             };
+
+        if !had_child_err && self.type_contains_evidence(returned_ty) {
+            let runtime_branch = self.env.active_exprs().iter().rev().copied().find(|site| {
+                match site.data(self.db, self.body()) {
+                    Partial::Present(Expr::If(cond, _, _)) => {
+                        !self.has_compile_time_condition_source(*cond)
+                    }
+                    Partial::Present(Expr::Match(scrutinee, _)) => {
+                        !self.has_compile_time_source(*scrutinee)
+                    }
+                    _ => false,
+                }
+            });
+            if let Some(site) = runtime_branch {
+                self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
+                    primary: site.span(self.body()).into(),
+                });
+            }
+        }
 
         if !had_child_err
             && !returned_ty.has_invalid(self.db)

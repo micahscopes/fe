@@ -1877,6 +1877,7 @@ impl<'db> TyChecker<'db> {
     fn run(&mut self) {
         self.check_effect_param_keys_resolve();
         self.check_own_param_types();
+        self.check_mutable_evidence_param_types();
 
         if let BodyOwner::ContractRecvArm {
             contract,
@@ -1905,6 +1906,45 @@ impl<'db> TyChecker<'db> {
         let root_expr = self.env.body().expr(self.db);
         self.check_expr(root_expr, self.expected);
         self.record_implicit_move_for_owned_expr(root_expr, self.expected);
+    }
+
+    fn check_mutable_evidence_param_types(&mut self) {
+        match self.env.owner() {
+            BodyOwner::Func(func) => {
+                let args = func.arg_tys(self.db);
+                for (idx, param) in func.params(self.db).enumerate() {
+                    let Some(arg) = args.get(idx) else { continue };
+                    let ty = *arg.skip_binder();
+                    let mutable = param.is_mut(self.db)
+                        || matches!(ty.as_capability(self.db), Some((CapabilityKind::Mut, _)));
+                    if mutable && self.type_contains_evidence(ty) {
+                        self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
+                            primary: func.span().params().param(idx).ty().into(),
+                        });
+                    }
+                }
+            }
+            BodyOwner::ContractInit { contract } => {
+                let Some(init) = contract.init(self.db) else {
+                    return;
+                };
+                for (idx, param) in init.params(self.db).data(self.db).iter().enumerate() {
+                    let Some(hir_ty) = param.ty.to_opt() else {
+                        continue;
+                    };
+                    let ty =
+                        lower_hir_ty(self.db, hir_ty, self.env.scope(), self.env.assumptions());
+                    let mutable = param.is_mut
+                        || matches!(ty.as_capability(self.db), Some((CapabilityKind::Mut, _)));
+                    if mutable && self.type_contains_evidence(ty) {
+                        self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
+                            primary: contract.span().init_block().params().param(idx).ty().into(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn check_own_param_types(&mut self) {

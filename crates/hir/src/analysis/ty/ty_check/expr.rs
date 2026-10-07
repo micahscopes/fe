@@ -1830,6 +1830,8 @@ impl<'db> TyChecker<'db> {
         callable.process_constraints(self, expr, call_span.callee().into());
 
         let normalized_ret_ty = self.normalize_callable_return(&callable);
+        self.check_evidence_call_source(expr, &callable, normalized_ret_ty, args, None);
+
         self.report_instantiated_const_fault(
             &callable,
             normalized_ret_ty,
@@ -4229,6 +4231,7 @@ impl<'db> TyChecker<'db> {
         callable.process_constraints(self, expr, call_span.method_name().into());
 
         let normalized_ret_ty = self.normalize_callable_return(&callable);
+        self.check_evidence_call_source(expr, &callable, normalized_ret_ty, args, Some(*receiver));
         self.report_instantiated_const_fault(
             &callable,
             normalized_ret_ty,
@@ -5634,9 +5637,127 @@ impl<'db> TyChecker<'db> {
         !arithmetic || opened
     }
 
+    fn check_evidence_call_source(
+        &mut self,
+        expr: ExprId,
+        callable: &super::Callable<'db>,
+        result: TyId<'db>,
+        args: &[HirCallArg<'db>],
+        receiver: Option<ExprId>,
+    ) {
+        if self.type_contains_evidence(result)
+            && (!matches!(callable.callable_def(), CallableDef::Func(func) if func.is_const(self.db))
+                || !args
+                    .iter()
+                    .all(|arg| self.has_compile_time_source(arg.expr))
+                || receiver.is_some_and(|expr| !self.has_compile_time_source(expr)))
+        {
+            self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
+                primary: expr.span(self.body()).into(),
+            });
+        }
+    }
+
+    /// Recognize compile-time source forms without executing or propagating values.
+    pub(super) fn has_compile_time_source(&self, root: ExprId) -> bool {
+        // Const-language checking validates these bodies. Calls producing evidence
+        // require compile-time arguments at their caller, before evaluation.
+        if self.in_const_context() {
+            return true;
+        }
+        let mut pending = vec![root];
+        let mut seen = FxHashSet::default();
+        while let Some(expr) = pending.pop() {
+            if !seen.insert(expr) {
+                continue;
+            }
+            let Partial::Present(data) = expr.data(self.db, self.body()) else {
+                return false;
+            };
+            match data {
+                Expr::Lit(_) => {}
+                Expr::Un(inner, _) | Expr::Cast(inner, _) => pending.push(*inner),
+                Expr::Bin(lhs, rhs, _) => pending.extend([*lhs, *rhs]),
+                Expr::Tuple(items) | Expr::Array(items) => pending.extend(items.iter().copied()),
+                Expr::RecordInit(_, fields) => {
+                    pending.extend(fields.iter().map(|field| field.expr))
+                }
+                Expr::With(_, body) => pending.push(*body),
+                Expr::Block(stmts) => {
+                    let Some(stmt) = stmts.last() else { continue };
+                    let Partial::Present(Stmt::Expr(expr)) = stmt.data(self.db, self.body()) else {
+                        return false;
+                    };
+                    pending.push(*expr);
+                }
+                Expr::Path(_) => {
+                    if self.env.expr_const_ref(expr).is_some()
+                        || matches!(
+                            self.env.expr_value_path_ref(expr),
+                            Some(ValuePathRef::TypeConst(_) | ValuePathRef::UnitVariant(_))
+                        )
+                    {
+                        continue;
+                    }
+                    let Some(LocalBinding::Local { pat, is_mut: false }) =
+                        self.env.typed_expr(expr).and_then(|p| p.binding)
+                    else {
+                        return false;
+                    };
+                    let initializer =
+                        self.body()
+                            .stmts(self.db)
+                            .iter()
+                            .find_map(|(_, stmt)| match stmt {
+                                Partial::Present(Stmt::Let(bound, _, Some(init)))
+                                    if *bound == pat =>
+                                {
+                                    Some(*init)
+                                }
+                                _ => None,
+                            });
+                    let Some(initializer) = initializer else {
+                        return false;
+                    };
+                    pending.push(initializer);
+                }
+                Expr::Call(_, args) => {
+                    let Some(callable) = self.env.callable_expr(expr) else {
+                        return false;
+                    };
+                    let CallableDef::Func(func) = callable.callable_def() else {
+                        return false;
+                    };
+                    if !func.is_const(self.db) {
+                        return false;
+                    }
+                    pending.extend(args.iter().map(|arg| arg.expr));
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    pub(super) fn has_compile_time_condition_source(&self, root: CondId) -> bool {
+        let mut pending = vec![root];
+        while let Some(cond) = pending.pop() {
+            match cond.data(self.db, self.body()) {
+                Partial::Present(Cond::Expr(expr)) => {
+                    if !self.has_compile_time_source(*expr) {
+                        return false;
+                    }
+                }
+                Partial::Present(Cond::Bin(lhs, rhs, _)) => pending.extend([*lhs, *rhs]),
+                _ => return false,
+            }
+        }
+        true
+    }
+
     fn check_if(
         &mut self,
-        _expr: ExprId,
+        expr: ExprId,
         expr_data: &Expr<'db>,
         expected: TyId<'db>,
         result_discarded: bool,
@@ -5663,6 +5784,13 @@ impl<'db> TyChecker<'db> {
             self.env.clear_pending_bindings();
             self.env.leave_scope();
             let else_prop = self.check_expr_in_new_scope(*else_, expected, result_discarded);
+            if self.type_contains_evidence(else_prop.ty)
+                && !self.has_compile_time_condition_source(*cond)
+            {
+                self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
+                    primary: expr.span(self.body()).into(),
+                });
+            }
             let borrow_provider = self.merge_concrete_borrow_providers(
                 then.span(self.body()).into(),
                 then_prop.borrow_provider,
@@ -5759,6 +5887,12 @@ impl<'db> TyChecker<'db> {
                     provider_unknown = true;
                 }
             }
+        }
+
+        if self.type_contains_evidence(match_ty) && !self.has_compile_time_source(*scrutinee) {
+            self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
+                primary: expr.span(self.body()).into(),
+            });
         }
 
         if !scrutinee_pat_ty.has_invalid(self.db)

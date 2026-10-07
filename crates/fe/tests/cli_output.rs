@@ -4874,8 +4874,7 @@ fn rd103_known_evidence_ordinary_functions_at_o0_and_o2() {
 }
 
 #[test]
-#[ignore = "RD116: control-flow diagnostic parked pending bounded analysis and alias review"]
-fn runtime_selected_evidence_requires_compile_time_choice() {
+fn rd121_runtime_selected_evidence_requires_compile_time_choice() {
     let root =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evidence_boundary_runtime");
     for name in [
@@ -4917,17 +4916,10 @@ fn compile_time_evidence_return_conditions_remain_accepted() {
         "known_local.fe",
         "known_const_call.fe",
         "known_enum.fe",
-        "known_mutable_local.fe",
         "known_generic_helper_return.fe",
         "known_formal_branch.fe",
-        "same_witness_return.fe",
-        "mixed_record_return.fe",
-        "mixed_runtime_payload.fe",
-        "known_sibling_store.fe",
-        "known_sibling_method.fe",
         "known_const_generic.fe",
         "known_const_generic_after_runtime_work.fe",
-        "known_dynamic_numeric_array_store.fe",
     ] {
         let fixture = root.join(name);
         let (output, exit_code) =
@@ -5246,4 +5238,80 @@ fn named_choice_blanket_bound_at_o0_and_o2() {
 #[ignore = "H1d: actual evidence value must specialize and validate the named-only callee"]
 fn evidence_named_only_method_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("evidence_named_only_method_pending.fe");
+}
+
+#[test]
+fn rd121_mutable_places_cannot_hold_evidence() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/evidence_choice_checks");
+    for name in [
+        "rd121-mutable_evidence_without_store.fe",
+        "rd121-mutable_capsule_without_store.fe",
+        "rd121-mutable_parameter.fe",
+        "rd121-mutable_array.fe",
+        "rd121-mutable_tuple.fe",
+        "rd121-ordinary_evidence_return_call.fe",
+        "rd121-ordinary_method_return.fe",
+        "rd121-const_call_runtime_argument.fe",
+    ] {
+        let fixture = root.join(name);
+        let (output, exit_code) =
+            run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+        assert_eq!(
+            exit_code, 1,
+            "{name}: mutable evidence place must receive a normal error: {output}"
+        );
+        assert!(
+            output.contains("error[8-0120]")
+                && output.contains("evidence choice must be known at compile time"),
+            "{name}: missing structural evidence diagnostic: {output}"
+        );
+    }
+}
+
+#[test]
+fn rd121_immutable_evidence_and_scalar_branches_remain_accepted() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/evidence_choice_checks");
+    for name in [
+        "rd121-immutable_const_function_binding.fe",
+        "rd121-runtime_branch_around_scalar_use.fe",
+        "rd121-const_method_known_receiver.fe",
+    ] {
+        let fixture = root.join(name);
+        let (output, exit_code) =
+            run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+        assert_eq!(
+            exit_code, 0,
+            "{name}: allowed structural evidence use rejected: {output}"
+        );
+    }
+}
+
+#[test]
+fn rd121_runtime_producers_and_mutable_aggregates_are_rejected() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/evidence_choice_checks");
+    for name in [
+        "known_mutable_local.fe",
+        "same_witness_return.fe",
+        "mixed_record_return.fe",
+        "mixed_runtime_payload.fe",
+        "known_sibling_store.fe",
+        "known_sibling_method.fe",
+        "known_dynamic_numeric_array_store.fe",
+    ] {
+        let fixture = root.join(name);
+        let (output, exit_code) =
+            run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+        assert_eq!(
+            exit_code, 1,
+            "{name}: forbidden structural evidence use must receive a normal error: {output}"
+        );
+        assert!(
+            output.contains("error[8-0120]")
+                && output.contains("evidence choice must be known at compile time"),
+            "{name}: missing structural evidence diagnostic: {output}"
+        );
+    }
 }

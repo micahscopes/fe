@@ -1,0 +1,8 @@
+use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+struct Capsule { evidence: Evidence<Read<Subject>>, number: u256 }
+const fn witness() -> Evidence<Read<Subject>> { prove<Read<Subject>>() }
+fn read() -> u256 { let evidence = witness()
+with (evidence) { <Subject as Read>::read() } }

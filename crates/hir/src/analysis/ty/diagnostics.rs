@@ -743,6 +743,10 @@ pub enum BodyDiag<'db> {
     },
 
     /// `let mut` local bindings must bind owned values, not capability handles.
+    EvidenceChoiceNotCompileTime {
+        primary: DynLazySpan<'db>,
+    },
+
     MutableBindingCannotBeCapability {
         primary: DynLazySpan<'db>,
         ty: TyId<'db>,
@@ -1187,6 +1191,7 @@ impl<'db> BodyDiag<'db> {
             Self::OwnParamCannotBeBorrow { .. } => 70,
             Self::OwnArgMustBeOwnedMove { .. } => 72,
             Self::MutableBindingCannotBeCapability { .. } => 73,
+            Self::EvidenceChoiceNotCompileTime { .. } => 120,
             Self::ArrayRepeatRequiresCopy { .. } => 71,
             Self::ArrayIndexOutOfBounds { .. } => 84,
             Self::NonAssignableExpr(..) => 17,
