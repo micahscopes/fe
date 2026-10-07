@@ -410,8 +410,17 @@ pub(crate) fn non_copy_fixed_array_elem<'db>(
         let (_, args) = ty.decompose_ty_app(db);
         let elem = *args.first()?;
         // Name the innermost culprit: `Key` rather than `[Key; 1]`.
-        return non_copy_fixed_array_elem(db, scope, elem, assumptions)
-            .or_else(|| (!ty_is_copy(db, scope, elem, assumptions)).then_some(elem));
+        return non_copy_fixed_array_elem(db, scope, elem, assumptions).or_else(|| {
+            (!ty_is_copy(
+                db,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    assumptions,
+                ),
+                elem,
+            ))
+            .then_some(elem)
+        });
     }
     if ty.is_tuple(db) {
         let (_, args) = ty.decompose_ty_app(db);

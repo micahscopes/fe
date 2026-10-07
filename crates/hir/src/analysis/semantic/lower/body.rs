@@ -1259,13 +1259,18 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         param: usize,
     ) -> SValueId {
         let ty = self.expr_ty(expr);
-        if !ty_is_copy(self.db, self.body.scope(), ty, self.assumptions)
-            && callable.arg_ty(self.db, param).is_some_and(|param_ty| {
-                normalize_ty(self.db, param_ty, self.body.scope(), self.assumptions)
-                    .as_view(self.db)
-                    .is_some()
-            })
-            && let Some(place) = self.try_lower_place(expr)
+        if !ty_is_copy(
+            self.db,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.body.scope(),
+                self.assumptions,
+            ),
+            ty,
+        ) && callable.arg_ty(self.db, param).is_some_and(|param_ty| {
+            normalize_ty(self.db, param_ty, self.body.scope(), self.assumptions)
+                .as_view(self.db)
+                .is_some()
+        }) && let Some(place) = self.try_lower_place(expr)
             && !place.path.is_empty()
         {
             return self.emit_expr_with_origin(

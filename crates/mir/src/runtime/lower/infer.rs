@@ -871,7 +871,13 @@ fn place_carrier_lowers_as_direct_value<'db>(
             mode: FuncParamMode::View,
             ..
         }) if runtime_repr_ty_in_env(db, env, local.ty) == runtime_target_ty
-    ) || scope.is_some_and(|scope| ty_is_copy(db, scope, *target_ty, assumptions))
+    ) || scope.is_some_and(|scope| {
+        ty_is_copy(
+            db,
+            hir::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+            *target_ty,
+        )
+    })
 }
 
 fn local_lowers_as_direct_read_value<'db>(

@@ -566,12 +566,14 @@ impl<'db> Borrowck<'db> {
             let consume = pointer
                 && !ty_is_copy(
                     self.db,
-                    self.instance
-                        .key(self.db)
-                        .impl_env(self.db)
-                        .normalization_scope(self.db),
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        self.instance
+                            .key(self.db)
+                            .impl_env(self.db)
+                            .normalization_scope(self.db),
+                        self.instance.assumptions(self.db),
+                    ),
                     input.ty,
-                    self.instance.assumptions(self.db),
                 );
             for (kind, possible) in [
                 (MemoryAccessKind::Read, native || pointer),

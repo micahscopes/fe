@@ -3445,7 +3445,14 @@ impl<'db> TyChecker<'db> {
     }
 
     fn ty_is_copy(&self, ty: TyId<'db>) -> bool {
-        crate::analysis::ty::ty_is_copy(self.db, self.env.scope(), ty, self.env.assumptions())
+        crate::analysis::ty::ty_is_copy(
+            self.db,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.env.scope(),
+                self.env.assumptions(),
+            ),
+            ty,
+        )
     }
 
     fn copy_inner_from_borrow(&self, ty: TyId<'db>) -> Option<TyId<'db>> {

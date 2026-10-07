@@ -629,9 +629,11 @@ fn verify_expr<'db>(
             }
             if !ty_is_copy(
                 db,
-                body.template_owner.scope(),
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    body.template_owner.scope(),
+                    body.owner.assumptions(db),
+                ),
                 element,
-                body.owner.assumptions(db),
             ) {
                 return Err(NormalizedBodyVerifyError::ArrayRepeatRequiresCopy);
             }
@@ -795,9 +797,11 @@ fn type_is_boundary_compatible<'db>(
         && (kind == CapabilityKind::View
             || ty_is_copy(
                 db,
-                body.template_owner.scope(),
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    body.template_owner.scope(),
+                    body.owner.assumptions(db),
+                ),
                 actual,
-                body.owner.assumptions(db),
             ))
     {
         return type_is_boundary_compatible(db, body, actual, expected);

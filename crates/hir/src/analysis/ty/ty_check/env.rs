@@ -1065,7 +1065,15 @@ impl<'db> TyCheckEnv<'db> {
                     scope,
                     assumptions,
                 );
-                (!ty_is_copy(self.db, scope, ty, assumptions)).then_some(*expr)
+                (!ty_is_copy(
+                    self.db,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        scope,
+                        assumptions,
+                    ),
+                    ty,
+                ))
+                .then_some(*expr)
             })
             .collect();
 

@@ -919,7 +919,13 @@ fn runtime_boundary_spec<'db>(
             return inner_boundary;
         }
         let pointee = stored_class_for_ty_in_env(db, env, inner);
-        let inner_is_copy = scope.is_some_and(|scope| ty_is_copy(db, scope, inner, assumptions));
+        let inner_is_copy = scope.is_some_and(|scope| {
+            ty_is_copy(
+                db,
+                hir::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+                inner,
+            )
+        });
         if inner_is_copy && pointee.aggregate_layout().is_none() {
             return inner_boundary;
         }

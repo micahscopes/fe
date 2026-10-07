@@ -594,12 +594,14 @@ impl<'db> Borrowck<'db> {
                         && !source.is_fresh_allocation()
                         && (!ty_is_copy(
                             self.db,
-                            self.instance
-                                .key(self.db)
-                                .impl_env(self.db)
-                                .normalization_scope(self.db),
+                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                                self.instance
+                                    .key(self.db)
+                                    .impl_env(self.db)
+                                    .normalization_scope(self.db),
+                                self.instance.assumptions(self.db),
+                            ),
                             source.contract.ty,
-                            self.instance.assumptions(self.db),
                         ) || self
                             .shape(source.contract.ty)
                             .expect("resolved storage has an admitted capability shape")

@@ -103,11 +103,10 @@ pub fn ty_is_borrow<'db>(
 
 pub fn ty_is_copy<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     ty: TyId<'db>,
-    assumptions: PredicateListId<'db>,
 ) -> bool {
-    let ty = normalize::normalize_ty(db, ty, scope, assumptions);
+    let ty = normalize::normalize_ty(db, ty, premises.scope(), premises.assumptions());
 
     // Borrow/view handles (`mut`/`ref`/`view`) are always copyable, even without an explicit
     // `Copy` impl.
@@ -120,16 +119,16 @@ pub fn ty_is_copy<'db>(
         return true;
     }
 
-    ty_is_copy_query(db, scope, ty, assumptions)
+    ty_is_copy_query(db, premises, ty)
 }
 
 #[salsa::tracked]
 fn ty_is_copy_query<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     ty: TyId<'db>,
-    assumptions: PredicateListId<'db>,
 ) -> bool {
+    let (scope, assumptions) = (premises.scope(), premises.assumptions());
     let Some(copy_trait) = corelib::resolve_core_trait(db, scope, &["marker", "Copy"]) else {
         return false;
     };
@@ -143,7 +142,7 @@ fn ty_is_copy_query<'db>(
     {
         return true;
     }
-    let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+    let solve_cx = premises.solver_context(db);
     if !copy_goal_has_possible_impl(db, solve_cx, inst) {
         return false;
     }
@@ -1066,7 +1065,14 @@ struct Plain {
         let solve_cx = TraitSolveCx::new(&db, top_mod.scope()).with_assumptions(assumptions);
 
         assert!(!copy_goal_has_possible_impl(&db, solve_cx, copy_plain));
-        assert!(!ty_is_copy(&db, top_mod.scope(), plain, assumptions));
+        assert!(!ty_is_copy(
+            &db,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                top_mod.scope(),
+                assumptions
+            ),
+            plain
+        ));
     }
 
     #[test]
@@ -1091,6 +1097,13 @@ impl Copy for Explicit {}
         let solve_cx = TraitSolveCx::new(&db, top_mod.scope()).with_assumptions(assumptions);
 
         assert!(copy_goal_has_possible_impl(&db, solve_cx, copy_explicit));
-        assert!(ty_is_copy(&db, top_mod.scope(), explicit, assumptions));
+        assert!(ty_is_copy(
+            &db,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                top_mod.scope(),
+                assumptions
+            ),
+            explicit
+        ));
     }
 }

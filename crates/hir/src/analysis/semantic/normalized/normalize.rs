@@ -2300,9 +2300,11 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
         }
         let result = ty_is_copy(
             self.db,
-            self.raw.template_owner.scope(),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.raw.template_owner.scope(),
+                self.assumptions,
+            ),
             ty,
-            self.assumptions,
         );
         self.copy_cache.borrow_mut().insert(ty, result);
         result
