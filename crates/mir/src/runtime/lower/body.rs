@@ -3,7 +3,7 @@ use std::{collections::HashSet, mem::size_of};
 use cranelift_entity::EntityRef;
 use hir::analysis::{
     semantic::{
-        EvalOutcome, FieldIndex, LayoutEvidenceBase, LayoutEvidenceBody,
+        EvalOutcome, FieldIndex, ImplEnv, LayoutEvidenceBase, LayoutEvidenceBody,
         LayoutEvidenceComponentValue, LayoutEvidenceConstBinding, LayoutEvidenceError,
         LayoutEvidenceExpr, LayoutEvidenceOperand, RuntimeSizeError, SBlockId, SConst, SLocalId,
         SStmtId, SemConstId, SemConstScalar, SemConstValue, SemOrigin, SemanticCalleeRef,
@@ -28,9 +28,7 @@ use hir::analysis::{
             runtime_builtin_func_kind,
         },
         trait_def::TraitInstId,
-        trait_resolution::{
-            GoalSatisfiability, PredicateListId, TraitSolveCx, is_goal_satisfiable,
-        },
+        trait_resolution::{GoalSatisfiability, is_goal_satisfiable},
         ty_check::{BodyOwner, TraitChoiceId},
         ty_def::{TyData, TyId},
     },
@@ -38,7 +36,6 @@ use hir::analysis::{
 use hir::core::meta::MetaItem;
 use hir::hir_def::{
     ArithBinOp, BinOp, CompBinOp, Expr, Func, IdentId, Partial, UnOp, attr::ArithmeticMode,
-    scope_graph::ScopeId,
 };
 use hir::projection::IndexSource;
 use hir::semantic::ProviderBinding;
@@ -315,13 +312,7 @@ pub(super) fn check_runtime_body_supported<'db>(
             } = &stmt.kind
                 && let Some(value_ty) = panic_payload_ty(db, body, *callee, args)
             {
-                let impl_env = key.impl_env(db);
-                ensure_panic_payload_encodable(
-                    db,
-                    impl_env.normalization_scope(db),
-                    impl_env.assumptions(db),
-                    value_ty,
-                )?;
+                ensure_panic_payload_encodable(db, key.impl_env(db), value_ty)?;
             }
         }
     }
@@ -409,10 +400,10 @@ fn panic_payload_ty<'db>(
 
 fn ensure_panic_payload_encodable<'db>(
     db: &'db dyn MirDb,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    impl_env: ImplEnv<'db>,
     value_ty: TyId<'db>,
 ) -> Result<(), LowerError> {
+    let scope = impl_env.normalization_scope(db);
     let abi_ty = resolve_lib_type_path(db, scope, "std::abi::Sol")
         .ok_or_else(|| LowerError::Unsupported("missing std::abi::Sol".to_string()))?;
     let encode_trait = resolve_core_trait(db, scope, &["abi", "Encode"])
@@ -421,9 +412,7 @@ fn ensure_panic_payload_encodable<'db>(
         .ok_or_else(|| LowerError::Unsupported("missing core::abi::AbiSize".to_string()))?;
     let encode = TraitInstId::new_simple(db, encode_trait, vec![value_ty, abi_ty]);
     let abi_size = TraitInstId::new_simple(db, abi_size_trait, vec![value_ty]);
-    if trait_goal_satisfied(db, scope, assumptions, encode)
-        && trait_goal_satisfied(db, scope, assumptions, abi_size)
-    {
+    if trait_goal_satisfied(db, impl_env, encode) && trait_goal_satisfied(db, impl_env, abi_size) {
         return Ok(());
     }
     Err(LowerError::Unsupported(format!(
@@ -434,10 +423,10 @@ fn ensure_panic_payload_encodable<'db>(
 
 fn panic_payload_is_error_variant<'db>(
     db: &'db dyn MirDb,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    impl_env: ImplEnv<'db>,
     value_ty: TyId<'db>,
 ) -> bool {
+    let scope = impl_env.normalization_scope(db);
     let Some(abi_ty) = resolve_lib_type_path(db, scope, "std::abi::Sol") else {
         return false;
     };
@@ -446,18 +435,17 @@ fn panic_payload_is_error_variant<'db>(
         return false;
     };
     let error_variant = TraitInstId::new_simple(db, error_variant_trait, vec![value_ty, abi_ty]);
-    trait_goal_satisfied(db, scope, assumptions, error_variant)
+    trait_goal_satisfied(db, impl_env, error_variant)
 }
 
+/// The goal is proved under the instance's own position context.
 fn trait_goal_satisfied<'db>(
     db: &'db dyn MirDb,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    impl_env: ImplEnv<'db>,
     inst: TraitInstId<'db>,
 ) -> bool {
-    let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
     matches!(
-        is_goal_satisfiable(db, solve_cx, inst),
+        is_goal_satisfiable(db, impl_env.solver_context(db), inst),
         GoalSatisfiability::Satisfied(_)
     )
 }
@@ -3813,8 +3801,8 @@ impl<'db> RmirEmitter<'db> {
         let impl_env = key.impl_env(self.db);
         let scope = impl_env.normalization_scope(self.db);
         let assumptions = impl_env.assumptions(self.db);
-        self.assert_panic_payload_encodable(scope, assumptions, value_ty);
-        let func_path = if panic_payload_is_error_variant(self.db, scope, assumptions, value_ty) {
+        self.assert_panic_payload_encodable(impl_env, value_ty);
+        let func_path = if panic_payload_is_error_variant(self.db, impl_env, value_ty) {
             "std::evm::revert_error"
         } else {
             "std::evm::revert"
@@ -3830,13 +3818,8 @@ impl<'db> RmirEmitter<'db> {
         )
     }
 
-    fn assert_panic_payload_encodable(
-        &self,
-        scope: ScopeId<'db>,
-        assumptions: PredicateListId<'db>,
-        value_ty: TyId<'db>,
-    ) {
-        ensure_panic_payload_encodable(self.db, scope, assumptions, value_ty)
+    fn assert_panic_payload_encodable(&self, impl_env: ImplEnv<'db>, value_ty: TyId<'db>) {
+        ensure_panic_payload_encodable(self.db, impl_env, value_ty)
             .expect("panic payload support should be checked before rMIR emission");
     }
 

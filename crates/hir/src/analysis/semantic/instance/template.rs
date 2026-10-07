@@ -229,7 +229,7 @@ pub struct ImplEnv<'db> {
 
 impl<'db> ImplEnv<'db> {
     /// Solver premises and normalization scope come from one position context.
-    pub(crate) fn solver_context(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
+    pub fn solver_context(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
         TraitSolveCx::new(db, self.normalization_scope(db)).with_assumptions(self.assumptions(db))
     }
 
