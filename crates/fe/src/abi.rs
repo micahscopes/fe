@@ -1686,7 +1686,7 @@ msg FooMsg {
     Ping,
 }
 
-fn emit_event<E: Event>(event: E) uses (log: mut Log) {
+fn emit_event<E: Event>(_ event: own E) uses (log: mut Log) {
     log.emit(event)
 }
 
