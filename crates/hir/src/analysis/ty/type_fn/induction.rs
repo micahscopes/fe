@@ -7,8 +7,7 @@ use crate::analysis::ty::{
     fold::{TyFoldable, TyFolder},
     trait_def::TraitInstId,
     trait_resolution::{
-        CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitSolveCx, check_ty_wf,
-        is_goal_query_satisfiable,
+        GoalSatisfiability, PredicateListId, TraitSolveCx, check_ty_wf, is_goal_query_satisfiable,
     },
     ty_def::{TyBase, TyData, TyFlags, TyId, TyParam},
     visitor::{TyVisitable, TyVisitor, walk_const_ty},
@@ -33,7 +32,8 @@ fn inputs_are_valid<'db>(
     goal.visit_with(&mut validity);
     cx.assumptions().visit_with(&mut validity);
     !validity.invalid
-        && !CanonicalGoalQuery::new(db, goal, cx.assumptions())
+        && !cx
+            .goal_query(db, goal)
             .canonical()
             .flags(db)
             .intersects(TyFlags::HAS_INVALID | TyFlags::HAS_VAR)
@@ -47,7 +47,7 @@ fn strict_prove<'db>(
     if !inputs_are_valid(db, cx, goal) {
         return false;
     }
-    let query = CanonicalGoalQuery::new(db, goal, cx.assumptions());
+    let query = cx.goal_query(db, goal);
     matches!(
         is_goal_query_satisfiable(db, cx, &query),
         GoalSatisfiability::Satisfied(_)
@@ -354,7 +354,7 @@ struct Guarded<T: Mark> {}
                 "formation: {name}"
             );
             if name == "Ambiguous" {
-                let query = CanonicalGoalQuery::new(&db, goal, cx.assumptions());
+                let query = cx.goal_query(&db, goal);
                 assert!(matches!(
                     is_goal_query_satisfiable(&db, cx, &query),
                     GoalSatisfiability::NeedsConfirmation { .. }

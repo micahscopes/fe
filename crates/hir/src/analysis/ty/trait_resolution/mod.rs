@@ -22,7 +22,7 @@ use crate::analysis::{
 };
 use crate::{
     Ingot,
-    hir_def::{HirIngot, scope_graph::ScopeId},
+    hir_def::{CallableDef, HirIngot, Trait, scope_graph::ScopeId},
 };
 use common::indexmap::IndexSet;
 use constraint::collect_constraints;
@@ -169,6 +169,34 @@ impl<'db> TraitSolveCx<'db> {
             assumptions,
             ..self
         }
+    }
+
+    /// Coherence: whether two implementations of a trait can overlap. This is
+    /// a question about the implementations themselves, not about any program
+    /// position, so it deliberately has no premises.
+    pub(crate) fn coherence(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>) -> Self {
+        Self::new(db, trait_.scope())
+    }
+
+    /// Signature comparison: whether a trait method's declared bounds, after
+    /// substituting the implementation's arguments, entail the implementing
+    /// method's bounds. The premises are that substituted signature, which no
+    /// program position states, so they are not read from `context_at`.
+    pub(crate) fn signature_comparison(
+        db: &'db dyn HirAnalysisDb,
+        trait_method: CallableDef<'db>,
+        trait_method_bounds: PredicateListId<'db>,
+    ) -> Self {
+        Self::new(db, trait_method.scope()).with_assumptions(trait_method_bounds)
+    }
+
+    /// The canonical proof query for `goal` under this context's premises.
+    pub(crate) fn goal_query(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+    ) -> CanonicalGoalQuery<'db> {
+        CanonicalGoalQuery::new(db, goal, self.assumptions)
     }
 
     pub fn assumptions(self) -> PredicateListId<'db> {

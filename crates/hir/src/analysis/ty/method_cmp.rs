@@ -1122,7 +1122,7 @@ fn compare_constraints<'db>(
         }
         let entailment = classify_constraint_entailment(is_goal_satisfiable(
             db,
-            TraitSolveCx::new(db, trait_m.scope()).with_assumptions(trait_m_constraints),
+            TraitSolveCx::signature_comparison(db, trait_m, trait_m_constraints),
             goal,
         ));
         match entailment {

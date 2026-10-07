@@ -1969,8 +1969,7 @@ pub(crate) fn does_impl_trait_conflict<'db>(
     // Check if all constraints from both implementations would be satisfiable
     // when the types are unified.
     let merged_constraints = a_constraints.merge(db, b_constraints);
-    let solve_cx = TraitSolveCx::new(db, a.trait_def(db).scope())
-        .with_assumptions(PredicateListId::empty_list(db));
+    let solve_cx = TraitSolveCx::coherence(db, a.trait_def(db));
 
     for &constraint in merged_constraints.list(db) {
         let constraint = constraint.fold_with(db, &mut table);
