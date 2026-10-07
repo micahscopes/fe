@@ -1232,6 +1232,32 @@ impl<'db> SemanticInstance<'db> {
         ThinVec::new()
     }
 
+    /// Formal types use the caller's retained lexical provision before reduction.
+    pub(crate) fn normalized_call_param_ty(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        callee: SemanticInstance<'db>,
+        site: CallSiteId,
+        binding: LocalBinding<'db>,
+    ) -> TyId<'db> {
+        let CallSiteId::Expr(expr) = site else {
+            return callee.normalized_binding_ty(db, binding);
+        };
+        let typed = self.key(db).typed_body(db);
+        let chain = crate::core::semantic::recorded_chain_at(db, typed, expr);
+        let context = chain.context(db, self.normalization_scope(db));
+        let ty =
+            context.contextualize_const_types_with(db, callee.binding_ty(db, binding), |goal| {
+                chain.lookup(db, goal)
+            });
+        normalize_ty(
+            db,
+            ty,
+            context.normalization_scope(db),
+            context.assumptions(db),
+        )
+    }
+
     #[salsa::tracked]
     pub fn normalized_binding_ty(
         self,

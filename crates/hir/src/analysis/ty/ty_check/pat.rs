@@ -523,8 +523,8 @@ impl<'db> TyChecker<'db> {
                 );
 
                 let trait_ = inst.def(self.db);
-                let selection = self.selection_for_path(*path, inst, span.clone().into());
-                if !self.check_trait_const_obligation(inst, span.clone().into(), selection) {
+                let provision = self.provision_for_path(*path, inst, span.clone().into());
+                if !self.check_trait_const_obligation(inst, span.clone().into(), provision) {
                     return self.finish_pat_check(
                         pat,
                         expected,
@@ -540,7 +540,7 @@ impl<'db> TyChecker<'db> {
                     let ty = self.table.instantiate_to_term(instantiated);
                     let cref = ConstRef::TraitConst(
                         AssocConstUse::new(self.env.scope(), self.env.assumptions(), inst, name)
-                            .with_selection(selection),
+                            .with_provision(provision),
                     );
                     (
                         ty,

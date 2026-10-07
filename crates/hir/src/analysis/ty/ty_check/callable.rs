@@ -1147,7 +1147,11 @@ impl<'db> Callable<'db> {
                 }
                 _ => None,
             };
-            let selection = path.and_then(|path| tc.selection_for_path(path, goal, span.clone()));
+            let provision = path.and_then(|path| tc.provision_for_path(path, goal, span.clone()));
+            let selection = match provision {
+                Some(crate::semantic::Provision::Named(selection)) => Some(selection),
+                _ => None,
+            };
             let obligation = super::env::TraitObligation {
                 context: tc.context_with_selection(selection),
                 assumptions: tc.env.assumptions(),

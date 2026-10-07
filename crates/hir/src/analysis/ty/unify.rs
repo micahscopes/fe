@@ -288,7 +288,13 @@ where
 
         match (expr1.data(self.db), expr2.data(self.db)) {
             (TraitConst(assoc1), TraitConst(assoc2)) => {
-                if assoc1.name() != assoc2.name() {
+                if assoc1.name() != assoc2.name()
+                    || assoc1.provision() != assoc2.provision()
+                    || (assoc1
+                        .provision()
+                        .is_some_and(|p| p.evidence_operand().is_some())
+                        && assoc1.origin_scope() != assoc2.origin_scope())
+                {
                     return Err(UnificationError::TypeMismatch);
                 }
                 self.unify(assoc1.inst(), assoc2.inst())

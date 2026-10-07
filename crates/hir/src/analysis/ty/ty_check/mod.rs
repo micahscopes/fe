@@ -2516,12 +2516,12 @@ impl<'db> TyChecker<'db> {
         }
     }
 
-    fn selection_for_path(
+    fn provision_for_path(
         &mut self,
         path: crate::hir_def::PathId<'db>,
         goal: TraitInstId<'db>,
         span: DynLazySpan<'db>,
-    ) -> Option<crate::analysis::semantic::SelectedApplication<'db>> {
+    ) -> Option<crate::semantic::Provision<'db>> {
         let root = path.segment(self.db, 0)?;
         let through_self = root.is_self_ty(self.db)
             || matches!(root.kind(self.db), crate::hir_def::PathKind::QualifiedType { type_, .. }
@@ -2539,7 +2539,7 @@ impl<'db> TyChecker<'db> {
                     )?;
                     if header.trait_(self.db).def(self.db) == goal.def(self.db) {
                         return match self.prove_static_selection(implementation, goal) {
-                            Ok(selection) => Some(selection),
+                            Ok(selection) => Some(crate::semantic::Provision::Named(selection)),
                             Err((reason, _)) => {
                                 self.push_diag(BodyDiag::ObligationOpening {
                                     primary: span,
@@ -2554,7 +2554,7 @@ impl<'db> TyChecker<'db> {
                 scope = parent;
             }
         }
-        self.env.selection_for_goal(goal)
+        self.env.provision_for_goal(goal)
     }
 
     fn context_with_selection(
@@ -2575,12 +2575,12 @@ impl<'db> TyChecker<'db> {
         &mut self,
         goal: TraitInstId<'db>,
         span: DynLazySpan<'db>,
-        selection: Option<crate::analysis::semantic::SelectedApplication<'db>>,
+        provision: Option<crate::semantic::Provision<'db>>,
     ) -> bool {
         self.check_trait_const_obligation_at(
             goal,
             span,
-            selection,
+            provision,
             env::TraitObligationOrigin::GenericConfirmation,
         )
     }
@@ -2589,7 +2589,7 @@ impl<'db> TyChecker<'db> {
         &mut self,
         goal: TraitInstId<'db>,
         span: DynLazySpan<'db>,
-        selection: Option<crate::analysis::semantic::SelectedApplication<'db>>,
+        provision: Option<crate::semantic::Provision<'db>>,
         origin: env::TraitObligationOrigin<'db>,
     ) -> bool {
         // Binder parameters outside this body's scope await receiver inference.
@@ -2597,7 +2597,10 @@ impl<'db> TyChecker<'db> {
             return true;
         }
         let obligation = env::TraitObligation {
-            context: self.context_with_selection(selection),
+            context: self.context_with_selection(match provision {
+                Some(crate::semantic::Provision::Named(selection)) => Some(selection),
+                _ => None,
+            }),
             assumptions: self.env.assumptions(),
             goal,
             origin,
@@ -3770,7 +3773,27 @@ impl<'db> TyChecker<'db> {
         star_kind_required: bool,
     ) -> TyId<'db> {
         let context = self.env.selection_context();
-        let ty = if context.selections(self.db).is_empty() {
+        let ty = if !context.witnesses(self.db).is_empty() {
+            // Keep written constant paths until their full lexical provision
+            // has been captured; eager lowering would select an ordinary impl.
+            let assumptions = self.env.method_lookup_assumptions();
+            let minter = LoweringContext::deferred(HoleAnchor::TemplateTy {
+                ty: hir_ty,
+                scope: self.env.scope(),
+                assumptions,
+            });
+            let ty = super::ty_lower::lower_hir_ty_with_minter(
+                self.db,
+                hir_ty,
+                self.env.scope(),
+                assumptions,
+                &minter,
+            );
+            let ty = context.contextualize_const_types_with(self.db, ty, |goal| {
+                self.env.provision_for_goal(goal)
+            });
+            normalize_ty(self.db, ty, self.env.scope(), self.env.assumptions())
+        } else if context.selections(self.db).is_empty() {
             lower_hir_ty(self.db, hir_ty, self.env.scope(), self.env.assumptions())
         } else {
             let lookup_assumptions = self.env.method_lookup_assumptions();

@@ -1,0 +1,37 @@
+// One provision, two spellings: a direct associated-constant read inside the
+// block, named `with (Wide)` versus opened evidence carrying Wide.
+use core::obligations::{Evidence, prove}
+trait Width { const N: usize }
+struct Subject {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+const fn named_direct() -> usize { with (Wide) { Subject::N } }
+const fn evidence_direct(_ e: Evidence<Width<Subject>>) -> usize { with (e) { Subject::N } }
+const fn named_qualified() -> usize { with (Wide) { <Subject as Width>::N } }
+const fn evidence_qualified(_ e: Evidence<Width<Subject>>) -> usize { with (e) { <Subject as Width>::N } }
+const ND: usize = named_direct()
+const ED: usize = evidence_direct(with (Wide) { prove<Width<Subject>>() })
+const NQ: usize = named_qualified()
+const EQ: usize = evidence_qualified(with (Wide) { prove<Width<Subject>>() })
+#[test]
+fn named_direct_is_2() { assert(ND == 2) }
+#[test]
+fn evidence_direct_is_2() { assert(ED == 2) }
+#[test]
+fn named_qualified_is_2() { assert(NQ == 2) }
+#[test]
+fn evidence_qualified_is_2() { assert(EQ == 2) }
+
+const fn evidence_generic<T: Width>(_ e: Evidence<Width<T>>) -> usize { with (e) { T::N } }
+const fn nested<T: Width>(_ outer: Evidence<Width<T>>, _ inner: Evidence<Width<T>>) -> usize {
+    with (outer) { T::N * 100 + with (inner) { T::N } * 10 + T::N }
+}
+const G: usize = evidence_generic<Subject>(with (Wide) { prove<Width<Subject>>() })
+const N212: usize = nested<Subject>(with (Wide) { prove<Width<Subject>>() }, prove<Width<Subject>>())
+const N121: usize = nested<Subject>(prove<Width<Subject>>(), with (Wide) { prove<Width<Subject>>() })
+#[test]
+fn generic_evidence_is_2() { assert(G == 2) }
+#[test]
+fn nested_evidence_restores_212() { assert(N212 == 212) }
+#[test]
+fn nested_evidence_restores_121() { assert(N121 == 121) }

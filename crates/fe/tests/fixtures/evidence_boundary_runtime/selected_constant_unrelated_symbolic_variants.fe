@@ -1,0 +1,23 @@
+// Variants of p02 at head: unrelated symbolic constants reaching a callee whose
+// first bound is selected. Each must keep the caller's own identity.
+trait Width { const N: usize }
+struct Subject {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+struct Other {}
+impl Width for Other { const N: usize = 3 }
+// (a) caller's V::N arrives as a const generic argument
+fn via_k<T: Width, const K: usize>(_ a: [u256; T::N], _ b: [u256; K]) -> [u256; K] { b }
+fn a<V: Width>(_ b: [u256; V::N]) -> [u256; V::N] { with (Wide) { via_k<Subject, { V::N }>([1, 2], b) } }
+// (b) arithmetic on the unrelated bound
+fn plus<T: Width, U: Width>(_ a: [u256; T::N], _ b: [u256; U::N + 1]) -> [u256; U::N + 1] { b }
+fn b<V: Width>(_ x: [u256; V::N + 1]) -> [u256; V::N + 1] { with (Wide) { plus<Subject, V>([1, 2], x) } }
+// (c) the same bound twice: V selected? No: V is generic, only Subject is selected
+fn twice<T: Width, U: Width>(_ a: [u256; T::N], _ b: [u256; U::N]) -> [u256; T::N] { a }
+fn c<V: Width>(_ x: [u256; V::N]) -> [u256; 2] { with (Wide) { twice<Subject, V>([1, 2], x) } }
+#[test]
+fn t() {
+    assert(a<Other>([7, 8, 9])[2] == 9)
+    assert(b<Other>([7, 8, 9, 10])[3] == 10)
+    assert(c<Other>([7, 8, 9])[1] == 2)
+}

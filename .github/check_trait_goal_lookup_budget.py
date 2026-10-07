@@ -37,7 +37,6 @@ def inventory(sources):
         ('env', 'provision_for_goal', 'lookup'),
         ('chain', 'lookup', 'lookup_trait_goal'),
         ('chain', 'visible', 'lookup_trait_goal'),
-        ('env', 'selection_for_goal', 'provision_for_goal'),
         ('const', 'selection_for', 'selection_for'),
     ]:
         readers = bodies(sources[file], name)
@@ -45,6 +44,8 @@ def inventory(sources):
             raise ValueError(f'{file}::{name} must delegate to {delegate}')
         if re.search(r'\.(?:find|position|rposition)\s*\(|\b(?:for|while|loop)\b', readers[0]):
             raise ValueError(f'{file}::{name} reintroduced an independent lookup')
+    if any('selection_for_goal' in source for source in sources.values()):
+        raise ValueError('named-only position reader is retired; read the full provision')
     return len(searches)
 
 

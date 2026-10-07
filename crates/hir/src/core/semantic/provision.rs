@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// One retained trait provision, shared by lexical frames and body openings.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
 pub enum Provision<'db> {
     EvidenceLocal(ExprId, TraitInstId<'db>),
     EvidenceParameter(ExprId, TraitInstId<'db>),

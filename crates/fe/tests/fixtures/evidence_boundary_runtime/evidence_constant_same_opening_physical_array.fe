@@ -1,0 +1,13 @@
+use core::obligations::{Evidence, prove}
+trait Width { const N: usize }
+struct Subject {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+const fn len<T: Width>(_ x: [u256; T::N]) -> usize { T::N }
+const fn inside<T: Width>(_ e: Evidence<Width<T>>) -> usize {
+    with (e) { let y: [u256; T::N] = [5; T::N]
+        len<T>(y) + (y[1] as usize) }
+}
+const L: usize = inside<Subject>(with (Wide) { prove<Width<Subject>>() })
+#[test]
+fn same_opening() { assert(L == 7) }

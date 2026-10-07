@@ -485,6 +485,10 @@ pub enum SExpr<'db> {
         region: SemanticCodeRegionRef<'db>,
     },
     Const(SConst<'db>),
+    OpenedConst {
+        assoc: crate::analysis::ty::assoc_const::AssocConstUse<'db>,
+        witness: SOperand,
+    },
     Unary {
         op: UnOp,
         value: SOperand,
@@ -501,6 +505,7 @@ pub enum SExpr<'db> {
     ArrayRepeat {
         ty: TyId<'db>,
         value: SOperand,
+        provisions: Box<[(crate::semantic::Provision<'db>, SOperand)]>,
     },
     AggregateMake {
         ty: TyId<'db>,

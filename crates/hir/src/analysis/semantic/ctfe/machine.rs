@@ -1125,6 +1125,59 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         Ok(CtfeValue::concrete(self.db, value))
     }
 
+    fn opened_const_term(
+        &mut self,
+        frame_idx: usize,
+        term: ConstTyId<'db>,
+        provisions: &[(crate::semantic::Provision<'db>, SOperand)],
+        origin: SemOrigin<'db>,
+    ) -> EvalResult<'db, ConstTyId<'db>> {
+        if provisions.is_empty() {
+            return Ok(term);
+        }
+        use crate::analysis::ty::fold::{TyFoldable, TyFolder};
+        struct Opened<'a, 'db> {
+            selections: &'a FxHashMap<
+                crate::semantic::Provision<'db>,
+                crate::analysis::semantic::SelectedApplication<'db>,
+            >,
+        }
+        impl<'db> TyFolder<'db> for Opened<'_, 'db> {
+            fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+                ty.super_fold_with(db, self)
+            }
+            fn fold_assoc_const_use(
+                &mut self,
+                db: &'db dyn HirAnalysisDb,
+                use_: crate::analysis::ty::assoc_const::AssocConstUse<'db>,
+            ) -> crate::analysis::ty::assoc_const::AssocConstUse<'db> {
+                let use_ = use_.super_fold_with(db, self);
+                match use_
+                    .provision()
+                    .and_then(|provision| self.selections.get(&provision))
+                {
+                    Some(selection) => use_.with_selection(Some(*selection)),
+                    None => use_,
+                }
+            }
+        }
+        let mut selections = FxHashMap::default();
+        for &(provision, witness) in provisions {
+            let (selection, _) = self.opened_proof(frame_idx, witness, provision.goal(), origin)?;
+            selections.insert(provision, selection);
+        }
+        let ty = TyId::const_ty(self.db, term).fold_with(
+            self.db,
+            &mut Opened {
+                selections: &selections,
+            },
+        );
+        let TyData::ConstTy(term) = ty.data(self.db) else {
+            unreachable!("opening substitution preserves a constant term");
+        };
+        Ok(*term)
+    }
+
     fn force_term(
         &mut self,
         term: ConstTyId<'db>,
@@ -1482,6 +1535,33 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             .normalized_ty(self.db, result_ty);
         // Keep the large value-operation frame off recursive call paths.
         match expr {
+            SExpr::OpenedConst { assoc, witness } => {
+                let goal = assoc.inst();
+                let (selection, proof) = self.opened_proof(frame_idx, witness, goal, origin)?;
+                let (body, ty, subst) =
+                    crate::analysis::ty::trait_def::selected_assoc_const_body_template(
+                        self.db,
+                        proof.resolved_instance(),
+                        assoc.name(),
+                    )
+                    .ok_or(CtfeError::NotConstEvaluable { origin })?;
+                let key = SemanticInstanceKey::new(
+                    self.db,
+                    BodyOwner::AnonConstBody { body, expected: ty },
+                    GenericSubst::complete(self.db, subst),
+                    crate::analysis::semantic::EffectProviderSubst::empty(self.db),
+                    ImplEnv::new(
+                        self.db,
+                        assoc.origin_scope(),
+                        proof.context().assumptions(),
+                        vec![goal],
+                    )
+                    .with_selections(self.db, vec![selection]),
+                );
+                let value =
+                    self.eval_const_ref_value(SemanticConstRef::new(self.db, key, ty, origin))?;
+                self.load_sem_const(value, origin)
+            }
             SExpr::Call {
                 call_site,
                 callee,
@@ -1649,7 +1729,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
     ) -> EvalResult<'db, CtfeValue<'db>> {
         self.bump(origin)?;
         match expr {
-            SExpr::Call { .. } | SExpr::Const(SConst::Ref(..)) => {
+            SExpr::Call { .. } | SExpr::Const(SConst::Ref(..)) | SExpr::OpenedConst { .. } => {
                 unreachable!("calls are dispatched separately")
             }
             SExpr::Forward(value) => Ok(self.read_operand(frame_idx, value, origin)?),
@@ -1717,7 +1797,11 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     origin,
                 )?))
             }
-            SExpr::ArrayRepeat { ty, value } => {
+            SExpr::ArrayRepeat {
+                ty,
+                value,
+                provisions,
+            } => {
                 let CtfeValue::Value(value) = self.read_operand(frame_idx, value, origin)? else {
                     return Err(CtfeError::InvalidBorrow { origin }.into());
                 };
@@ -1730,7 +1814,8 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 let TyData::ConstTy(length) = length.data(self.db) else {
                     return Err(CtfeError::InvalidBody { origin }.into());
                 };
-                let length = self.force_term(*length, ConstDemandKind::ArrayLength, origin)?;
+                let length = self.opened_const_term(frame_idx, *length, &provisions, origin)?;
+                let length = self.force_term(length, ConstDemandKind::ArrayLength, origin)?;
                 let SemConstValue::Scalar {
                     value: SemConstScalar::Int { value: length },
                     ..
@@ -2162,6 +2247,47 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         Ok(value)
     }
 
+    fn opened_proof(
+        &mut self,
+        frame_idx: usize,
+        witness: SOperand,
+        goal: crate::analysis::ty::trait_def::TraitInstId<'db>,
+        origin: SemOrigin<'db>,
+    ) -> Result<
+        (
+            crate::analysis::semantic::SelectedApplication<'db>,
+            crate::analysis::ty::trait_def::SelectedImplEvidence<'db>,
+        ),
+        CtfeError<'db>,
+    > {
+        let invalid = || CtfeError::InvalidOperation {
+            origin,
+            message: "opened evidence does not prove this use's requirements".into(),
+        };
+        let CtfeValue::Value(value) = self.read_operand(frame_idx, witness, origin)? else {
+            return Err(invalid());
+        };
+        let SemConstValue::Structural {
+            handle: StructuralHandle::Evidence(selection),
+            ..
+        } = value.materialize(self.db).value(self.db)
+        else {
+            return Err(invalid());
+        };
+        if selection.goal() != goal {
+            return Err(invalid());
+        }
+        let caller_env = self.frames[frame_idx]
+            .body
+            .owner
+            .key(self.db)
+            .impl_env(self.db);
+        selection
+            .revalidate(self.db, caller_env.solver_context(self.db), goal)
+            .map(|proof| (*selection, proof))
+            .map_err(|_| invalid())
+    }
+
     fn call_key_with_opened_provisions(
         &mut self,
         frame_idx: usize,
@@ -2202,34 +2328,17 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         let env = key.impl_env(db);
         // Validate at the call site. The callee's own trait requirements
         // cannot establish the selected application's prerequisites.
-        let caller_env = self.frames[frame_idx].body.owner.key(db).impl_env(db);
-        let destination = caller_env.solver_context(db);
         let mut selections = env.selections(db).clone();
         let mut opened_method = None;
         for &(witness, goal) in provisions {
-            let CtfeValue::Value(value) = self.read_operand(frame_idx, witness, origin)? else {
-                return Err(invalid());
-            };
-            let SemConstValue::Structural {
-                handle: StructuralHandle::Evidence(selection),
-                ..
-            } = value.materialize(db).value(db)
-            else {
-                return Err(invalid());
-            };
-            if selection.goal() != goal {
-                return Err(invalid());
-            }
-            let proof = selection
-                .revalidate(db, destination, goal)
-                .map_err(|_| invalid())?;
+            let (selection, proof) = self.opened_proof(frame_idx, witness, goal, origin)?;
             if opened_call.is_some_and(|(required, _)| required == goal) {
                 opened_method = Some(proof);
             }
             // Opening in this callee is a new frame. Its validated witness
             // shadows any choice inherited through the callee's bounds.
             selections.retain(|inherited| !inherited.matches(db, goal));
-            selections.push(*selection);
+            selections.push(selection);
         }
         let env = env.with_selections(db, selections);
         let key = SemanticInstanceKey::new(

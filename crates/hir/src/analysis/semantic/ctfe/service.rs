@@ -1382,11 +1382,15 @@ fn force_const_computation_in_context<'db>(
         ConstEntry::Associated(use_) => {
             let Some(const_ty) = const_ty_from_assoc_const_use(db, use_) else {
                 let dependent = use_
-                    .inst()
-                    .args(db)
-                    .iter()
-                    .chain(use_.inst().assoc_type_bindings(db).values())
-                    .any(|ty| ty.has_param(db) || ty.has_var(db) || ty.has_projection(db));
+                    .provision()
+                    .and_then(|p| p.evidence_operand())
+                    .is_some()
+                    || use_
+                        .inst()
+                        .args(db)
+                        .iter()
+                        .chain(use_.inst().assoc_type_bindings(db).values())
+                        .any(|ty| ty.has_param(db) || ty.has_var(db) || ty.has_projection(db));
                 return if dependent {
                     EvalOutcome::Blocked(BlockedInfo::new(
                         ConstDemandKind::CallableSelection,

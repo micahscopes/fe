@@ -5026,6 +5026,53 @@ fn effect_provider_recorded_choice_at_o0_and_o2() {
 }
 
 #[test]
+fn selected_constant_unrelated_symbolic_variants_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("selected_constant_unrelated_symbolic_variants.fe");
+}
+
+#[test]
+fn evidence_constant_direct_reads_agree_with_named_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_constant_direct_read.fe");
+}
+
+fn reject_evidence_constant_wrong_length(name: &str) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime")
+        .join(name);
+    let (output, code) = run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+    assert_ne!(
+        code, 0,
+        "a different provision's array length was accepted: {output}"
+    );
+    assert!(
+        output.contains("error[8-0000]")
+            && !output.contains("error[16-")
+            && !output.contains("panicked"),
+        "wrong provision length must report a frontend type mismatch: {output}"
+    );
+}
+
+#[test]
+fn evidence_constant_annotation_rejects_other_provision_length() {
+    reject_evidence_constant_wrong_length("evidence_constant_annotation_wrong_length.fe");
+}
+
+#[test]
+fn evidence_constant_same_opening_array_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_constant_same_opening_array.fe");
+}
+
+#[test]
+fn evidence_constant_concrete_signature_rejects_other_provision_length() {
+    reject_evidence_constant_wrong_length("evidence_constant_concrete_wrong_length.fe");
+}
+
+#[test]
+fn evidence_constant_symbolic_signature_rejects_other_provision_length() {
+    reject_evidence_constant_wrong_length("evidence_constant_symbolic_wrong_length.fe");
+}
+
+#[test]
 fn signature_constants_share_checker_and_callee_context_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("signature_const_context.fe");
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -5053,4 +5100,9 @@ fn loop_noncopy_array_fields_at_o0_and_o2() {
 #[test]
 fn loop_custom_integer_inference_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("loop_custom_integer_inference.fe");
+}
+
+#[test]
+fn evidence_constant_same_opening_physical_array_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_constant_same_opening_physical_array.fe");
 }

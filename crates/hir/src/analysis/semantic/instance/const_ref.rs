@@ -1297,6 +1297,13 @@ fn semantic_const_key_for_assoc_const<'db>(
     caller_key: Option<SemanticInstanceKey<'db>>,
     assoc: AssocConstUse<'db>,
 ) -> Option<SemanticInstanceKey<'db>> {
+    if assoc
+        .provision()
+        .is_some_and(|p| p.evidence_operand().is_some())
+    {
+        // The lexical operand, not an ordinary lookup, decides this read.
+        return None;
+    }
     let selection = assoc
         .selection()
         .or_else(|| caller_key.and_then(|key| key.impl_env(db).selection_for(db, assoc.inst())));

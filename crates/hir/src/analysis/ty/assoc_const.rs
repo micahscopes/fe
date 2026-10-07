@@ -18,7 +18,7 @@ pub struct AssocConstUse<'db> {
     assumptions: PredicateListId<'db>,
     inst: TraitInstId<'db>,
     name: IdentId<'db>,
-    selection: Option<SelectedApplication<'db>>,
+    provision: Option<crate::semantic::Provision<'db>>,
 }
 
 impl<'db> AssocConstUse<'db> {
@@ -33,7 +33,7 @@ impl<'db> AssocConstUse<'db> {
             assumptions,
             inst,
             name,
-            selection: None,
+            provision: None,
         }
     }
 
@@ -66,18 +66,33 @@ impl<'db> AssocConstUse<'db> {
     }
 
     pub(crate) fn selection(self) -> Option<SelectedApplication<'db>> {
-        self.selection
+        match self.provision {
+            Some(crate::semantic::Provision::Named(selection)) => Some(selection),
+            _ => None,
+        }
     }
 
     pub(crate) fn with_selection(self, selection: Option<SelectedApplication<'db>>) -> Self {
-        Self { selection, ..self }
+        self.with_provision(selection.map(crate::semantic::Provision::Named))
+    }
+
+    pub(crate) fn provision(self) -> Option<crate::semantic::Provision<'db>> {
+        self.provision
+    }
+
+    pub(crate) fn with_provision(self, provision: Option<crate::semantic::Provision<'db>>) -> Self {
+        Self {
+            provision: provision
+                .filter(|entry| !matches!(entry, crate::semantic::Provision::Bound(_))),
+            ..self
+        }
     }
 
     /// A symbolic bound belongs to its parameter, rather than to whichever
     /// declaration supplied a field or argument type. Explicit choices retain
     /// their captured context; a goal absent from the binder is not rewritten.
     pub(crate) fn canonical_symbolic_bound(self, db: &'db dyn HirAnalysisDb) -> Self {
-        if self.selection.is_some() {
+        if self.provision.is_some() {
             return self;
         }
         let super::ty_def::TyData::TyParam(param) = self.inst.self_ty(db).data(db) else {
@@ -110,8 +125,8 @@ impl<'db> TyVisitable<'db> for AssocConstUse<'db> {
     {
         self.assumptions.visit_with(visitor);
         self.inst.visit_with(visitor);
-        if let Some(selection) = self.selection {
-            selection.visit_with(visitor);
+        if let Some(provision) = self.provision {
+            provision.visit_with(visitor);
         }
     }
 }
@@ -133,9 +148,9 @@ impl<'db> TyFoldable<'db> for AssocConstUse<'db> {
             assumptions: self.assumptions.fold_with(db, folder),
             inst: self.inst.fold_with(db, folder),
             name: self.name,
-            selection: self
-                .selection
-                .map(|selection| selection.fold_with(db, folder)),
+            provision: self
+                .provision
+                .map(|provision| provision.fold_with(db, folder)),
         }
     }
 }

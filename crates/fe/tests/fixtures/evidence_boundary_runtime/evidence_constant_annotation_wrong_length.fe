@@ -1,0 +1,10 @@
+use core::obligations::{Evidence, prove}
+trait Width { const N: usize }
+struct Subject {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+const fn len<T: Width>(_ x: [u256; T::N]) -> usize { T::N }
+const fn crossed<T: Width>(_ e: Evidence<Width<T>>, _ x: [u256; T::N]) -> usize {
+    with (e) { let y: [u256; T::N] = x
+        0 }
+}

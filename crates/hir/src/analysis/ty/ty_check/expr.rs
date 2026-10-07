@@ -1721,22 +1721,26 @@ impl<'db> TyChecker<'db> {
         let requirements = callable
             .selection_requirements(self.db)
             .fold_with(self.db, &mut self.table);
-        let mut premises = self.env.assumptions().list(self.db).to_vec();
-        let mut selections = Vec::new();
-        for &required in requirements.list(self.db) {
-            if let Some(selection) = self.env.selection_for_goal(required) {
-                premises.retain(|goal| !selection.matches(self.db, *goal));
-                premises.push(selection.goal());
-                selections.push(selection);
-            }
-        }
-        let assumptions = PredicateListId::new(self.db, premises).extend_all_bounds(self.db);
-        let context = self
-            .env
-            .selection_context()
-            .with_selections(self.db, selections);
+        let provisions = requirements
+            .list(self.db)
+            .iter()
+            .filter_map(|&goal| self.env.provision_for_goal(goal))
+            .collect::<Vec<_>>();
+        let assumptions = crate::semantic::lookup_assumptions(
+            self.db,
+            self.env.assumptions(),
+            provisions
+                .iter()
+                .filter_map(|p| p.evidence_operand().map(|(_, goal)| goal)),
+            provisions.iter().filter_map(|p| match p {
+                crate::semantic::Provision::Named(selection) => Some(*selection),
+                _ => None,
+            }),
+        );
+        let context = self.env.selection_context();
         let ty = ty.fold_with(self.db, &mut self.table);
-        let ty = context.contextualize_const_types(self.db, ty);
+        let ty = context
+            .contextualize_const_types_with(self.db, ty, |goal| self.env.provision_for_goal(goal));
         normalize_ty(self.db, ty, self.env.scope(), assumptions)
     }
 
@@ -2690,15 +2694,23 @@ impl<'db> TyChecker<'db> {
             args,
             instantiated.assoc_type_bindings(self.db).clone(),
         );
-        if let Some(selection) = self.env.selection_for_goal(trait_goal) {
-            let goal = selection
-                .revalidate(
-                    self.db,
-                    self.trait_effect_solve_context(self.env.scope(), self.env.assumptions()),
-                    trait_goal,
-                )
-                .and_then(|proof| proof.goal_with_associated_bindings())
-                .ok()?;
+        if let Some(provision) = self
+            .env
+            .provision_for_goal(trait_goal)
+            .filter(|p| !matches!(p, Provision::Bound(_)))
+        {
+            let goal = match provision {
+                Provision::EvidenceLocal(_, goal) | Provision::EvidenceParameter(_, goal) => goal,
+                Provision::Named(selection) => selection
+                    .revalidate(
+                        self.db,
+                        self.trait_effect_solve_context(self.env.scope(), self.env.assumptions()),
+                        trait_goal,
+                    )
+                    .and_then(|proof| proof.goal_with_associated_bindings())
+                    .ok()?,
+                Provision::Bound(_) => unreachable!("bound lookup uses ordinary solving"),
+            };
             let StoredEffectKey::Trait(witness) = finalize_stored_effect_key(
                 self.db,
                 StoredEffectKey::Trait(StoredTraitKey {
@@ -3751,15 +3763,24 @@ impl<'db> TyChecker<'db> {
                     args,
                     instantiated.assoc_type_bindings(self.db).clone(),
                 );
-                let solved_inst = if let Some(selection) = self.env.selection_for_goal(trait_goal) {
-                    selection
-                        .revalidate(
-                            self.db,
-                            self.trait_effect_solve_context(scope, assumptions),
-                            trait_goal,
-                        )
-                        .and_then(|proof| proof.goal_with_associated_bindings())
-                        .ok()
+                let solved_inst = if let Some(provision) = self
+                    .env
+                    .provision_for_goal(trait_goal)
+                    .filter(|p| !matches!(p, Provision::Bound(_)))
+                {
+                    match provision {
+                        Provision::EvidenceLocal(_, goal)
+                        | Provision::EvidenceParameter(_, goal) => Some(goal),
+                        Provision::Named(selection) => selection
+                            .revalidate(
+                                self.db,
+                                self.trait_effect_solve_context(scope, assumptions),
+                                trait_goal,
+                            )
+                            .and_then(|proof| proof.goal_with_associated_bindings())
+                            .ok(),
+                        Provision::Bound(_) => unreachable!("bound lookup uses ordinary solving"),
+                    }
                 } else if let GoalSatisfiability::Satisfied(solution) =
                     self.trait_effect_goal_satisfiability_in_scope(scope, assumptions, trait_goal)
                 {
@@ -4573,12 +4594,12 @@ impl<'db> TyChecker<'db> {
                         inst.assoc_type_bindings(self.db).clone(),
                     );
 
-                    let selection =
-                        self.selection_for_path(path, inst, path_expr_span.clone().into());
+                    let provision =
+                        self.provision_for_path(path, inst, path_expr_span.clone().into());
                     if !self.check_trait_const_obligation(
                         inst,
                         path_expr_span.clone().into(),
-                        selection,
+                        provision,
                     ) {
                         return ExprProp::invalid(self.db);
                     }
@@ -4592,7 +4613,7 @@ impl<'db> TyChecker<'db> {
                                 inst,
                                 name,
                             )
-                            .with_selection(selection),
+                            .with_provision(provision),
                         ),
                     );
                     // Look up the associated const's declared type in the trait and
@@ -4863,11 +4884,11 @@ impl<'db> TyChecker<'db> {
                 .iter()
                 .enumerate()
         {
-            let selection = self.env.selection_for_goal(goal);
+            let provision = self.env.provision_for_goal(goal);
             self.check_trait_const_obligation_at(
                 goal,
                 expr.span(self.body()).into(),
-                selection,
+                provision,
                 super::env::TraitObligationOrigin::ConstructorConstraint {
                     constructor: expr,
                     constraint_idx,
@@ -5496,7 +5517,10 @@ impl<'db> TyChecker<'db> {
                 .applicable_ty(self.db)
                 .and_then(|applicable| applicable.const_ty);
 
-            let len_ty = ConstTyId::from_body(self.db, len_body, expected_len_ty, None);
+            let len_ty = ConstTyId::from_body(self.db, len_body, expected_len_ty, None)
+                .with_provision_at(self.db, self.env.selection_context(), &|goal| {
+                    self.env.provision_for_goal(goal)
+                });
             let len_ty = TyId::const_ty(self.db, len_ty);
             let array_ty = TyId::app(self.db, array, len_ty);
 

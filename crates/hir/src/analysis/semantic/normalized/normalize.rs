@@ -1,3 +1,4 @@
+use crate::analysis::semantic::CallSiteId;
 use std::cell::RefCell;
 
 use cranelift_entity::EntityRef;
@@ -224,10 +225,16 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
                             // it must not materialize an owned field snapshot.
                             self.mark_address_root(place.local, &mut needs_slot);
                         }
-                        if let SExpr::Call { callee, args, .. } = expr {
+                        if let SExpr::Call {
+                            call_site,
+                            callee,
+                            args,
+                            ..
+                        } = expr
+                        {
                             for (index, argument) in args.iter().enumerate() {
                                 if self
-                                    .call_view_target(*callee, index, argument.value)
+                                    .call_view_target(*callee, *call_site, index, argument.value)
                                     .is_some()
                                 {
                                     self.mark_address_root(argument.value, &mut needs_slot);
@@ -718,6 +725,25 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
                     .collect::<Result<Vec<_>, _>>()?
                     .into_boxed_slice(),
             },
+            SExpr::OpenedConst { assoc, .. } => {
+                // Borrow checking needs the scalar's type, not an invented impl
+                // answer. CTFE resolves the retained operand before execution.
+                let value = crate::analysis::ty::const_ty::abstract_const_ty_from_assoc_const_use(
+                    self.db, *assoc, dst_ty,
+                );
+                let value = crate::analysis::semantic::sem_const_from_ty(
+                    self.db,
+                    TyId::const_ty(self.db, value),
+                )
+                .ok_or(NormalizeError::InvalidProjection)?;
+                self.normalize_constant(
+                    block,
+                    origin,
+                    dst,
+                    dst_ty,
+                    SConst::from_trusted_source(self.db, value),
+                )?
+            }
             SExpr::Const(value) => {
                 self.normalize_constant(block, origin, dst, dst_ty, value.clone())?
             }
@@ -775,7 +801,7 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
                     NExpr::ScalarCast { value, to }
                 }
             }
-            SExpr::ArrayRepeat { ty, value } => {
+            SExpr::ArrayRepeat { ty, value, .. } => {
                 let ty = self.instance.normalized_ty(self.db, *ty);
                 let element_ty = ty
                     .decompose_ty_app(self.db)
@@ -890,7 +916,9 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
                     .iter()
                     .enumerate()
                     .map(|(index, arg)| {
-                        if let Some(target) = self.call_view_target(*callee, index, arg.value) {
+                        if let Some(target) =
+                            self.call_view_target(*callee, *call_site, index, arg.value)
+                        {
                             let place =
                                 self.place_for_local(block, arg.sem_origin(origin), arg.value)?;
                             let mut place = self.dereference_place_to(
@@ -966,7 +994,7 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
                                 self.call_arg_mode(*callee, index, arg.value),
                             )?;
                             let expected = self
-                                .call_param_ty(*callee, index)
+                                .call_param_ty(*callee, *call_site, index)
                                 .ok_or(NormalizeError::InvalidProjection)?;
                             let actual = self.values[value.value.index()].ty;
                             let target = match (
@@ -2147,18 +2175,21 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
     fn call_view_target(
         &self,
         callee: crate::analysis::semantic::SemanticCalleeRef<'db>,
+        call_site: CallSiteId,
         index: usize,
         local: SLocalId,
     ) -> Option<TyId<'db>> {
         if self.normalized_local_ty(local).as_view(self.db).is_some() {
             return None;
         }
-        self.call_param_ty(callee, index)?.as_view(self.db)
+        self.call_param_ty(callee, call_site, index)?
+            .as_view(self.db)
     }
 
     fn call_param_ty(
         &self,
         callee: crate::analysis::semantic::SemanticCalleeRef<'db>,
+        call_site: CallSiteId,
         index: usize,
     ) -> Option<TyId<'db>> {
         let instance = get_or_build_semantic_instance(self.db, callee.key);
@@ -2168,7 +2199,8 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
             .param_binding(index)?;
         Some(copied_scalar_ty(
             self.db,
-            instance.normalized_binding_ty(self.db, binding),
+            self.instance
+                .normalized_call_param_ty(self.db, instance, call_site, binding),
         ))
     }
 
@@ -2411,6 +2443,7 @@ fn for_each_address_required_local(expr: &SExpr<'_>, mut f: impl FnMut(SLocalId)
         | SExpr::CodeRegionRef { .. }
         | SExpr::Quote { .. }
         | SExpr::Const(_)
+        | SExpr::OpenedConst { .. }
         | SExpr::Unary { .. }
         | SExpr::Binary { .. }
         | SExpr::Cast { .. }
@@ -2972,10 +3005,15 @@ pub(crate) fn expr_used_locals(expr: &SExpr<'_>) -> Vec<SLocalId> {
         | SExpr::UseValue(value)
         | SExpr::Unary { value, .. }
         | SExpr::Cast { value, .. }
-        | SExpr::ArrayRepeat { value, .. }
         | SExpr::GetEnumTag { value }
         | SExpr::IsEnumVariant { value, .. }
         | SExpr::ExtractEnumField { value, .. } => locals.push(value.value),
+        SExpr::ArrayRepeat {
+            value, provisions, ..
+        } => {
+            locals.push(value.value);
+            locals.extend(provisions.iter().map(|(_, witness)| witness.value));
+        }
         SExpr::ReadPlace { place } | SExpr::Borrow { place, .. } => {
             locals.extend(place_used_locals(place));
         }
@@ -2992,6 +3030,7 @@ pub(crate) fn expr_used_locals(expr: &SExpr<'_>) -> Vec<SLocalId> {
             locals.push(base.value);
             locals.push(index.value);
         }
+        SExpr::OpenedConst { witness, .. } => locals.push(witness.value),
         SExpr::Call {
             args,
             effect_args,

@@ -128,6 +128,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             SExpr::CodeRegionRef { .. }
             | SExpr::Quote { .. }
             | SExpr::Const(_)
+            | SExpr::OpenedConst { .. }
             | SExpr::Unary { .. }
             | SExpr::Binary { .. }
             | SExpr::Cast { .. }
@@ -168,6 +169,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             | SExpr::CodeRegionRef { .. }
             | SExpr::Quote { .. }
             | SExpr::Const(_)
+            | SExpr::OpenedConst { .. }
             | SExpr::Unary { .. }
             | SExpr::Binary { .. }
             | SExpr::Cast { .. }
@@ -258,6 +260,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             SExpr::CodeRegionRef { .. }
             | SExpr::Quote { .. }
             | SExpr::Const(_)
+            | SExpr::OpenedConst { .. }
             | SExpr::Unary { .. }
             | SExpr::Binary { .. }
             | SExpr::Cast { .. }

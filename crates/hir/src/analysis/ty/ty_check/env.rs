@@ -605,16 +605,6 @@ impl<'db> TyCheckEnv<'db> {
         self.provisions.lookup(self.db, goal)
     }
 
-    pub(super) fn selection_for_goal(
-        &self,
-        goal: TraitInstId<'db>,
-    ) -> Option<crate::analysis::semantic::SelectedApplication<'db>> {
-        match self.provision_for_goal(goal) {
-            Some(Provision::Named(selection)) => Some(selection),
-            _ => None,
-        }
-    }
-
     pub(super) fn requires_explicit_supertrait_evidence(
         &self,
         span: DynLazySpan<'db>,

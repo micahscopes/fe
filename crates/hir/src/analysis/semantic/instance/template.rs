@@ -240,48 +240,72 @@ impl<'db> ImplEnv<'db> {
         db: &'db dyn HirAnalysisDb,
         ty: TyId<'db>,
     ) -> TyId<'db> {
-        use crate::analysis::ty::{const_ty::ConstTyData, ty_def::TyData};
         if self.selections(db).is_empty() {
             return ty;
         }
-        struct SignatureConsts<'db> {
-            context: crate::analysis::semantic::ImplEnv<'db>,
+        self.contextualize_const_types_with(db, ty, |goal| {
+            self.selection_for(db, goal)
+                .map(crate::semantic::Provision::Named)
+        })
+    }
+
+    pub(crate) fn contextualize_const_types_with(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        ty: TyId<'db>,
+        lookup: impl Fn(TraitInstId<'db>) -> Option<crate::semantic::Provision<'db>>,
+    ) -> TyId<'db> {
+        if self.selections(db).is_empty() && self.witnesses(db).is_empty() {
+            return ty;
         }
-        impl<'db> TyFolder<'db> for SignatureConsts<'db> {
+        use crate::analysis::ty::ty_def::TyData;
+        struct SignatureConsts<'db, F> {
+            context: crate::analysis::semantic::ImplEnv<'db>,
+            lookup: F,
+        }
+        impl<'db, F: Fn(TraitInstId<'db>) -> Option<crate::semantic::Provision<'db>>> TyFolder<'db>
+            for SignatureConsts<'db, F>
+        {
             fn fold_assoc_const_use(
                 &mut self,
                 db: &'db dyn HirAnalysisDb,
                 use_: crate::analysis::ty::assoc_const::AssocConstUse<'db>,
             ) -> crate::analysis::ty::assoc_const::AssocConstUse<'db> {
                 let use_ = use_.super_fold_with(db, self);
-                if use_.selection().is_some() {
+                if use_.provision().is_some() {
                     return use_;
                 }
-                let Some(selection) = self.context.selection_for(db, use_.inst()) else {
+                let Some(provision) = (self.lookup)(use_.inst()) else {
                     return use_;
                 };
-                use_.with_env(use_.origin_scope(), self.context.assumptions(db))
-                    .with_selection(Some(selection))
+                if matches!(provision, crate::semantic::Provision::Bound(_)) {
+                    return use_;
+                }
+                use_.with_env(
+                    self.context.normalization_scope(db),
+                    self.context.assumptions(db),
+                )
+                .with_provision(Some(provision))
             }
 
             fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
                 let ty = ty.super_fold_with(db, self);
-                if let TyData::ConstTy(value) = ty.data(db)
-                    && matches!(
-                        value.data(db),
-                        ConstTyData::UnEvaluated {
-                            impl_env: None,
-                            const_def: None,
-                            ..
-                        }
-                    )
-                {
-                    return TyId::const_ty(db, value.with_impl_env(db, self.context));
+                if let TyData::ConstTy(value) = ty.data(db) {
+                    return TyId::const_ty(
+                        db,
+                        value.with_provision_at(db, self.context, &self.lookup),
+                    );
                 }
                 ty
             }
         }
-        ty.fold_with(db, &mut SignatureConsts { context: self })
+        ty.fold_with(
+            db,
+            &mut SignatureConsts {
+                context: self,
+                lookup,
+            },
+        )
     }
 
     pub fn new_with_selections(

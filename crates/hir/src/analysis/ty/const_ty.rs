@@ -1015,7 +1015,13 @@ fn const_expr_is_fully_ground<'db>(db: &'db dyn HirAnalysisDb, expr: ConstExprId
         ConstExpr::UnOp { expr, .. }
         | ConstExpr::Cast { expr, .. }
         | ConstExpr::Field { value: expr, .. } => ty_is_fully_ground(db, *expr),
-        ConstExpr::TraitConst(assoc) => trait_inst_is_fully_ground(db, assoc.inst()),
+        ConstExpr::TraitConst(assoc) => {
+            assoc
+                .provision()
+                .and_then(|p| p.evidence_operand())
+                .is_none()
+                && trait_inst_is_fully_ground(db, assoc.inst())
+        }
         ConstExpr::InherentConst(use_) => ty_is_fully_ground(db, use_.receiver_ty()),
     }
 }
@@ -2709,6 +2715,14 @@ pub(crate) fn const_ty_from_assoc_const_use<'db>(
     db: &'db dyn HirAnalysisDb,
     assoc: AssocConstUse<'db>,
 ) -> Option<ConstTyId<'db>> {
+    if assoc
+        .provision()
+        .is_some_and(|provision| provision.evidence_operand().is_some())
+    {
+        // The opened operand owns this choice. Until its witness is known,
+        // preserve the constant description instead of choosing the ordinary impl.
+        return None;
+    }
     if let Some(selection) = assoc.selection() {
         let proof = selection
             .revalidate(db, assoc.solve_cx(db), assoc.inst())
@@ -3226,6 +3240,70 @@ impl<'db> ConstTyId<'db> {
             Partial::Present(body) => Self::from_body(db, body, None, None),
             Partial::Absent => Self::invalid(db, InvalidCause::ParseError),
         }
+    }
+
+    /// Capture only the provision read by an associated-constant path. An
+    /// unrelated symbolic expression must retain its declaration context.
+    pub(crate) fn with_provision_at(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        context: ImplEnv<'db>,
+        lookup: &impl Fn(TraitInstId<'db>) -> Option<crate::semantic::Provision<'db>>,
+    ) -> Self {
+        let ConstTyData::UnEvaluated {
+            body,
+            capture,
+            const_def: None,
+            impl_env: None,
+            ..
+        } = self.data(db)
+        else {
+            return self;
+        };
+        let Partial::Present(Expr::Path(path)) = body.expr(db).data(db, *body) else {
+            return self;
+        };
+        let Some(path) = path.to_opt() else {
+            return self;
+        };
+        let assumptions = assumptions_for_body(db, *body);
+        let Ok(PathRes::TraitConst(recv_ty, inst, name)) =
+            resolve_path(db, path, body.scope(), assumptions, true)
+        else {
+            return self;
+        };
+        let mut args = inst.args(db).clone();
+        args[0] = recv_ty;
+        let inst = capture.specialize(
+            db,
+            TraitInstId::new(db, inst.def(db), args, inst.assoc_type_bindings(db).clone()),
+        );
+        let Some(provision) = lookup(inst) else {
+            return self;
+        };
+        if matches!(provision, crate::semantic::Provision::Bound(_)) {
+            return self;
+        }
+        let assoc = AssocConstUse::new(
+            context.normalization_scope(db),
+            context.assumptions(db),
+            inst,
+            name,
+        )
+        .with_provision(Some(provision));
+        let ty = if self.ty(db).has_invalid(db) {
+            let Some(ty) = inst
+                .def(db)
+                .const_(db, name)
+                .and_then(|view| view.ty_binder(db))
+            else {
+                return self;
+            };
+            ty.instantiate(db, inst.args(db))
+        } else {
+            self.ty(db)
+        };
+        abstract_const_ty_from_assoc_const_use(db, assoc, ty)
     }
 
     pub(crate) fn with_optional_impl_env(

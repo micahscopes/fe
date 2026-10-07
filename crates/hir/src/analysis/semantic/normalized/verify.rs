@@ -520,6 +520,7 @@ fn verify_expr<'db>(
         .then_some(())
         .ok_or(NormalizedBodyVerifyError::ExpressionType),
         NExpr::Call {
+            call_site,
             callee,
             args,
             effect_args,
@@ -529,7 +530,10 @@ fn verify_expr<'db>(
             let typed_body = callee.key(db).typed_body(db);
             let mut param_tys = Vec::new();
             while let Some(binding) = typed_body.param_binding(param_tys.len()) {
-                param_tys.push(callee.normalized_binding_ty(db, binding));
+                param_tys.push(
+                    body.owner
+                        .normalized_call_param_ty(db, callee, *call_site, binding),
+                );
             }
             if args.len() != param_tys.len() {
                 return Err(NormalizedBodyVerifyError::ExpressionType);

@@ -518,7 +518,16 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             }
             Expr::ArrayRep(elem, _) => {
                 let value = self.lower_expr_operand(*elem);
-                self.emit_expr_with_origin(origin, ty, SExpr::ArrayRepeat { ty, value })
+                let provisions = self.array_length_provisions(ty);
+                self.emit_expr_with_origin(
+                    origin,
+                    ty,
+                    SExpr::ArrayRepeat {
+                        ty,
+                        value,
+                        provisions,
+                    },
+                )
             }
             Expr::RecordInit(path, fields) => self.lower_record_init(expr, *path, fields),
             Expr::Field(base, _) => {
@@ -772,6 +781,50 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         ))
     }
 
+    fn array_length_provisions(
+        &self,
+        ty: TyId<'db>,
+    ) -> Box<[(crate::semantic::Provision<'db>, SOperand)]> {
+        use crate::analysis::ty::fold::{TyFoldable, TyFolder};
+        struct Openings<'db>(Vec<crate::semantic::Provision<'db>>);
+        impl<'db> TyFolder<'db> for Openings<'db> {
+            fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+                ty.super_fold_with(db, self)
+            }
+            fn fold_assoc_const_use(
+                &mut self,
+                db: &'db dyn HirAnalysisDb,
+                use_: crate::analysis::ty::assoc_const::AssocConstUse<'db>,
+            ) -> crate::analysis::ty::assoc_const::AssocConstUse<'db> {
+                if let Some(provision) = use_.provision()
+                    && provision.evidence_operand().is_some()
+                    && !self.0.contains(&provision)
+                {
+                    self.0.push(provision);
+                }
+                use_.super_fold_with(db, self)
+            }
+        }
+        let mut openings = Openings(Vec::new());
+        if let Some(length) = ty.generic_args(self.db).get(1) {
+            length.fold_with(self.db, &mut openings);
+        }
+        openings
+            .0
+            .into_iter()
+            .map(|provision| {
+                let (value, _) = provision
+                    .evidence_operand()
+                    .expect("captured opening has an operand");
+                let Some(WithBindingSource::Value(witness)) = self.with_binding_sources.get(&value)
+                else {
+                    panic!("array length must retain its lexical evidence value");
+                };
+                (provision, *witness)
+            })
+            .collect()
+    }
+
     fn lower_const_ref(&mut self, expr: ExprId, const_ref: ConstRef<'db>) -> SValueId {
         let ty = self.expr_ty(expr);
         let inherit_trait_selection = matches!(const_ref, ConstRef::TraitConst(_))
@@ -788,6 +841,22 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     .answer_origin(self.db),
                 crate::analysis::ty::trait_def::ImplementorOrigin::Assumption
             );
+        if let ConstRef::TraitConst(assoc) = const_ref
+            && let Some((value, _)) = assoc.provision().and_then(|p| p.evidence_operand())
+        {
+            let Some(WithBindingSource::Value(witness)) = self.with_binding_sources.get(&value)
+            else {
+                panic!("opened constant must retain its lexical evidence value");
+            };
+            return self.emit_expr_with_origin(
+                SemOrigin::Expr(expr),
+                ty,
+                SExpr::OpenedConst {
+                    assoc,
+                    witness: *witness,
+                },
+            );
+        }
         if let Some(const_ref) = resolve_semantic_const_ref_in_instance(
             self.db,
             Some(self.instance.key(self.db)),
