@@ -1261,8 +1261,16 @@ fn instantiate_provider_target_layout<'db>(
         boundary,
         vec![LayoutOccurrenceStep::Instantiation(0)],
     );
-    let normalized_root_uses = normalize_layout_root_uses(db, target.ty, scope, assumptions);
-    let normalized = normalize_ty(db, target.ty, scope, assumptions);
+    let normalized_root_uses = normalize_layout_root_uses(
+        db,
+        target.ty,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+    );
+    let normalized = normalize_ty(
+        db,
+        target.ty,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+    );
     // Normalization can expose structural roots owned by another associated
     // type definition. Re-land the complete equality partition under this
     // provider occurrence so every root carries the exact provider boundary.
@@ -1289,8 +1297,10 @@ fn instantiate_provider_target_layout<'db>(
                     db,
                     Binder::bind(schema.owner(db), owner)
                         .instantiate(db, impl_instance.impl_args(db)),
-                    scope,
-                    assumptions,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        scope,
+                        assumptions,
+                    ),
                 )
             }),
             selector: root_use.selector,
@@ -3195,8 +3205,10 @@ fn resolve_storage_place<'db>(
                 ty = normalize_ty(
                     db,
                     impl_instance.instantiated_assoc_ty(db, target_ident)?,
-                    field.field.contract.scope(),
-                    PredicateListId::empty_list(db),
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        field.field.contract.scope(),
+                        PredicateListId::empty_list(db),
+                    ),
                 );
                 space = target_space;
             }

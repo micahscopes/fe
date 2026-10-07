@@ -1285,10 +1285,19 @@ impl<'db> ResolvedMethodInstance<'db> {
                     db,
                     substitute_complete(db, formal_ty, &args.residualize(db))
                         .expect("selected input template must match body schema"),
-                    self.normalization_scope,
-                    assumptions,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        self.normalization_scope,
+                        assumptions,
+                    ),
                 );
-                let actual_ty = normalize_ty(db, actual_ty, self.normalization_scope, assumptions);
+                let actual_ty = normalize_ty(
+                    db,
+                    actual_ty,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        self.normalization_scope,
+                        assumptions,
+                    ),
+                );
                 let mut bindings = Vec::new();
                 if !collect_layout_arg_bindings(db, formal_ty, actual_ty, &mut bindings) {
                     continue;
@@ -2042,7 +2051,16 @@ impl<'db> TraitInstId<'db> {
         let normalized_args: Vec<_> = self
             .args(db)
             .iter()
-            .map(|&arg| crate::analysis::ty::normalize::normalize_ty(db, arg, scope, assumptions))
+            .map(|&arg| {
+                crate::analysis::ty::normalize::normalize_ty(
+                    db,
+                    arg,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        scope,
+                        assumptions,
+                    ),
+                )
+            })
             .collect();
         Self::new(
             db,

@@ -1062,8 +1062,10 @@ impl<'db> TyCheckEnv<'db> {
                 let ty = normalize_ty(
                     self.db,
                     ty.fold_with(self.db, &mut prober),
-                    scope,
-                    assumptions,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        scope,
+                        assumptions,
+                    ),
                 );
                 (!ty_is_copy(
                     self.db,

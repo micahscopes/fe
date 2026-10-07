@@ -605,8 +605,14 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     .into_iter()
                     .enumerate()
                     .map(|(idx, field_ty)| {
-                        let field_ty =
-                            normalize_ty(self.db, field_ty, self.body.scope(), self.assumptions);
+                        let field_ty = normalize_ty(
+                            self.db,
+                            field_ty,
+                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                                self.body.scope(),
+                                self.assumptions,
+                            ),
+                        );
                         if field_ty == TyId::unit(self.db) || field_ty.is_zero_sized(self.db) {
                             unit
                         } else if idx == 0 {
@@ -1021,9 +1027,21 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         expr_ty: TyId<'db>,
     ) -> PathReadSemantics {
         let scope = self.body.scope();
-        if normalize_ty(self.db, expr_ty, scope, self.assumptions)
-            == normalize_ty(self.db, self.binding_ty(binding), scope, self.assumptions)
-        {
+        if normalize_ty(
+            self.db,
+            expr_ty,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                scope,
+                self.assumptions,
+            ),
+        ) == normalize_ty(
+            self.db,
+            self.binding_ty(binding),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                scope,
+                self.assumptions,
+            ),
+        ) {
             return PathReadSemantics::ReuseLocal;
         }
 
@@ -1034,9 +1052,16 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             | SemanticLocalRole::PlaceBoundValue { .. }
             | SemanticLocalRole::DirectCarrier { .. } => PathReadSemantics::ForwardInterface,
             SemanticLocalRole::PlaceCarrier { .. }
-                if normalize_ty(self.db, expr_ty, scope, self.assumptions)
-                    .as_capability(self.db)
-                    .is_some() =>
+                if normalize_ty(
+                    self.db,
+                    expr_ty,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        scope,
+                        self.assumptions,
+                    ),
+                )
+                .as_capability(self.db)
+                .is_some() =>
             {
                 PathReadSemantics::ForwardInterface
             }
@@ -1267,9 +1292,16 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             ),
             ty,
         ) && callable.arg_ty(self.db, param).is_some_and(|param_ty| {
-            normalize_ty(self.db, param_ty, self.body.scope(), self.assumptions)
-                .as_view(self.db)
-                .is_some()
+            normalize_ty(
+                self.db,
+                param_ty,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    self.body.scope(),
+                    self.assumptions,
+                ),
+            )
+            .as_view(self.db)
+            .is_some()
         }) && let Some(place) = self.try_lower_place(expr)
             && !place.path.is_empty()
         {
@@ -1355,8 +1387,10 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     .generic_args()
                     .first()
                     .expect("core::size_of lowering requires a concrete generic arg"),
-                self.body.scope(),
-                self.assumptions,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    self.body.scope(),
+                    self.assumptions,
+                ),
             ),
         };
         let result_ty = self.expr_ty(expr);

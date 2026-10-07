@@ -1546,7 +1546,14 @@ pub fn canonicalize_ty_for_mode<'db>(
 
         if finalize_self && !matches!(mode, ConstCanonMode::Stored) {
             ty = complete_default_const_args_for_identity(db, ty);
-            ty = normalize_ty(db, ty, env.scope, env.assumptions);
+            ty = normalize_ty(
+                db,
+                ty,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    env.scope,
+                    env.assumptions,
+                ),
+            );
         }
 
         ty

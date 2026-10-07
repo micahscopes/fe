@@ -454,8 +454,10 @@ fn projection_base_ty<'db>(
     let ty = normalize_ty(
         db,
         ty,
-        source.template_owner.scope(),
-        source.owner.assumptions(db),
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+            source.template_owner.scope(),
+            source.owner.assumptions(db),
+        ),
     );
     ty.as_capability(db).map_or(ty, |(_, target)| target)
 }

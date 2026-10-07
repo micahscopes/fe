@@ -1456,8 +1456,10 @@ impl<'db> PredicateListId<'db> {
                 let inst = normalize_from_assumptions(
                     db,
                     super_trait.instantiate(db, pred.args(db)),
-                    hir_trait.scope(),
-                    evidence,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        hir_trait.scope(),
+                        evidence,
+                    ),
                 );
                 if predicate_has_recursive_assoc_projection(db, inst) {
                     continue;
@@ -1492,8 +1494,10 @@ impl<'db> PredicateListId<'db> {
                     let trait_inst = normalize_from_assumptions(
                         db,
                         Binder::bind(hir_trait.into(), bound).instantiate(db, pred.args(db)),
-                        hir_trait.scope(),
-                        evidence,
+                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                            hir_trait.scope(),
+                            evidence,
+                        ),
                     );
                     if predicate_has_recursive_assoc_projection(db, trait_inst) {
                         continue;

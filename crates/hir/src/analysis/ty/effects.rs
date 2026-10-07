@@ -207,8 +207,7 @@ pub(crate) fn lower_effect_key_schema<'db>(
         let carrier = normalize_from_assumptions(
             db,
             lower_hir_ty_with_minter(db, key_ty, scope, assumptions, minter),
-            scope,
-            assumptions,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
         );
         return if carrier.is_star_kind(db) {
             ResolvedEffectKey::Type(TypeKeySchema { carrier })
@@ -221,7 +220,14 @@ pub(crate) fn lower_effect_key_schema<'db>(
     };
     match resolve_path_with_minter(db, key_path, scope, assumptions, false, minter) {
         Ok(PathRes::Ty(ty)) if ty.is_star_kind(db) => {
-            let ty = normalize_from_assumptions(db, ty, scope, assumptions);
+            let ty = normalize_from_assumptions(
+                db,
+                ty,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    assumptions,
+                ),
+            );
             let schema = TypeKeySchema {
                 carrier: existentialize_omitted_const_args_in_effect_key(
                     db,
@@ -235,7 +241,14 @@ pub(crate) fn lower_effect_key_schema<'db>(
         }
         Ok(PathRes::TyAlias(_, ty)) if ty.is_star_kind(db) => {
             let schema = TypeKeySchema {
-                carrier: normalize_from_assumptions(db, ty, scope, assumptions),
+                carrier: normalize_from_assumptions(
+                    db,
+                    ty,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        scope,
+                        assumptions,
+                    ),
+                ),
             };
             ResolvedEffectKey::Type(schema)
         }

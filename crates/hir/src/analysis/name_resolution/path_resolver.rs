@@ -1406,7 +1406,13 @@ where
                     .get(&ident)
                     .copied()
                     .map_or(applied, |bound| TyId::foldl(db, bound, &seg_args));
-                let norm = normalize_ty(db, candidate_ty, scope, evidence);
+                let norm = normalize_ty(
+                    db,
+                    candidate_ty,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        scope, evidence,
+                    ),
+                );
                 let key = if norm.has_invalid(db) { applied } else { norm };
                 dedup.entry(key).or_insert((inst, applied, norm));
             }
@@ -2260,8 +2266,7 @@ fn normalize_computed_path<'db>(
         return PathRes::Ty(crate::analysis::ty::normalize::normalize_ty(
             db,
             *ty,
-            scope,
-            assumptions,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
         ));
     }
     resolved

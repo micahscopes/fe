@@ -316,12 +316,21 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         src: PatternValue<'db>,
     ) {
         let scope = self.body.scope();
-        let src_ty = normalize_ty(self.db, src.carrier_ty.0, scope, self.assumptions);
+        let src_ty = normalize_ty(
+            self.db,
+            src.carrier_ty.0,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                scope,
+                self.assumptions,
+            ),
+        );
         let dst_ty = normalize_ty(
             self.db,
             self.locals[dst.index()].ty,
-            scope,
-            self.assumptions,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                scope,
+                self.assumptions,
+            ),
         );
         debug_assert_eq!(
             src_ty,
@@ -369,8 +378,21 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                         == Some(PatBindingMode::ByBorrow);
                     let source_matches_dst = {
                         let scope = self.body.scope();
-                        normalize_ty(self.db, value.carrier_ty.0, scope, self.assumptions)
-                            == normalize_ty(self.db, dst_ty, scope, self.assumptions)
+                        normalize_ty(
+                            self.db,
+                            value.carrier_ty.0,
+                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                                scope,
+                                self.assumptions,
+                            ),
+                        ) == normalize_ty(
+                            self.db,
+                            dst_ty,
+                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                                scope,
+                                self.assumptions,
+                            ),
+                        )
                     };
                     let needs_borrow_read = by_borrow && !source_matches_dst;
                     let binding_value = if needs_borrow_read {

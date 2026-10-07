@@ -417,7 +417,14 @@ impl<'db> TyChecker<'db> {
             return typed;
         };
 
-        let expected = normalize_ty(self.db, expected, self.env.scope(), self.env.assumptions());
+        let expected = normalize_ty(
+            self.db,
+            expected,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.env.scope(),
+                self.env.assumptions(),
+            ),
+        );
 
         self.env.enter_expr(expr);
         let mut actual = match expr_data {
@@ -468,7 +475,14 @@ impl<'db> TyChecker<'db> {
         };
         self.env.leave_expr();
 
-        actual.ty = normalize_ty(self.db, actual.ty, self.env.scope(), self.env.assumptions());
+        actual.ty = normalize_ty(
+            self.db,
+            actual.ty,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.env.scope(),
+                self.env.assumptions(),
+            ),
+        );
         if let Some(coerced) =
             self.try_coerce_capability_for_expr_to_expected(expr, actual.ty, expected)
         {
@@ -730,10 +744,19 @@ impl<'db> TyChecker<'db> {
         let mut from = normalize_ty(
             self.db,
             inner_prop.ty,
-            self.env.scope(),
-            self.env.assumptions(),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.env.scope(),
+                self.env.assumptions(),
+            ),
         );
-        let to = normalize_ty(self.db, target_ty, self.env.scope(), self.env.assumptions());
+        let to = normalize_ty(
+            self.db,
+            target_ty,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.env.scope(),
+                self.env.assumptions(),
+            ),
+        );
 
         // Casts operate on values, so for Copy capabilities treat the source as
         // the inner value type. This allows widening/narrowing checks such as
@@ -1739,7 +1762,14 @@ impl<'db> TyChecker<'db> {
         let ty = ty.fold_with(self.db, &mut self.table);
         let ty = context
             .contextualize_const_types_with(self.db, ty, |goal| self.env.provision_for_goal(goal));
-        normalize_ty(self.db, ty, self.env.scope(), assumptions)
+        normalize_ty(
+            self.db,
+            ty,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.env.scope(),
+                assumptions,
+            ),
+        )
     }
 
     fn normalize_callable_return(&mut self, callable: &Callable<'db>) -> TyId<'db> {
@@ -2760,7 +2790,14 @@ impl<'db> TyChecker<'db> {
         if matches!(provider.origin, EffectOrigin::RootProvider { .. }) {
             return Some(EffectArgStyle::Value);
         }
-        let target_ty = normalize_ty(self.db, target_ty, self.env.scope(), self.env.assumptions());
+        let target_ty = normalize_ty(
+            self.db,
+            target_ty,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.env.scope(),
+                self.env.assumptions(),
+            ),
+        );
         match provider_semantics(self.db, self.env.scope(), self.env.assumptions(), target_ty)
             .evidence
         {
@@ -3282,8 +3319,7 @@ impl<'db> TyChecker<'db> {
         normalize_ty(
             self.db,
             self.table.fold_ty(self.db, target_ty),
-            scope,
-            assumptions,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
         )
         .fold_with(self.db, &mut self.table)
     }
@@ -3396,8 +3432,15 @@ impl<'db> TyChecker<'db> {
             self.commit_trait_goal_solution(effect_handle_inst, handle_solution);
 
             let target_assoc = effect_handle_inst.project_assoc_ty(self.db, target_ident)?;
-            let mut target_ty = normalize_ty(self.db, target_assoc, scope, assumptions)
-                .fold_with(self.db, &mut self.table);
+            let mut target_ty = normalize_ty(
+                self.db,
+                target_assoc,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    assumptions,
+                ),
+            )
+            .fold_with(self.db, &mut self.table);
             let mut provided_ty = self.table.fold_ty(self.db, provided_ty);
 
             let effect_ref_inst = TraitInstId::new(
@@ -4909,7 +4952,7 @@ impl<'db> TyChecker<'db> {
         let lhs_place_ty = lhs_ty
             .as_capability(self.db)
             .map_or(lhs_ty, |(_, inner)| inner);
-        // let lhs_ty = normalize_ty(self.db, lhs_ty, self.env.scope(), self.env.assumptions());
+        // let lhs_ty = normalize_ty(self.db, lhs_ty, crate::analysis::semantic::SolverPremises::from_unpositioned_pair(self.env.scope(), self.env.assumptions()));
 
         if lhs_place_ty.has_invalid(self.db) {
             return ExprProp::invalid(self.db);

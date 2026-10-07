@@ -340,7 +340,14 @@ fn projection_normalization_does_not_commit_speculative_trait_arguments() {
     );
     let assumptions = PredicateListId::new(&db, vec![assumption]);
     assert_eq!(
-        normalize_ty(&db, projection, module.scope(), assumptions),
+        normalize_ty(
+            &db,
+            projection,
+            fe_hir::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                module.scope(),
+                assumptions
+            )
+        ),
         projection,
         "possible equality or impl selection cannot assign a caller inference variable"
     );

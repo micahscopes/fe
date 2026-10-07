@@ -309,13 +309,32 @@ fn compare_ty<'db>(
         let impl_m_ty = impl_m_ty.instantiate_identity();
 
         // 2) Substitute associated types using the provided trait instance.
-        let trait_m_ty_substituted =
-            normalize_from_assumptions(db, trait_m_ty, trait_scope, evidence);
+        let trait_m_ty_substituted = normalize_from_assumptions(
+            db,
+            trait_m_ty,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                trait_scope,
+                evidence,
+            ),
+        );
 
         // 3) Normalize both types to resolve any further nested associated types.
-        let trait_m_ty_normalized =
-            normalize_ty(db, trait_m_ty_substituted, trait_scope, compare_assumptions);
-        let impl_m_ty_normalized = normalize_ty(db, impl_m_ty, trait_scope, compare_assumptions);
+        let trait_m_ty_normalized = normalize_ty(
+            db,
+            trait_m_ty_substituted,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                trait_scope,
+                compare_assumptions,
+            ),
+        );
+        let impl_m_ty_normalized = normalize_ty(
+            db,
+            impl_m_ty,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                trait_scope,
+                compare_assumptions,
+            ),
+        );
         let trait_m_ty_normalized = normalize_compare_assoc_consts(
             db,
             trait_m_ty_normalized,
@@ -355,16 +374,27 @@ fn compare_ty<'db>(
     let trait_m_ret_ty = instantiate_trait_method_template(db, trait_m.ret_ty(db), param_subst);
 
     // Substitute and normalize the return type as well.
-    let trait_m_ret_ty_substituted =
-        normalize_from_assumptions(db, trait_m_ret_ty, trait_scope, evidence);
+    let trait_m_ret_ty_substituted = normalize_from_assumptions(
+        db,
+        trait_m_ret_ty,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(trait_scope, evidence),
+    );
     let trait_m_ret_ty_normalized = normalize_ty(
         db,
         trait_m_ret_ty_substituted,
-        trait_scope,
-        compare_assumptions,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+            trait_scope,
+            compare_assumptions,
+        ),
     );
-    let impl_m_ret_ty_normalized =
-        normalize_ty(db, impl_m_ret_ty, trait_scope, compare_assumptions);
+    let impl_m_ret_ty_normalized = normalize_ty(
+        db,
+        impl_m_ret_ty,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+            trait_scope,
+            compare_assumptions,
+        ),
+    );
     let trait_m_ret_ty_normalized = normalize_compare_assoc_consts(
         db,
         trait_m_ret_ty_normalized,
@@ -663,7 +693,14 @@ fn collect_effect_provider_entries<'db>(
             identity.key_ty = identity.key_ty.map(|ty| {
                 normalize_compare_assoc_consts(
                     db,
-                    normalize_ty(db, ty, scope, assumptions),
+                    normalize_ty(
+                        db,
+                        ty,
+                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                            scope,
+                            assumptions,
+                        ),
+                    ),
                     scope,
                     assumptions,
                     trait_inst,
@@ -797,7 +834,14 @@ pub(crate) fn normalize_predicate_for_comparison<'db>(
         .iter()
         .copied()
         .map(|ty| {
-            let ty = normalize_ty(db, ty, scope, assumptions);
+            let ty = normalize_ty(
+                db,
+                ty,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    assumptions,
+                ),
+            );
             normalize_compare_assoc_consts(
                 db,
                 ty,
@@ -812,7 +856,14 @@ pub(crate) fn normalize_predicate_for_comparison<'db>(
         .assoc_type_bindings(db)
         .iter()
         .map(|(name, &ty)| {
-            let ty = normalize_ty(db, ty, scope, assumptions);
+            let ty = normalize_ty(
+                db,
+                ty,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    assumptions,
+                ),
+            );
             (
                 *name,
                 normalize_compare_assoc_consts(

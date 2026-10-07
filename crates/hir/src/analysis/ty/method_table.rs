@@ -315,8 +315,22 @@ fn match_probe_key<'db>(
         let mut progressed = false;
         for (lhs, rhs) in deferred {
             let assumptions = assumptions.fold_with(db, table);
-            let normalized_lhs = normalize_ty(db, lhs.fold_with(db, table), scope, assumptions);
-            let normalized_rhs = normalize_ty(db, rhs.fold_with(db, table), scope, assumptions);
+            let normalized_lhs = normalize_ty(
+                db,
+                lhs.fold_with(db, table),
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    assumptions,
+                ),
+            );
+            let normalized_rhs = normalize_ty(
+                db,
+                rhs.fold_with(db, table),
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    assumptions,
+                ),
+            );
             if table.unify(normalized_lhs, normalized_rhs).is_ok() {
                 progressed = true;
             } else {

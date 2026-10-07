@@ -64,11 +64,25 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
     }
 
     fn fallback_local_role(&self, ty: TyId<'db>) -> SemanticLocalRole<'db> {
-        let ty = normalize_ty(self.db, ty, self.body.scope(), self.assumptions);
+        let ty = normalize_ty(
+            self.db,
+            ty,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.body.scope(),
+                self.assumptions,
+            ),
+        );
         if let Some((_, value_ty)) = ty.as_capability(self.db) {
             return SemanticLocalRole::PlaceCarrier {
                 provider: None,
-                value_ty: normalize_ty(self.db, value_ty, self.body.scope(), self.assumptions),
+                value_ty: normalize_ty(
+                    self.db,
+                    value_ty,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        self.body.scope(),
+                        self.assumptions,
+                    ),
+                ),
             };
         }
         let semantics = provider_semantics(self.db, self.body.scope(), self.assumptions, ty);

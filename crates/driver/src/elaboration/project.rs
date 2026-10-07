@@ -516,8 +516,16 @@ fn prepare_selected<'db>(
             let record_ty = MetaItem::Record
                 .resolve(db, provider.scope())
                 .ok_or_else(|| error(ElaborationErrorKind::MissingRecord))?;
-            let normalize =
-                |ty| normalize_ty(db, ty, provider.scope(), PredicateListId::empty_list(db));
+            let normalize = |ty| {
+                normalize_ty(
+                    db,
+                    ty,
+                    hir::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        provider.scope(),
+                        PredicateListId::empty_list(db),
+                    ),
+                )
+            };
             let argument_ty = parameters.first().map(|parameter| {
                 let ty = normalize(parameter.ty(db));
                 ty.as_view(db).unwrap_or(ty)

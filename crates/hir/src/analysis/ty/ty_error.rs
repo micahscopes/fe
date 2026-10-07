@@ -98,7 +98,11 @@ pub(crate) fn normalization_limit_diag<'db>(
     if !ty.has_projection(db) {
         return None;
     }
-    let normalized = super::normalize::normalize_ty(db, ty, scope, assumptions);
+    let normalized = super::normalize::normalize_ty(
+        db,
+        ty,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+    );
     super::fold::ty_contains(
         db,
         normalized,
@@ -224,7 +228,11 @@ fn projection_const_fault<'db>(
     if !matches!(ty.data(db), TyData::AssocTy(_) | TyData::QualifiedTy(_)) {
         return None;
     }
-    let normalized = super::normalize::normalize_ty(db, ty, scope, assumptions);
+    let normalized = super::normalize::normalize_ty(
+        db,
+        ty,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+    );
     let cause = normalized.invalid_cause(db)?;
     if is_const_fault(&cause) {
         diag_from_invalid_cause(span, &cause)

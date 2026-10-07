@@ -912,7 +912,14 @@ impl<'db> Callable<'db> {
             .get(arg_idx)?
             .instantiate(tc.db, &self.generic_args);
         expected = self.normalize_with_trait_evidence(tc.db, expected);
-        let expected = normalize_ty(tc.db, expected, tc.env.scope(), tc.env.assumptions());
+        let expected = normalize_ty(
+            tc.db,
+            expected,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                tc.env.scope(),
+                tc.env.assumptions(),
+            ),
+        );
         if tc.string_literal_should_use_byte_array(expected)
             || self
                 .callable_def

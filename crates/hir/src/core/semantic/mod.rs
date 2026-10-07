@@ -320,11 +320,8 @@ pub(crate) fn recorded_impl_bounds<'db>(
     let ImplementorOrigin::Hir(item) = selected.origin(db) else {
         return PredicateListId::empty_list(db);
     };
-    let mut normalizer = crate::analysis::ty::normalize::TypeNormalizer::new(
-        db,
-        context.normalization_scope(db),
-        context.assumptions(db),
-    );
+    let mut normalizer =
+        crate::analysis::ty::normalize::TypeNormalizer::new(db, context.premises(db));
     let goal = goal.fold_with(db, &mut normalizer);
     let selected = selected.fold_with(db, &mut normalizer);
     let instance = crate::analysis::ty::trait_def::instantiate_selected_impl_with_normalizer(
@@ -1685,7 +1682,14 @@ impl<'db> FuncParamView<'db> {
                         substitute_layout_holes_by_placeholder(db, expected, receiver_layout_args);
                 }
             }
-            let ty_norm = normalize_ty(db, ty, func.scope(), assumptions);
+            let ty_norm = normalize_ty(
+                db,
+                ty,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    func.scope(),
+                    assumptions,
+                ),
+            );
 
             let matches_expected = |candidate: TyId<'db>| {
                 let (exp_base, exp_args) = expected.decompose_ty_app(db);
@@ -1883,7 +1887,14 @@ impl<'db> RecvArmView<'db> {
                 IndexMap::new(),
             );
             let return_proj = TyId::assoc_ty(db, inst.trait_ref(db), return_ident);
-            normalize_ty(db, return_proj, contract.scope(), assumptions)
+            normalize_ty(
+                db,
+                return_proj,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    contract.scope(),
+                    assumptions,
+                ),
+            )
         } else {
             TyId::invalid(db, InvalidCause::Other)
         };
@@ -4963,7 +4974,14 @@ impl<'db> ImplAssocTypeView<'db> {
         if let Some(diag) = ty.emit_diag(db, ty_span.clone().into()) {
             return vec![diag];
         }
-        let normalized = normalize_ty(db, ty, self.scope(), assumptions);
+        let normalized = normalize_ty(
+            db,
+            ty,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.scope(),
+                assumptions,
+            ),
+        );
         if let Some(diag) = normalized.emit_diag(db, ty_span.clone().into()) {
             return vec![diag];
         }

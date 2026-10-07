@@ -2177,12 +2177,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             return Err(invalid("expected a unary query family and result type").into());
         };
         let context = crate::semantic::context_at(db, owner.scope(), None);
-        let query_ty = normalize_ty(
-            db,
-            TyId::app(db, *family, field_ty),
-            context.normalization_scope(db),
-            context.assumptions(db),
-        );
+        let query_ty = normalize_ty(db, TyId::app(db, *family, field_ty), context.premises(db));
         for ty in [field_ty, query_ty, *expected, result_ty] {
             if ty.has_invalid(db) || ty.has_param(db) || ty.has_var(db) || ty.has_projection(db) {
                 return Err(invalid("query types must be concrete and resolved").into());
@@ -2620,7 +2615,16 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 let func = body
                     .containing_func(db)
                     .ok_or_else(|| invalid("checked body has no function"))?;
-                let normalize = |ty| normalize_ty(db, ty, func.scope(), typed.assumptions());
+                let normalize = |ty| {
+                    normalize_ty(
+                        db,
+                        ty,
+                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                            func.scope(),
+                            typed.assumptions(),
+                        ),
+                    )
+                };
                 let ty = normalize(ty.as_view(db).unwrap_or(ty));
                 let candidate = normalize(candidate);
                 return self.reflected_type_is(
@@ -2964,8 +2968,10 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     normalize_ty(
                         self.db,
                         ty,
-                        key.owner(self.db).scope(),
-                        key.instantiate_typed_body(self.db).assumptions(),
+                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                            key.owner(self.db).scope(),
+                            key.instantiate_typed_body(self.db).assumptions(),
+                        ),
                     )
                 };
                 let field_ty = normalize(field_ty);
@@ -3356,11 +3362,13 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         let ty = normalize_ty(
             self.db,
             ty,
-            instance.key(self.db).owner(self.db).scope(),
-            instance
-                .key(self.db)
-                .instantiate_typed_body(self.db)
-                .assumptions(),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                instance.key(self.db).owner(self.db).scope(),
+                instance
+                    .key(self.db)
+                    .instantiate_typed_body(self.db)
+                    .assumptions(),
+            ),
         );
         let size = runtime_size_bytes(self.db, ty)
             .map_err(|error| match error {

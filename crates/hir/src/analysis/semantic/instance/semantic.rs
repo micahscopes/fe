@@ -290,8 +290,16 @@ fn receiver_lowering_plan<'db>(
 ) -> Option<ReceiverLoweringPlan<'db>> {
     let receiver = call_like_receiver_expr(expr_data)?;
     let borrowed_ty = callable.arg_ty(db, 0)?;
-    let borrowed_ty = normalize_ty(db, borrowed_ty, scope, assumptions);
-    let receiver_ty = normalize_ty(db, typed_body.expr_ty(db, receiver), scope, assumptions);
+    let borrowed_ty = normalize_ty(
+        db,
+        borrowed_ty,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+    );
+    let receiver_ty = normalize_ty(
+        db,
+        typed_body.expr_ty(db, receiver),
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+    );
     let (kind, _) = borrowed_ty.as_capability(db)?;
     // A `view` receiver (a parameter declared without `own`) is borrowed for
     // a `ref self` method, as an explicit `ref` would borrow it.
@@ -1171,7 +1179,14 @@ impl<'db> SemanticInstance<'db> {
     #[salsa::tracked]
     pub fn normalized_ty(self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
         let ty = self.key(db).impl_env(db).contextualize_const_types(db, ty);
-        normalize_ty(db, ty, self.normalization_scope(db), self.assumptions(db))
+        normalize_ty(
+            db,
+            ty,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.normalization_scope(db),
+                self.assumptions(db),
+            ),
+        )
     }
 
     #[salsa::tracked(return_ref)]
@@ -1247,12 +1262,7 @@ impl<'db> SemanticInstance<'db> {
         let chain = crate::core::semantic::recorded_chain_at(db, typed, expr);
         let context = chain.context(db, self.normalization_scope(db));
         let ty = context.contextualize_const_types_with(db, ty, |goal| chain.lookup(db, goal));
-        normalize_ty(
-            db,
-            ty,
-            context.normalization_scope(db),
-            context.assumptions(db),
-        )
+        normalize_ty(db, ty, context.premises(db))
     }
 
     pub(crate) fn normalized_call_param_ty(
@@ -1406,7 +1416,14 @@ impl<'db> SemanticInstance<'db> {
                 let Some(arg) = callable.generic_args().first().copied() else {
                     continue;
                 };
-                let arg = normalize_ty(db, arg, body.scope(), self.assumptions(db));
+                let arg = normalize_ty(
+                    db,
+                    arg,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        body.scope(),
+                        self.assumptions(db),
+                    ),
+                );
                 if let Err(error) = runtime_size_bytes(db, arg) {
                     return Err(SemanticBodyAdmissionError::InvalidConcreteType(
                         invalid_size_diagnostic(db, self, SemOrigin::Expr(expr), arg, error),
@@ -1942,9 +1959,17 @@ fn classify_binding_role<'db>(
 ) -> SemanticLocalRole<'db> {
     let owner = instance.key(db).owner(db);
     let scope = owner.scope();
-    let ty = normalize_ty(db, ty, scope, assumptions);
+    let ty = normalize_ty(
+        db,
+        ty,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+    );
     if let Some((_, value_ty)) = ty.as_capability(db) {
-        let value_ty = normalize_ty(db, value_ty, scope, assumptions);
+        let value_ty = normalize_ty(
+            db,
+            value_ty,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+        );
         return SemanticLocalRole::PlaceCarrier { provider, value_ty };
     }
     // A raw-address provider names storage of the binding type, including a
@@ -2429,7 +2454,11 @@ fn instantiate_normalized_ty<'db>(
     let scope = key.owner(db).scope();
     let assumptions = semantic_instance_base_assumptions_for_key(db, key);
     let ty = instantiate_checked(db, key.owner(db), ty, key.subst(db))?;
-    Ok(normalize_ty(db, ty, scope, assumptions))
+    Ok(normalize_ty(
+        db,
+        ty,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+    ))
 }
 
 fn instantiate_normalized_trait_inst<'db>(
@@ -2446,12 +2475,33 @@ fn instantiate_normalized_trait_inst<'db>(
     let args = trait_inst
         .args(db)
         .iter()
-        .map(|&arg| normalize_ty(db, arg, scope, assumptions))
+        .map(|&arg| {
+            normalize_ty(
+                db,
+                arg,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    assumptions,
+                ),
+            )
+        })
         .collect::<Vec<_>>();
     let assoc_type_bindings = trait_inst
         .assoc_type_bindings(db)
         .iter()
-        .map(|(&name, &ty)| (name, normalize_ty(db, ty, scope, assumptions)))
+        .map(|(&name, &ty)| {
+            (
+                name,
+                normalize_ty(
+                    db,
+                    ty,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        scope,
+                        assumptions,
+                    ),
+                ),
+            )
+        })
         .collect::<IndexMap<_, _>>();
     Ok(crate::analysis::ty::trait_def::TraitInstId::new(
         db,

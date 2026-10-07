@@ -233,7 +233,11 @@ fn resolve_effect_handle_query<'db>(
     else {
         return EffectHandleResolution::Invalid(ProviderLayoutFailure::UnresolvedTarget);
     };
-    let target_ty = normalize_ty(db, target_ty, scope, assumptions);
+    let target_ty = normalize_ty(
+        db,
+        target_ty,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+    );
     if target_ty.has_invalid(db)
         || target_ty.has_var(db)
         || !target_ty.has_star_kind(db)
@@ -245,7 +249,11 @@ fn resolve_effect_handle_query<'db>(
     else {
         return EffectHandleResolution::Invalid(ProviderLayoutFailure::UnresolvedRaw);
     };
-    let raw_ty = normalize_ty(db, raw_ty, scope, assumptions);
+    let raw_ty = normalize_ty(
+        db,
+        raw_ty,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+    );
     if raw_ty.has_invalid(db)
         || raw_ty.has_var(db)
         || !raw_ty.has_star_kind(db)

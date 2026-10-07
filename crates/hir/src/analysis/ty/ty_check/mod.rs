@@ -2087,8 +2087,14 @@ impl<'db> TyChecker<'db> {
                         }
                     }
                     ResolvedEffectKey::Type(schema) => {
-                        let given =
-                            normalize_ty(self.db, schema.carrier, contract.scope(), assumptions);
+                        let given = normalize_ty(
+                            self.db,
+                            schema.carrier,
+                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                                contract.scope(),
+                                assumptions,
+                            ),
+                        );
                         if !given.is_zero_sized(self.db) {
                             self.push_diag(BodyDiag::ContractRootEffectTypeNotZeroSized {
                                 owner,
@@ -2229,8 +2235,10 @@ impl<'db> TyChecker<'db> {
         let binding_ty = normalize_ty(
             self.db,
             self.env.lookup_binding_ty(&binding),
-            self.env.scope(),
-            self.env.assumptions(),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.env.scope(),
+                self.env.assumptions(),
+            ),
         );
         let place_result_ty = normalize_ty(
             self.db,
@@ -2238,8 +2246,10 @@ impl<'db> TyChecker<'db> {
                 .projections
                 .last()
                 .map_or(binding_ty, |projection| projection.result_ty()),
-            self.env.scope(),
-            self.env.assumptions(),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.env.scope(),
+                self.env.assumptions(),
+            ),
         );
         if binding_ty.as_capability(self.db).is_some() {
             return self.concrete_borrow_provider_for_binding(binding);
@@ -2311,12 +2321,33 @@ impl<'db> TyChecker<'db> {
             .args(db)
             .iter()
             .copied()
-            .map(|ty| normalize_ty(db, ty, scope, assumptions))
+            .map(|ty| {
+                normalize_ty(
+                    db,
+                    ty,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        scope,
+                        assumptions,
+                    ),
+                )
+            })
             .collect();
         let assoc_type_bindings: IndexMap<_, _> = goal
             .assoc_type_bindings(db)
             .iter()
-            .map(|(&name, &ty)| (name, normalize_ty(db, ty, scope, assumptions)))
+            .map(|(&name, &ty)| {
+                (
+                    name,
+                    normalize_ty(
+                        db,
+                        ty,
+                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                            scope,
+                            assumptions,
+                        ),
+                    ),
+                )
+            })
             .collect();
         TraitInstId::new(db, goal.def(db), args, assoc_type_bindings)
     }
@@ -3015,14 +3046,18 @@ impl<'db> TyChecker<'db> {
                         let expected = normalize_ty(
                             db,
                             expected.fold_with(db, &mut this.table),
-                            scope,
-                            assumptions,
+                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                                scope,
+                                assumptions,
+                            ),
                         );
                         let given = normalize_ty(
                             db,
                             given.fold_with(db, &mut this.table),
-                            scope,
-                            assumptions,
+                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                                scope,
+                                assumptions,
+                            ),
                         );
                         let given = this
                             .try_coerce_capability_to_expected(given, expected)
@@ -3043,8 +3078,10 @@ impl<'db> TyChecker<'db> {
                     let ret_ty = normalize_ty(
                         db,
                         callable.ret_ty(db).fold_with(db, &mut this.table),
-                        scope,
-                        assumptions,
+                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                            scope,
+                            assumptions,
+                        ),
                     );
 
                     if this.table.unify(expr_ty, ret_ty).is_ok() {
@@ -3225,7 +3262,7 @@ impl<'db> TyChecker<'db> {
                                     && self.env.typed_expr(call_args[0].expr).is_some_and(|prop| {
                                         ty_may_be_code_region_token(
                                             db,
-                                            normalize_ty(db, prop.ty, scope, assumptions),
+                                            normalize_ty(db, prop.ty, crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions)),
                                         )
                                     })
                                 {
@@ -3764,7 +3801,14 @@ impl<'db> TyChecker<'db> {
     }
 
     pub(crate) fn string_literal_should_use_byte_array(&self, expected: TyId<'db>) -> bool {
-        let expected = normalize_ty(self.db, expected, self.env.scope(), self.env.assumptions());
+        let expected = normalize_ty(
+            self.db,
+            expected,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.env.scope(),
+                self.env.assumptions(),
+            ),
+        );
         let (base, args) = expected.decompose_ty_app(self.db);
         matches!(
             base.data(self.db),
@@ -3802,7 +3846,14 @@ impl<'db> TyChecker<'db> {
             let ty = context.contextualize_const_types_with(self.db, ty, |goal| {
                 self.env.provision_for_goal(goal)
             });
-            normalize_ty(self.db, ty, self.env.scope(), self.env.assumptions())
+            normalize_ty(
+                self.db,
+                ty,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    self.env.scope(),
+                    self.env.assumptions(),
+                ),
+            )
         } else if context.selections(self.db).is_empty() {
             lower_hir_ty(self.db, hir_ty, self.env.scope(), self.env.assumptions())
         } else {
@@ -4346,8 +4397,10 @@ impl<'db> TyChecker<'db> {
         normalize_ty(
             self.db,
             ty.fold_with(self.db, &mut self.table),
-            self.env.scope(),
-            self.env.assumptions(),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.env.scope(),
+                self.env.assumptions(),
+            ),
         )
     }
 }

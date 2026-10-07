@@ -102,7 +102,11 @@ fn normalize_assoc_binding<'db>(
     assumptions: super::PredicateListId<'db>,
 ) -> Result<TyId<'db>, UnificationError> {
     let ty = ty.fold_with(db, table);
-    let normalized = crate::analysis::ty::normalize::normalize_ty(db, ty, scope, assumptions);
+    let normalized = crate::analysis::ty::normalize::normalize_ty(
+        db,
+        ty,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+    );
     if !ty.has_invalid(db) && normalized.has_invalid(db) {
         Err(UnificationError::NormalizationFault)
     } else {

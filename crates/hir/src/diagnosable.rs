@@ -635,8 +635,14 @@ impl<'db> Trait<'db> {
                 diags.extend(source_diags);
                 continue;
             }
-            let normalized =
-                ty::normalize::normalize_ty(db, default_ty, assoc.scope(), assumptions);
+            let normalized = ty::normalize::normalize_ty(
+                db,
+                default_ty,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    assoc.scope(),
+                    assumptions,
+                ),
+            );
             if let Some(diag) = normalized.emit_diag(db, assoc.span().ty().into()) {
                 diags.push(diag);
                 continue;
@@ -1171,8 +1177,22 @@ impl<'db> ImplTrait<'db> {
                 continue;
             }
 
-            let expected_ty = normalize_ty(db, expected_ty, scope, assumptions);
-            let impl_header_ty = normalize_ty(db, impl_header_ty, scope, assumptions);
+            let expected_ty = normalize_ty(
+                db,
+                expected_ty,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    assumptions,
+                ),
+            );
+            let impl_header_ty = normalize_ty(
+                db,
+                impl_header_ty,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    assumptions,
+                ),
+            );
             // Const arguments can be written differently and still be equal,
             // so compare as unification does rather than by identity.
             if ty::unify::UnificationTable::new(db)
@@ -1406,8 +1426,22 @@ impl<'db> ImplTrait<'db> {
                     expected = TyId::app(db, expected, arg);
                     given = TyId::app(db, given, arg);
                 }
-                let expected = normalize_ty(db, expected, self.scope(), solve_cx.assumptions());
-                let given = normalize_ty(db, given, self.scope(), solve_cx.assumptions());
+                let expected = normalize_ty(
+                    db,
+                    expected,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        self.scope(),
+                        solve_cx.assumptions(),
+                    ),
+                );
+                let given = normalize_ty(
+                    db,
+                    given,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        self.scope(),
+                        solve_cx.assumptions(),
+                    ),
+                );
                 if expected != given && !expected.has_invalid(db) && !given.has_invalid(db) {
                     diags.push(
                         ty::diagnostics::ImplDiag::NamedAssociatedTypeMismatch {
@@ -1484,8 +1518,14 @@ impl<'db> ImplTrait<'db> {
             predicates.extend_from_slice(assoc.parameter_bounds(db).list(db));
             let assumptions =
                 ty::trait_resolution::PredicateListId::new(db, predicates).extend_all_bounds(db);
-            let normalized =
-                ty::normalize::normalize_ty(db, assoc.impl_ty(), self.scope(), assumptions);
+            let normalized = ty::normalize::normalize_ty(
+                db,
+                assoc.impl_ty(),
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    self.scope(),
+                    assumptions,
+                ),
+            );
             if let Some(diag) = normalized.emit_diag(db, self.span().trait_ref().into()) {
                 diags.push(diag);
             }

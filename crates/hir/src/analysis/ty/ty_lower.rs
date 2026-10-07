@@ -768,7 +768,11 @@ fn lower_const_ty_ty<'db>(
         _ => return TyId::invalid(db, InvalidCause::InvalidConstParamTy),
     };
 
-    let ty = normalize_ty(db, ty, scope, assumptions);
+    let ty = normalize_ty(
+        db,
+        ty,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+    );
 
     if ty.has_invalid(db)
         || ty.is_integral(db)
@@ -1911,8 +1915,10 @@ fn callable_input_layout_types<'db>(
         ConstBodyLowering::Eager => normalize_from_assumptions(
             db,
             lower_hir_ty(db, hir_ty, func.scope(), assumptions),
-            func.scope(),
-            assumptions,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                func.scope(),
+                assumptions,
+            ),
         ),
         ConstBodyLowering::Deferred => lower_callable_input_shape_ty(db, func, hir_ty, assumptions),
     };
@@ -2575,8 +2581,10 @@ pub(crate) fn lower_callable_input_param_ty<'db>(
     let ty = normalize_from_assumptions(
         db,
         lower_hir_ty(db, hir_ty, func.scope(), assumptions),
-        func.scope(),
-        assumptions,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+            func.scope(),
+            assumptions,
+        ),
     );
     bind_callable_input_layout_holes(db, ty, func, origin)
 }
@@ -2762,8 +2770,10 @@ fn lower_callable_input_shape_ty<'db>(
     normalize_from_assumptions(
         db,
         lower_hir_ty_with_minter(db, hir_ty, func.scope(), assumptions, &minter),
-        func.scope(),
-        assumptions,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+            func.scope(),
+            assumptions,
+        ),
     )
 }
 

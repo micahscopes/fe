@@ -22,7 +22,7 @@ use super::{
         resolve_trait_impl_instance,
     },
     trait_lower::complete_candidate_impl_assoc_ty,
-    trait_resolution::{PredicateListId, Selection, TraitSolveCx},
+    trait_resolution::{PredicateListId, Selection},
     ty_def::{AssocTy, InvalidCause, TyBase, TyData, TyId, TyParam, collect_variables},
     unify::UnificationTable,
     visitor::{TyVisitable, TyVisitor, walk_const_ty, walk_ty},
@@ -163,10 +163,9 @@ impl<'db> TyVisitor<'db> for ConstTransportCost<'db> {
 pub fn normalize_ty<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: TyId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> TyId<'db> {
-    let mut normalizer = TypeNormalizer::new(db, scope, assumptions);
+    let mut normalizer = TypeNormalizer::new(db, premises);
     normalizer.reduce(ty, 1, ConstPolicy::Preserve)
 }
 
@@ -176,13 +175,12 @@ pub fn normalize_ty<'db>(
 pub fn normalize_from_assumptions<'db, T>(
     db: &'db dyn HirAnalysisDb,
     value: T,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> T
 where
     T: TyFoldable<'db>,
 {
-    let mut normalizer = TypeNormalizer::new(db, scope, assumptions);
+    let mut normalizer = TypeNormalizer::new(db, premises);
     normalizer.resolve_impls = false;
     value.fold_with(db, &mut normalizer)
 }
@@ -198,20 +196,27 @@ pub fn normalize_with_trait_evidence<'db, T>(
 where
     T: TyFoldable<'db>,
 {
-    normalize_from_assumptions(db, value, scope, PredicateListId::new(db, vec![evidence]))
+    // The premise is one trait predicate supplied by the caller, not the
+    // premises of a position.
+    normalize_from_assumptions(
+        db,
+        value,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+            scope,
+            PredicateListId::new(db, vec![evidence]),
+        ),
+    )
 }
 
 pub(crate) fn normalize_layout_root_uses<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: TyId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> Vec<LayoutRootUse<'db>> {
     fn collect<'db>(
         db: &'db dyn HirAnalysisDb,
         ty: TyId<'db>,
-        scope: ScopeId<'db>,
-        assumptions: PredicateListId<'db>,
+        premises: crate::analysis::semantic::SolverPremises<'db>,
         visiting: &mut rustc_hash::FxHashSet<TyId<'db>>,
         uses: &mut Vec<LayoutRootUse<'db>>,
     ) {
@@ -219,7 +224,7 @@ pub(crate) fn normalize_layout_root_uses<'db>(
             return;
         }
         if let TyData::AssocTy(assoc) = ty.data(db) {
-            let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+            let solve_cx = premises.solver_context(db);
             if let Selection::Unique(resolved) =
                 resolve_trait_impl_instance(db, solve_cx, assoc.trait_.as_predicate(db))
                 && let ImplementorOrigin::Hir(impl_trait) = resolved.selected().origin(db)
@@ -233,8 +238,7 @@ pub(crate) fn normalize_layout_root_uses<'db>(
                                 db,
                                 Binder::bind(impl_trait.into(), owner)
                                     .instantiate(db, resolved.impl_args(db)),
-                                scope,
-                                assumptions,
+                                premises,
                             )
                         }),
                         selector: root_use.selector,
@@ -244,16 +248,16 @@ pub(crate) fn normalize_layout_root_uses<'db>(
                     }
                 }
                 if let Some(instantiated) = resolved.instantiated_assoc_ty(db, assoc.name) {
-                    collect(db, instantiated, scope, assumptions, visiting, uses);
+                    collect(db, instantiated, premises, visiting, uses);
                 }
             }
         } else {
             let (base, args) = ty.decompose_ty_app(db);
             if base != ty {
-                collect(db, base, scope, assumptions, visiting, uses);
+                collect(db, base, premises, visiting, uses);
             }
             for arg in args {
-                collect(db, *arg, scope, assumptions, visiting, uses);
+                collect(db, *arg, premises, visiting, uses);
             }
         }
         visiting.remove(&ty);
@@ -263,8 +267,7 @@ pub(crate) fn normalize_layout_root_uses<'db>(
     collect(
         db,
         ty,
-        scope,
-        assumptions,
+        premises,
         &mut rustc_hash::FxHashSet::default(),
         &mut uses,
     );
@@ -273,8 +276,7 @@ pub(crate) fn normalize_layout_root_uses<'db>(
 
 pub struct TypeNormalizer<'db> {
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     resolve_impls: bool,
     cache: FxHashMap<ReductionKey<'db>, Option<Reduced<'db>>>,
     budget: ReductionBudget,
@@ -372,13 +374,11 @@ impl<'db> TyFolder<'db> for Replacements<'_, 'db> {
 impl<'db> TypeNormalizer<'db> {
     pub fn new(
         db: &'db dyn HirAnalysisDb,
-        scope: ScopeId<'db>,
-        assumptions: PredicateListId<'db>,
+        premises: crate::analysis::semantic::SolverPremises<'db>,
     ) -> Self {
         Self {
             db,
-            scope,
-            assumptions,
+            premises,
             resolve_impls: true,
             cache: FxHashMap::default(),
             budget: ReductionBudget::default(),
@@ -575,7 +575,7 @@ impl<'db> TypeNormalizer<'db> {
         self.resolve_impls
             && matches!(head.data(db), TyData::TyBase(TyBase::TypeFn(def))
             if args.len() == def.generic_params(db).data(db).len())
-            && !super::type_fn::in_definition(db, self.scope)
+            && !super::type_fn::in_definition(db, self.premises.scope())
     }
 
     fn rewrite_head(
@@ -591,7 +591,11 @@ impl<'db> TypeNormalizer<'db> {
                     concretize_const_ty_if_ground(
                         db,
                         *value,
-                        ConstCanonEnv::new(self.scope, self.assumptions, None),
+                        ConstCanonEnv::new(
+                            self.premises.scope(),
+                            self.premises.assumptions(),
+                            None,
+                        ),
                     )
                     // A ground value whose evaluation faulted is not ground;
                     // evaluate it to report the fault instead of keeping it.
@@ -612,7 +616,11 @@ impl<'db> TypeNormalizer<'db> {
                         db,
                         *expr,
                         *expected,
-                        ConstCanonEnv::new(self.scope, self.assumptions, None),
+                        ConstCanonEnv::new(
+                            self.premises.scope(),
+                            self.premises.assumptions(),
+                            None,
+                        ),
                     )
                     .unwrap_or(*value)
                 }
@@ -656,7 +664,7 @@ impl<'db> TypeNormalizer<'db> {
         if let TyData::TyBase(TyBase::TypeFn(def)) = head.data(db)
             && args.len() == def.generic_params(db).data(db).len()
             && self.resolve_impls
-            && !super::type_fn::in_definition(db, self.scope)
+            && !super::type_fn::in_definition(db, self.premises.scope())
             && let Some(TyData::ConstTy(subject)) = args.last().map(|arg| arg.data(db))
             && let Some(value) = subject.integer_value(db)
         {
@@ -712,7 +720,7 @@ impl<'db> TypeNormalizer<'db> {
         // its entire trait reference before using an assumption's binding.
         let target = assoc.trait_.fold_with(self.db, self);
         let mut matching_bounds: IndexMap<TyId<'db>, ()> = IndexMap::new();
-        for &pred in self.assumptions.list(self.db) {
+        for &pred in self.premises.assumptions().list(self.db) {
             let Some(bound) = pred.bound_assoc_ty(self.db, assoc.name) else {
                 continue;
             };
@@ -749,10 +757,10 @@ impl<'db> TypeNormalizer<'db> {
         let self_ty = self.fold_ty(self.db, assoc.trait_.self_ty(self.db));
         let mut raw_cands = match find_associated_type(
             self.db,
-            self.scope,
+            self.premises.scope(),
             Canonicalized::new(self.db, self_ty),
             assoc.name,
-            self.assumptions,
+            self.premises.assumptions(),
         ) {
             Ok(raw_cands) => raw_cands,
             Err(FindAssociatedTypeError::InfiniteBoundRecursion) => return None,
@@ -806,7 +814,7 @@ impl<'db> TypeNormalizer<'db> {
 
         let mut dedup: IndexMap<TyId<'db>, ()> = IndexMap::new();
 
-        let solve_cx = TraitSolveCx::new(self.db, self.scope).with_assumptions(self.assumptions);
+        let solve_cx = self.premises.solver_context(self.db);
         let (primary, secondary) = solve_cx.search_ingots_for_trait_inst(self.db, trait_inst);
         let search_ingots = [Some(primary), secondary];
 
@@ -821,7 +829,7 @@ impl<'db> TypeNormalizer<'db> {
                     self.db,
                     ingot,
                     canonical_trait_inst,
-                    self.assumptions,
+                    self.premises.assumptions(),
                 ) {
                     let Some(implementor) =
                         complete_candidate_impl_assoc_ty(self.db, implementor, assoc.name)

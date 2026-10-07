@@ -2853,8 +2853,10 @@ fn written_type_check_query<'db>(
                     let ty = crate::analysis::ty::normalize::normalize_from_assumptions(
                         db,
                         ty,
-                        written.scope,
-                        assumptions,
+                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                            written.scope,
+                            assumptions,
+                        ),
                     );
                     contextual = WrittenType {
                         lowered: (!ty.has_invalid(db)).then_some(ty),
@@ -2886,8 +2888,10 @@ fn written_type_check_query<'db>(
                         crate::analysis::ty::normalize::normalize_from_assumptions(
                             db,
                             *ty,
-                            context.normalization_scope(db),
-                            equalities,
+                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                                context.normalization_scope(db),
+                                equalities,
+                            ),
                         )
                     };
                     if let Some(conditions) =

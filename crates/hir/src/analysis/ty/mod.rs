@@ -106,7 +106,7 @@ pub fn ty_is_copy<'db>(
     premises: crate::analysis::semantic::SolverPremises<'db>,
     ty: TyId<'db>,
 ) -> bool {
-    let ty = normalize::normalize_ty(db, ty, premises.scope(), premises.assumptions());
+    let ty = normalize::normalize_ty(db, ty, premises);
 
     // Borrow/view handles (`mut`/`ref`/`view`) are always copyable, even without an explicit
     // `Copy` impl.
@@ -766,12 +766,8 @@ impl ModuleAnalysisPass for ContractAnalysisPass {
                         }
                     }
                     ResolvedEffectKey::Type(schema) => {
-                        let given = normalize::normalize_ty(
-                            db,
-                            schema.carrier,
-                            contract.scope(),
-                            assumptions,
-                        );
+                        let given =
+                            normalize::normalize_ty(db, schema.carrier, context.premises(db));
                         if !given.is_zero_sized(db) {
                             diags.push(Box::new(BodyDiag::ContractRootEffectTypeNotZeroSized {
                                 owner: EffectParamOwner::Contract(contract),
@@ -861,8 +857,7 @@ pub fn resolve_default_root_effect_ty<'db>(
     Some(normalize::normalize_ty(
         db,
         TyId::assoc_ty(db, inst_target.trait_ref(db), root_ident),
-        scope,
-        assumptions,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
     ))
 }
 
