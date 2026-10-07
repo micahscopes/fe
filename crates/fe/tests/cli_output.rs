@@ -5143,3 +5143,81 @@ fn uncaptured_arithmetic_repeat_keeps_its_existing_limit() {
         "{output}"
     );
 }
+
+#[test]
+fn abi_event_and_error_lists_follow_recorded_call_instances() {
+    for (fixture, kind, expected) in [
+        ("abi_named_event_direct", "event", vec!["Loud"]),
+        ("abi_named_event_forwarder", "event", vec!["Loud"]),
+        ("abi_ordinary_event_forwarder", "event", vec!["Quiet"]),
+        ("abi_event_both_contexts", "event", vec!["Loud", "Quiet"]),
+        ("abi_named_error_forwarder", "error", vec!["Loud"]),
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/cli_output/emit_abi")
+            .join(format!("{fixture}.fe"));
+        let temp = tempdir().expect("ABI output directory");
+        let (output, exit) = run_fe_main(&[
+            "build",
+            "--standalone",
+            path.to_str().unwrap(),
+            "--emit",
+            "abi,ir",
+            "--out-dir",
+            temp.path().to_str().unwrap(),
+        ]);
+        assert_eq!(exit, 0, "{fixture}: {output}");
+        let abi: Value = serde_json::from_str(
+            &fs::read_to_string(temp.path().join("C.abi.json")).expect("read ABI"),
+        )
+        .expect("parse ABI");
+        let mut actual = abi
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["type"] == kind)
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        assert_eq!(
+            actual, expected,
+            "{fixture}: ABI must project the recorded implementation"
+        );
+        if kind == "event" {
+            use ethers_core::types::{I256, U256};
+            use tiny_keccak::{Hasher, Keccak};
+            let mut expected_topics = expected
+                .iter()
+                .map(|name| {
+                    let mut hasher = Keccak::v256();
+                    hasher.update(format!("{name}(uint256)").as_bytes());
+                    let mut hash = [0; 32];
+                    hasher.finalize(&mut hash);
+                    I256::from_raw(U256::from_big_endian(&hash)).to_string()
+                })
+                .collect::<Vec<_>>();
+            expected_topics.sort_unstable();
+            let ir = fs::read_to_string(temp.path().join(format!("{fixture}.sona")))
+                .expect("read generated IR");
+            let mut topics = ir
+                .lines()
+                .filter(|line| line.contains("evm_log1 "))
+                .map(|line| {
+                    line.split_whitespace()
+                        .last()
+                        .unwrap()
+                        .trim_end_matches(';')
+                        .strip_suffix(".i256")
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>();
+            topics.sort_unstable();
+            topics.dedup();
+            assert_eq!(
+                topics, expected_topics,
+                "{fixture}: emitted topics must agree with ABI"
+            );
+        }
+    }
+}

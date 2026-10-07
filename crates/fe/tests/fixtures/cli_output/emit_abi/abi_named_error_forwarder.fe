@@ -1,0 +1,21 @@
+// Generic forwarding must retain the selected event body.
+use std::evm::Evm
+use std::abi::sol
+#[error]
+pub struct Quiet { x: u256 }
+#[error]
+pub struct Loud { y: u256 }
+trait Notify { fn notify() uses (evm: mut Evm) }
+struct Subject {}
+impl Notify for Subject { fn notify() uses (evm: mut Evm) { revert_error(Quiet { x: 1 }) } }
+impl Notify for Subject as Shout { fn notify() uses (evm: mut Evm) { revert_error(Loud { y: 2 }) } }
+fn fwd<T: Notify>() uses (evm: mut Evm) { T::notify() }
+msg M {
+    #[selector = sol("go()")]
+    Go,
+}
+pub contract C uses (evm: mut Evm) {
+    recv M {
+        Go uses (mut evm) { with (Shout) { fwd<Subject>() } }
+    }
+}

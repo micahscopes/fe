@@ -5,20 +5,19 @@ use driver::DriverDataBase;
 use hir::{
     analysis::{
         name_resolution::{PathRes, resolve_path},
+        semantic::{
+            SemanticInstanceKey, get_or_build_semantic_instance, root_semantic_instance_key,
+        },
         ty::{
             abi_ty::{self, AbiComponent, AbiTypeDesc, ParsedFunctionSignature},
             adt_def::AdtRef,
-            binder::Binder,
             corelib::{RuntimeBuiltinFuncKind, runtime_builtin_func_kind},
-            normalize::normalize_from_assumptions,
-            trait_def::{TraitInstId, resolve_trait_method_instance},
-            trait_resolution::{PredicateListId, Selection, TraitSolveCx},
+            trait_resolution::PredicateListId,
             ty_def::{TyBase, TyData, TyId},
         },
     },
     hir_def::{
-        FieldDefListId, Func, GenericParamOwner, IdentId, PathId, Struct, TopLevelMod, Trait,
-        scope_graph::ScopeId,
+        FieldDefListId, Func, IdentId, PathId, Struct, TopLevelMod, Trait, scope_graph::ScopeId,
     },
 };
 use serde::Serialize;
@@ -150,11 +149,11 @@ pub fn generate_contract_abi(
         }
     }
 
-    for struct_ in collect_contract_event_structs(db, contract, false) {
+    for struct_ in collect_contract_event_structs(db, contract, false)? {
         entries.push(event_struct_to_abi_entry(db, struct_)?);
     }
 
-    for struct_ in collect_contract_event_structs(db, contract, true) {
+    for struct_ in collect_contract_event_structs(db, contract, true)? {
         let mut entry = event_struct_to_abi_entry(db, struct_)?;
         entry.entry_type = "error".to_string();
         entry.anonymous = None;
@@ -297,171 +296,80 @@ fn event_struct_to_abi_entry(db: &DriverDataBase, struct_: Struct<'_>) -> Result
     })
 }
 
+/// The ABI projects the same instantiated call graph that runtime lowering
+/// reads, including bound answers forwarded through generic helpers.
 fn collect_contract_event_structs<'db>(
     db: &'db DriverDataBase,
     contract: hir::hir_def::Contract<'db>,
     errors: bool,
-) -> Vec<Struct<'db>> {
+) -> Result<Vec<Struct<'db>>, String> {
+    use hir::analysis::ty::ty_check::BodyOwner;
+
     let mut events = Vec::new();
     let mut seen = HashSet::new();
-    let mut visited_funcs = HashSet::new();
+    let mut visited: HashSet<SemanticInstanceKey<'db>> = HashSet::new();
     let emit_traits = resolve_event_emit_traits(db, contract.scope());
     let error_func = hir::analysis::ty::corelib::resolve_lib_func_path(
         db,
         contract.scope(),
         "std::evm::effects::revert_error",
     );
-
+    let mut roots = Vec::new();
     if contract.init(db).is_some() {
-        let (_, typed_body) = hir::analysis::ty::ty_check::check_contract_init_body(db, contract);
-        collect_typed_body_event_structs(
-            db,
-            typed_body,
-            &emit_traits,
-            errors,
-            error_func,
-            &mut events,
-            &mut seen,
-            &mut visited_funcs,
-        );
+        roots.push(BodyOwner::ContractInit { contract });
     }
-
     for recv in contract.recv_views(db) {
         for arm in recv.arms(db) {
-            let (_, typed_body) = hir::analysis::ty::ty_check::check_contract_recv_arm_body(
-                db,
+            roots.push(BodyOwner::ContractRecvArm {
                 contract,
-                recv.index(db),
-                arm.index(db),
-            );
-            collect_typed_body_event_structs(
-                db,
-                typed_body,
-                &emit_traits,
-                errors,
-                error_func,
-                &mut events,
-                &mut seen,
-                &mut visited_funcs,
-            );
+                recv_idx: recv.index(db),
+                arm_idx: arm.index(db),
+            });
         }
     }
-
-    events
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_typed_body_event_structs<'db>(
-    db: &'db DriverDataBase,
-    typed_body: &hir::analysis::ty::ty_check::TypedBody<'db>,
-    emit_traits: &EventEmitTraits<'db>,
-    errors: bool,
-    error_func: Option<Func<'db>>,
-    out: &mut Vec<Struct<'db>>,
-    seen: &mut HashSet<Struct<'db>>,
-    visited_funcs: &mut HashSet<VisitedFuncBody<'db>>,
-) {
-    let Some(body) = typed_body.body() else {
-        return;
-    };
-
-    for (expr_id, partial_expr) in body.exprs(db).iter() {
-        let hir::hir_def::Partial::Present(_) = partial_expr else {
+    let mut pending = roots
+        .into_iter()
+        .rev()
+        .map(|owner| {
+            root_semantic_instance_key(db, owner).map_err(|error| {
+                format!("cannot collect contract ABI from runtime root: {error:?}")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    while let Some(key) = pending.pop() {
+        if !visited.insert(key) {
+            continue;
+        }
+        let typed_body = key.typed_body(db);
+        let Some(body) = typed_body.body() else {
             continue;
         };
-        if errors {
-            if let Some(struct_) = reverted_error_struct(db, typed_body, body, expr_id, error_func)
-                && seen.insert(struct_)
-            {
-                out.push(struct_);
-            }
-        } else if let Some(struct_) =
-            emitted_event_struct(db, typed_body, body, expr_id, emit_traits)
-        {
-            push_event_struct(db, out, seen, struct_);
-        }
-
-        // Operators also have semantic callees, even without call syntax.
-        if let Some(callable) = typed_body.callable_expr(expr_id)
-            && let hir::hir_def::CallableDef::Func(func) = callable.callable_def
-        {
-            let mut target = VisitedFuncBody::from_callable(func, callable);
-            if let Some(inst) = callable.trait_inst()
-                && let Some(name) = func.name(db).to_opt()
-                && let Selection::Unique(method) = resolve_trait_method_instance(
-                    db,
-                    TraitSolveCx::new(db, body.scope()).with_assumptions(typed_body.assumptions()),
-                    inst,
-                    name,
-                )
-                && let Some(impl_func) = method.body()
-                && let Ok(body_args) = method.complete_body_args(
-                    db,
-                    callable.generic_args(),
-                    callable.checked_input_tys(),
-                    None,
-                )
-            {
-                target.func = impl_func;
-                target.generic_args = body_args.into_values();
-            }
-            if target.func.body(db).is_none() || !visited_funcs.insert(target.clone()) {
+        for (expr_id, partial_expr) in body.exprs(db).iter() {
+            if !matches!(partial_expr, hir::hir_def::Partial::Present(_)) {
                 continue;
             }
-            let (_, func_typed_body) =
-                hir::analysis::ty::ty_check::check_func_body(db, target.func);
-            let func_typed_body =
-                instantiate_callable_typed_body(db, func_typed_body.clone(), &target);
-            collect_typed_body_event_structs(
-                db,
-                &func_typed_body,
-                emit_traits,
-                errors,
-                error_func,
-                out,
-                seen,
-                visited_funcs,
-            );
+            if errors {
+                if let Some(struct_) =
+                    reverted_error_struct(db, typed_body, body, expr_id, error_func)
+                    && seen.insert(struct_)
+                {
+                    events.push(struct_);
+                }
+            } else if let Some(struct_) =
+                emitted_event_struct(db, typed_body, body, expr_id, &emit_traits)
+            {
+                push_event_struct(db, &mut events, &mut seen, struct_);
+            }
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct VisitedFuncBody<'db> {
-    func: Func<'db>,
-    generic_args: Vec<TyId<'db>>,
-    trait_inst: Option<TraitInstId<'db>>,
-}
-
-impl<'db> VisitedFuncBody<'db> {
-    fn from_callable(
-        func: Func<'db>,
-        callable: &hir::analysis::ty::ty_check::Callable<'db>,
-    ) -> Self {
-        Self {
-            func,
-            generic_args: callable.generic_args().to_vec(),
-            trait_inst: callable.trait_inst(),
+        let instance = get_or_build_semantic_instance(db, key);
+        if let Some(error) = instance.call_site_finalization_diagnostic(db) {
+            return Err(format!(
+                "cannot collect contract ABI from unresolved runtime call: {error:?}"
+            ));
         }
+        pending.extend(instance.callees(db).iter().rev().map(|callee| callee.key));
     }
-}
-
-fn instantiate_callable_typed_body<'db>(
-    db: &'db DriverDataBase,
-    typed_body: hir::analysis::ty::ty_check::TypedBody<'db>,
-    target: &VisitedFuncBody<'db>,
-) -> hir::analysis::ty::ty_check::TypedBody<'db> {
-    let mut typed_body = Binder::bind(GenericParamOwner::Func(target.func), typed_body)
-        .instantiate(db, &target.generic_args);
-    if let Some(trait_inst) = target.trait_inst {
-        typed_body = normalize_from_assumptions(
-            db,
-            typed_body,
-            target.func.scope(),
-            PredicateListId::new(db, vec![trait_inst]),
-        );
-    }
-    typed_body
+    Ok(events)
 }
 
 struct EventEmitTraits<'db> {
