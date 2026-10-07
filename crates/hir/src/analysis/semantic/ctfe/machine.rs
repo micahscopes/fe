@@ -2072,7 +2072,6 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         use crate::analysis::ty::{
             corelib::resolve_core_trait,
             trait_def::{OrdinaryEvidenceError, TraitInstId, resolve_ordinary_impl_evidence},
-            trait_resolution::{PredicateListId, TraitSolveCx},
             ty_check::check_func_body,
         };
         let db = self.db;
@@ -2092,11 +2091,12 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         let [family, expected] = arguments else {
             return Err(invalid("expected a unary query family and result type").into());
         };
+        let context = crate::semantic::context_at(db, owner.scope(), None);
         let query_ty = normalize_ty(
             db,
             TyId::app(db, *family, field_ty),
-            owner.scope(),
-            PredicateListId::empty_list(db),
+            context.normalization_scope(db),
+            context.assumptions(db),
         );
         for ty in [field_ty, query_ty, *expected, result_ty] {
             if ty.has_invalid(db) || ty.has_param(db) || ty.has_var(db) || ty.has_projection(db) {
@@ -2115,15 +2115,17 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             vec![query_ty, *expected],
             common::indexmap::IndexMap::<crate::hir_def::IdentId<'db>, TyId<'db>>::default(),
         );
-        let context = TraitSolveCx::new(db, owner.scope());
-        let evidence = resolve_ordinary_impl_evidence(db, context, goal).map_err(|error| {
-            invalid(match error {
-                OrdinaryEvidenceError::NotUnique => "no unique proven FieldQuery implementation",
-                OrdinaryEvidenceError::PrerequisitesNotProven => {
-                    "selected query prerequisites were not proved"
-                }
-            })
-        })?;
+        let evidence = resolve_ordinary_impl_evidence(db, context.solver_context(db), goal)
+            .map_err(|error| {
+                invalid(match error {
+                    OrdinaryEvidenceError::NotUnique => {
+                        "no unique proven FieldQuery implementation"
+                    }
+                    OrdinaryEvidenceError::PrerequisitesNotProven => {
+                        "selected query prerequisites were not proved"
+                    }
+                })
+            })?;
         let method = crate::hir_def::IdentId::new(db, "evaluate".to_owned());
         let (function, generic_args) = evidence
             .nullary_const_method(method)
