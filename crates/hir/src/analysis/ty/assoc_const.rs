@@ -73,6 +73,24 @@ impl<'db> AssocConstUse<'db> {
         Self { selection, ..self }
     }
 
+    /// A symbolic bound belongs to its parameter, rather than to whichever
+    /// declaration supplied a field or argument type. Explicit choices retain
+    /// their captured context; a goal absent from the binder is not rewritten.
+    pub(crate) fn canonical_symbolic_bound(self, db: &'db dyn HirAnalysisDb) -> Self {
+        if self.selection.is_some() {
+            return self;
+        }
+        let super::ty_def::TyData::TyParam(param) = self.inst.self_ty(db).data(db) else {
+            return self;
+        };
+        let context = crate::semantic::context_at(db, param.owner, None);
+        let assumptions = context.assumptions(db);
+        if !assumptions.list(db).contains(&self.inst) {
+            return self;
+        }
+        self.with_env(context.normalization_scope(db), assumptions)
+    }
+
     pub fn solve_cx(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
         TraitSolveCx::new(db, self.origin_scope).with_assumptions(self.assumptions)
     }

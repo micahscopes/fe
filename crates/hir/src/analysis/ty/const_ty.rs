@@ -1103,10 +1103,15 @@ fn canonicalize_const_expr_for_mode<'db>(
                 index: *index,
             },
         ),
-        ConstExpr::TraitConst(assoc) => ConstExprId::new(
-            db,
-            ConstExpr::TraitConst(env.apply_assoc_evidence(db, *assoc)),
-        ),
+        ConstExpr::TraitConst(assoc) => {
+            let assoc = env.apply_assoc_evidence(db, *assoc);
+            let assoc = if mode == ConstCanonMode::Identity {
+                assoc.canonical_symbolic_bound(db)
+            } else {
+                assoc
+            };
+            ConstExprId::new(db, ConstExpr::TraitConst(assoc))
+        }
         ConstExpr::InherentConst(use_) => ConstExprId::new(
             db,
             ConstExpr::InherentConst(env.apply_assoc_evidence(db, *use_)),
@@ -1156,6 +1161,13 @@ pub(crate) fn evaluate_type_level_const_ty<'db>(
     let const_ty = const_ty.with_ty(db, ty.as_view(db).unwrap_or(ty));
     let expected_ty = expected_ty.map(|ty| ty.as_view(db).unwrap_or(ty));
     let evaluated = const_ty.evaluate(db, expected_ty);
+    let evaluated = if let ConstTyData::Abstract(expr, ty) = evaluated.data(db)
+        && let ConstExpr::TraitConst(assoc) = expr.data(db)
+    {
+        abstract_const_ty_from_assoc_const_use(db, assoc.canonical_symbolic_bound(db), *ty)
+    } else {
+        evaluated
+    };
     let ConstTyData::Abstract(expr, ty) = evaluated.data(db) else {
         return evaluated;
     };

@@ -3694,6 +3694,47 @@ fn widen(_ value: own u8) -> u256 {
     }
 
     #[test]
+    fn symbolic_associated_const_fields_normalize_and_verify() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "symbolic_associated_const_fields.fe".into(),
+            r#"
+trait Width { const N: usize
+    const M: usize }
+struct Buf<T: Width> { a: [u256; T::N] }
+fn make<T: Width>(_ a: [u256; T::N]) -> Buf<T> { Buf { a } }
+fn forward<T: Width>(_ a: [u256; T::N]) -> Buf<T> { make<T>(a) }
+fn distinct<T: Width, U: Width>(
+    _ a: [u256; T::N], _ b: [u256; T::M], _ c: [u256; U::N],
+) {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        for name in ["make", "forward"] {
+            let artifacts = normalized_func(&db, top_mod, name);
+            verify_normalized_body(&db, &artifacts.body)
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        }
+        let artifacts = normalized_func(&db, top_mod, "distinct");
+        let types: Vec<_> = artifacts
+            .body
+            .values
+            .iter()
+            .filter_map(|value| {
+                matches!(value.definition, NValueDefinition::EntryParam { .. }).then_some(value.ty)
+            })
+            .collect();
+        let [same_receiver, other_const, other_receiver]: [TyId<'_>; 3] = types.try_into().unwrap();
+        for other in [other_const, other_receiver] {
+            assert!(
+                super::structural_repack_mapping(&db, artifacts.body.owner, same_receiver, other,)
+                    .is_none(),
+                "distinct associated constants must retain distinct layouts"
+            );
+        }
+    }
+
+    #[test]
     fn symbolic_array_defaults_normalize_and_verify() {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
