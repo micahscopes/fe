@@ -21,6 +21,7 @@ pub(crate) use semantic::{
     resolved_effect_binding_ty_for_instance_effect, semantic_instance_base_assumptions_for_key,
 };
 pub use template::{
-    EffectProviderSubst, GenericSubst, ImplEnv, SelectedApplication, TypedBodyTemplate,
-    instantiate_typed_body, resolve_trait_method_with_selections, typed_body_template,
+    EffectProviderSubst, GenericSubst, ImplEnv, SelectedApplication, SolverPremises,
+    TypedBodyTemplate, instantiate_typed_body, resolve_trait_method_with_selections,
+    typed_body_template,
 };

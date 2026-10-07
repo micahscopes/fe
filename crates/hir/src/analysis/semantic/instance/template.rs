@@ -227,10 +227,58 @@ pub struct ImplEnv<'db> {
     pub bound_choices: Vec<(usize, TraitChoiceId<'db>)>,
 }
 
+/// The premises and normalization scope of a position context: the part of
+/// the context a premise-only query (normalization, `Copy`, provider layout)
+/// reads, and so the part such a query is keyed by.
+///
+/// Named selections are deliberately excluded: a named choice is not proof
+/// authority, and evidence opened at the position is already among the
+/// assumptions. Method lookup, where a named choice shadows matching goals,
+/// needs a different view and gets its own named projection.
+///
+/// Equality and hashing are those of the `(scope, assumptions)` pair it
+/// replaces, so query keys are unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub struct SolverPremises<'db> {
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+}
+
+impl<'db> SolverPremises<'db> {
+    /// Transitional: premises built from a scope and assumption list that do
+    /// not yet come from a position context. Each caller is a site still to be
+    /// given the context of its position; `.github/check_solver_premises_budget.py`
+    /// counts them and the count may only decrease.
+    pub fn from_unpositioned_pair(scope: ScopeId<'db>, assumptions: PredicateListId<'db>) -> Self {
+        Self { scope, assumptions }
+    }
+
+    pub fn scope(self) -> ScopeId<'db> {
+        self.scope
+    }
+
+    pub fn assumptions(self) -> PredicateListId<'db> {
+        self.assumptions
+    }
+
+    /// The solver view of these premises.
+    pub fn solver_context(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
+        TraitSolveCx::new(db, self.scope).with_assumptions(self.assumptions)
+    }
+}
+
 impl<'db> ImplEnv<'db> {
+    /// The premises and normalization scope of this position context.
+    pub fn premises(self, db: &'db dyn HirAnalysisDb) -> SolverPremises<'db> {
+        SolverPremises {
+            scope: self.normalization_scope(db),
+            assumptions: self.assumptions(db),
+        }
+    }
+
     /// Solver premises and normalization scope come from one position context.
     pub fn solver_context(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
-        TraitSolveCx::new(db, self.normalization_scope(db)).with_assumptions(self.assumptions(db))
+        self.premises(db).solver_context(db)
     }
 
     /// Attach this restricted position context to uncaptured signature constants.

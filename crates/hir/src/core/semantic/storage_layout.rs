@@ -1404,7 +1404,14 @@ impl<'db> FieldCollector<'db> {
         owner: TyId<'db>,
         default_space: ProviderAddressSpace,
     ) -> Option<ProviderAddressSpace> {
-        match resolve_static_slot_layout(self.db, self.scope, self.assumptions, owner) {
+        match resolve_static_slot_layout(
+            self.db,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.scope,
+                self.assumptions,
+            ),
+            owner,
+        ) {
             StaticSlotLayoutResolution::NotStaticSlot => Some(default_space),
             StaticSlotLayoutResolution::Resolved(space) => Some(space),
             StaticSlotLayoutResolution::Ambiguous => {
@@ -3526,8 +3533,7 @@ fn owner_space_in_field<'db>(
 ) -> Option<ProviderAddressSpace> {
     match resolve_static_slot_layout(
         db,
-        field.field.contract.scope(),
-        PredicateListId::empty_list(db),
+        crate::semantic::context_at(db, field.field.contract.scope(), None).premises(db),
         owner,
     ) {
         StaticSlotLayoutResolution::NotStaticSlot => Some(default_space),

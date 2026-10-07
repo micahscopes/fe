@@ -344,15 +344,15 @@ pub fn resolve_effect_handle_layout<'db>(
 #[salsa::tracked]
 pub fn resolve_static_slot_layout<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     owner_ty: TyId<'db>,
 ) -> StaticSlotLayoutResolution {
+    let scope = premises.scope();
     let Some(static_slot) = super::corelib::resolve_core_trait(db, scope, &["StaticSlot"]) else {
         return StaticSlotLayoutResolution::NotStaticSlot;
     };
     let inst = TraitInstId::new(db, static_slot, vec![owner_ty], IndexMap::new());
-    let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+    let solve_cx = premises.solver_context(db);
     let resolved = match resolve_trait_impl_instance(db, solve_cx, inst) {
         Selection::Unique(resolved)
             if !matches!(
