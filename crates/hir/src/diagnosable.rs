@@ -303,8 +303,7 @@ impl<'db> SuperTraitRefView<'db> {
 
         check_trait_inst_wf(
             db,
-            ty::trait_resolution::TraitSolveCx::new(db, scope)
-                .with_assumptions(param_env(db, self.owner.into())),
+            crate::semantic::context_at(db, scope, None).solver_context(db),
             inst,
         )
         .into_diag(span.into())
@@ -428,8 +427,7 @@ impl<'db> WherePredicateBoundView<'db> {
                 if !is_trait_self_subject
                     && let Some(diag) = check_trait_inst_wf(
                         db,
-                        ty::trait_resolution::TraitSolveCx::new(db, scope)
-                            .with_assumptions(param_env(db, owner_item)),
+                        crate::semantic::context_at(db, scope, None).solver_context(db),
                         inst,
                     )
                     .without_subgoal()
@@ -1945,8 +1943,7 @@ impl<'db> GenericParamOwner<'db> {
 
                         if let Some(diag) = check_trait_inst_wf(
                             db,
-                            ty::trait_resolution::TraitSolveCx::new(db, scope)
-                                .with_assumptions(param_env(db, self.into())),
+                            crate::semantic::context_at(db, scope, None).solver_context(db),
                             inst,
                         )
                         .without_subgoal()
