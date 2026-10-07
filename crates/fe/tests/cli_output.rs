@@ -4890,6 +4890,7 @@ fn runtime_selected_evidence_requires_compile_time_choice() {
         "evidence_choice_checks/generic_helper_return.fe",
         "evidence_choice_checks/runtime_controlled_condition.fe",
         "evidence_choice_checks/runtime_witness_field_store.fe",
+        "evidence_choice_checks/runtime_witness_method.fe",
     ] {
         let fixture = root.join(name);
         let (output, exit_code) =
@@ -4923,6 +4924,7 @@ fn compile_time_evidence_return_conditions_remain_accepted() {
         "mixed_record_return.fe",
         "mixed_runtime_payload.fe",
         "known_sibling_store.fe",
+        "known_sibling_method.fe",
         "known_const_generic.fe",
         "known_const_generic_after_runtime_work.fe",
         "known_dynamic_numeric_array_store.fe",
