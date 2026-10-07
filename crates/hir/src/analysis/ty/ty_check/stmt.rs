@@ -14,7 +14,6 @@ use crate::analysis::ty::{
     diagnostics::BodyDiag,
     fold::{TyFoldable, TyFolder},
     trait_def::{TraitInstId, impls_for_ty},
-    trait_resolution::TraitSolveCx,
     ty_def::{InvalidCause, TyId},
     visitor::TyVisitable,
 };
@@ -132,8 +131,7 @@ impl<'db> TyChecker<'db> {
             if let Some(diag) =
                 crate::analysis::ty::trait_resolution::check_ty_wf_with_lexical_context(
                     self.db,
-                    TraitSolveCx::new(self.db, self.env.scope())
-                        .with_assumptions(self.env.assumptions()),
+                    self.env.solver_context(),
                     ascription,
                     crate::analysis::ty::trait_resolution::PredicateListId::empty_list(self.db),
                     context.fold_with(self.db, &mut self.table),

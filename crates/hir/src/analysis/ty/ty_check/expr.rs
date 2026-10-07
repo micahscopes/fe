@@ -320,8 +320,7 @@ impl<'db> TyChecker<'db> {
         let reason = match callable.generic_args() {
             [term] => {
                 let term = self.normalize_ty(*term);
-                let context = TraitSolveCx::new(self.db, self.env.scope())
-                    .with_assumptions(self.env.assumptions());
+                let context = self.env.solver_context();
                 crate::analysis::ty::trait_def::concrete_obligation_goal(self.db, term)
                     .and_then(|goal| match self.env.provision_for_goal(goal) {
                         Some(Provision::Named(selection)) => selection
@@ -1513,8 +1512,7 @@ impl<'db> TyChecker<'db> {
             semantic::SelectedApplication,
             ty::trait_def::{prove_selected_hir_impl_evidence, unproved_named_impl_requirement},
         };
-        let context =
-            TraitSolveCx::new(self.db, self.env.scope()).with_assumptions(self.env.assumptions());
+        let context = self.env.solver_context();
         let proof =
             prove_selected_hir_impl_evidence(self.db, context, candidate, goal).map_err(|_| {
                 (
