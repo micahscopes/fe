@@ -281,7 +281,7 @@ pub(crate) fn context_at<'db>(
         };
         enclosing = parent;
     }
-    crate::analysis::semantic::ImplEnv::new(db, scope, param_env(db, enclosing.item()), Vec::new())
+    Chain::<()>::new(db, param_env(db, enclosing.item())).context(db, scope)
 }
 
 /// The direct trait goal belongs to the accepted record, not a copied callable link.

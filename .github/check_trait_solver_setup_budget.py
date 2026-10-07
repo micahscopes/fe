@@ -147,6 +147,18 @@ def main() -> int:
     ]
     if any(count(source) != expected for source, expected in cases):
         raise AssertionError("solver construction counter self-check failed")
+    # Item and body positions must both project their provision chain. This
+    # excludes a second context constructor beside context_at's record reader.
+    semantic = ROOT / "crates/hir/src/core/semantic/mod.rs"
+    context_constructor = r"\bImplEnv\s*::\s*new(?:_\w+)?\b"
+    for name in ("new", "new_with_selections", "new_with_choices"):
+        assert re.search(context_constructor, production_code(f"ImplEnv::{name}(db);"))
+    assert not re.search(context_constructor, production_code(
+        '// ImplEnv::new(db)\n#[cfg(test)] fn control() { ImplEnv::new(db); }'
+    ))
+    if re.search(context_constructor, production_code(semantic.read_text())):
+        print("semantic item context bypasses the provision chain", file=sys.stderr)
+        return 1
     by_file = inventory()
     total = sum(by_file.values())
     print(f"direct solver constructions outside solver module: {total} (ceiling {BASELINE})")
