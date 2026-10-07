@@ -1,10 +1,5 @@
-// Root cause of p09 without any generic binder: inside `with (e)` the checker
-// types the callee parameter [u256; T::N] (T = Subject) with the ordinary N (1),
-// but the callee instance runs with the evidence's N (2).
-// The named spelling of the same provision,
-//     const fn named_len(_ x: [u256; Subject::N]) -> usize { with (Wide) { len<Subject>(x) } }
-// is rejected since 5f260e410 (error[8-0000]: expected `[u256; 2]`, but `[u256; 1]` is given).
-// The evidence spelling below is accepted on every compiler and LEN evaluates to 2.
+// A value formed under the ordinary provision cannot cross into an opening
+// that requires a different array length. Expect a frontend type mismatch.
 use core::obligations::{Evidence, prove}
 trait Width { const N: usize }
 struct Subject {}
@@ -16,4 +11,4 @@ const fn cross_len(_ e: Evidence<Width<Subject>>, _ x: [u256; Subject::N]) -> us
 }
 const LEN: usize = cross_len(with (Wide) { prove<Width<Subject>>() }, [5])
 #[test]
-fn one_element_array_reported_as_length_2() { assert(LEN == 2) }
+fn ordinary_array_cannot_cross_into_wide_opening() { assert(LEN == 2) }

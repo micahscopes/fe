@@ -1,0 +1,17 @@
+// Named spelling of p26, a correct program: under `with (Wide)` both the written
+// type and the repeat length Subject::N + 1 mean 3.
+use core::obligations::{Evidence, prove}
+trait Width { const N: usize }
+struct Subject {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+const fn three(_ x: [u256; 3]) -> usize { 3 }
+const fn named_three() -> usize {
+    with (Wide) {
+        let y: [u256; Subject::N + 1] = [7; Subject::N + 1]
+        three(y)
+    }
+}
+const N3: usize = named_three()
+#[test]
+fn named_is_3() { assert(N3 == 3) }

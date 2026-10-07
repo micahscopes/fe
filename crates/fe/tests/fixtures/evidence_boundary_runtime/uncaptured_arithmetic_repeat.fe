@@ -1,0 +1,4 @@
+const fn repeat<const N: usize>() -> [u256; N + 1] { [7; N + 1] }
+const X: [u256; 3] = repeat<2>()
+#[test]
+fn three() { assert(X[2] == 7) }

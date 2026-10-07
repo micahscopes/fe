@@ -3242,8 +3242,8 @@ impl<'db> ConstTyId<'db> {
         }
     }
 
-    /// Capture only the provision read by an associated-constant path. An
-    /// unrelated symbolic expression must retain its declaration context.
+    /// Capture each associated-constant path before reducing its surrounding
+    /// expression. Other references keep their declaration context.
     pub(crate) fn with_provision_at(
         self,
         db: &'db dyn HirAnalysisDb,
@@ -3254,56 +3254,113 @@ impl<'db> ConstTyId<'db> {
             body,
             capture,
             const_def: None,
-            impl_env: None,
+            ty,
+            template_ty,
             ..
         } = self.data(db)
         else {
             return self;
         };
-        let Partial::Present(Expr::Path(path)) = body.expr(db).data(db, *body) else {
-            return self;
+        let capture_path = |expr: crate::hir_def::ExprId| {
+            let Partial::Present(Expr::Path(path)) = expr.data(db, *body) else {
+                return None;
+            };
+            let path = path.to_opt()?;
+            let assumptions = assumptions_for_body(db, *body);
+            let Ok(PathRes::TraitConst(recv_ty, inst, name)) =
+                resolve_path(db, path, body.scope(), assumptions, true)
+            else {
+                return None;
+            };
+            let mut args = inst.args(db).clone();
+            args[0] = recv_ty;
+            let inst = capture.specialize(
+                db,
+                TraitInstId::new(db, inst.def(db), args, inst.assoc_type_bindings(db).clone()),
+            );
+            let provision = lookup(inst)?;
+            if matches!(provision, crate::semantic::Provision::Bound(_)) {
+                return None;
+            }
+            let assoc = AssocConstUse::new(
+                context.normalization_scope(db),
+                context.assumptions(db),
+                inst,
+                name,
+            )
+            .with_provision(Some(provision));
+            let declared_ty = inst
+                .def(db)
+                .const_(db, name)?
+                .ty_binder(db)?
+                .instantiate(db, inst.args(db));
+            Some(abstract_const_ty_from_assoc_const_use(
+                db,
+                assoc,
+                declared_ty,
+            ))
         };
-        let Some(path) = path.to_opt() else {
-            return self;
-        };
-        let assumptions = assumptions_for_body(db, *body);
-        let Ok(PathRes::TraitConst(recv_ty, inst, name)) =
-            resolve_path(db, path, body.scope(), assumptions, true)
-        else {
-            return self;
-        };
-        let mut args = inst.args(db).clone();
-        args[0] = recv_ty;
-        let inst = capture.specialize(
-            db,
-            TraitInstId::new(db, inst.def(db), args, inst.assoc_type_bindings(db).clone()),
-        );
-        let Some(provision) = lookup(inst) else {
-            return self;
-        };
-        if matches!(provision, crate::semantic::Provision::Bound(_)) {
+        if let Some(value) = capture_path(body.expr(db)) {
+            return if self.ty(db).has_invalid(db) {
+                value
+            } else {
+                value.with_ty(db, self.ty(db))
+            };
+        }
+        let captured: rustc_hash::FxHashMap<_, _> = body
+            .exprs(db)
+            .iter()
+            .filter_map(|(expr, _)| capture_path(expr).map(|value| (expr, value)))
+            .collect();
+        if captured.is_empty() {
             return self;
         }
-        let assoc = AssocConstUse::new(
-            context.normalization_scope(db),
-            context.assumptions(db),
-            inst,
-            name,
-        )
-        .with_provision(Some(provision));
-        let ty = if self.ty(db).has_invalid(db) {
-            let Some(ty) = inst
-                .def(db)
-                .const_(db, name)
-                .and_then(|view| view.ty_binder(db))
-            else {
-                return self;
-            };
-            ty.instantiate(db, inst.args(db))
-        } else {
-            self.ty(db)
+        let Some(expected) = template_ty.or(*ty) else {
+            return self;
         };
-        abstract_const_ty_from_assoc_const_use(db, assoc, ty)
+        let owner = super::ty_check::BodyOwner::AnonConstBody {
+            body: *body,
+            expected,
+        };
+        let key = SemanticInstanceKey::new(
+            db,
+            owner,
+            capture.generic_subst(db),
+            EffectProviderSubst::empty(db),
+            context,
+        );
+        let changed = std::cell::Cell::new(false);
+        let Some(description) =
+            crate::analysis::semantic::ctfe::capture_const_term(db, key, &|candidate, origin| {
+                if candidate != key {
+                    return None;
+                }
+                let SemOrigin::Expr(expr) = origin else {
+                    return None;
+                };
+                let value = captured.get(&expr).copied()?;
+                changed.set(true);
+                Some(value)
+            })
+        else {
+            return Self::invalid(
+                db,
+                InvalidCause::ConstEvalUnsupported {
+                    body: *body,
+                    expr: body.expr(db),
+                },
+            );
+        };
+        if !changed.get() {
+            return self;
+        }
+        Self::new(
+            db,
+            ConstTyData::Computation {
+                description: Box::new(description),
+                source: key,
+            },
+        )
     }
 
     pub(crate) fn with_optional_impl_env(

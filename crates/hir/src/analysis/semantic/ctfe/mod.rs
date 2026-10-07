@@ -30,4 +30,4 @@ pub use service::{
     force_const_description, specialize_const_computation, specialize_const_description,
 };
 
-pub(crate) use service::force_const_term_value;
+pub(crate) use service::{capture_const_term, force_const_term_value};

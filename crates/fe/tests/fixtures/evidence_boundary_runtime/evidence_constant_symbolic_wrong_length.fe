@@ -1,7 +1,5 @@
-// Minimal form of p04-p06. `x` is built with the bound's T::N (1 element); inside
-// `with (e)` it is passed where the evidence's T::N (2) is expected. Base
-// reported an internal error (normalized-body repack check); head accepts and
-// the callee reports length 2 for a 1-element array.
+// A value formed under the ordinary provision cannot cross into an opening
+// that requires a different array length. Expect a frontend type mismatch.
 use core::obligations::{Evidence, prove}
 trait Width { const N: usize }
 struct Subject {}
@@ -13,4 +11,4 @@ const fn cross_len<T: Width>(_ e: Evidence<Width<T>>, _ x: [u256; T::N]) -> usiz
 }
 const LEN: usize = cross_len<Subject>(with (Wide) { prove<Width<Subject>>() }, [5])
 #[test]
-fn one_element_array_reported_as_length_2() { assert(LEN == 2) }
+fn ordinary_array_cannot_cross_into_wide_opening() { assert(LEN == 2) }

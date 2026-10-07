@@ -1,0 +1,27 @@
+// Same block, same expression, two meanings under `with (e)` (Wide, N = 2):
+// as a value, Subject::N + 1 is 3; as an array length in a written type it is 2.
+use core::obligations::{Evidence, prove}
+trait Width { const N: usize }
+struct Subject {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+const fn last_index_ok(_ e: Evidence<Width<Subject>>) -> u256 {
+    with (e) {
+        let y: [u256; Subject::N + 1] = [7; Subject::N + 1]
+        y[Subject::N]   // the last element if the length is N + 1
+    }
+}
+const V: u256 = last_index_ok(with (Wide) { prove<Width<Subject>>() })
+#[test]
+fn last_is_7() { assert(V == 7) }
+
+// Nested arithmetic and repeated reads capture the same opening in a generic body.
+const fn nested<T: Width>(_ e: Evidence<Width<T>>) -> u256 {
+    with (e) {
+        let y: [u256; T::N + (T::N * 2)] = [7; T::N + (T::N * 2)]
+        y[T::N + (T::N * 2) - 1]
+    }
+}
+const NESTED: u256 = nested<Subject>(with (Wide) { prove<Width<Subject>>() })
+#[test]
+fn nested_last_is_7() { assert(NESTED == 7) }

@@ -5553,33 +5553,44 @@ impl<'db> TyChecker<'db> {
         ExprProp::new(ty, true)
     }
 
-    /// Whether `const_ty` is acceptable as an array-repeat length: a known
-    /// literal, or a symbolic const that resolves per monomorphization — a bare
-    /// const param (`N`) or a bare trait-const projection (`T::N`). The latter
-    /// two stay symbolic during checking and become concrete once the owning
-    /// type parameters are.
+    /// Array counts can retain captured scalar arithmetic until their compiler-
+    /// known provision is instantiated. CTFE still checks operations and budgets.
     fn array_len_const_is_acceptable(&self, const_ty: ConstTyId<'db>) -> bool {
-        if const_ty.integer_value(self.db).is_some() {
-            return true;
-        }
-        match const_ty.data(self.db) {
-            ConstTyData::TyParam(..) => true,
-            ConstTyData::Computation { description, .. } => match description.repr() {
-                ConstRepr::Term(term) => self.array_len_const_is_acceptable(*term),
-                ConstRepr::Value(value) => matches!(
-                    value.value().value(self.db),
-                    SemConstValue::Scalar {
-                        value: SemConstScalar::Int { .. },
-                        ..
-                    }
-                ),
-                ConstRepr::Deferred(_) => false,
-            },
-            ConstTyData::Abstract(expr, _) => {
-                matches!(expr.data(self.db), ConstExpr::TraitConst(_))
+        let mut pending = vec![const_ty];
+        let mut arithmetic = false;
+        let mut opened = false;
+        while let Some(value) = pending.pop() {
+            if value.integer_value(self.db).is_some() {
+                continue;
             }
-            _ => false,
+            match value.data(self.db) {
+                ConstTyData::TyParam(..) => {}
+                ConstTyData::Computation { description, .. } => match description.repr() {
+                    ConstRepr::Term(term) => pending.push(*term),
+                    _ => return false,
+                },
+                ConstTyData::Abstract(expr, _) => {
+                    let operands: &[TyId<'db>] = match expr.data(self.db) {
+                        ConstExpr::TraitConst(use_) => {
+                            opened |= use_.provision().is_some();
+                            continue;
+                        }
+                        ConstExpr::ArithBinOp { lhs, rhs, .. } => &[*lhs, *rhs],
+                        ConstExpr::UnOp { expr, .. } | ConstExpr::Cast { expr, .. } => &[*expr],
+                        _ => return false,
+                    };
+                    arithmetic = true;
+                    for operand in operands {
+                        let TyData::ConstTy(value) = operand.data(self.db) else {
+                            return false;
+                        };
+                        pending.push(*value);
+                    }
+                }
+                _ => return false,
+            }
         }
+        !arithmetic || opened
     }
 
     fn check_if(

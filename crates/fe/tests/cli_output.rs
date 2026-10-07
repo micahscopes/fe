@@ -5116,3 +5116,30 @@ fn evidence_constant_compound_signature_rejects_other_provision_length() {
 fn evidence_constant_helper_result_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("evidence_constant_helper_result.fe");
 }
+
+#[test]
+fn evidence_constant_compound_annotation_rejects_other_provision_length() {
+    reject_evidence_constant_wrong_length("evidence_constant_compound_annotation_wrong_length.fe");
+}
+
+#[test]
+fn evidence_constant_named_compound_repeat_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_constant_named_compound_repeat.fe");
+}
+
+#[test]
+fn evidence_constant_compound_last_element_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_constant_compound_last_element.fe");
+}
+
+#[test]
+fn uncaptured_arithmetic_repeat_keeps_its_existing_limit() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/uncaptured_arithmetic_repeat.fe");
+    let (output, code) = run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+    assert_ne!(code, 0, "unrelated symbolic arithmetic changed: {output}");
+    assert!(
+        output.contains("error[8-0064]") && !output.contains("error[16-"),
+        "{output}"
+    );
+}

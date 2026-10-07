@@ -1,0 +1,17 @@
+// ea5aa971d compound gap: inside `with (e)` (Wide, N = 2) the written length
+// Subject::N + 1 means 3. Which concrete lengths does the checker accept for it?
+use core::obligations::{Evidence, prove}
+trait Width { const N: usize }
+struct Subject {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+const fn two(_ x: [u256; 2]) -> usize { 2 }
+const fn as_two(_ e: Evidence<Width<Subject>>) -> usize {
+    with (e) {
+        let y: [u256; Subject::N + 1] = [7; Subject::N + 1]
+        two(y)
+    }
+}
+const T2: usize = as_two(with (Wide) { prove<Width<Subject>>() })
+#[test]
+fn if_accepted_a_3_element_meaning_was_typed_as_2() { assert(T2 == 2) }

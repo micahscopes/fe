@@ -301,6 +301,32 @@ fn extract_whole_const_term<'db>(
     computation: ConstComputationId<'db>,
     config: &CtfeConfig,
 ) -> Option<TermProvenance<'db>> {
+    extract_whole_const_term_with(db, computation, config, None)
+}
+
+/// Capture source constant references before selecting or reducing their values.
+/// The same bounded extractor still checks the whole graph and source order.
+pub(crate) fn capture_const_term<'db>(
+    db: &'db dyn HirAnalysisDb,
+    key: SemanticInstanceKey<'db>,
+    project: &dyn Fn(SemanticInstanceKey<'db>, SemOrigin<'db>) -> Option<ConstTyId<'db>>,
+) -> Option<ConstDesc<'db>> {
+    let computation = const_computation_for_instance(db, key, Vec::new());
+    let term =
+        extract_whole_const_term_with(db, computation, &CtfeConfig::default(), Some(project))?;
+    Some(ConstDesc::term_with_provenance(
+        db,
+        computation.parameter_owner(db),
+        term,
+    ))
+}
+
+fn extract_whole_const_term_with<'db>(
+    db: &'db dyn HirAnalysisDb,
+    computation: ConstComputationId<'db>,
+    config: &CtfeConfig,
+    project: Option<&dyn Fn(SemanticInstanceKey<'db>, SemOrigin<'db>) -> Option<ConstTyId<'db>>>,
+) -> Option<TermProvenance<'db>> {
     let ConstEntry::Resolved(key) = computation.entry(db) else {
         return None;
     };
@@ -308,6 +334,7 @@ fn extract_whole_const_term<'db>(
         return None;
     }
     let mut extraction = TermExtraction {
+        project,
         next_order: 0,
         remaining: config.step_limit.min(256),
         depth_limit: config.recursion_limit.min(64),
@@ -330,7 +357,8 @@ fn extract_whole_const_term<'db>(
 
 // Extraction is an optional description optimization. A bounded attempt falls
 // back to the original computation; only the executor reports resource faults.
-struct TermExtraction {
+struct TermExtraction<'a, 'db> {
+    project: Option<&'a dyn Fn(SemanticInstanceKey<'db>, SemOrigin<'db>) -> Option<ConstTyId<'db>>>,
     next_order: usize,
     remaining: usize,
     depth_limit: usize,
@@ -341,7 +369,7 @@ fn operation_provenance<'db>(
     origin: SemOrigin<'db>,
     operands: Vec<TermProvenance<'db>>,
     frames: &[TermCallFrame<'db>],
-    extraction: &mut TermExtraction,
+    extraction: &mut TermExtraction<'_, 'db>,
 ) -> TermProvenance<'db> {
     let operation_order = extraction.next_order;
     extraction.next_order += 1;
@@ -362,7 +390,7 @@ fn extract_pure_body_term<'db>(
     parameter_owner: ScopeId<'db>,
     stack: &[BodyOwner<'db>],
     frames: &[TermCallFrame<'db>],
-    extraction: &mut TermExtraction,
+    extraction: &mut TermExtraction<'_, 'db>,
 ) -> Option<TermProvenance<'db>> {
     if stack.len() >= extraction.depth_limit || stack.contains(&key.owner(db)) {
         return None;
@@ -416,7 +444,21 @@ fn extract_pure_body_term<'db>(
             // A term tree cannot duplicate a source operation. Moving each
             // operand also avoids exponential cloning before the order check.
             let mut read = |local: SLocalId| terms.get_mut(local.index()).and_then(Option::take);
+            let captured = if matches!(expr, SExpr::Const(_)) {
+                extraction
+                    .project
+                    .and_then(|project| project(key, stmt.origin))
+            } else {
+                None
+            };
             let (term, deps) = match expr {
+                SExpr::Const(_) if captured.is_some() => {
+                    let term = captured.expect("captured constant arm");
+                    let mut provenance =
+                        operation_provenance(term, stmt.origin, Vec::new(), frames, extraction);
+                    provenance.opaque = true;
+                    (provenance, Vec::new())
+                }
                 SExpr::Const(
                     constant @ (SConst::Value(..) | SConst::Description(..) | SConst::Evidence(..)),
                 ) => {
