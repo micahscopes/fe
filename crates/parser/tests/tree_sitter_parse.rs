@@ -176,6 +176,29 @@ fn format_report(results: &[SuiteResult]) -> String {
 }
 
 #[test]
+fn newline_else_keeps_the_branch_attached_without_joining_identifiers() {
+    let mut parser = new_parser();
+    for source in [
+        "fn f(flag: bool) { if flag { 1 }\nelse { 2 } }",
+        "fn f(flag: bool) { if flag { 1 }\n// branch\nelse { 2 } }",
+        "fn f(flag: bool) { if flag { 1 }\nelse if flag { 2 }\nelse { 3 } }",
+        "fn f(flag: bool) { let elsewhere = 2\nif flag { 1 }\nelsewhere }",
+        "fn f(flag: bool) { let else_value = 2\nif flag { 1 }\nelse_value }",
+    ] {
+        let (_, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(
+            errors.is_empty(),
+            "compiler parser rejected {source}: {errors:?}"
+        );
+        let errors = parse_errors(&mut parser, source);
+        assert!(
+            errors.is_empty(),
+            "tree-sitter rejected {source}: {errors:?}"
+        );
+    }
+}
+
+#[test]
 fn tree_sitter_parse_newline_lt_continuations() {
     let mut parser = new_parser();
     let cases = [

@@ -40,7 +40,6 @@ crates/hir/tests/fixtures/impl_const_requirements/pass/s5h_pattern_assoc.fe
 crates/uitest/fixtures/name_resolution/qualified_type_middle_segment.fe
 crates/uitest/fixtures/name_resolution/qualified_type_nested_errors.fe
 crates/uitest/fixtures/name_resolution/variant_and_module_generic_args.fe
-crates/uitest/fixtures/semantic_borrowck/recursive_fresh_return.fe
 crates/uitest/fixtures/ty_check/abi_attr_on_non_struct.fe
 crates/uitest/fixtures/ty_check/const_arg_in_param_projection.fe
 crates/uitest/fixtures/ty_check/const_arg_in_param_projection_mismatch.fe

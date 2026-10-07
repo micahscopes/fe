@@ -88,6 +88,8 @@ static bool skip_block_comment(TSLexer *lexer) {
 //   .y()     <- no semicolon after x
 //   .z()     <- no semicolon after .y()
 //
+static bool scan_word(TSLexer *lexer, const char *word);
+
 static bool scan_automatic_semicolon(TSLexer *lexer) {
   lexer->result_symbol = AUTOMATIC_SEMICOLON;
   lexer->mark_end(lexer);
@@ -175,6 +177,10 @@ static bool scan_automatic_semicolon(TSLexer *lexer) {
 
       return true;
     }
+
+    // `else` continues its preceding branch across whitespace and comments.
+    // Match the whole keyword so names such as `elsewhere` still start a statement.
+    if (c == 'e') return !scan_word(lexer, "else");
 
     // Any other token after a newline -- insert semicolon
     return true;
