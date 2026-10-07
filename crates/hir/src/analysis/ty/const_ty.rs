@@ -2646,13 +2646,12 @@ fn selected_const_body_assumptions<'db>(
     let Some(env) = impl_env else {
         return assumptions_for_body(db, body);
     };
-    let mut assumptions = env.assumptions(db).list(db).clone();
-    for selection in env.selections(db) {
-        if !assumptions.contains(&selection.goal()) {
-            assumptions.push(selection.goal());
-        }
-    }
-    PredicateListId::new(db, assumptions).extend_all_bounds(db)
+    crate::semantic::lookup_assumptions(
+        db,
+        env.assumptions(db),
+        env.witnesses(db).iter().copied(),
+        env.selections(db).iter().copied(),
+    )
 }
 
 fn assoc_const_use_for_body<'db>(
@@ -3671,6 +3670,32 @@ mod tests {
                 ty.super_fold_with(db, self)
             }
         }
+    }
+
+    #[test]
+    fn selected_constant_lookup_preserves_transported_witnesses() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "constant_lookup_witness.fe".into(),
+            "trait Mark {}\nfn caller<T: Mark>() {}",
+        );
+        let (top, _) = db.top_mod(file);
+        db.assert_no_diags(top);
+        let caller = find_func(&db, top, "caller");
+        let body = caller.body(&db).expect("caller body");
+        let premises = crate::semantic::param_env(&db, caller.into());
+        let witness = premises.list(&db)[0];
+        let context = ImplEnv::new(
+            &db,
+            caller.scope(),
+            PredicateListId::empty_list(&db),
+            vec![witness],
+        );
+        let actual = selected_const_body_assumptions(&db, body, Some(context));
+        assert!(
+            actual.list(&db).contains(&witness),
+            "constant path lookup must preserve the transported witness premise"
+        );
     }
 
     #[test]

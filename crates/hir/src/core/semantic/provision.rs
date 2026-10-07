@@ -302,14 +302,7 @@ impl<'db, Data> Chain<'db, Data> {
     /// Lookup may discover methods from a named choice without treating it as
     /// an ordinary proof premise. Keep this projection at the context boundary.
     pub fn method_lookup_assumptions(&self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
-        let mut premises = self.evidence_assumptions(db).list(db).to_vec();
-        for provision in self.visible(db) {
-            if let Provision::Named(selection) = provision {
-                premises.retain(|goal| !selection.matches(db, *goal));
-                premises.push(selection.goal());
-            }
-        }
-        PredicateListId::new(db, premises).extend_all_bounds(db)
+        lookup_assumptions(db, self.evidence_assumptions(db), [], self.selections(db))
     }
 
     pub fn lookup(
@@ -319,6 +312,27 @@ impl<'db, Data> Chain<'db, Data> {
     ) -> Option<Provision<'db>> {
         super::lookup_trait_goal(db, goal, self.iter(), |p| p.goal())
     }
+}
+
+/// Project context premises and transported witnesses for member lookup.
+/// Named choices shadow matching lookup goals without becoming proof authority.
+pub(crate) fn lookup_assumptions<'db>(
+    db: &'db dyn HirAnalysisDb,
+    assumptions: PredicateListId<'db>,
+    witnesses: impl IntoIterator<Item = TraitInstId<'db>>,
+    selections: impl IntoIterator<Item = SelectedApplication<'db>>,
+) -> PredicateListId<'db> {
+    let mut premises = assumptions.list(db).to_vec();
+    for witness in witnesses {
+        if !premises.contains(&witness) {
+            premises.push(witness);
+        }
+    }
+    for selection in selections {
+        premises.retain(|goal| !selection.matches(db, *goal));
+        premises.push(selection.goal());
+    }
+    PredicateListId::new(db, premises).extend_all_bounds(db)
 }
 
 /// Syntax only: a position's innermost with-expression and binding prefix.
