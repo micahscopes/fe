@@ -2043,7 +2043,8 @@ impl<'db> TyChecker<'db> {
         };
         let view = crate::core::semantic::EffectEnvView::new(site);
 
-        let assumptions = PredicateListId::empty_list(self.db);
+        let context = crate::semantic::context_at(self.db, contract.scope(), None);
+        let assumptions = context.assumptions(self.db);
         let root_effect_ty = crate::analysis::ty::registered_root_providers(
             self.db,
             EffectParamSite::Contract(contract),
@@ -2071,7 +2072,7 @@ impl<'db> TyChecker<'db> {
                         if matches!(
                             is_goal_satisfiable(
                                 self.db,
-                                TraitSolveCx::new(self.db, contract.scope()),
+                                context.solver_context(self.db),
                                 trait_req
                             ),
                             GoalSatisfiability::UnSat(_) | GoalSatisfiability::ContainsInvalid

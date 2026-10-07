@@ -145,16 +145,16 @@ fn check_recv_variant_param_types_decodable<'db>(
     contract: Contract<'db>,
     variant: ResolvedRecvVariant<'db>,
     span: DynLazySpan<'db>,
-    assumptions: PredicateListId<'db>,
     diags: &mut Vec<FuncBodyDiag<'db>>,
 ) {
-    let Some(sol_ty) = resolve_sol_abi_ty(db, contract.scope(), assumptions) else {
+    let context = crate::semantic::context_at(db, contract.scope(), None);
+    let Some(sol_ty) = resolve_sol_abi_ty(db, contract.scope(), context.assumptions(db)) else {
         return;
     };
     let Some(decode_trait) = resolve_core_trait(db, contract.scope(), &["abi", "Decode"]) else {
         return;
     };
-    let solve_cx = TraitSolveCx::new(db, contract.scope()).with_assumptions(assumptions);
+    let solve_cx = context.solver_context(db);
 
     for field_ty in variant.ty.field_types(db) {
         check_ty_decodable(
@@ -357,7 +357,6 @@ fn check_named_recv_block<'db>(
                         contract,
                         resolved,
                         pat_span.clone(),
-                        assumptions,
                         diags,
                     );
                 }
@@ -479,7 +478,6 @@ fn check_bare_recv_block<'db>(
                         contract,
                         resolved,
                         pat_span.clone(),
-                        assumptions,
                         diags,
                     );
                 }
