@@ -2168,7 +2168,6 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         provisions: &[(SOperand, crate::analysis::ty::trait_def::TraitInstId<'db>)],
         origin: SemOrigin<'db>,
     ) -> Result<(SemanticInstanceKey<'db>, bool), CtfeError<'db>> {
-        use crate::analysis::ty::trait_resolution::TraitSolveCx;
         // Direct opened calls are registered from this same provision list.
         if provisions.is_empty() {
             return Ok((key, false));
@@ -2202,8 +2201,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         // Validate at the call site. The callee's own trait requirements
         // cannot establish the selected application's prerequisites.
         let caller_env = self.frames[frame_idx].body.owner.key(db).impl_env(db);
-        let destination = TraitSolveCx::new(db, caller_env.normalization_scope(db))
-            .with_assumptions(caller_env.assumptions(db));
+        let destination = caller_env.solver_context(db);
         let mut selections = env.selections(db).clone();
         let mut opened_method = None;
         for &(witness, goal) in provisions {
@@ -2267,9 +2265,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         args: &[CtfeConstValue<'db>],
         origin: SemOrigin<'db>,
     ) -> Result<CtfeConstValue<'db>, CtfeError<'db>> {
-        use crate::analysis::ty::{
-            trait_def::introduce_obligation, trait_resolution::TraitSolveCx,
-        };
+        use crate::analysis::ty::trait_def::introduce_obligation;
         let db = self.db;
         let invalid = |message: &str| CtfeError::InvalidOperation {
             origin,
@@ -2293,8 +2289,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 _ => None,
             },
         );
-        let solve_cx = TraitSolveCx::new(db, context.normalization_scope(db))
-            .with_assumptions(context.assumptions(db));
+        let solve_cx = context.solver_context(db);
         let goal =
             crate::analysis::ty::trait_def::concrete_obligation_goal(db, *term).map_err(invalid)?;
         let evidence =
