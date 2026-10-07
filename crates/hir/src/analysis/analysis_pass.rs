@@ -9,7 +9,7 @@ use crate::analysis::{
         corelib::{resolve_core_trait, resolve_lib_trait_path, resolve_lib_type_path},
         non_copy_array_abi_fields,
         trait_def::TraitInstId,
-        trait_resolution::{GoalSatisfiability, TraitSolveCx, is_goal_satisfiable},
+        trait_resolution::{GoalSatisfiability, is_goal_satisfiable},
         ty_lower::lower_hir_ty,
     },
 };
@@ -282,7 +282,7 @@ fn semantic_field_type_errors<'db>(
 
         let scope = abi_struct.scope();
         let assumptions = constraints_for(db, abi_struct.into());
-        let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+        let solve_cx = crate::semantic::context_at(db, scope, None).solver_context(db);
         let traits = (
             resolve_lib_type_path(db, scope, "std::abi::Sol"),
             resolve_core_trait(db, scope, &["abi", "AbiSize"]),
