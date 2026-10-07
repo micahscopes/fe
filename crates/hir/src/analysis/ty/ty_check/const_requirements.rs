@@ -3391,6 +3391,12 @@ const fn caller<T>(_ first: Evidence<Compute<T>>, _ second: Evidence<Inspect<T>>
                 _ => continue,
             };
             let context = crate::semantic::context_at(&db, body.scope(), Some((typed, expr)));
+            assert_eq!(
+                context.witnesses(&db).as_slice(),
+                expected,
+                "transported evidence at {}",
+                name.data(&db)
+            );
             let mut premises = canonical.list(&db).to_vec();
             premises.extend_from_slice(expected);
             let expected =

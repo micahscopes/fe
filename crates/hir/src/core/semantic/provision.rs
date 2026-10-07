@@ -282,7 +282,7 @@ impl<'db, Data> Chain<'db, Data> {
             db,
             scope,
             self.evidence_assumptions(db),
-            Vec::new(),
+            self.opened_evidence(db).map(|(_, goal)| goal).collect(),
             self.selections(db).collect(),
         )
     }
