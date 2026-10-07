@@ -5676,7 +5676,9 @@ impl<'db> TyChecker<'db> {
             };
             match data {
                 Expr::Lit(_) => {}
-                Expr::Un(inner, _) | Expr::Cast(inner, _) => pending.push(*inner),
+                Expr::Un(inner, _) | Expr::Cast(inner, _) | Expr::Field(inner, _) => {
+                    pending.push(*inner)
+                }
                 Expr::Bin(lhs, rhs, _) => pending.extend([*lhs, *rhs]),
                 Expr::Tuple(items) | Expr::Array(items) => pending.extend(items.iter().copied()),
                 Expr::RecordInit(_, fields) => {
@@ -5721,7 +5723,7 @@ impl<'db> TyChecker<'db> {
                     };
                     pending.push(initializer);
                 }
-                Expr::Call(_, args) => {
+                Expr::Call(_, args) | Expr::MethodCall(_, _, _, args) => {
                     let Some(callable) = self.env.callable_expr(expr) else {
                         return false;
                     };
@@ -5730,6 +5732,9 @@ impl<'db> TyChecker<'db> {
                     };
                     if !func.is_const(self.db) {
                         return false;
+                    }
+                    if let Expr::MethodCall(receiver, ..) = data {
+                        pending.push(*receiver);
                     }
                     pending.extend(args.iter().map(|arg| arg.expr));
                 }
