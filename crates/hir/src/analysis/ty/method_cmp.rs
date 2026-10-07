@@ -942,7 +942,12 @@ pub(crate) fn normalize_compare_assoc_consts<'db>(
             db: &'db dyn HirAnalysisDb,
             assoc: AssocConstUse<'db>,
         ) -> AssocConstUse<'db> {
-            let assoc = assoc.with_env(self.scope, self.assumptions);
+            let assoc = assoc.with_premises(
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    self.scope,
+                    self.assumptions,
+                ),
+            );
             if self.rebase_same_trait_uses
                 && assoc.inst().def(db) == self.trait_inst.def(db)
                 && is_identity_trait_inst(db, assoc.inst())

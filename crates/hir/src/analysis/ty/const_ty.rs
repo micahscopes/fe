@@ -2689,8 +2689,12 @@ fn assoc_const_use_for_body<'db>(
 ) -> AssocConstUse<'db> {
     let scope = impl_env.map_or(body.scope(), |env| env.normalization_scope(db));
     let assumptions = impl_env.map_or(assumptions, |env| env.assumptions(db));
-    AssocConstUse::new(scope, assumptions, inst, name)
-        .with_provision(impl_env.and_then(|env| env.provision_for(db, inst)))
+    AssocConstUse::new(
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+        inst,
+        name,
+    )
+    .with_provision(impl_env.and_then(|env| env.provision_for(db, inst)))
 }
 
 pub(crate) fn assumptions_for_body<'db>(
@@ -3289,13 +3293,8 @@ impl<'db> ConstTyId<'db> {
             if matches!(provision, crate::semantic::Provision::Bound(_)) {
                 return None;
             }
-            let assoc = AssocConstUse::new(
-                context.normalization_scope(db),
-                context.assumptions(db),
-                inst,
-                name,
-            )
-            .with_provision(Some(provision));
+            let assoc = AssocConstUse::new(context.premises(db), inst, name)
+                .with_provision(Some(provision));
             let declared_ty = inst
                 .def(db)
                 .const_(db, name)?

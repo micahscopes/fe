@@ -1252,7 +1252,14 @@ impl<'db> ImplTrait<'db> {
             let Some(name) = trait_const.name(db) else {
                 continue;
             };
-            let assoc = AssocConstUse::new(scope, assumptions, inst, name);
+            let assoc = AssocConstUse::new(
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    assumptions,
+                ),
+                inst,
+                name,
+            );
             let Some(const_ty) = const_ty_from_assoc_const_use(db, assoc) else {
                 continue;
             };

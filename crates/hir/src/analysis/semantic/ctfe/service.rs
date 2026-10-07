@@ -87,7 +87,12 @@ pub fn specialize_const_computation<'db>(
             } else {
                 use_.origin_scope()
             };
-            ConstEntry::Associated(folded.with_env(scope, folded.assumptions()))
+            ConstEntry::Associated(folded.with_premises(
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    folded.assumptions(),
+                ),
+            ))
         }
         ConstEntry::Inherent(use_) => {
             let folded = instantiate_scoped_into(db, use_, from_owner, new_owner, args);

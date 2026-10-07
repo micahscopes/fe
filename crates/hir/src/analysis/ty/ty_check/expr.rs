@@ -4652,8 +4652,10 @@ impl<'db> TyChecker<'db> {
                         expr,
                         ConstRef::TraitConst(
                             AssocConstUse::new(
-                                self.env.scope(),
-                                self.env.assumptions(),
+                                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                                    self.env.scope(),
+                                    self.env.assumptions(),
+                                ),
                                 inst,
                                 name,
                             )

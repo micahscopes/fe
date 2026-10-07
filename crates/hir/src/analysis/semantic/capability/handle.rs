@@ -116,7 +116,14 @@ impl<'db> OpaqueHandleContract<'db> {
                     .ok_or(UnresolvedCapability(ty))?;
                 let value = const_ty_or_abstract_from_assoc_const_use(
                     db,
-                    AssocConstUse::new(scope, assumptions, inst, name),
+                    AssocConstUse::new(
+                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                            scope,
+                            assumptions,
+                        ),
+                        inst,
+                        name,
+                    ),
                     expected,
                 )
                 .ok_or(UnresolvedCapability(ty))?;

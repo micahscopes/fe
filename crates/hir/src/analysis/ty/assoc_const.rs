@@ -14,8 +14,9 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub struct AssocConstUse<'db> {
-    origin_scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    /// The proof context the use was recorded with. Identity is unchanged:
+    /// premises compare and hash as the scope and assumptions they replace.
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     inst: TraitInstId<'db>,
     name: IdentId<'db>,
     provision: Option<crate::semantic::Provision<'db>>,
@@ -23,26 +24,28 @@ pub struct AssocConstUse<'db> {
 
 impl<'db> AssocConstUse<'db> {
     pub fn new(
-        origin_scope: ScopeId<'db>,
-        assumptions: PredicateListId<'db>,
+        premises: crate::analysis::semantic::SolverPremises<'db>,
         inst: TraitInstId<'db>,
         name: IdentId<'db>,
     ) -> Self {
         Self {
-            origin_scope,
-            assumptions,
+            premises,
             inst,
             name,
             provision: None,
         }
     }
 
+    pub fn premises(self) -> crate::analysis::semantic::SolverPremises<'db> {
+        self.premises
+    }
+
     pub fn origin_scope(self) -> ScopeId<'db> {
-        self.origin_scope
+        self.premises.scope()
     }
 
     pub fn assumptions(self) -> PredicateListId<'db> {
-        self.assumptions
+        self.premises.assumptions()
     }
 
     pub fn inst(self) -> TraitInstId<'db> {
@@ -53,12 +56,8 @@ impl<'db> AssocConstUse<'db> {
         Self { inst, ..self }
     }
 
-    pub fn with_env(self, origin_scope: ScopeId<'db>, assumptions: PredicateListId<'db>) -> Self {
-        Self {
-            origin_scope,
-            assumptions,
-            ..self
-        }
+    pub fn with_premises(self, premises: crate::analysis::semantic::SolverPremises<'db>) -> Self {
+        Self { premises, ..self }
     }
 
     pub fn name(self) -> IdentId<'db> {
@@ -126,11 +125,16 @@ impl<'db> AssocConstUse<'db> {
         if !assumptions.list(db).contains(&self.inst) {
             return self;
         }
-        self.with_env(param.owner, assumptions)
+        self.with_premises(
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                param.owner,
+                assumptions,
+            ),
+        )
     }
 
     pub fn solve_cx(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
-        TraitSolveCx::new(db, self.origin_scope).with_assumptions(self.assumptions)
+        self.premises.solver_context(db)
     }
 }
 
@@ -139,7 +143,7 @@ impl<'db> TyVisitable<'db> for AssocConstUse<'db> {
     where
         V: TyVisitor<'db> + ?Sized,
     {
-        self.assumptions.visit_with(visitor);
+        self.premises.visit_with(visitor);
         self.inst.visit_with(visitor);
         if let Some(provision) = self.provision {
             provision.visit_with(visitor);
@@ -160,8 +164,7 @@ impl<'db> TyFoldable<'db> for AssocConstUse<'db> {
         F: TyFolder<'db>,
     {
         Self {
-            origin_scope: self.origin_scope,
-            assumptions: self.assumptions.fold_with(db, folder),
+            premises: self.premises.fold_with(db, folder),
             inst: self.inst.fold_with(db, folder),
             name: self.name,
             provision: self

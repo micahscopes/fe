@@ -506,8 +506,10 @@ pub(crate) fn lower_const_body_path<'db>(
                     // differ in integer shape from the const's declared type
                     // (e.g. a `u256` trait const used as an array length).
                     let assoc = AssocConstUse::new(
-                        scope,
-                        minter.const_assumptions(assumptions),
+                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                            scope,
+                            minter.const_assumptions(assumptions),
+                        ),
                         inst,
                         name,
                     )
@@ -664,9 +666,15 @@ pub(crate) fn lower_type_position_path<'db>(
                 .and_then(|v| v.ty_binder(db))
                 .map(|b| b.instantiate(db, inst.args(db)))
             {
-                let assoc =
-                    AssocConstUse::new(scope, minter.const_assumptions(assumptions), inst, name)
-                        .with_provision(minter.provision_for(db, inst));
+                let assoc = AssocConstUse::new(
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        scope,
+                        minter.const_assumptions(assumptions),
+                    ),
+                    inst,
+                    name,
+                )
+                .with_provision(minter.provision_for(db, inst));
                 if let Some(const_ty) = super::const_ty::const_ty_or_abstract_from_assoc_const_use(
                     db,
                     assoc,

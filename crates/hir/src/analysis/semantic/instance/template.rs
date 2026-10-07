@@ -267,6 +267,24 @@ impl<'db> SolverPremises<'db> {
     }
 }
 
+impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for SolverPremises<'db> {
+    fn visit_with<V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized>(
+        &self,
+        visitor: &mut V,
+    ) {
+        self.assumptions.visit_with(visitor);
+    }
+}
+
+impl<'db> TyFoldable<'db> for SolverPremises<'db> {
+    fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
+        Self {
+            scope: self.scope,
+            assumptions: self.assumptions.fold_with(db, folder),
+        }
+    }
+}
+
 impl<'db> ImplEnv<'db> {
     /// The premises and normalization scope of this position context.
     pub fn premises(self, db: &'db dyn HirAnalysisDb) -> SolverPremises<'db> {
@@ -326,11 +344,8 @@ impl<'db> ImplEnv<'db> {
                 if matches!(provision, crate::semantic::Provision::Bound(_)) {
                     return use_;
                 }
-                use_.with_env(
-                    self.context.normalization_scope(db),
-                    self.context.assumptions(db),
-                )
-                .with_provision(Some(provision))
+                use_.with_premises(self.context.premises(db))
+                    .with_provision(Some(provision))
             }
 
             fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
