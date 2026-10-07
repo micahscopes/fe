@@ -5221,3 +5221,8 @@ fn abi_event_and_error_lists_follow_recorded_call_instances() {
         }
     }
 }
+
+#[test]
+fn evidence_constant_compound_unrelated_opening_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_constant_compound_unrelated_opening.fe");
+}

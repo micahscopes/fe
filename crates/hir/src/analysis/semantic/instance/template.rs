@@ -243,10 +243,7 @@ impl<'db> ImplEnv<'db> {
         if self.selections(db).is_empty() {
             return ty;
         }
-        self.contextualize_const_types_with(db, ty, |goal| {
-            self.selection_for(db, goal)
-                .map(crate::semantic::Provision::Named)
-        })
+        self.contextualize_const_types_with(db, ty, |goal| self.provision_for(db, goal))
     }
 
     pub(crate) fn contextualize_const_types_with(
@@ -347,17 +344,36 @@ impl<'db> ImplEnv<'db> {
         )
     }
 
+    /// Read the transported declaration view. A bound witness retains a goal;
+    /// lexical evidence operands are captured from their source record before
+    /// transport, and must never be reconstructed from this goal-only view.
+    pub(crate) fn provision_for(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+    ) -> Option<crate::semantic::Provision<'db>> {
+        use crate::semantic::Provision;
+        crate::core::semantic::lookup_trait_goal(
+            db,
+            goal,
+            self.witnesses(db)
+                .iter()
+                .copied()
+                .map(Provision::Bound)
+                .chain(self.selections(db).iter().copied().map(Provision::Named)),
+            |provision| provision.goal(),
+        )
+    }
+
     pub fn selection_for(
         self,
         db: &'db dyn HirAnalysisDb,
         goal: TraitInstId<'db>,
     ) -> Option<SelectedApplication<'db>> {
-        crate::core::semantic::lookup_trait_goal(
-            db,
-            goal,
-            self.selections(db).iter().copied(),
-            SelectedApplication::goal,
-        )
+        match self.provision_for(db, goal)? {
+            crate::semantic::Provision::Named(selection) => Some(selection),
+            _ => None,
+        }
     }
 
     pub fn empty(db: &'db dyn HirAnalysisDb, normalization_scope: ScopeId<'db>) -> Self {

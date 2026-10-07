@@ -511,7 +511,7 @@ pub(crate) fn lower_const_body_path<'db>(
                         inst,
                         name,
                     )
-                    .with_selection(minter.selection_for(db, inst));
+                    .with_provision(minter.provision_for(db, inst));
                     super::const_ty::abstract_const_ty_from_assoc_const_use(db, assoc, expected_ty)
                 } else {
                     ConstTyId::invalid(db, InvalidCause::Other)
@@ -666,7 +666,7 @@ pub(crate) fn lower_type_position_path<'db>(
             {
                 let assoc =
                     AssocConstUse::new(scope, minter.const_assumptions(assumptions), inst, name)
-                        .with_selection(minter.selection_for(db, inst));
+                        .with_provision(minter.provision_for(db, inst));
                 if let Some(const_ty) = super::const_ty::const_ty_or_abstract_from_assoc_const_use(
                     db,
                     assoc,

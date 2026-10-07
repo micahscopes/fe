@@ -38,10 +38,10 @@ use crate::analysis::{
     name_resolution::{PathRes, resolve_path},
     semantic::{
         ConstDesc, ConstRepr, CtfeConfig, CtfeError, EffectProviderSubst, EvalFailure, EvalOutcome,
-        GenericSubst, ImplEnv, PrimitiveFault, SConst, SelectedApplication, SemConstId,
-        SemConstScalar, SemConstValue, SemOrigin, SemanticInstanceKey, VariantIndex,
-        VerifiedConstValueId, const_computation_for_instance, describe_const_computation,
-        enum_const, eval_body_owner_const, execute_source_int_binary, execute_source_int_unary,
+        GenericSubst, ImplEnv, PrimitiveFault, SConst, SemConstId, SemConstScalar, SemConstValue,
+        SemOrigin, SemanticInstanceKey, VariantIndex, VerifiedConstValueId,
+        const_computation_for_instance, describe_const_computation, enum_const,
+        eval_body_owner_const, execute_source_int_binary, execute_source_int_unary,
         force_const_description, force_const_term_value, int_const, int_ty_shape,
         normalize_int_to_shape, sem_const_from_ty,
     },
@@ -523,12 +523,12 @@ impl<'db> LoweringContext<'db> {
         self.selected_const_assumptions.unwrap_or(default)
     }
 
-    pub(crate) fn selection_for(
+    pub(crate) fn provision_for(
         &self,
         db: &'db dyn HirAnalysisDb,
         goal: TraitInstId<'db>,
-    ) -> Option<SelectedApplication<'db>> {
-        self.selection_context?.selection_for(db, goal)
+    ) -> Option<crate::semantic::Provision<'db>> {
+        self.selection_context?.provision_for(db, goal)
     }
 
     pub(crate) fn const_impl_env(
@@ -2683,7 +2683,7 @@ fn assoc_const_use_for_body<'db>(
     let scope = impl_env.map_or(body.scope(), |env| env.normalization_scope(db));
     let assumptions = impl_env.map_or(assumptions, |env| env.assumptions(db));
     AssocConstUse::new(scope, assumptions, inst, name)
-        .with_selection(impl_env.and_then(|env| env.selection_for(db, inst)))
+        .with_provision(impl_env.and_then(|env| env.provision_for(db, inst)))
 }
 
 pub(crate) fn assumptions_for_body<'db>(

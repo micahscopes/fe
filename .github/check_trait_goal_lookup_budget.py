@@ -33,17 +33,22 @@ def inventory(sources):
     if len(searches) != BASELINE or '.rev()' not in searches[0] or '.find(' not in searches[0]:
         raise ValueError('expected one ordered trait-goal lookup')
     for file, name, delegate in [
-        ('impl', 'selection_for', 'lookup_trait_goal'),
+        ('impl', 'provision_for', 'lookup_trait_goal'),
+        ('impl', 'selection_for', 'provision_for'),
         ('env', 'provision_for_goal', 'lookup'),
         ('chain', 'lookup', 'lookup_trait_goal'),
         ('chain', 'visible', 'lookup_trait_goal'),
-        ('const', 'selection_for', 'selection_for'),
+        ('const', 'provision_for', 'provision_for'),
     ]:
         readers = bodies(sources[file], name)
         if len(readers) != 1 or delegate + '(' not in readers[0]:
             raise ValueError(f'{file}::{name} must delegate to {delegate}')
         if re.search(r'\.(?:find|position|rposition)\s*\(|\b(?:for|while|loop)\b', readers[0]):
             raise ValueError(f'{file}::{name} reintroduced an independent lookup')
+    if bodies(sources['const'], 'selection_for'):
+        raise ValueError('constant lowering must read provisions, not named selections')
+    if '.with_selection(' in sources['lower'] or 'minter.selection_for(' in sources['lower']:
+        raise ValueError('type lowering must capture the full provision')
     if any('selection_for_goal' in source for source in sources.values()):
         raise ValueError('named-only position reader is retired; read the full provision')
     return len(searches)
@@ -56,6 +61,7 @@ if __name__ == '__main__':
         'env': 'crates/hir/src/analysis/ty/ty_check/env.rs',
         'chain': 'crates/hir/src/core/semantic/provision.rs',
         'const': 'crates/hir/src/analysis/ty/const_ty.rs',
+        'lower': 'crates/hir/src/analysis/ty/ty_lower.rs',
     }
     sources = {name: (ROOT / path).read_text() for name, path in paths.items()}
     try:
@@ -63,7 +69,7 @@ if __name__ == '__main__':
     except ValueError as error:
         sys.exit(str(error))
     # Mutations must not turn adapters back into independent lookup authorities.
-    for file, name in [('impl', 'selection_for'), ('env', 'provision_for_goal'), ('chain', 'lookup'), ('chain', 'visible')]:
+    for file, name in [('impl', 'provision_for'), ('impl', 'selection_for'), ('const', 'provision_for'), ('env', 'provision_for_goal'), ('chain', 'lookup'), ('chain', 'visible')]:
         mutant = dict(sources)
         body = bodies(sources[file], name)[0]
         mutant[file] = sources[file].replace(body, '{ entries.rev().find(|entry| true) }')

@@ -1,0 +1,19 @@
+// An unrelated opening must not change the captured compound length.
+use core::obligations::{Evidence, prove}
+trait Width { const N: usize }
+struct Subject {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+struct Other {}
+impl Width for Other { const N: usize = 4 }
+impl Width for Other as OtherWide { const N: usize = 5 }
+const fn take<T: Width>(_ x: [u256; T::N + 1]) -> usize { T::N }
+const fn through<T: Width>(_ e: Evidence<Width<T>>) -> usize {
+    with (e) {
+        let y: [u256; T::N + 1] = [7; T::N + 1]
+        with (OtherWide) { take<T>(y) }
+    }
+}
+const R: usize = through<Subject>(with (Wide) { prove<Width<Subject>>() })
+#[test]
+fn same_width() { assert(R == 2) }
