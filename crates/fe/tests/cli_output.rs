@@ -5226,3 +5226,13 @@ fn abi_event_and_error_lists_follow_recorded_call_instances() {
 fn evidence_constant_compound_unrelated_opening_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("evidence_constant_compound_unrelated_opening.fe");
 }
+
+#[test]
+fn symbolic_constant_impl_constructor_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("symbolic_constant_impl_constructor.fe");
+}
+
+#[test]
+fn symbolic_constant_supertrait_default_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("symbolic_constant_supertrait_default.fe");
+}

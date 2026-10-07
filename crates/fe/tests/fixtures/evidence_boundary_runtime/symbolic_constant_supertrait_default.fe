@@ -1,0 +1,13 @@
+// Self::N reached through a super-trait inside a default method.
+trait Width {
+    const N: usize
+    fn take(_ x: [u256; Self::N]) -> [u256; Self::N] { x }
+}
+trait Deeper: Width {
+    fn again(_ x: [u256; Self::N]) -> [u256; Self::N] { Self::take(x) }
+}
+struct Subject {}
+impl Width for Subject { const N: usize = 2 }
+impl Deeper for Subject {}
+#[test]
+fn t() { assert(Subject::again([3, 4])[1] == 4) }

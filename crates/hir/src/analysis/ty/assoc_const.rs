@@ -103,7 +103,23 @@ impl<'db> AssocConstUse<'db> {
         // effects, so asking for them here would re-enter their own query.
         let assumptions = match param.owner.item() {
             crate::hir_def::ItemKind::Func(func) => {
-                crate::semantic::func_body_assumptions(db, func).extend_all_bounds(db)
+                let assumptions = crate::semantic::func_body_assumptions(db, func);
+                // Source checking uses the parent's authored parameters, while
+                // identity comparison sees their copies in the method binder.
+                let assumptions = if func.is_associated_func(db)
+                    && let Some(parent) = crate::hir_def::GenericParamOwner::Func(func).parent(db)
+                {
+                    let parent_len = super::ty_lower::collect_generic_params(db, parent)
+                        .params(db)
+                        .len();
+                    let params =
+                        super::ty_lower::collect_generic_params(db, func.into()).params(db);
+                    super::binder::Binder::bind(parent, assumptions)
+                        .instantiate(db, &params[..parent_len])
+                } else {
+                    assumptions
+                };
+                assumptions.extend_all_bounds(db)
             }
             _ => crate::semantic::context_at(db, param.owner, None).assumptions(db),
         };

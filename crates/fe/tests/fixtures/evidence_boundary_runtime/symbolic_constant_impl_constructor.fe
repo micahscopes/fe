@@ -1,0 +1,15 @@
+// The generic-constructor case 55528c06c fixed for free functions, written as an
+// inherent impl method (parameter owned by the impl).
+trait Width { const N: usize }
+struct Subject {}
+impl Width for Subject { const N: usize = 2 }
+struct Buf<T: Width> { a: [u256; T::N] }
+fn make<T: Width>(_ a: [u256; T::N]) -> Buf<T> { Buf { a } }
+impl<T: Width> Buf<T> {
+    fn new(_ a: [u256; T::N]) -> Self { Buf { a } }
+}
+#[test]
+fn t() {
+    assert(make<Subject>([3, 4]).a[1] == 4)
+    assert(Buf<Subject>::new([3, 4]).a[1] == 4)
+}
