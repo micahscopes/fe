@@ -720,8 +720,7 @@ impl<'db> Trait<'db> {
             if let Ok(inst) = view.trait_inst(db)
                 && let Some(diag) = check_trait_inst_wf(
                     db,
-                    ty::trait_resolution::TraitSolveCx::new(db, self.scope())
-                        .with_assumptions(param_env(db, self.into())),
+                    crate::semantic::context_at(db, self.scope(), None).solver_context(db),
                     inst,
                 )
                 .without_subgoal()
@@ -1366,8 +1365,7 @@ impl<'db> ImplTrait<'db> {
         let trait_inst = implementor.trait_(db);
         let trait_def = implementor.trait_def(db);
 
-        let solve_cx = trait_resolution::TraitSolveCx::new(db, self.scope())
-            .with_assumptions(param_env(db, self.into()));
+        let solve_cx = crate::semantic::context_at(db, self.scope(), None).solver_context(db);
 
         if let Some(diag) =
             check_trait_inst_wf(db, solve_cx, trait_inst).into_diag(self.span().trait_ref().into())
