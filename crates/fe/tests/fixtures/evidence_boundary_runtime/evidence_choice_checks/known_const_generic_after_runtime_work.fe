@@ -1,0 +1,11 @@
+use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+impl Read for Subject as Alternative { const fn read() -> u256 { 2 } }
+fn choose<const N: usize>(_ selected: bool) -> Evidence<Read<Subject>> {
+    let number: u256 = if selected { 1 } else { 2 }
+    assert(number > 0)
+    if N == 0 { prove<Read<Subject>>() }
+    else { with (Alternative) { prove<Read<Subject>>() } }
+}

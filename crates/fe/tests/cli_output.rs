@@ -4874,7 +4874,7 @@ fn rd103_known_evidence_ordinary_functions_at_o0_and_o2() {
 }
 
 #[test]
-#[ignore = "RD116: symbolic and field-sensitive evidence knowledge must converge before the diagnostic"]
+#[ignore = "RD116: control-flow diagnostic parked pending bounded analysis and alias review"]
 fn runtime_selected_evidence_requires_compile_time_choice() {
     let root =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evidence_boundary_runtime");
@@ -4888,6 +4888,8 @@ fn runtime_selected_evidence_requires_compile_time_choice() {
         "evidence_choice_checks/passed_choice.fe",
         "evidence_choice_checks/opened_choice.fe",
         "evidence_choice_checks/generic_helper_return.fe",
+        "evidence_choice_checks/runtime_controlled_condition.fe",
+        "evidence_choice_checks/runtime_witness_field_store.fe",
     ] {
         let fixture = root.join(name);
         let (output, exit_code) =
@@ -4919,6 +4921,11 @@ fn compile_time_evidence_return_conditions_remain_accepted() {
         "known_formal_branch.fe",
         "same_witness_return.fe",
         "mixed_record_return.fe",
+        "mixed_runtime_payload.fe",
+        "known_sibling_store.fe",
+        "known_const_generic.fe",
+        "known_const_generic_after_runtime_work.fe",
+        "known_dynamic_numeric_array_store.fe",
     ] {
         let fixture = root.join(name);
         let (output, exit_code) =
