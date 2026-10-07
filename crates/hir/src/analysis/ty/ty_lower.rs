@@ -1286,9 +1286,16 @@ impl<'db> CallableLayoutProjectionCollector<'db> {
         let Some(adt) = ty.adt_def(self.db) else {
             return;
         };
-        let effect_target = self
-            .expand_effect_targets
-            .then(|| resolve_effect_handle(self.db, self.site.scope(), self.assumptions, ty));
+        let effect_target = self.expand_effect_targets.then(|| {
+            resolve_effect_handle(
+                self.db,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    self.site.scope(),
+                    self.assumptions,
+                ),
+                ty,
+            )
+        });
         let family = match &effect_target {
             Some(EffectHandleResolution::Resolved { impl_instance, .. }) => {
                 CallableLayoutExpansionFamily::Provider(impl_instance.selected())

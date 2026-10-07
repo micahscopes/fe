@@ -99,7 +99,11 @@ impl<'db> OpaqueHandleContract<'db> {
                 address_space: HandleAddressSpace::Known(ProviderAddressSpace::Memory),
             }));
         }
-        match resolve_effect_handle(db, scope, assumptions, ty) {
+        match resolve_effect_handle(
+            db,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+            ty,
+        ) {
             EffectHandleResolution::NotHandle => Ok(None),
             EffectHandleResolution::Resolved {
                 impl_instance,

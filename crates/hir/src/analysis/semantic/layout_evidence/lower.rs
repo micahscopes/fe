@@ -1023,8 +1023,10 @@ impl<'a, 'db> LayoutEvidenceBuilder<'a, 'db> {
                 target_ty: next_ty, ..
             } = resolve_effect_handle(
                 self.db,
-                self.normalized.owner.key(self.db).owner(self.db).scope(),
-                self.normalized.owner.assumptions(self.db),
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    self.normalized.owner.key(self.db).owner(self.db).scope(),
+                    self.normalized.owner.assumptions(self.db),
+                ),
                 source_ty,
             )
             else {

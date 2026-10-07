@@ -98,7 +98,11 @@ pub fn capability_semantics<'db>(
         }));
     }
     // Semantic shapes retain generic targets; allocation layout requires a concrete target.
-    let target_ty = match resolve_effect_handle(db, scope, assumptions, ty) {
+    let target_ty = match resolve_effect_handle(
+        db,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+        ty,
+    ) {
         EffectHandleResolution::NotHandle => None,
         EffectHandleResolution::Resolved { target_ty, .. } => Some(target_ty),
         EffectHandleResolution::Invalid(_) => return Err(UnresolvedCapability(ty)),

@@ -15,7 +15,7 @@ use crate::{
                 ImplementorId, ImplementorOrigin, ResolvedImplInstance, TraitInstId,
                 resolve_trait_impl_instance,
             },
-            trait_resolution::{PredicateListId, Selection, TraitSolveCx},
+            trait_resolution::{PredicateListId, Selection},
             ty_check::EffectParamSite,
             ty_def::{CapabilityKind, TyBase, TyData, TyId},
             visitor::{TyVisitable, TyVisitor, walk_ty},
@@ -186,29 +186,28 @@ pub(crate) enum EffectHandleResolution<'db> {
 
 pub(crate) fn resolve_effect_handle<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     provider_ty: TyId<'db>,
 ) -> EffectHandleResolution<'db> {
     if provider_ty.as_capability(db).is_some() || !can_select_effect_handle_impl(db, provider_ty) {
         return EffectHandleResolution::NotHandle;
     }
-    resolve_effect_handle_query(db, scope, assumptions, provider_ty)
+    resolve_effect_handle_query(db, premises, provider_ty)
 }
 
 #[salsa::tracked]
 fn resolve_effect_handle_query<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     provider_ty: TyId<'db>,
 ) -> EffectHandleResolution<'db> {
+    let scope = premises.scope();
     let Some(effect_handle) = super::corelib::resolve_core_trait(db, scope, &["EffectHandle"])
     else {
         return EffectHandleResolution::NotHandle;
     };
     let inst = TraitInstId::new(db, effect_handle, vec![provider_ty], IndexMap::new());
-    let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+    let solve_cx = premises.solver_context(db);
     if provider_ty.has_var(db) {
         return match solve_cx.select_impl(db, inst) {
             Selection::NotFound => EffectHandleResolution::NotHandle,
@@ -233,11 +232,7 @@ fn resolve_effect_handle_query<'db>(
     else {
         return EffectHandleResolution::Invalid(ProviderLayoutFailure::UnresolvedTarget);
     };
-    let target_ty = normalize_ty(
-        db,
-        target_ty,
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
-    );
+    let target_ty = normalize_ty(db, target_ty, premises);
     if target_ty.has_invalid(db)
         || target_ty.has_var(db)
         || !target_ty.has_star_kind(db)
@@ -249,11 +244,7 @@ fn resolve_effect_handle_query<'db>(
     else {
         return EffectHandleResolution::Invalid(ProviderLayoutFailure::UnresolvedRaw);
     };
-    let raw_ty = normalize_ty(
-        db,
-        raw_ty,
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
-    );
+    let raw_ty = normalize_ty(db, raw_ty, premises);
     if raw_ty.has_invalid(db)
         || raw_ty.has_var(db)
         || !raw_ty.has_star_kind(db)
@@ -298,7 +289,11 @@ pub fn effect_handle_layout_target_ty<'db>(
     if let Some((_, inner)) = provider_ty.as_capability(db) {
         return Some(inner);
     }
-    match resolve_effect_handle(db, scope, assumptions, provider_ty) {
+    match resolve_effect_handle(
+        db,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+        provider_ty,
+    ) {
         EffectHandleResolution::Resolved { target_ty, .. } => Some(target_ty),
         EffectHandleResolution::NotHandle | EffectHandleResolution::Invalid(_) => None,
     }
@@ -311,21 +306,24 @@ pub fn resolve_effect_handle_layout<'db>(
     assumptions: PredicateListId<'db>,
     provider_ty: TyId<'db>,
 ) -> ProviderLayoutResolution<'db> {
-    let (impl_instance, target_template, target_ty, raw_ty) =
-        match resolve_effect_handle(db, scope, assumptions, provider_ty) {
-            EffectHandleResolution::NotHandle => {
-                return ProviderLayoutResolution::NotHandle;
-            }
-            EffectHandleResolution::Resolved {
-                impl_instance,
-                target_template,
-                target_ty,
-                raw_ty,
-            } => (impl_instance, target_template, target_ty, raw_ty),
-            EffectHandleResolution::Invalid(failure) => {
-                return ProviderLayoutResolution::Invalid(failure);
-            }
-        };
+    let (impl_instance, target_template, target_ty, raw_ty) = match resolve_effect_handle(
+        db,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+        provider_ty,
+    ) {
+        EffectHandleResolution::NotHandle => {
+            return ProviderLayoutResolution::NotHandle;
+        }
+        EffectHandleResolution::Resolved {
+            impl_instance,
+            target_template,
+            target_ty,
+            raw_ty,
+        } => (impl_instance, target_template, target_ty, raw_ty),
+        EffectHandleResolution::Invalid(failure) => {
+            return ProviderLayoutResolution::Invalid(failure);
+        }
+    };
     if matches!(
         impl_instance.selected().origin(db),
         ImplementorOrigin::Assumption
@@ -499,7 +497,11 @@ pub fn provider_semantics<'db>(
         };
     }
 
-    match resolve_effect_handle(db, scope, assumptions, provider_ty) {
+    match resolve_effect_handle(
+        db,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+        provider_ty,
+    ) {
         EffectHandleResolution::NotHandle => ProviderSemantics {
             provider_ty,
             kind: ProviderKind::RootObject,
@@ -783,7 +785,14 @@ fn handle<T>(value: own *T) {}
         let provider_ty = table.instantiate_with_fresh_vars(provider_ty);
         assert!(provider_ty.has_var(&db));
         assert!(matches!(
-            resolve_effect_handle(&db, scope, PredicateListId::empty_list(&db), provider_ty),
+            resolve_effect_handle(
+                &db,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    PredicateListId::empty_list(&db)
+                ),
+                provider_ty
+            ),
             EffectHandleResolution::NotHandle
         ));
         let func = find_func(&db, top_mod, "handle");
@@ -793,8 +802,10 @@ fn handle<T>(value: own *T) {}
         assert!(matches!(
             resolve_effect_handle(
                 &db,
-                func.scope(),
-                PredicateListId::empty_list(&db),
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    func.scope(),
+                    PredicateListId::empty_list(&db)
+                ),
                 handle_ty
             ),
             EffectHandleResolution::Invalid(ProviderLayoutFailure::Ambiguous)
