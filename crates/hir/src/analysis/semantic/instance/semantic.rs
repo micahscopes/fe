@@ -31,9 +31,7 @@ use crate::{
             },
             subst::substitute_complete,
             trait_def::MethodArgMapError,
-            trait_resolution::{
-                GoalSatisfiability, PredicateListId, TraitSolveCx, is_goal_satisfiable,
-            },
+            trait_resolution::{GoalSatisfiability, PredicateListId, is_goal_satisfiable},
             ty_check::{
                 BodyOwner, Callable, ConstIntrinsicKind, EffectParamSite,
                 EffectProviderSpecialization, LocalBinding, ParamSite, ResolvedEffectArg,
@@ -2163,13 +2161,10 @@ fn root_owner_effect_providers<'db>(
     };
     let site = effect_param_site(owner).expect("function owners should always have an effect site");
     let view = EffectEnvView::new(site);
-    let assumptions =
-        crate::analysis::ty::trait_resolution::constraint::collect_func_decl_constraints(
-            db,
-            func.into(),
-            true,
-        )
-        .instantiate_identity();
+    // Root providers are matched while effect bounds are being established, so
+    // they read the function's declaration-phase premises.
+    let context = crate::semantic::declaration_context_at(db, func.scope());
+    let assumptions = context.assumptions(db);
     let providers = view.providers(db);
     let root_provider = providers.iter().find(|provider| {
         matches!(
@@ -2201,7 +2196,7 @@ fn root_owner_effect_providers<'db>(
                     root_provider_satisfies_effect_requirement(
                         db,
                         func,
-                        assumptions,
+                        context,
                         provider,
                         &requirement,
                     )
@@ -2250,7 +2245,7 @@ fn root_owner_effect_providers<'db>(
 fn root_provider_satisfies_effect_requirement<'db>(
     db: &'db dyn HirAnalysisDb,
     func: crate::hir_def::Func<'db>,
-    assumptions: PredicateListId<'db>,
+    context: ImplEnv<'db>,
     root_provider: &ProviderBinding<'db>,
     requirement: &EffectRequirement<'db>,
 ) -> bool {
@@ -2258,7 +2253,8 @@ fn root_provider_satisfies_effect_requirement<'db>(
         EffectRequirementKey::Type(provider_ty) => {
             provider_ty == root_provider.provider_ty
                 || matches!(
-                    provider_semantics(db, func.scope(), assumptions, provider_ty).evidence,
+                    provider_semantics(db, func.scope(), context.assumptions(db), provider_ty)
+                        .evidence,
                     ProviderLayoutEvidence::ResolvedHandle(_)
                         | ProviderLayoutEvidence::TraitBoundHandle(_)
                 )
@@ -2266,11 +2262,7 @@ fn root_provider_satisfies_effect_requirement<'db>(
         EffectRequirementKey::Trait(trait_inst) => {
             let goal = instantiate_trait_self(db, trait_inst, root_provider.provider_ty);
             matches!(
-                is_goal_satisfiable(
-                    db,
-                    TraitSolveCx::new(db, func.scope()).with_assumptions(assumptions),
-                    goal,
-                ),
+                is_goal_satisfiable(db, context.solver_context(db), goal),
                 GoalSatisfiability::Satisfied(_) | GoalSatisfiability::NeedsConfirmation { .. }
             )
         }

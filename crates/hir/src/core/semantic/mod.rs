@@ -288,6 +288,24 @@ pub(crate) fn context_at<'db>(
     Chain::<()>::new(db, premises).context(db, scope)
 }
 
+/// Declaration-phase premises at a position, for readers that run while a
+/// function's effect-provider bounds are still being computed. Asking for the
+/// completed premises there would re-enter the query that builds them, so a
+/// function position reads its declared bounds only. Other positions have no
+/// such phase and read `context_at`.
+pub(crate) fn declaration_context_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+) -> crate::analysis::semantic::ImplEnv<'db> {
+    match enclosing_item(db, scope) {
+        ItemKind::Func(func) => {
+            Chain::<()>::new(db, func_body_assumptions(db, func).extend_all_bounds(db))
+                .context(db, scope)
+        }
+        _ => context_at(db, scope, None),
+    }
+}
+
 /// The item whose premises hold at `scope`; a body inherits its owner's.
 fn enclosing_item<'db>(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> ItemKind<'db> {
     let mut enclosing = scope;
