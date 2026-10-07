@@ -1532,7 +1532,7 @@ impl<'db> VariantView<'db> {
     pub fn diags_tuple_elems_wf(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
         use crate::hir_def::types::TypeKind as HirTyKind;
         use name_resolution::{PathRes, resolve_path};
-        use ty::trait_resolution::{TraitSolveCx, check_ty_wf};
+        use ty::trait_resolution::check_ty_wf;
         use ty::ty_lower::lower_hir_ty;
 
         let mut out = Vec::new();
@@ -1603,7 +1603,7 @@ impl<'db> VariantView<'db> {
             // Trait-bound well-formedness for element type.
             if let Some(diag) = check_ty_wf(
                 db,
-                TraitSolveCx::new(db, scope).with_assumptions(param_env(db, enum_.into())),
+                crate::semantic::context_at(db, scope, None).solver_context(db),
                 ty,
             )
             .into_diag(span.clone().into())
