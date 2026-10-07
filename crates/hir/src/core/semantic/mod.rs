@@ -242,7 +242,7 @@ fn item_body_assumptions<'db>(
 /// Solver view of the canonical premises at an item position.
 fn item_solver_context<'db>(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> TraitSolveCx<'db> {
     let context = context_at(db, scope, None);
-    TraitSolveCx::new(db, context.normalization_scope(db)).with_assumptions(context.assumptions(db))
+    context.solver_context(db)
 }
 
 /// Declared body premises at an anonymous constant's source position.

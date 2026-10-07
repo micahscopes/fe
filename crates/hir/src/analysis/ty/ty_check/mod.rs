@@ -7030,10 +7030,9 @@ impl<'db> TyCheckerFinalizer<'db> {
             self.body.body().unwrap().scope(),
             Some((&self.body, expr)),
         );
-        let solve_cx = TraitSolveCx::new(self.db, context.normalization_scope(self.db));
         let formation = crate::analysis::ty::trait_resolution::check_ty_wf_with_lexical_context(
             self.db,
-            solve_cx.with_assumptions(context.assumptions(self.db)),
+            context.solver_context(self.db),
             ty,
             answers,
             context,

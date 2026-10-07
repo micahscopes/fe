@@ -2867,8 +2867,7 @@ fn written_type_check_query<'db>(
                     };
                     &contextual
                 };
-                let solve_cx = TraitSolveCx::new(db, context.normalization_scope(db))
-                    .with_assumptions(context.assumptions(db));
+                let solve_cx = context.solver_context(db);
                 let mut uses = Vec::new();
                 let equalities = PredicateListId::new(
                     db,

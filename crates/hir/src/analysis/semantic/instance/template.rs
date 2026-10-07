@@ -228,6 +228,11 @@ pub struct ImplEnv<'db> {
 }
 
 impl<'db> ImplEnv<'db> {
+    /// Solver premises and normalization scope come from one position context.
+    pub(crate) fn solver_context(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
+        TraitSolveCx::new(db, self.normalization_scope(db)).with_assumptions(self.assumptions(db))
+    }
+
     /// Attach this restricted position context to uncaptured signature constants.
     /// Values and constants that already captured their choice keep that identity.
     pub(crate) fn contextualize_const_types(
