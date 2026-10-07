@@ -280,6 +280,16 @@ pub(crate) fn context_at<'db>(
     if let Some((typed, expr)) = position {
         return provision::recorded_chain_at(db, typed, expr).context(db, scope);
     }
+    let premises = param_env(db, enclosing_item(db, scope));
+    let premises = match associated_type_at(scope) {
+        Some(owner) => associated_type_premises(db, owner, premises),
+        None => premises,
+    };
+    Chain::<()>::new(db, premises).context(db, scope)
+}
+
+/// The item whose premises hold at `scope`; a body inherits its owner's.
+fn enclosing_item<'db>(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> ItemKind<'db> {
     let mut enclosing = scope;
     while matches!(enclosing.item(), ItemKind::Body(_)) {
         let Some(parent) = enclosing.parent(db) else {
@@ -287,7 +297,41 @@ pub(crate) fn context_at<'db>(
         };
         enclosing = parent;
     }
-    Chain::<()>::new(db, param_env(db, enclosing.item())).context(db, scope)
+    enclosing.item()
+}
+
+/// The associated type whose own parameters are in scope at `scope`.
+fn associated_type_at<'db>(
+    scope: ScopeId<'db>,
+) -> Option<crate::hir_def::scope_graph::AssocTypeOwner<'db>> {
+    match scope {
+        ScopeId::AssocTypeParam(owner, _) => Some(owner),
+        scope => scope.assoc_type_owner(),
+    }
+}
+
+/// An associated type's own parameter bounds hold wherever its parameters are
+/// in scope. They come from the trait's declaration; an impl's definition gets
+/// the trait's bounds with the impl's arguments, never its own written bounds,
+/// so an impl cannot assume more than the trait's callers guarantee.
+fn associated_type_premises<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: crate::hir_def::scope_graph::AssocTypeOwner<'db>,
+    premises: PredicateListId<'db>,
+) -> PredicateListId<'db> {
+    use crate::hir_def::scope_graph::AssocTypeOwner;
+    match owner {
+        AssocTypeOwner::Trait(owner, idx) => TraitAssocTypeView {
+            owner,
+            idx: idx as usize,
+        }
+        .with_parameter_bounds(db, premises),
+        AssocTypeOwner::Impl(owner, idx) => ImplAssocTypeView {
+            owner,
+            idx: idx as usize,
+        }
+        .with_parameter_bounds(db, premises),
+    }
 }
 
 /// The direct trait goal belongs to the accepted record, not a copied callable link.
@@ -6158,7 +6202,127 @@ impl<'db> TyId<'db> {
 #[cfg(test)]
 mod item_context_tests {
     use super::*;
-    use crate::test_db::HirAnalysisTestDb;
+    use crate::test_db::{HirAnalysisTestDb, format_diagnostics};
+
+    fn trait_named<'db>(
+        db: &'db HirAnalysisTestDb,
+        module: TopLevelMod<'db>,
+        name: &str,
+    ) -> Trait<'db> {
+        module
+            .children_non_nested(db)
+            .find_map(|item| match item {
+                ItemKind::Trait(t) if t.name(db).to_opt().is_some_and(|id| id.data(db) == name) => {
+                    Some(t)
+                }
+                _ => None,
+            })
+            .expect("fixture trait")
+    }
+
+    fn premise_names<'db>(
+        db: &'db HirAnalysisTestDb,
+        context: crate::analysis::semantic::ImplEnv<'db>,
+    ) -> Vec<String> {
+        context
+            .assumptions(db)
+            .list(db)
+            .iter()
+            .map(|inst| inst.pretty_print(db, true))
+            .collect()
+    }
+
+    /// An associated type's own parameter bounds hold at its scope. In an impl
+    /// they are the trait's declared bounds with the impl's arguments, not the
+    /// impl's own written bounds.
+    #[test]
+    fn associated_type_scopes_read_their_family_parameter_bounds() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "family_context.fe".into(),
+            r#"
+trait Allowed {}
+trait Extra {}
+trait Factory { type Out<T: Allowed> }
+struct P {}
+impl Factory for P { type Out<U> = U }
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        let factory = trait_named(&db, module, "Factory");
+        let trait_scope = ScopeId::TraitType(factory, 0);
+        let names = premise_names(&db, context_at(&db, trait_scope, None));
+        assert!(
+            names.iter().any(|name| name.contains("Allowed")),
+            "trait family scope: {names:?}"
+        );
+        let impl_trait = module
+            .children_non_nested(&db)
+            .find_map(|item| match item {
+                ItemKind::ImplTrait(i) => Some(i),
+                _ => None,
+            })
+            .expect("fixture impl");
+        let impl_scope = ScopeId::ImplTraitType(impl_trait, 0);
+        let names = premise_names(&db, context_at(&db, impl_scope, None));
+        assert!(
+            names.iter().any(|name| name.contains("Allowed")),
+            "impl family scope gets the trait's bound: {names:?}"
+        );
+        // The trait's own item scope is unchanged.
+        let names = premise_names(&db, context_at(&db, factory.scope(), None));
+        assert!(
+            !names.iter().any(|name| name.contains("Allowed")),
+            "trait scope: {names:?}"
+        );
+        assert!(
+            format_diagnostics(&db, &db.run_on_top_mod(module)).is_empty(),
+            "fixture should check cleanly"
+        );
+    }
+
+    /// Family bounds naming the trait itself or another member of it are
+    /// collected from the declaration without re-entering the trait context.
+    #[test]
+    fn self_referential_family_bounds_do_not_cycle() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "family_context_cycle.fe".into(),
+            r#"
+trait Holds<T> {}
+trait Lift {
+    type Item
+    type Out<X: Lift>
+    type Pair<Y: Holds<Self::Item>>
+}
+struct Base {}
+impl Lift for Base {
+    type Item = u256
+    type Out<X> = X
+    type Pair<Y> = Y
+}
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        let lift = trait_named(&db, module, "Lift");
+        let trait_premises = context_at(&db, lift.scope(), None)
+            .assumptions(&db)
+            .list(&db)
+            .len();
+        let out = context_at(&db, ScopeId::TraitType(lift, 1), None);
+        assert!(
+            out.assumptions(&db).list(&db).len() > trait_premises,
+            "`Out<X: Lift>` adds its bound: {:?}",
+            premise_names(&db, out)
+        );
+        let names = premise_names(&db, context_at(&db, ScopeId::TraitType(lift, 2), None));
+        assert!(
+            names.iter().any(|name| name.contains("Holds")),
+            "`Pair<Y: Holds<Self::Item>>` adds its bound: {names:?}"
+        );
+        let diags = format_diagnostics(&db, &db.run_on_top_mod(module));
+        assert!(diags.is_empty(), "{diags}");
+    }
 
     #[test]
     fn computed_item_context_preserves_declared_bounds_without_inventing_missing_ones() {
