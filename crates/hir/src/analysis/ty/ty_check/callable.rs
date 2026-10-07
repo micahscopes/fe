@@ -24,7 +24,7 @@ use crate::analysis::{
         normalize::{normalize_ty, normalize_with_trait_evidence},
         trait_def::TraitInstId,
         trait_resolution::{
-            PredicateListId, TraitSolveCx, check_trait_inst_wf,
+            PredicateListId, check_trait_inst_wf,
             constraint::{
                 collect_func_decl_constraints, collect_func_def_constraints,
                 is_trait_effect_provider_constraint,
@@ -40,7 +40,7 @@ use crate::analysis::{
         visitor::{TyVisitable, TyVisitor, collect_flags},
     },
 };
-use crate::core::semantic::{ProviderBinding, ProviderSource, param_env};
+use crate::core::semantic::{ProviderBinding, ProviderSource};
 use crate::hir_def::Body;
 use crate::hir_def::CallableDef;
 use crate::hir_def::params::FuncParamMode;
@@ -1133,12 +1133,8 @@ impl<'db> Callable<'db> {
         let constraints = collect_func_def_constraints(db, self.callable_def, true);
         let declared = constraints.instantiate_identity();
         let instantiated = constraints.instantiate(db, &self.generic_args);
-        let definition_assumptions = match self.callable_def {
-            CallableDef::Func(func) => param_env(db, func.into()),
-            CallableDef::VariantCtor(_) => declared,
-        };
-        let definition_solve_cx = TraitSolveCx::new(db, self.callable_def.scope())
-            .with_assumptions(definition_assumptions);
+        let definition_solve_cx =
+            crate::semantic::context_at(db, self.callable_def.scope(), None).solver_context(db);
 
         let mut pending_obligations = Vec::new();
         // A resolved method's originating trait is itself a selected-impl
