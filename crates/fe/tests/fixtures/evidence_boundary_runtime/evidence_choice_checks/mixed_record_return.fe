@@ -1,0 +1,7 @@
+use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+impl Read for Subject as Alternative { const fn read() -> u256 { 2 } }
+struct Capsule { evidence: Evidence<Read<Subject>>, number: u256 }
+fn choose(_ selected: bool) -> Capsule { if selected { Capsule { evidence: prove<Read<Subject>>(), number: 1 } } else { Capsule { evidence: prove<Read<Subject>>(), number: 2 } } }

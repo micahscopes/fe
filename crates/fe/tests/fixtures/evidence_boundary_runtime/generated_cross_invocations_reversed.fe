@@ -1,0 +1,24 @@
+use core::meta::{Code, Item, Record}
+trait Leaf { const fn leaf(self) -> u256 }
+trait Consumer { const fn consume(self) -> u256 }
+const fn make_consumer(_ record: Record) -> Code<Item> {
+    quote {
+        impl Consumer for ${record} {
+            const fn consume(self) -> u256 { self.leaf() + 1 }
+        }
+    }
+}
+const fn make_leaf(_ record: Record) -> Code<Item> {
+    quote {
+        impl Leaf for ${record} {
+            const fn leaf(self) -> u256 { 42 }
+        }
+    }
+}
+#[generate(make_leaf)]
+#[generate(make_consumer)]
+struct Target {}
+#[test]
+fn generated_items_from_different_invocations_refer_to_each_other() {
+    assert(Target {}.consume() == 43)
+}

@@ -4874,10 +4874,77 @@ fn rd103_known_evidence_ordinary_functions_at_o0_and_o2() {
 }
 
 #[test]
-#[ignore = "RD103 Q9: runtime evidence transport must replace the MIR provision rejection"]
-fn rd103_evidence_ordinary_function_at_o0_and_o2() {
-    evidence_boundary_runtime_at_o0_and_o2("evidence_runtime_choice.fe");
+#[ignore = "RD116: symbolic and field-sensitive evidence knowledge must converge before the diagnostic"]
+fn runtime_selected_evidence_requires_compile_time_choice() {
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evidence_boundary_runtime");
+    for name in [
+        "evidence_runtime_choice.fe",
+        "evidence_choice_checks/explicit_return.fe",
+        "evidence_choice_checks/match_return.fe",
+        "evidence_choice_checks/aggregate_return.fe",
+        "evidence_choice_checks/assigned_return.fe",
+        "evidence_choice_checks/nominal_return.fe",
+        "evidence_choice_checks/passed_choice.fe",
+        "evidence_choice_checks/opened_choice.fe",
+        "evidence_choice_checks/generic_helper_return.fe",
+    ] {
+        let fixture = root.join(name);
+        let (output, exit_code) =
+            run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+        assert_ne!(
+            exit_code, 0,
+            "{name}: runtime-selected evidence return accepted: {output}"
+        );
+        assert!(
+            output.contains("error[8-0120]")
+                && output.contains("evidence choice must be known at compile time"),
+            "{name}: runtime-selected evidence did not receive its frontend diagnostic: {output}"
+        );
+    }
+}
+
+#[test]
+fn compile_time_evidence_return_conditions_remain_accepted() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/evidence_choice_checks");
+    for name in [
+        "known_literal.fe",
+        "known_const.fe",
+        "known_local.fe",
+        "known_const_call.fe",
+        "known_enum.fe",
+        "known_mutable_local.fe",
+        "known_generic_helper_return.fe",
+        "known_formal_branch.fe",
+        "same_witness_return.fe",
+        "mixed_record_return.fe",
+    ] {
+        let fixture = root.join(name);
+        let (output, exit_code) =
+            run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+        assert_eq!(
+            exit_code, 0,
+            "{name}: compiler-known evidence return rejected: {output}"
+        );
+    }
+}
+
+#[test]
+fn runtime_branches_around_known_evidence_use_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_choice_checks/known_branch_use.fe");
+}
+
+#[test]
+fn rd116_compile_time_evidence_functions_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_choice_checks/known_generic_helper_return.fe");
     evidence_boundary_runtime_at_o0_and_o2("evidence_ordinary_function.fe");
+}
+
+#[test]
+fn generated_items_refer_across_invocations_in_both_orders_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("generated_cross_invocations.fe");
+    evidence_boundary_runtime_at_o0_and_o2("generated_cross_invocations_reversed.fe");
 }
 
 #[test]

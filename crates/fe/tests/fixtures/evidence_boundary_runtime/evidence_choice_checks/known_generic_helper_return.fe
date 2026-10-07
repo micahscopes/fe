@@ -1,0 +1,18 @@
+use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+impl Read for Subject as Alternative { const fn read() -> u256 { 2 } }
+const fn pick<T>(_ selected: bool, _ first: T, _ second: T) -> T {
+    if selected { first } else { second }
+}
+const fn choose() -> Evidence<Read<Subject>> {
+    let first = prove<Read<Subject>>()
+    let second = with (Alternative) { prove<Read<Subject>>() }
+    pick<Evidence<Read<Subject>>>(true, first, second)
+}
+#[test]
+fn generic_helper_keeps_its_compile_time_choice() {
+    let evidence = choose()
+    with (evidence) { assert(<Subject as Read>::read() == 1) }
+}

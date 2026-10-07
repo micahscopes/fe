@@ -1,0 +1,11 @@
+use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+impl Read for Subject as Alternative { const fn read() -> u256 { 2 } }
+fn run(_ selected: bool) -> u256 { if selected { let evidence = with (Alternative) { prove<Read<Subject>>() }
+with (evidence) { <Subject as Read>::read() } } else { let evidence = prove<Read<Subject>>()
+with (evidence) { <Subject as Read>::read() } } }
+#[test]
+fn runtime_choice_branches_around_use() { assert(run(true) == 2)
+assert(run(false) == 1) }
