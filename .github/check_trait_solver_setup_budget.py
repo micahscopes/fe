@@ -6,7 +6,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SOLVER = ROOT / "crates/hir/src/analysis/ty/trait_resolution"
-BASELINE = 57  # Reflected field queries share the canonical owner context.
+BASELINE = 56  # Return diagnostics share the canonical function context.
 TYPES = ("TraitSolveCx", "CanonicalGoalQuery", "TraitSolverQuery")
 RAW = re.compile(r'(?:br|cr|r)(#*)"')
 CHAR = re.compile(r"'(?:\\(?:u\{[^}]*\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'")

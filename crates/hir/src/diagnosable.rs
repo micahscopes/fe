@@ -515,14 +515,13 @@ impl<'db> Func<'db> {
                 db,
                 self.scope(),
                 ret,
-                param_env(db, self.into()),
+                crate::semantic::context_at(db, self.scope(), None).assumptions(db),
                 span.clone(),
             ) {
                 diags.push(diag);
             } else if let Some(diag) = ty::trait_resolution::check_ty_wf(
                 db,
-                ty::trait_resolution::TraitSolveCx::new(db, self.scope())
-                    .with_assumptions(param_env(db, self.into())),
+                crate::semantic::context_at(db, self.scope(), None).solver_context(db),
                 ret,
             )
             .into_diag(span)
