@@ -1,0 +1,32 @@
+// Found while baselining (existed before this batch): a blanket impl whose bound is met only by the
+// named choice in force, called directly in the block.
+trait Foo { const fn v() -> u256 }
+trait Bar { const fn w() -> u256 }
+struct Subject {}
+impl Foo for Subject as OnlyNamed { const fn v() -> u256 { 5 } }
+impl<T: Foo> Bar for T { const fn w() -> u256 { T::v() } }
+const fn blanket_inside() -> u256 { with (OnlyNamed) { <Subject as Bar>::w() } }
+const B: u256 = blanket_inside()
+#[test]
+fn blanket_reads_5() { assert(B == 5) }
+
+trait CacheFoo { const fn v() -> u256 }
+trait CacheBar { const fn w() -> u256 }
+struct CacheSubject {}
+impl CacheFoo for CacheSubject { const fn v() -> u256 { 1 } }
+impl CacheFoo for CacheSubject as CacheOther { const fn v() -> u256 { 5 } }
+impl<T: CacheFoo> CacheBar for T { const fn w() -> u256 { T::v() } }
+const fn ordinary() -> u256 { <CacheSubject as CacheBar>::w() }
+const fn selected() -> u256 { with (CacheOther) { <CacheSubject as CacheBar>::w() } }
+const FIRST: u256 = ordinary()
+const SECOND: u256 = selected()
+const THIRD: u256 = selected()
+const FOURTH: u256 = ordinary()
+#[test]
+fn both_orders() {
+    assert(FIRST == 1)
+    assert(SECOND == 5)
+    assert(THIRD == 5)
+    assert(FOURTH == 1)
+}
+

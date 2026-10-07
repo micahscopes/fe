@@ -355,18 +355,20 @@ fn is_query_satisfiable<'db>(
     db: &'db dyn HirAnalysisDb,
     use_scope: ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
+    context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> GoalSatisfiability<'db> {
     if query.flags(db).contains(TyFlags::HAS_INVALID) {
         return GoalSatisfiability::ContainsInvalid;
     };
 
-    solve(db, use_scope, query)
+    solve(db, use_scope, query, context)
 }
 
 fn is_query_satisfiable_cycle_initial<'db>(
     _db: &'db dyn HirAnalysisDb,
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
+    _context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> GoalSatisfiability<'db> {
     // A cycle can arise while collecting an impl whose constraints contain an associated-type
     // projection: resolving the projection needs the trait environment that is currently being
@@ -384,6 +386,7 @@ fn is_query_satisfiable_cycle_recover<'db>(
     _count: u32,
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
+    _context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> salsa::CycleRecoveryAction<GoalSatisfiability<'db>> {
     salsa::CycleRecoveryAction::Iterate
 }
@@ -396,13 +399,14 @@ fn query_has_solution<'db>(
     db: &'db dyn HirAnalysisDb,
     use_scope: ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
-    target: Canonical<TraitInstId<'db>>,
-    relation: TargetSolutionMatch,
+    target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
+    context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> TargetSolutionStatus {
+    let (target, relation) = target;
     if query.flags(db).contains(TyFlags::HAS_INVALID) {
         return TargetSolutionStatus::NotFound;
     }
-    has_solution(db, use_scope, query, target, relation, None).status
+    has_solution(db, use_scope, query, target, relation, None, context).status
 }
 
 #[salsa::tracked(
@@ -429,6 +433,7 @@ fn query_candidate_proves_goal<'db>(
         target,
         TargetSolutionMatch::Equal,
         Some(candidate),
+        None,
     )
 }
 
@@ -499,8 +504,8 @@ fn query_has_solution_cycle_initial<'db>(
     _db: &'db dyn HirAnalysisDb,
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
-    _target: Canonical<TraitInstId<'db>>,
-    _relation: TargetSolutionMatch,
+    _target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
+    _context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> TargetSolutionStatus {
     TargetSolutionStatus::Incomplete
 }
@@ -511,8 +516,8 @@ fn query_has_solution_cycle_recover<'db>(
     _count: u32,
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
-    _target: Canonical<TraitInstId<'db>>,
-    _relation: TargetSolutionMatch,
+    _target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
+    _context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> salsa::CycleRecoveryAction<TargetSolutionStatus> {
     salsa::CycleRecoveryAction::Iterate
 }
@@ -528,26 +533,27 @@ pub(crate) fn goal_query_has_solution<'db>(
             db,
             solve_cx.origin_scope(db),
             query.canonical(),
-            target,
-            TargetSolutionMatch::Equal,
+            (target, TargetSolutionMatch::Equal),
+            None,
         ),
         TargetSolutionStatus::Found
     )
 }
 
-pub(crate) fn goal_query_has_no_distinct_solution<'db>(
+pub(crate) fn goal_query_has_no_distinct_solution_at_context<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
     query: &CanonicalGoalQuery<'db>,
     target: Canonical<TraitInstId<'db>>,
+    context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> bool {
     matches!(
         query_has_solution(
             db,
             solve_cx.origin_scope(db),
             query.canonical(),
-            target,
-            TargetSolutionMatch::NotEqual,
+            (target, TargetSolutionMatch::NotEqual),
+            context,
         ),
         TargetSolutionStatus::NotFound
     )
@@ -558,7 +564,25 @@ pub fn is_goal_query_satisfiable<'db>(
     solve_cx: TraitSolveCx<'db>,
     query: &CanonicalGoalQuery<'db>,
 ) -> GoalSatisfiability<'db> {
-    is_query_satisfiable(db, solve_cx.origin_scope(db), query.canonical()).clone()
+    is_query_satisfiable(db, solve_cx.origin_scope(db), query.canonical(), None).clone()
+}
+
+pub(crate) fn is_goal_query_satisfiable_at_context<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    query: &CanonicalGoalQuery<'db>,
+    context: crate::analysis::semantic::ImplEnv<'db>,
+) -> GoalSatisfiability<'db> {
+    if context.selections(db).is_empty() {
+        return is_goal_query_satisfiable(db, solve_cx, query);
+    }
+    is_query_satisfiable(
+        db,
+        solve_cx.origin_scope(db),
+        query.canonical(),
+        Some(context),
+    )
+    .clone()
 }
 
 pub fn is_goal_satisfiable<'db>(

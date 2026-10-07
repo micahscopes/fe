@@ -276,6 +276,7 @@ struct TraitResolutionContext<'db> {
     target: Option<TargetAnswer<'db>>,
     found_target_conditions: Cell<Option<ImplConditionsId<'db>>>,
     type_depth_budget: TypeDepthBudget,
+    position_context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 }
 
 impl<'db> TraitResolutionContext<'db> {
@@ -284,6 +285,7 @@ impl<'db> TraitResolutionContext<'db> {
         use_scope: crate::hir_def::scope_graph::ScopeId<'db>,
         root: TraitSolverQuery<'db>,
         target: Option<TargetAnswer<'db>>,
+        position_context: Option<crate::analysis::semantic::ImplEnv<'db>>,
     ) -> Self {
         Self {
             db,
@@ -292,6 +294,7 @@ impl<'db> TraitResolutionContext<'db> {
             target,
             found_target_conditions: Cell::new(None),
             type_depth_budget: TypeDepthBudget::new(db, root, target),
+            position_context,
         }
     }
 
@@ -479,17 +482,25 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
             self.origin_ingot,
             prepared.query.goal,
         );
+        // A lexical choice selects a candidate at every dependent impl bound.
+        // It never becomes an ordinary proof premise: the chosen candidate's
+        // header and prerequisites still run through the normal clause path.
+        let selected_candidate = key.selected_candidate.or_else(|| {
+            self.position_context
+                .and_then(|context| context.selection_for(self.db, prepared.normalized_goal))
+                .map(|selection| selection.candidate())
+        });
         let implementors = impls_for_trait_in_ingots(
             self.db,
             primary,
             secondary,
             Canonical::new(self.db, prepared.query.goal),
-            key.selected_candidate,
+            selected_candidate,
         );
 
         let mut clauses =
             Vec::with_capacity(implementors.len() + prepared.query.assumptions.list(self.db).len());
-        if let Some(selected_candidate) = key.selected_candidate {
+        if let Some(selected_candidate) = selected_candidate {
             clauses.extend(
                 implementors
                     .iter()
@@ -500,7 +511,7 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
         } else {
             clauses.extend(implementors.iter().copied().map(Clause::Implementor));
         }
-        if key.selected_candidate.is_none()
+        if selected_candidate.is_none()
             && !prepared.query.require_impl
             && self.goal_can_use_assumptions(prepared.normalized_goal)
         {
@@ -896,11 +907,12 @@ pub(super) fn solve<'db>(
     db: &'db dyn HirAnalysisDb,
     use_scope: crate::hir_def::scope_graph::ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
+    position_context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> GoalSatisfiability<'db> {
     let _proof_search = super::enter_proof_search();
     let mut root_table = PersistentUnificationTable::new_proof(db);
     let root_goal = query.extract_identity(&mut root_table);
-    let mut context = TraitResolutionContext::new(db, use_scope, root_goal, None);
+    let mut context = TraitResolutionContext::new(db, use_scope, root_goal, None, position_context);
     let mut observer = UnresolvedGoalObserver::default();
     let config = Config {
         limits: Limits {
@@ -954,6 +966,7 @@ pub(super) fn has_solution<'db>(
     target: Canonical<TraitInstId<'db>>,
     relation: TargetSolutionMatch,
     selected_candidate: Option<ImplementorId<'db>>,
+    position_context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> TargetSearchResult<'db> {
     let _proof_search = super::enter_proof_search();
     let mut root_table = PersistentUnificationTable::new_proof(db);
@@ -967,7 +980,8 @@ pub(super) fn has_solution<'db>(
         inst: target,
         relation,
     };
-    let mut context = TraitResolutionContext::new(db, use_scope, root_goal, Some(target));
+    let mut context =
+        TraitResolutionContext::new(db, use_scope, root_goal, Some(target), position_context);
     let options = ReportOptions::default().with_answerless(AnswerlessMode::Omit);
     // A target can occur after a non-regular recursive clause. Fair scheduling
     // keeps that branch from starving later root clauses before the type-depth

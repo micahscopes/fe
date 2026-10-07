@@ -5236,3 +5236,14 @@ fn symbolic_constant_impl_constructor_at_o0_and_o2() {
 fn symbolic_constant_supertrait_default_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("symbolic_constant_supertrait_default.fe");
 }
+
+#[test]
+fn named_choice_blanket_bound_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("named_choice_blanket_bound.fe");
+}
+
+#[test]
+#[ignore = "H1d: actual evidence value must specialize and validate the named-only callee"]
+fn evidence_named_only_method_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_named_only_method_pending.fe");
+}
