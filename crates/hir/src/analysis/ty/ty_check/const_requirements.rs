@@ -2359,28 +2359,12 @@ fn discharge_selected_requirement_query<'db>(
         .map(Arc::new);
     let owner = BodyOwner::const_predicate(db, predicate);
     let subst = GenericSubst::for_body_owner(db, owner, args);
-    let outcome = if selections.is_empty() {
-        condition_outcome(db, owner, subst)
-    } else {
-        let key = SemanticInstanceKey::new(
-            db,
-            owner,
-            subst,
-            EffectProviderSubst::empty(db),
-            ImplEnv::new(
-                db,
-                owner.scope(),
-                crate::semantic::body_assumptions_at(db, owner.scope()),
-                Vec::new(),
-            )
-            .with_selections(db, selections.clone()),
-        );
-        condition_outcome_from_evaluation(
-            db,
-            owner,
-            eval_const_instance(db, get_or_build_semantic_instance(db, key)),
-        )
-    };
+    let key = condition_instance_key(db, owner, subst, selections.clone());
+    let outcome = condition_outcome_from_evaluation(
+        db,
+        owner,
+        eval_const_instance(db, get_or_build_semantic_instance(db, key)),
+    );
     let outcome = match outcome {
         ConditionOutcome::True => Discharge::Holds(RequirementProof::Evaluated),
         ConditionOutcome::False => Discharge::Fails(RequirementFailure::False),
@@ -2395,6 +2379,23 @@ fn discharge_selected_requirement_query<'db>(
         outcome,
         predicate: captured_predicate,
     }
+}
+
+fn condition_instance_key<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: BodyOwner<'db>,
+    subst: GenericSubst<'db>,
+    selections: Vec<SelectedApplication<'db>>,
+) -> SemanticInstanceKey<'db> {
+    SemanticInstanceKey::new(
+        db,
+        owner,
+        subst,
+        EffectProviderSubst::empty(db),
+        // The instance substitutes the checked body's premises once. Only
+        // lexical choices belong here; owner premises are not caller inputs.
+        ImplEnv::empty(db, owner.scope()).with_selections(db, selections),
+    )
 }
 
 // A requirement reached again while it is being discharged depends on itself.
@@ -3992,6 +3993,37 @@ fn use_it() -> u256 { read<7>() }";
             choice.outcome(),
             Err(crate::analysis::ty::diagnostics::BodyDiag::UnknownNamedSelection { .. })
         ));
+    }
+
+    #[test]
+    fn condition_instance_premises_use_the_concrete_substitution() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "condition_instance_premises.fe".into(),
+            "trait Mark {}\nimpl Mark for u8 {}\nfn caller<T: Mark>() where { true } {}",
+        );
+        let (top, _) = db.top_mod(file);
+        db.assert_no_diags(top);
+        let caller = crate::test_db::find_func(&db, top, "caller");
+        let owner = super::BodyOwner::const_predicates_of(&db, caller.into())
+            .next()
+            .expect("condition body");
+        let key = super::condition_instance_key(
+            &db,
+            owner,
+            super::GenericSubst::for_body_owner(&db, owner, vec![super::TyId::u8(&db)]),
+            Vec::new(),
+        );
+        let premises =
+            crate::analysis::semantic::semantic_instance_base_assumptions_for_key(&db, key);
+        assert!(!premises.list(&db).is_empty());
+        assert!(
+            premises
+                .list(&db)
+                .iter()
+                .all(|premise| !premise.self_ty(&db).has_param(&db)),
+            "a concrete condition instance must not retain its unsubstituted owner premise"
+        );
     }
 
     #[test]
