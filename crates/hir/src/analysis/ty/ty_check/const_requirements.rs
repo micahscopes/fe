@@ -4106,8 +4106,7 @@ fn use_it() -> u256 { read<7>() }";
         let snapshot = checker.snapshot_state();
         let obligation = super::super::env::TraitObligation {
             goal,
-            assumptions: checker.env.assumptions(),
-            context: checker.env.selection_context(),
+            context: checker.env.position_context(),
             origin: super::super::env::TraitObligationOrigin::GenericConfirmation,
             span: function.span().into(),
         };
@@ -4155,8 +4154,7 @@ fn use_it() -> u256 { read<7>() }";
         let snapshot = checker.snapshot_state();
         let obligation = super::super::env::TraitObligation {
             goal,
-            assumptions: checker.env.assumptions(),
-            context: checker.env.selection_context(),
+            context: checker.env.position_context(),
             origin: super::super::env::TraitObligationOrigin::GenericConfirmation,
             span: function.span().into(),
         };

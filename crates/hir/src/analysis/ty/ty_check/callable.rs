@@ -1161,7 +1161,6 @@ impl<'db> Callable<'db> {
             };
             let obligation = super::env::TraitObligation {
                 context: tc.context_with_selection(selection),
-                assumptions: tc.env.assumptions(),
                 goal: tc.normalize_trait_goal(goal),
                 origin: super::env::TraitObligationOrigin::GenericConfirmation,
                 span: call_expr.span(tc.body()).into(),
@@ -1213,8 +1212,7 @@ impl<'db> Callable<'db> {
             }
 
             let obligation = super::env::TraitObligation {
-                context: tc.env.selection_context(),
-                assumptions: tc.env.assumptions(),
+                context: tc.env.position_context(),
                 goal: constraint,
                 origin: super::env::TraitObligationOrigin::CallConstraint {
                     call_expr,

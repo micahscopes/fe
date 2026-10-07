@@ -646,7 +646,7 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     /// The live position context: the provisions in force here, projected at
-    /// the current lexical scope.
+    /// the current lexical scope. Deferred checks retain it from registration.
     pub(super) fn position_context(&self) -> crate::analysis::semantic::ImplEnv<'db> {
         self.provisions.context(self.db, self.scope())
     }
@@ -990,7 +990,7 @@ impl<'db> TyCheckEnv<'db> {
     pub(super) fn register_type_formation(&mut self, ty: TyId<'db>, span: DynLazySpan<'db>) {
         self.deferred.push(DeferredTask::TypeFormation {
             ty,
-            assumptions: self.assumptions(),
+            context: self.position_context(),
             span,
         });
     }
@@ -1873,7 +1873,8 @@ impl PendingPrimitiveOp {
 pub(super) enum DeferredTask<'db> {
     TypeFormation {
         ty: TyId<'db>,
-        assumptions: PredicateListId<'db>,
+        /// The position context where the type was written.
+        context: crate::analysis::semantic::ImplEnv<'db>,
         span: DynLazySpan<'db>,
     },
     Obligation(TraitObligation<'db>),
@@ -2229,8 +2230,8 @@ pub enum TraitChoiceVia<'db> {
 #[derive(Debug, Clone)]
 pub(super) struct TraitObligation<'db> {
     pub goal: TraitInstId<'db>,
-    /// Premises at the use site, retained when solving is deferred past a scope.
-    pub assumptions: PredicateListId<'db>,
+    /// The position context at the use site (its scope, premises and
+    /// selections), retained when solving is deferred past a scope.
     pub context: crate::analysis::semantic::ImplEnv<'db>,
     pub origin: TraitObligationOrigin<'db>,
     pub span: DynLazySpan<'db>,

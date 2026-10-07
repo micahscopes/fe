@@ -4577,8 +4577,7 @@ impl<'db> TyChecker<'db> {
                                 && matches!(candidate, MethodCandidate::NeedsConfirmation(_))
                             {
                                 self.env.register_trait_obligation(TraitObligation {
-                                    context: self.env.selection_context(),
-                                    assumptions: self.env.assumptions(),
+                                    context: self.env.position_context(),
                                     goal: inst,
                                     origin: TraitObligationOrigin::GenericConfirmation,
                                     span: path_expr_span.clone().into(),
@@ -4679,8 +4678,7 @@ impl<'db> TyChecker<'db> {
                     // at the whole-call span. Standalone values own their path use here.
                     if !is_call_callee {
                         self.env.register_trait_obligation(TraitObligation {
-                            context: self.env.selection_context(),
-                            assumptions: self.env.assumptions(),
+                            context: self.env.position_context(),
                             goal: inst,
                             origin: TraitObligationOrigin::GenericConfirmation,
                             span: path_expr_span.clone().into(),

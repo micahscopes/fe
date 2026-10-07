@@ -1,0 +1,24 @@
+// A call's trait obligation is registered inside `with (Named)` while its type
+// still has an inference variable, and is solved only after the block ends.
+// It must be solved with the block's selection, recorded where it arose.
+// Inside `with (Named)`, Subject::OK is true, so Gate<Subject>'s impl
+// condition is true there. Expected: accept.
+trait Compute { const OK: bool }
+struct Subject {}
+impl Compute for Subject { const OK: bool = false }
+impl Compute for Subject as Named { const OK: bool = true }
+
+trait Value { fn value(self) -> u256 }
+struct Gate<T> {}
+impl<T: Compute> Value for Gate<T> where T::OK {
+    fn value(self) -> u256 { 1 }
+}
+
+fn needs<V: Value>(_ v: V) -> u256 { 1 }
+
+fn selected() -> u256 {
+    let g = Gate {}
+    let r = with (Named) { needs(g) }
+    let _h: Gate<Subject> = g
+    r
+}

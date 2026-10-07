@@ -2634,7 +2634,7 @@ impl<'db> TyChecker<'db> {
         &self,
         selection: Option<crate::analysis::semantic::SelectedApplication<'db>>,
     ) -> crate::analysis::semantic::ImplEnv<'db> {
-        let context = self.env.selection_context();
+        let context = self.env.position_context();
         let Some(selection) = selection else {
             return context;
         };
@@ -2674,7 +2674,6 @@ impl<'db> TyChecker<'db> {
                 Some(crate::semantic::Provision::Named(selection)) => Some(selection),
                 _ => None,
             }),
-            assumptions: self.env.assumptions(),
             goal,
             origin,
             span,
@@ -2696,8 +2695,11 @@ impl<'db> TyChecker<'db> {
         final_pass: bool,
     ) -> TraitObligationOutcome<'db> {
         let db = self.db;
-        let scope = self.env.scope();
-        let assumptions = obligation.assumptions.fold_with(db, &mut self.table);
+        // A deferred obligation is solved where it arose, not where the
+        // checker happens to be when it is processed.
+        let context = obligation.context.fold_with(db, &mut self.table);
+        let scope = context.normalization_scope(db);
+        let assumptions = context.assumptions(db);
 
         if self.has_dead_inference_keys(&obligation.goal) {
             return TraitObligationOutcome::Discharged;
@@ -2722,7 +2724,7 @@ impl<'db> TyChecker<'db> {
             return TraitObligationOutcome::Discharged;
         }
 
-        let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+        let solve_cx = context.solver_context(db);
         if !obligation.context.selections(db).is_empty() {
             let requirements = PredicateListId::new(db, vec![goal]).extend_all_bounds(db);
             let snapshot = self.table.snapshot();
@@ -2776,7 +2778,7 @@ impl<'db> TyChecker<'db> {
             obligation.goal = self.normalize_trait_goal_with_assumptions(goal, assumptions);
         }
         let goal = obligation.goal;
-        let query = CanonicalGoalQuery::new(db, goal, assumptions);
+        let query = solve_cx.goal_query(db, goal);
         match is_goal_query_satisfiable_at_context(db, solve_cx, &query, obligation.context) {
             GoalSatisfiability::Satisfied(solution) => {
                 self.accept_trait_answer(obligation, final_pass, &query, solution)
@@ -2921,9 +2923,9 @@ impl<'db> TyChecker<'db> {
         >,
     ) -> TraitObligationOutcome<'db> {
         let db = self.db;
-        let scope = self.env.scope();
+        let scope = obligation.context.normalization_scope(db);
         let goal = obligation.goal;
-        let assumptions = obligation.assumptions;
+        let assumptions = obligation.context.assumptions(db);
         if goal.self_ty(db).has_var(db) {
             let outcome = if final_pass {
                 // Don't invent the self type at the end either; leave it alone
@@ -3340,17 +3342,15 @@ impl<'db> TyChecker<'db> {
         // Emit diagnostics for remaining tasks.
         for task in self.env.take_deferred_tasks() {
             match task {
-                env::DeferredTask::TypeFormation {
-                    ty,
-                    assumptions,
-                    span,
-                } => {
+                env::DeferredTask::TypeFormation { ty, context, span } => {
                     if self.has_dead_inference_keys(&ty) {
                         continue;
                     }
+                    let scope = context.normalization_scope(db);
                     let ty = ty.fold_with(db, &mut env::Prober::new(&mut self.table, scope));
                     if !ty.has_invalid(db) && !ty.has_var(db) {
-                        let solve_cx = TraitSolveCx::new(db, scope);
+                        let solve_cx = context.solver_context(db);
+                        let assumptions = context.assumptions(db);
                         if let Some(diag) = ty.emit_wf_diag(db, solve_cx, assumptions, span) {
                             self.push_diag(diag);
                         }
