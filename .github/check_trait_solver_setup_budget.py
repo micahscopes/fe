@@ -6,7 +6,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SOLVER = ROOT / "crates/hir/src/analysis/ty/trait_resolution"
-BASELINE = 48  # Approved H1/H2 diagnostic, contract, and type-fn context migrations.
+BASELINE = 39  # Approved H3/H2 contexts and the ABI recorded-instance reader.
 TYPES = ("TraitSolveCx", "CanonicalGoalQuery", "TraitSolverQuery")
 RAW = re.compile(r'(?:br|cr|r)(#*)"')
 CHAR = re.compile(r"'(?:\\(?:u\{[^}]*\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'")
