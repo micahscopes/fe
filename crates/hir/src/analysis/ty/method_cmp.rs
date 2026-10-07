@@ -771,7 +771,7 @@ fn effect_identity_tys_match<'db>(
         .is_ok()
 }
 
-fn instantiate_trait_method_template<'db, T>(
+pub(crate) fn instantiate_trait_method_template<'db, T>(
     db: &'db dyn HirAnalysisDb,
     binder: Binder<'db, T>,
     param_subst: &CompleteSubst<'db>,
@@ -835,7 +835,7 @@ pub(crate) fn normalize_predicate_for_comparison<'db>(
     )
 }
 
-fn normalize_predicates_for_comparison<'db>(
+pub(crate) fn normalize_predicates_for_comparison<'db>(
     db: &'db dyn HirAnalysisDb,
     preds: PredicateListId<'db>,
     scope: ScopeId<'db>,
@@ -1085,31 +1085,10 @@ fn compare_constraints<'db>(
     param_subst: &CompleteSubst<'db>,
     sink: &mut Vec<TyDiagCollection<'db>>,
 ) -> bool {
-    let impl_m_constraints = collect_func_def_constraints(db, impl_m, false).instantiate_identity();
-    let trait_m_constraints = instantiate_trait_method_template(
-        db,
-        collect_func_def_constraints(db, trait_m, false),
-        param_subst,
-    );
-    let compare_assumptions = impl_m_constraints
-        .merge(db, trait_m_constraints)
-        .extend_all_bounds(db);
-    let impl_m_constraints = normalize_predicates_for_comparison(
-        db,
-        impl_m_constraints,
-        trait_m.scope(),
-        compare_assumptions,
-        trait_inst,
-        false,
-    );
-    let trait_m_constraints = normalize_predicates_for_comparison(
-        db,
-        trait_m_constraints,
-        trait_m.scope(),
-        compare_assumptions,
-        trait_inst,
-        true,
-    );
+    let comparison =
+        TraitSolveCx::signature_comparison(db, impl_m, trait_m, trait_inst, param_subst);
+    let (impl_m_constraints, trait_m_constraints) =
+        (comparison.impl_bounds, comparison.trait_bounds);
     let mut unsatisfied_goals = ThinVec::new();
     for &goal in impl_m_constraints.list(db) {
         // Source-level concrete assumptions are rejected, so the solver does
@@ -1120,11 +1099,8 @@ fn compare_constraints<'db>(
         if trait_m_constraints.list(db).contains(&goal) {
             continue;
         }
-        let entailment = classify_constraint_entailment(is_goal_satisfiable(
-            db,
-            TraitSolveCx::signature_comparison(db, trait_m, trait_m_constraints),
-            goal,
-        ));
+        let entailment =
+            classify_constraint_entailment(is_goal_satisfiable(db, comparison.context, goal));
         match entailment {
             ConstraintEntailment::Proven => {}
             // An incomplete search cannot establish that the trait method

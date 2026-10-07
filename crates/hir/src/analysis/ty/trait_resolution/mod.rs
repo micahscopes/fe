@@ -141,6 +141,71 @@ impl<'db> CanonicalGoalQuery<'db> {
     }
 }
 
+/// Returns `true` if the given two implementors conflict.
+///
+/// Different named selections may overlap unless the trait is `#[fixed]`.
+/// Within one selection, retain the ordinary coherence check:
+/// - instantiate both implementors with fresh vars and unify them;
+/// - then check that the merged constraints are satisfiable.
+pub(crate) fn does_impl_trait_conflict<'db>(
+    db: &'db dyn HirAnalysisDb,
+    a: ImplementorId<'db>,
+    b: ImplementorId<'db>,
+) -> bool {
+    let a_class = a.selection_class(db);
+    let b_class = b.selection_class(db);
+    let trait_ = a.trait_def(db);
+    let fixed = crate::hir_def::ItemKind::Trait(trait_)
+        .attrs(db)
+        .is_some_and(|attrs| attrs.has_attr(db, "fixed"));
+    if !fixed && a_class != b_class {
+        return false;
+    }
+    let mut table = UnificationTable::new(db);
+    let a = table.instantiate_with_fresh_vars(a);
+    let b = table.instantiate_with_fresh_vars(b);
+
+    if table.unify(a, b).is_err() {
+        return false;
+    }
+
+    let a_constraints = a.constraints(db);
+    let b_constraints = b.constraints(db);
+
+    if a_constraints.is_empty(db) && b_constraints.is_empty(db) {
+        return true;
+    }
+
+    // Check if all constraints from both implementations would be satisfiable
+    // when the types are unified.
+    let merged_constraints = a_constraints.merge(db, b_constraints);
+    let solve_cx = TraitSolveCx::coherence(db, trait_);
+
+    for &constraint in merged_constraints.list(db) {
+        let constraint = constraint.fold_with(db, &mut table);
+
+        match is_goal_satisfiable(db, solve_cx, constraint) {
+            GoalSatisfiability::UnSat(_) | GoalSatisfiability::ContainsInvalid => {
+                return false;
+            }
+            _ => {
+                // Constraint is satisfiable or needs more information, continue checking.
+            }
+        }
+    }
+
+    true
+}
+
+/// A trait method's substituted bounds and the implementing method's bounds,
+/// both normalized for comparison, with the context that asks whether the
+/// former entail the latter.
+pub(crate) struct SignatureComparison<'db> {
+    pub(crate) context: TraitSolveCx<'db>,
+    pub(crate) impl_bounds: PredicateListId<'db>,
+    pub(crate) trait_bounds: PredicateListId<'db>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Selection<T> {
     Unique(T),
@@ -173,21 +238,58 @@ impl<'db> TraitSolveCx<'db> {
 
     /// Coherence: whether two implementations of a trait can overlap. This is
     /// a question about the implementations themselves, not about any program
-    /// position, so it deliberately has no premises.
-    pub(crate) fn coherence(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>) -> Self {
+    /// position, so it deliberately has no premises. Only the overlap check
+    /// below asks it.
+    fn coherence(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>) -> Self {
         Self::new(db, trait_.scope())
     }
 
     /// Signature comparison: whether a trait method's declared bounds, after
     /// substituting the implementation's arguments, entail the implementing
     /// method's bounds. The premises are that substituted signature, which no
-    /// program position states, so they are not read from `context_at`.
+    /// program position states, so they are not read from `context_at`. They
+    /// are built here from the two methods and the substitution, so this
+    /// context can only answer that question.
     pub(crate) fn signature_comparison(
         db: &'db dyn HirAnalysisDb,
+        impl_method: CallableDef<'db>,
         trait_method: CallableDef<'db>,
-        trait_method_bounds: PredicateListId<'db>,
-    ) -> Self {
-        Self::new(db, trait_method.scope()).with_assumptions(trait_method_bounds)
+        trait_inst: TraitInstId<'db>,
+        param_subst: &crate::analysis::ty::ty_lower::CompleteSubst<'db>,
+    ) -> SignatureComparison<'db> {
+        use crate::analysis::ty::method_cmp::{
+            instantiate_trait_method_template, normalize_predicates_for_comparison,
+        };
+        use constraint::collect_func_def_constraints;
+        let impl_bounds =
+            collect_func_def_constraints(db, impl_method, false).instantiate_identity();
+        let trait_bounds = instantiate_trait_method_template(
+            db,
+            collect_func_def_constraints(db, trait_method, false),
+            param_subst,
+        );
+        let compare_assumptions = impl_bounds.merge(db, trait_bounds).extend_all_bounds(db);
+        let impl_bounds = normalize_predicates_for_comparison(
+            db,
+            impl_bounds,
+            trait_method.scope(),
+            compare_assumptions,
+            trait_inst,
+            false,
+        );
+        let trait_bounds = normalize_predicates_for_comparison(
+            db,
+            trait_bounds,
+            trait_method.scope(),
+            compare_assumptions,
+            trait_inst,
+            true,
+        );
+        SignatureComparison {
+            context: Self::new(db, trait_method.scope()).with_assumptions(trait_bounds),
+            impl_bounds,
+            trait_bounds,
+        }
     }
 
     /// The canonical proof query for `goal` under this context's premises.

@@ -1782,7 +1782,7 @@ pub struct ImplementorId<'db> {
 }
 
 impl<'db> ImplementorId<'db> {
-    fn selection_class(self, db: &'db dyn HirAnalysisDb) -> ImplSelectionClass<'db> {
+    pub(super) fn selection_class(self, db: &'db dyn HirAnalysisDb) -> ImplSelectionClass<'db> {
         match self.origin(db) {
             ImplementorOrigin::Hir(item) => impl_selection_class(db, item),
             ImplementorOrigin::VirtualContract(_) | ImplementorOrigin::Assumption => {
@@ -1931,61 +1931,7 @@ impl<'db> ImplementorId<'db> {
     }
 }
 
-/// Returns `true` if the given two implementors conflict.
-///
-/// Different named selections may overlap unless the trait is `#[fixed]`.
-/// Within one selection, retain the ordinary coherence check:
-/// - instantiate both implementors with fresh vars and unify them;
-/// - then check that the merged constraints are satisfiable.
-pub(crate) fn does_impl_trait_conflict<'db>(
-    db: &'db dyn HirAnalysisDb,
-    a: ImplementorId<'db>,
-    b: ImplementorId<'db>,
-) -> bool {
-    let a_class = a.selection_class(db);
-    let b_class = b.selection_class(db);
-    let trait_ = a.trait_def(db);
-    let fixed = crate::hir_def::ItemKind::Trait(trait_)
-        .attrs(db)
-        .is_some_and(|attrs| attrs.has_attr(db, "fixed"));
-    if !fixed && a_class != b_class {
-        return false;
-    }
-    let mut table = UnificationTable::new(db);
-    let a = table.instantiate_with_fresh_vars(a);
-    let b = table.instantiate_with_fresh_vars(b);
-
-    if table.unify(a, b).is_err() {
-        return false;
-    }
-
-    let a_constraints = a.constraints(db);
-    let b_constraints = b.constraints(db);
-
-    if a_constraints.is_empty(db) && b_constraints.is_empty(db) {
-        return true;
-    }
-
-    // Check if all constraints from both implementations would be satisfiable
-    // when the types are unified.
-    let merged_constraints = a_constraints.merge(db, b_constraints);
-    let solve_cx = TraitSolveCx::coherence(db, a.trait_def(db));
-
-    for &constraint in merged_constraints.list(db) {
-        let constraint = constraint.fold_with(db, &mut table);
-
-        match is_goal_satisfiable(db, solve_cx, constraint) {
-            GoalSatisfiability::UnSat(_) | GoalSatisfiability::ContainsInvalid => {
-                return false;
-            }
-            _ => {
-                // Constraint is satisfiable or needs more information, continue checking.
-            }
-        }
-    }
-
-    true
-}
+pub(crate) use super::trait_resolution::does_impl_trait_conflict;
 
 /// The positional identity of a trait application. Associated equalities live
 /// in predicates and resolution evidence, not in a projection's identity.
