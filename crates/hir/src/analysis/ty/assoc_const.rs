@@ -83,12 +83,19 @@ impl<'db> AssocConstUse<'db> {
         let super::ty_def::TyData::TyParam(param) = self.inst.self_ty(db).data(db) else {
             return self;
         };
-        let context = crate::semantic::context_at(db, param.owner, None);
-        let assumptions = context.assumptions(db);
+        // This identity is needed while effect keys and hidden layout slots
+        // are still being lowered. Completed function premises include those
+        // effects, so asking for them here would re-enter their own query.
+        let assumptions = match param.owner.item() {
+            crate::hir_def::ItemKind::Func(func) => {
+                crate::semantic::func_body_assumptions(db, func).extend_all_bounds(db)
+            }
+            _ => crate::semantic::context_at(db, param.owner, None).assumptions(db),
+        };
         if !assumptions.list(db).contains(&self.inst) {
             return self;
         }
-        self.with_env(context.normalization_scope(db), assumptions)
+        self.with_env(param.owner, assumptions)
     }
 
     pub fn solve_cx(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
