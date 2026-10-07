@@ -136,15 +136,7 @@ pub(super) fn selection_context<'db>(
     scope: ScopeId<'db>,
     selections: Vec<SelectedApplication<'db>>,
 ) -> ImplEnv<'db> {
-    // This is the existing interned context authority. Preserve the ordered
-    // lexical inputs here; evaluator normalization still happens at its boundary.
-    ImplEnv::new_with_selections(
-        db,
-        scope,
-        PredicateListId::empty_list(db),
-        Vec::new(),
-        selections,
-    )
+    crate::semantic::context_at(db, scope, None).with_selections(db, selections)
 }
 
 impl<'db> ConstConditionUse<'db> {
@@ -1596,7 +1588,8 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 predicate,
                 args: args.to_vec(),
                 caller: premise_owner,
-                context: selection_context(self.db, self.scope, selections.to_vec()),
+                context: crate::semantic::context_at(db, self.scope, Some((self.typed, expr)))
+                    .with_selections(db, selections.to_vec()),
                 use_span: Some(expr.span(self.body).into()),
                 discharge: None,
             };
@@ -3999,6 +3992,25 @@ fn use_it() -> u256 { read<7>() }";
             choice.outcome(),
             Err(crate::analysis::ty::diagnostics::BodyDiag::UnknownNamedSelection { .. })
         ));
+    }
+
+    #[test]
+    fn condition_context_preserves_the_canonical_item_premises() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "condition_context_premises.fe".into(),
+            "trait Read {}\nfn use_it<T: Read>() {}\n",
+        );
+        let (top, _) = db.top_mod(file);
+        let scope = top.all_funcs(&db)[0].scope();
+        let canonical = crate::semantic::context_at(&db, scope, None);
+        assert!(!canonical.assumptions(&db).list(&db).is_empty());
+        let context = super::selection_context(&db, scope, Vec::new());
+        assert_eq!(
+            context.normalization_scope(&db),
+            canonical.normalization_scope(&db)
+        );
+        assert_eq!(context.assumptions(&db), canonical.assumptions(&db));
     }
 
     #[test]

@@ -1268,7 +1268,12 @@ fn inferred_body_with_selections<'db>(
         BodyInferenceKey::new(
             db,
             owner,
-            const_requirements::selection_context(db, owner.scope(), selections.to_vec()),
+            // This key carries lexical inputs before inference builds the
+            // owner's premise frame. Reading completed item premises here
+            // can re-enter inference through effect and condition checking.
+            crate::semantic::Chain::<()>::new(db, PredicateListId::empty_list(db))
+                .context(db, owner.scope())
+                .with_selections(db, selections.to_vec()),
         ),
     )
 }
@@ -4485,10 +4490,8 @@ impl<'db> TypedBody<'db> {
         if root.selections(db).is_empty() && self.with_choices().len() == 0 {
             return &[];
         }
-        let selections = crate::semantic::recorded_chain_at(db, self, expr)
-            .selections(db)
-            .collect();
-        const_requirements::selection_context(db, root.normalization_scope(db), selections)
+        crate::semantic::recorded_chain_at(db, self, expr)
+            .context(db, root.normalization_scope(db))
             .selections(db)
     }
 }
