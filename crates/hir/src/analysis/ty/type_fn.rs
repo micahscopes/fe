@@ -29,9 +29,7 @@ use crate::{
 use super::{
     const_ty::{ConstTyData, ConstTyId, validate_unevaluated_const_ty},
     diagnostics::{TyDiagCollection, TyLowerDiag},
-    trait_resolution::{
-        PredicateListId, TraitSolveCx, check_ty_wf, constraint::collect_constraints,
-    },
+    trait_resolution::{PredicateListId, check_ty_wf, constraint::collect_constraints},
     ty_def::{Kind, PrimTy, TyBase, TyData, TyId},
     ty_lower::{lower_hir_ty_deferred, lower_kind},
     visitor::{TyVisitable, TyVisitor, walk_const_ty},
@@ -176,8 +174,7 @@ pub(super) fn check_definition_body<'db>(
     let templates = check_definition_templates(db, def);
     let mut checked = templates.clone();
     if let Some(arms) = &templates.arms {
-        let assumptions = *collect_constraints(db, def.into()).skip_binder();
-        let cx = TraitSolveCx::new(db, def.scope()).with_assumptions(assumptions);
+        let cx = crate::semantic::context_at(db, def.scope(), None).solver_context(db);
         for (index, &ty) in arms.iter().enumerate() {
             let span = def.span().body().match_().arms().arm(index).ty();
             if let Some(diag) = check_ty_wf(db, cx, ty).into_diag(span.into()) {
