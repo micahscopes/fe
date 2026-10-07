@@ -1,0 +1,30 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/abi_field_rejected_premise.fe
+---
+error[10-0007]: unsupported ABI field type
+   ┌─ abi_field_rejected_premise.fe:15:12
+   │
+15 │     value: <Plain as Tr>::A,
+   │            ^^^^^^^^^^^^^^^^ `Plain::A` does not satisfy `AbiSize`, `Encode<Sol>`
+   │
+   = event data fields must implement `AbiSize` and `Encode<Sol>`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ abi_field_rejected_premise.fe:13:1
+   │
+13 │ ╭ #[event]
+14 │ │ struct Emitted where Plain: Tr<A = u256> {
+15 │ │     value: <Plain as Tr>::A,
+16 │ │ }
+   │ ╰─^ `Plain` doesn't implement `Tr<A = u256>`
+
+error[6-0005]: trait bound for concrete type is not allowed
+   ┌─ abi_field_rejected_premise.fe:13:1
+   │
+13 │ ╭ #[event]
+14 │ │ struct Emitted where Plain: Tr<A = u256> {
+15 │ │     value: <Plain as Tr>::A,
+16 │ │ }
+   │ ╰─^ `Plain` is a concrete type

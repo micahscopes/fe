@@ -281,8 +281,10 @@ fn semantic_field_type_errors<'db>(
         seen_structs.push(abi_struct);
 
         let scope = abi_struct.scope();
-        let assumptions = constraints_for(db, abi_struct.into());
-        let solve_cx = crate::semantic::context_at(db, scope, None).solver_context(db);
+        // Field types and trait checks read the struct's one premise set.
+        let position = crate::semantic::context_at(db, scope, None);
+        let assumptions = position.assumptions(db);
+        let solve_cx = position.solver_context(db);
         let traits = (
             resolve_lib_type_path(db, scope, "std::abi::Sol"),
             resolve_core_trait(db, scope, &["abi", "AbiSize"]),

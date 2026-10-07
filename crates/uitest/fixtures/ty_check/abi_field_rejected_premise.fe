@@ -1,0 +1,16 @@
+// The rejected where-clause (6-0005) must not rewrite the event field type:
+// the field keeps `Plain`'s associated type and gets one field error.
+trait Tr {
+    type A
+}
+
+pub struct Plain {}
+
+impl Tr for Plain {
+    type A = Plain
+}
+
+#[event]
+struct Emitted where Plain: Tr<A = u256> {
+    value: <Plain as Tr>::A,
+}
