@@ -732,7 +732,8 @@ impl ModuleAnalysisPass for ContractAnalysisPass {
             diags.extend(contract.diags(db).into_iter().map(|d| d.to_voucher()));
 
             // 2. Validate contract-level effects (`contract Foo uses (ctx: Ctx)`).
-            let assumptions = PredicateListId::empty_list(db);
+            let context = crate::semantic::context_at(db, contract.scope(), None);
+            let assumptions = context.assumptions(db);
             let root_effect_ty = registered_root_providers(
                 db,
                 crate::analysis::ty::ty_check::EffectParamSite::Contract(contract),
@@ -753,12 +754,7 @@ impl ModuleAnalysisPass for ContractAnalysisPass {
                         let trait_req =
                             instantiate_trait_self(db, schema.into_trait_inst(db), root_effect_ty);
                         if matches!(
-                            is_goal_satisfiable(
-                                db,
-                                TraitSolveCx::new(db, contract.scope())
-                                    .with_assumptions(assumptions),
-                                trait_req
-                            ),
+                            is_goal_satisfiable(db, context.solver_context(db), trait_req),
                             GoalSatisfiability::UnSat(_) | GoalSatisfiability::ContainsInvalid
                         ) {
                             diags.push(Box::new(BodyDiag::ContractRootEffectTraitNotImplemented {
