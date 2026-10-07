@@ -41,6 +41,17 @@ where
 pub trait TyFolder<'db> {
     fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db>;
 
+    fn fold_assoc_const_use(
+        &mut self,
+        db: &'db dyn HirAnalysisDb,
+        use_: super::assoc_const::AssocConstUse<'db>,
+    ) -> super::assoc_const::AssocConstUse<'db>
+    where
+        Self: Sized,
+    {
+        use_.super_fold_with(db, self)
+    }
+
     fn fold_scope(&mut self, scope: ScopeId<'db>) -> ScopeId<'db> {
         scope
     }

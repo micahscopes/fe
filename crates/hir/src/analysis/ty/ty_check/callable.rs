@@ -704,7 +704,7 @@ impl<'db> Callable<'db> {
 
             let mut expected = expected.instantiate(db, &self.generic_args);
             expected = self.normalize_with_trait_evidence(db, expected);
-            let mut expected = tc.normalize_ty(expected);
+            let mut expected = tc.normalize_callable_type(self, expected);
             let mode = func_params
                 .as_ref()
                 .and_then(|params| params.get(i).copied())

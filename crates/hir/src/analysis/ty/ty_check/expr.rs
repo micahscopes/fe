@@ -1713,24 +1713,35 @@ impl<'db> TyChecker<'db> {
         }
     }
 
-    fn normalize_callable_return(&mut self, callable: &Callable<'db>) -> TyId<'db> {
+    pub(super) fn normalize_callable_type(
+        &mut self,
+        callable: &Callable<'db>,
+        ty: TyId<'db>,
+    ) -> TyId<'db> {
         let requirements = callable
             .selection_requirements(self.db)
             .fold_with(self.db, &mut self.table);
         let mut premises = self.env.assumptions().list(self.db).to_vec();
+        let mut selections = Vec::new();
         for &required in requirements.list(self.db) {
             if let Some(selection) = self.env.selection_for_goal(required) {
                 premises.retain(|goal| !selection.matches(self.db, *goal));
                 premises.push(selection.goal());
+                selections.push(selection);
             }
         }
         let assumptions = PredicateListId::new(self.db, premises).extend_all_bounds(self.db);
-        normalize_ty(
-            self.db,
-            callable.ret_ty(self.db).fold_with(self.db, &mut self.table),
-            self.env.scope(),
-            assumptions,
-        )
+        let context = self
+            .env
+            .selection_context()
+            .with_selections(self.db, selections);
+        let ty = ty.fold_with(self.db, &mut self.table);
+        let ty = context.contextualize_const_types(self.db, ty);
+        normalize_ty(self.db, ty, self.env.scope(), assumptions)
+    }
+
+    fn normalize_callable_return(&mut self, callable: &Callable<'db>) -> TyId<'db> {
+        self.normalize_callable_type(callable, callable.ret_ty(self.db))
     }
 
     fn check_call(&mut self, expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {

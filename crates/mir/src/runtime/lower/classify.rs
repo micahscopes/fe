@@ -2911,7 +2911,7 @@ pub(crate) fn semantic_return_ty<'db>(
     db: &'db dyn MirDb,
     semantic: SemanticInstance<'db>,
 ) -> TyId<'db> {
-    semantic.key(db).typed_body(db).result_ty()
+    semantic.normalized_result_ty(db)
 }
 
 pub(crate) fn default_return_class<'db>(
@@ -2919,22 +2919,20 @@ pub(crate) fn default_return_class<'db>(
     semantic: SemanticInstance<'db>,
 ) -> Option<RuntimeClass<'db>> {
     let typed_body = semantic.key(db).typed_body(db);
+    let ty = semantic_return_ty(db, semantic);
     let env = RuntimeTypeEnv::for_semantic(db, semantic);
-    let return_borrow_provider = typed_body
-        .result_ty()
-        .as_borrow(db)
-        .and(typed_body.return_borrow_provider());
+    let return_borrow_provider = ty.as_borrow(db).and(typed_body.return_borrow_provider());
     let default_space =
         return_borrow_provider.map_or(AddressSpaceKind::Memory, address_space_from_provider);
     if return_borrow_provider.is_some() {
         return Some(provider_class_for_target_in_env(
             db,
             env,
-            Some(typed_body.result_ty()),
+            Some(ty),
             default_space,
         ));
     }
-    top_level_class_for_ty_in_env(db, env, typed_body.result_ty(), default_space)
+    top_level_class_for_ty_in_env(db, env, ty, default_space)
 }
 
 pub(crate) fn desired_runtime_return_plan<'db>(
@@ -2942,14 +2940,11 @@ pub(crate) fn desired_runtime_return_plan<'db>(
     semantic: SemanticInstance<'db>,
 ) -> RuntimeVisibleReturnPlan<'db> {
     let typed_body = semantic.key(db).typed_body(db);
+    let ty = semantic_return_ty(db, semantic);
     let env = RuntimeTypeEnv::for_semantic(db, semantic);
-    let return_borrow_provider = typed_body
-        .result_ty()
-        .as_borrow(db)
-        .and(typed_body.return_borrow_provider());
+    let return_borrow_provider = ty.as_borrow(db).and(typed_body.return_borrow_provider());
     let default_space =
         return_borrow_provider.map_or(AddressSpaceKind::Memory, address_space_from_provider);
-    let ty = typed_body.result_ty();
     if return_borrow_provider.is_some() {
         return RuntimeVisibleReturnPlan::PassActual;
     }

@@ -1170,6 +1170,7 @@ impl<'db> SemanticInstance<'db> {
 
     #[salsa::tracked]
     pub fn normalized_ty(self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+        let ty = self.key(db).impl_env(db).contextualize_const_types(db, ty);
         normalize_ty(db, ty, self.normalization_scope(db), self.assumptions(db))
     }
 

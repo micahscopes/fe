@@ -1,0 +1,33 @@
+trait Width { const N: usize }
+struct Subject {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+impl Width for Subject as Wider { const N: usize = 3 }
+const ROOT: usize = Subject::N
+fn last<T: Width>(_ value: [u256; T::N]) -> u256 { value[T::N - 1] }
+fn inferred<T: Width>(_ subject: T, _ value: [u256; T::N]) -> u256 { value[T::N - 1] }
+fn arithmetic<T: Width>(_ value: [u256; T::N + 1]) -> u256 { value[T::N] }
+fn identity<T: Width>(_ value: [u256; T::N]) -> [u256; T::N] { value }
+const fn constant_last<T: Width>(_ value: [u256; T::N]) -> u256 { value[T::N - 1] }
+const CHECKED: u256 = with (Wide) { constant_last<Subject>([31, 32]) }
+fn root<T: Width>(_ value: [u256; ROOT]) -> u256 { value[0] }
+fn concrete(_ value: [u256; Subject::N]) -> u256 { value[0] }
+#[test]
+fn signature_choices_follow_bounds_and_restore_scope() {
+    assert(last<Subject>([11]) == 11)
+    assert(with (Wide) { last<Subject>([12, 13]) } == 13)
+    assert(with (Wide) {
+        let before = last<Subject>([14, 15])
+        let inside = with (Wider) { last<Subject>([16, 17, 18]) }
+        let after = last<Subject>([19, 20])
+        before * 10000 + inside * 100 + after
+    } == 151820)
+    assert(last<Subject>([21]) == 21)
+    assert(with (Wide) { inferred(Subject {}, [22, 23]) } == 23)
+    assert(with (Wide) { arithmetic<Subject>([24, 25, 26]) } == 26)
+    assert(with (Wide) { root<Subject>([27]) } == 27)
+    assert(with (Wide) { concrete([28]) } == 28)
+    let result = with (Wide) { identity<Subject>([29, 30]) }
+    assert(result[1] == 30)
+    assert(CHECKED == 32)
+}

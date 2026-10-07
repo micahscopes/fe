@@ -92,6 +92,13 @@ impl<'db> TyVisitable<'db> for AssocConstUse<'db> {
 }
 
 impl<'db> TyFoldable<'db> for AssocConstUse<'db> {
+    fn fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: TyFolder<'db>,
+    {
+        folder.fold_assoc_const_use(db, self)
+    }
+
     fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
     where
         F: TyFolder<'db>,

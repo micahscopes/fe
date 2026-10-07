@@ -1,0 +1,7 @@
+trait Width { const N: usize }
+struct Subject {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+fn pass<T: Width>(_ value: [u256; T::N]) {}
+fn wrong_selected() { with (Wide) { pass<Subject>([1]) } }
+fn wrong_restored() { pass<Subject>([1, 2]) }

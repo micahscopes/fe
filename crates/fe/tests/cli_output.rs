@@ -5024,6 +5024,21 @@ fn effect_provider_recorded_choice_at_o0_and_o2() {
 }
 
 #[test]
+fn signature_constants_share_checker_and_callee_context_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("signature_const_context.fe");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/signature_const_wrong_length.fe");
+    let (output, exit_code) = run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+    assert_ne!(exit_code, 0, "wrong signature lengths accepted: {output}");
+    assert!(
+        output.contains("error[8-0000]")
+            && output.contains("expected `[u256; 2]`")
+            && output.contains("expected `[u256; 1]`"),
+        "selected and restored signature contexts disagree: {output}"
+    );
+}
+
+#[test]
 fn authored_bound_annotations_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("authored_bound_annotations.fe");
 }

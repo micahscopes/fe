@@ -228,6 +228,57 @@ pub struct ImplEnv<'db> {
 }
 
 impl<'db> ImplEnv<'db> {
+    /// Attach this restricted position context to uncaptured signature constants.
+    /// Values and constants that already captured their choice keep that identity.
+    pub(crate) fn contextualize_const_types(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        ty: TyId<'db>,
+    ) -> TyId<'db> {
+        use crate::analysis::ty::{const_ty::ConstTyData, ty_def::TyData};
+        if self.selections(db).is_empty() {
+            return ty;
+        }
+        struct SignatureConsts<'db> {
+            context: crate::analysis::semantic::ImplEnv<'db>,
+        }
+        impl<'db> TyFolder<'db> for SignatureConsts<'db> {
+            fn fold_assoc_const_use(
+                &mut self,
+                db: &'db dyn HirAnalysisDb,
+                use_: crate::analysis::ty::assoc_const::AssocConstUse<'db>,
+            ) -> crate::analysis::ty::assoc_const::AssocConstUse<'db> {
+                let use_ = use_.super_fold_with(db, self);
+                if use_.selection().is_some() {
+                    return use_;
+                }
+                let Some(selection) = self.context.selection_for(db, use_.inst()) else {
+                    return use_;
+                };
+                use_.with_env(use_.origin_scope(), self.context.assumptions(db))
+                    .with_selection(Some(selection))
+            }
+
+            fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+                let ty = ty.super_fold_with(db, self);
+                if let TyData::ConstTy(value) = ty.data(db)
+                    && matches!(
+                        value.data(db),
+                        ConstTyData::UnEvaluated {
+                            impl_env: None,
+                            const_def: None,
+                            ..
+                        }
+                    )
+                {
+                    return TyId::const_ty(db, value.with_impl_env(db, self.context));
+                }
+                ty
+            }
+        }
+        ty.fold_with(db, &mut SignatureConsts { context: self })
+    }
+
     pub fn new_with_selections(
         db: &'db dyn HirAnalysisDb,
         scope: ScopeId<'db>,
