@@ -5453,3 +5453,36 @@ fn valid_aggregate_call_origins_execute_at_o0_and_o2() {
         evidence_boundary_runtime_at_o0_and_o2(&format!("call_selection_boundary/{name}.fe"));
     }
 }
+
+#[test]
+fn evidence_selection_boundary_rejects_changed_aggregate_layouts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/evidence_selection_boundary");
+    for name in [
+        "r2_escape_under_evidence",
+        "r2b_escape_under_evidence_second_element",
+        "evidence_distinct_reopen",
+    ] {
+        let fixture = root.join(format!("{name}.fe"));
+        let (output, exit_code) =
+            run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+        assert_eq!(exit_code, 1, "{name}: {output}");
+        assert_eq!(
+            output.matches("error[8-0121]").count(),
+            1,
+            "{name}: {output}"
+        );
+        assert_eq!(output.matches("error[").count(), 1, "{name}: {output}");
+    }
+}
+
+#[test]
+fn evidence_selection_boundary_valid_reopening_at_o0_and_o2() {
+    for name in [
+        "evidence_inside",
+        "evidence_same_reopen",
+        "evidence_unrelated_nested",
+    ] {
+        evidence_boundary_runtime_at_o0_and_o2(&format!("evidence_selection_boundary/{name}.fe"));
+    }
+}

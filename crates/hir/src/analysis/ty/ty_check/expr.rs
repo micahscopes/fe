@@ -1617,8 +1617,22 @@ impl<'db> TyChecker<'db> {
                     if let [term] = args
                         && let TyData::ConstraintTerm(goal) = term.data(self.db)
                     {
-                        let provision =
-                            Provision::evidence(binding.value, *goal, value_prop.binding);
+                        // Reopening one immutable evidence binding retains its operand
+                        // identity; a second read is not a different witness.
+                        let provision = self
+                            .env
+                            .provision_for_goal(*goal)
+                            .filter(|previous| {
+                                let Some((operand, _)) = previous.evidence_operand() else {
+                                    return false;
+                                };
+                                value_prop.binding.is_some()
+                                    && self.env.typed_expr(operand).and_then(|prop| prop.binding)
+                                        == value_prop.binding
+                            })
+                            .unwrap_or_else(|| {
+                                Provision::evidence(binding.value, *goal, value_prop.binding)
+                            });
                         if !self.insert_with_provision(binding.value, provision) {
                             continue;
                         }
@@ -1715,13 +1729,18 @@ impl<'db> TyChecker<'db> {
         boundary: super::effect_env::SelectionBoundary<'db>,
     ) -> bool {
         let inside = self.env.selection_context();
+        let outside_chain = self.env.recorded_position_chain(boundary.site);
         let differs = self.selection_type_layout_differs(ty, |tc, source| {
-            let inner =
-                tc.ground_selection_type(inside.contextualize_const_types(tc.db, source), inside);
-            let outer = tc.ground_selection_type(
-                boundary.outside.contextualize_const_types(tc.db, source),
-                boundary.outside,
-            );
+            let inner = inside.contextualize_const_types_with(tc.db, source, |goal| {
+                tc.env.provision_for_goal(goal)
+            });
+            let inner = tc.ground_selection_type(inner, inside);
+            let outer = boundary
+                .outside
+                .contextualize_const_types_with(tc.db, source, |goal| {
+                    outside_chain.lookup(tc.db, goal)
+                });
+            let outer = tc.ground_selection_type(outer, boundary.outside);
             (inner, outer)
         });
         if differs {

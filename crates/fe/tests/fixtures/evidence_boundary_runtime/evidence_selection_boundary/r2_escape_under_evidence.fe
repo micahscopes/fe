@@ -1,0 +1,16 @@
+// RD120 with the evidence spelling: the escape check compares named-only
+// contextualized types, so a Buf built under an opened evidence may escape.
+use core::obligations::{Evidence, prove}
+trait Compute { const N: usize }
+struct Subject {}
+impl Compute for Subject { const N: usize = 1 }
+impl Compute for Subject as Other { const N: usize = 2 }
+struct Buf<T: Compute> { a: [u256; T::N] }
+const fn make<T: Compute>(_ a: [u256; T::N]) -> Buf<T> { Buf { a } }
+const fn build(_ e: Evidence<Compute<Subject>>) -> u256 {
+    let b = with (e) { make<Subject>([7; Subject::N]) }
+    b.a[0]
+}
+const V: u256 = build(with (Other) { prove<Compute<Subject>>() })
+#[test]
+fn t() { assert(V == 7) }
