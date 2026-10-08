@@ -702,6 +702,17 @@ impl<'db> Callable<'db> {
                 tc.push_diag(diag);
             }
 
+            // Compare the value's field layout before coercion or nominal equality
+            // can hide a constant chosen only in the caller's context.
+            if tc.reject_call_selection_type_escape(
+                self,
+                given.expr,
+                given.expr_prop.ty,
+                given.expr_span.clone(),
+            ) {
+                continue;
+            }
+
             let mut expected = expected.instantiate(db, &self.generic_args);
             expected = self.normalize_with_trait_evidence(db, expected);
             let mut expected = tc.normalize_callable_type(self, expected);

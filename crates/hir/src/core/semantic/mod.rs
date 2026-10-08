@@ -26,7 +26,7 @@ pub mod index;
 mod provision;
 pub use provision::Provision;
 pub(crate) use provision::{Chain, Frame};
-pub(crate) use provision::{lookup_assumptions, recorded_chain_at};
+pub(crate) use provision::{lookup_assumptions, recorded_chain_at, recorded_chain_from_openings};
 pub mod reference;
 mod storage_layout;
 pub mod symbol;

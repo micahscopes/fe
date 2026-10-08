@@ -1714,8 +1714,75 @@ impl<'db> TyChecker<'db> {
         ty: TyId<'db>,
         boundary: super::effect_env::SelectionBoundary<'db>,
     ) -> bool {
-        use crate::analysis::ty::const_ty::{ConstCanonEnv, concretize_const_ty_if_ground};
         let inside = self.env.selection_context();
+        let differs = self.selection_type_layout_differs(ty, |tc, source| {
+            let inner =
+                tc.ground_selection_type(inside.contextualize_const_types(tc.db, source), inside);
+            let outer = tc.ground_selection_type(
+                boundary.outside.contextualize_const_types(tc.db, source),
+                boundary.outside,
+            );
+            (inner, outer)
+        });
+        if differs {
+            self.env.mark_selection_boundary_reported(boundary.site);
+            self.push_diag(BodyDiag::SelectedConstantTypeEscape(
+                boundary.site.span(self.body()).into(),
+            ));
+        }
+        differs
+    }
+
+    pub(super) fn reject_call_selection_type_escape(
+        &mut self,
+        callable: &Callable<'db>,
+        expr: ExprId,
+        ty: TyId<'db>,
+        span: DynLazySpan<'db>,
+    ) -> bool {
+        if self.env.selection_boundaries(None).is_empty() {
+            return false;
+        }
+        let mut origin = expr;
+        let mut seen = FxHashSet::default();
+        while seen.insert(origin) {
+            match origin.data(self.db, self.body()) {
+                Partial::Present(Expr::Un(value, _) | Expr::Field(value, _)) => origin = *value,
+                Partial::Present(Expr::Path(_)) => {
+                    let Some(binding) = self.env.typed_expr(origin).and_then(|prop| prop.binding)
+                    else {
+                        break;
+                    };
+                    let Some(source) = self.env.binding_source(binding) else {
+                        break;
+                    };
+                    origin = source.init_expr;
+                }
+                _ => break,
+            }
+        }
+        let chain = self.env.recorded_position_chain(origin);
+        let inside = chain.context(self.db, self.env.scope());
+        let differs = self.selection_type_layout_differs(ty, |tc, source| {
+            let inner = inside
+                .contextualize_const_types_with(tc.db, source, |goal| chain.lookup(tc.db, goal));
+            let inner = tc.ground_selection_type(inner, inside);
+            let outer = tc.normalize_callable_type(callable, source);
+            let outer = tc.ground_selection_type(outer, tc.env.selection_context());
+            (inner, outer)
+        });
+        if differs {
+            self.push_diag(BodyDiag::SelectedConstantTypeEscape(span));
+        }
+        differs
+    }
+
+    fn ground_selection_type(
+        &self,
+        ty: TyId<'db>,
+        context: crate::analysis::semantic::ImplEnv<'db>,
+    ) -> TyId<'db> {
+        use crate::analysis::ty::const_ty::{ConstCanonEnv, concretize_const_ty_if_ground};
         struct Ground<'db>(crate::analysis::semantic::ImplEnv<'db>);
         impl<'db> TyFolder<'db> for Ground<'db> {
             fn fold_ty(
@@ -1737,24 +1804,22 @@ impl<'db> TyChecker<'db> {
                 ty
             }
         }
+        ty.fold_with(self.db, &mut Ground(context))
+    }
+
+    fn selection_type_layout_differs(
+        &mut self,
+        ty: TyId<'db>,
+        mut contextualize: impl FnMut(&mut Self, TyId<'db>) -> (TyId<'db>, TyId<'db>),
+    ) -> bool {
         let mut pending = vec![ty.fold_with(self.db, &mut self.table)];
         let mut visited = FxHashSet::default();
         while let Some(source) = pending.pop() {
             if !visited.insert(source) || source.has_invalid(self.db) {
                 continue;
             }
-            let inner = inside
-                .contextualize_const_types(self.db, source)
-                .fold_with(self.db, &mut Ground(inside));
-            let outer = boundary
-                .outside
-                .contextualize_const_types(self.db, source)
-                .fold_with(self.db, &mut Ground(boundary.outside));
+            let (inner, outer) = contextualize(self, source);
             if inner != outer && !inner.has_invalid(self.db) && !outer.has_invalid(self.db) {
-                self.env.mark_selection_boundary_reported(boundary.site);
-                self.push_diag(BodyDiag::SelectedConstantTypeEscape(
-                    boundary.site.span(self.body()).into(),
-                ));
                 return true;
             }
             pending.extend(source.generic_args(self.db).iter().copied());
@@ -1840,8 +1905,16 @@ impl<'db> TyChecker<'db> {
         );
         let context = self.env.selection_context();
         let ty = ty.fold_with(self.db, &mut self.table);
-        let ty = context
-            .contextualize_const_types_with(self.db, ty, |goal| self.env.provision_for_goal(goal));
+        // A callee receives the provisions required by its signature, rather than
+        // every choice visible at the call site.
+        let ty = context.contextualize_const_types_with(self.db, ty, |goal| {
+            crate::semantic::lookup_trait_goal(
+                self.db,
+                goal,
+                provisions.iter().copied(),
+                |provision| provision.goal(),
+            )
+        });
         normalize_ty(
             self.db,
             ty,

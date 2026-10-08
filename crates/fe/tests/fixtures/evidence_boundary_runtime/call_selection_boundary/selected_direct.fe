@@ -1,0 +1,17 @@
+// RD120 escape through a callee: the selected Buf is passed to a function that
+// stores it into an outer mutable value. No assignment crosses the block.
+trait Compute { const N: usize }
+struct Subject {}
+impl Compute for Subject { const N: usize = 1 }
+impl Compute for Subject as Other { const N: usize = 2 }
+struct Buf<T: Compute> { a: [u256; T::N] }
+fn make<T: Compute>(_ a: [u256; T::N]) -> Buf<T> { Buf { a } }
+struct Holder { b: Buf<Subject> }
+fn store(_ h: mut Holder, _ b: own Buf<Subject>) { h.b = b }
+fn via_callee() -> u256 {
+    let mut h = Holder { b: make<Subject>([1]) }
+    with (Other) { store(mut h, make<Subject>([7, 8])) }
+    h.b.a[0]
+}
+#[test]
+fn t() { assert(via_callee() == 7) }

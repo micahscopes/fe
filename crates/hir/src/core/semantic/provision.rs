@@ -433,20 +433,38 @@ pub(crate) fn recorded_chain_at<'db>(
     typed: &crate::analysis::ty::ty_check::TypedBody<'db>,
     expr: ExprId,
 ) -> Chain<'db> {
-    let mut chain = Chain::new(db, typed.assumptions());
-    chain.frames[0].provisions.extend(
-        typed
-            .root_selections(db)
-            .iter()
-            .copied()
-            .map(Provision::Named),
-    );
-    if typed.with_choices().len() == 0 {
+    recorded_chain_from_openings(
+        db,
+        typed.body(),
+        typed.assumptions(),
+        typed.root_selections(db),
+        typed.with_choices().len() != 0,
+        expr,
+        |expression| typed.with_choice(expression)?.outcome().ok(),
+    )
+}
+
+/// Reconstruct a position from accepted opening outcomes. The caller may be a
+/// completed body or the live checker; this reader never checks the body again.
+/// The syntax index preserves each opening's prefix, so later bindings cannot
+/// supply authority to an earlier expression.
+pub(crate) fn recorded_chain_from_openings<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Option<crate::hir_def::Body<'db>>,
+    assumptions: crate::analysis::ty::trait_resolution::PredicateListId<'db>,
+    root_selections: &[SelectedApplication<'db>],
+    has_openings: bool,
+    expr: ExprId,
+    mut opening: impl FnMut(ExprId) -> Option<Provision<'db>>,
+) -> Chain<'db> {
+    let mut chain = Chain::new(db, assumptions);
+    chain.frames[0]
+        .provisions
+        .extend(root_selections.iter().copied().map(Provision::Named));
+    if !has_openings {
         return chain;
     }
-    let body = typed
-        .body()
-        .expect("opening records must retain their HIR body");
+    let body = body.expect("opening records must retain their HIR body");
     let index = opening_positions(db, body);
     let mut position = index.positions.get(&expr).copied();
     let mut frames = Vec::new();
@@ -462,7 +480,7 @@ pub(crate) fn recorded_chain_at<'db>(
         };
         let provisions = bindings[..prefix]
             .iter()
-            .filter_map(|binding| typed.with_choice(binding.value)?.outcome().ok())
+            .filter_map(|binding| opening(binding.value))
             .collect();
         chain.within(Frame::from_records(provisions));
     }

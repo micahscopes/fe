@@ -1,0 +1,14 @@
+trait Compute { const N: usize }
+struct Subject {}
+impl Compute for Subject { const N: usize = 1 }
+impl Compute for Subject as Other { const N: usize = 2 }
+struct Buf<T: Compute> { a: [u256; T::N] }
+fn make<T: Compute>(_ a: [u256; T::N]) -> Buf<T> { Buf { a } }
+struct Holder { b: Buf<Subject> }
+fn store(_ h: mut Holder, _ b: own Buf<Subject>) { h.b = b }
+fn forward<T: Compute>(_ b: own Buf<T>) -> Buf<T> { b }
+#[test]
+fn t() { let mut h = Holder { b: make<Subject>([1]) }
+ let b = forward<Subject>(make<Subject>([7]))
+ with (Other) { store(mut h, b) }
+ assert(h.b.a[0] == 7) }

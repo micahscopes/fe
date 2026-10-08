@@ -5415,3 +5415,41 @@ fn rd121_known_evidence_array_indices_at_o0_and_o2() {
 fn constant_layout_backing_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("constant_layout_backing.fe");
 }
+
+#[test]
+fn selected_constant_aggregate_call_arguments_respect_callee_context() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/call_selection_boundary");
+    for name in [
+        "selected_direct.fe",
+        "call_selected_alias.fe",
+        "call_selected_mutated.fe",
+        "call_selected_forwarded.fe",
+    ] {
+        let fixture = root.join(name);
+        let (output, exit_code) =
+            run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+        assert_eq!(exit_code, 1, "{name}: {output}");
+        assert_eq!(
+            output.matches("error[8-0121]").count(),
+            1,
+            "{name}: {output}"
+        );
+        assert_eq!(output.matches("error[").count(), 1, "{name}: {output}");
+    }
+}
+
+#[test]
+fn valid_aggregate_call_origins_execute_at_o0_and_o2() {
+    for name in [
+        "call_generic_inside",
+        "call_ordinary_concrete",
+        "evidence_inside",
+        "call_outside_origin",
+        "call_outside_alias",
+        "call_outside_mutated",
+        "call_outside_forwarded",
+    ] {
+        evidence_boundary_runtime_at_o0_and_o2(&format!("call_selection_boundary/{name}.fe"));
+    }
+}

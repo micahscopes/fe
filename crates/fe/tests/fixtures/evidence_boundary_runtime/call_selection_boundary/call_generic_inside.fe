@@ -1,0 +1,10 @@
+trait Compute { const N: usize }
+struct Subject {}
+impl Compute for Subject { const N: usize = 1 }
+impl Compute for Subject as Other { const N: usize = 2 }
+struct Buf<T: Compute> { a: [u256; T::N] }
+fn make<T: Compute>(_ a: [u256; T::N]) -> Buf<T> { Buf { a } }
+fn pass<T: Compute>(_ a: own Buf<T>) -> Buf<T> { a }
+#[test]
+fn t() { with (Other) { let b = pass<Subject>(make<Subject>([7, 8]))
+ assert(b.a[1] == 8) } }

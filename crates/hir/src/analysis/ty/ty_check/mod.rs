@@ -4672,6 +4672,68 @@ pub struct BindingSource {
     pub projection: Vec<ReturnProjectionStep>,
 }
 
+fn binding_source_in_body<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    patterns: &PatternStore<'db>,
+    binding: LocalBinding<'db>,
+) -> Option<BindingSource> {
+    let LocalBinding::Local { pat, .. } = binding else {
+        return None;
+    };
+    for (_, statement) in body.stmts(db).iter() {
+        if let Partial::Present(Stmt::Let(pattern, _, Some(value))) = statement
+            && let Some(projection) = patterns
+                .root(*pattern)
+                .and_then(|root| binding_projection_in_validated_pat(patterns, root, pat))
+        {
+            return Some(BindingSource {
+                init_expr: *value,
+                projection,
+            });
+        }
+    }
+    None
+}
+
+fn binding_projection_in_validated_pat(
+    patterns: &PatternStore<'_>,
+    pat: ValidatedPatId,
+    binding_pat: PatId,
+) -> Option<Vec<ReturnProjectionStep>> {
+    match patterns.node(pat).kind() {
+        ValidatedPatKind::Wildcard { binding } => binding
+            .filter(|binding| binding.representative_pat == binding_pat)
+            .map(|_| Vec::new()),
+        ValidatedPatKind::Constructor { ctor, fields } => {
+            fields.iter().enumerate().find_map(|(field_idx, child)| {
+                let suffix = binding_projection_in_validated_pat(patterns, *child, binding_pat)?;
+                let field = u16::try_from(field_idx).ok()?;
+                let step = match ctor {
+                    ConstructorKind::Variant(variant, _) => ReturnProjectionStep::VariantField {
+                        variant: variant.idx,
+                        field,
+                    },
+                    ConstructorKind::Type(_) => ReturnProjectionStep::Field(field),
+                    ConstructorKind::Literal(_, _) => return None,
+                };
+                let mut path = Vec::with_capacity(suffix.len() + 1);
+                path.push(step);
+                path.extend(suffix);
+                Some(path)
+            })
+        }
+        ValidatedPatKind::Or(pats) => {
+            let mut paths = pats
+                .iter()
+                .filter_map(|pat| binding_projection_in_validated_pat(patterns, *pat, binding_pat))
+                .collect::<Vec<_>>();
+            let first = paths.pop()?;
+            paths.into_iter().all(|path| path == first).then_some(first)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ReturnProjectionStep {
     Field(u16),
@@ -5480,71 +5542,7 @@ impl<'db> TypedBody<'db> {
         db: &'db dyn HirAnalysisDb,
         binding: LocalBinding<'db>,
     ) -> Option<BindingSource> {
-        let LocalBinding::Local { pat, .. } = binding else {
-            return None;
-        };
-        let body = self.body()?;
-
-        for (_, stmt) in body.stmts(db).iter() {
-            if let Partial::Present(crate::hir_def::Stmt::Let(stmt_pat, _, Some(init_expr))) = stmt
-                && let Some(projection) = self.binding_projection_in_pat(*stmt_pat, pat)
-            {
-                return Some(BindingSource {
-                    init_expr: *init_expr,
-                    projection,
-                });
-            }
-        }
-
-        None
-    }
-
-    fn binding_projection_in_pat(
-        &self,
-        pat: PatId,
-        binding_pat: PatId,
-    ) -> Option<Vec<ReturnProjectionStep>> {
-        self.binding_projection_in_validated_pat(self.pattern_root(pat)?, binding_pat)
-    }
-
-    fn binding_projection_in_validated_pat(
-        &self,
-        pat: ValidatedPatId,
-        binding_pat: PatId,
-    ) -> Option<Vec<ReturnProjectionStep>> {
-        match self.tables.pattern_store.node(pat).kind() {
-            ValidatedPatKind::Wildcard { binding } => binding
-                .filter(|binding| binding.representative_pat == binding_pat)
-                .map(|_| Vec::new()),
-            ValidatedPatKind::Constructor { ctor, fields } => {
-                fields.iter().enumerate().find_map(|(field_idx, child)| {
-                    let suffix = self.binding_projection_in_validated_pat(*child, binding_pat)?;
-                    let field = u16::try_from(field_idx).ok()?;
-                    let step = match ctor {
-                        ConstructorKind::Variant(variant, _) => {
-                            ReturnProjectionStep::VariantField {
-                                variant: variant.idx,
-                                field,
-                            }
-                        }
-                        ConstructorKind::Type(_) => ReturnProjectionStep::Field(field),
-                        ConstructorKind::Literal(_, _) => return None,
-                    };
-                    let mut path = Vec::with_capacity(suffix.len() + 1);
-                    path.push(step);
-                    path.extend(suffix);
-                    Some(path)
-                })
-            }
-            ValidatedPatKind::Or(pats) => {
-                let mut paths = pats
-                    .iter()
-                    .filter_map(|pat| self.binding_projection_in_validated_pat(*pat, binding_pat))
-                    .collect::<Vec<_>>();
-                let first = paths.pop()?;
-                paths.into_iter().all(|path| path == first).then_some(first)
-            }
-        }
+        binding_source_in_body(db, self.body()?, &self.tables.pattern_store, binding)
     }
 
     pub fn return_provenance(&self, db: &'db dyn HirAnalysisDb) -> ReturnProvenance {

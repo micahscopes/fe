@@ -93,8 +93,13 @@ def premise_boundary(env, semantic, provisions):
     if len(checker_context) != 1 or 'self.provisions.context(self.db, self.owner_scope)' not in checker_context[0]:
         raise ValueError('checker context must use the same chain projection as the record')
     roots = goal_lookup.bodies(provisions, 'recorded_chain_at')
-    if len(roots) != 1 or 'Chain::new(db, typed.assumptions())' not in roots[0]:
+    if len(roots) != 1 or not re.search(
+        r'recorded_chain_from_openings\(\s*db,\s*typed\.body\(\),\s*typed\.assumptions\(\),', roots[0]
+    ):
         raise ValueError('body positions must read their completed root premises')
+    readers = goal_lookup.bodies(provisions, 'recorded_chain_from_openings')
+    if len(readers) != 1 or 'Chain::new(db, assumptions)' not in readers[0]:
+        raise ValueError('opening reader must preserve the supplied root premises')
     if re.search(r'\.(?:list|extend_all_bounds)\s*\(', bodies[0]):
         raise ValueError('record context restored a separate premise builder')
 
@@ -173,7 +178,8 @@ if __name__ == '__main__':
         (env, semantic, provisions.replace('self.evidence_assumptions(db)', 'PredicateListId::empty_list(db)', 1)),
         (env, semantic, provisions.replace('self.selections(db).collect()', 'Vec::new()', 1)),
         (env.replace('self.provisions.context(self.db, self.owner_scope)', 'selection_context(self.db, self.owner_scope, Vec::new())', 1), semantic, provisions),
-        (env, semantic, provisions.replace('Chain::new(db, typed.assumptions())', 'Chain::new(db, PredicateListId::empty_list(db))', 1)),
+        (env, semantic, provisions.replace('typed.assumptions(),', 'PredicateListId::empty_list(db),', 1)),
+        (env, semantic, provisions.replace('Chain::new(db, assumptions)', 'Chain::new(db, PredicateListId::empty_list(db))', 1)),
         (env.replace('    provisions:', "    assumptions: PredicateListId<'db>,\n    provisions:", 1), semantic, provisions),
     ]:
         assert mutant_env != env or mutant_semantic != semantic or mutant_provisions != provisions, 'premise mutation must modify actual source'

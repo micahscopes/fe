@@ -651,6 +651,30 @@ impl<'db> TyCheckEnv<'db> {
         self.provisions.context(self.db, self.scope())
     }
 
+    /// Read the accepted opening records at an already checked source position.
+    pub(super) fn recorded_position_chain(&self, expr: ExprId) -> crate::semantic::Chain<'db> {
+        let root = self
+            .decisions
+            .root_context
+            .expect("checked body has a root context");
+        crate::core::semantic::recorded_chain_from_openings(
+            self.db,
+            Some(self.body),
+            root.assumptions(self.db),
+            root.selections(self.db),
+            !self.decisions.openings.is_empty(),
+            expr,
+            |expression| self.decisions.openings.get(&expression)?.outcome().ok(),
+        )
+    }
+
+    pub(super) fn binding_source(
+        &self,
+        binding: LocalBinding<'db>,
+    ) -> Option<super::BindingSource> {
+        super::binding_source_in_body(self.db, self.body, &self.pattern_store, binding)
+    }
+
     /// Solver view of the live position context.
     pub(super) fn solver_context(&self) -> TraitSolveCx<'db> {
         self.position_context().solver_context(self.db)
