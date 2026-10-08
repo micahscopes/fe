@@ -6,7 +6,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SOLVER = ROOT / "crates/hir/src/analysis/ty/trait_resolution"
-BASELINE = 20  # H1 batch 3 removes five direct construction sites.
+BASELINE = 19  # Combined approved H1 batch 3 and H3 batch 2.
 TYPES = ("TraitSolveCx", "CanonicalGoalQuery", "TraitSolverQuery")
 RAW = re.compile(r'(?:br|cr|r)(#*)"')
 CHAR = re.compile(r"'(?:\\(?:u\{[^}]*\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'")

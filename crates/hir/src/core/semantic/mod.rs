@@ -20,6 +20,8 @@
 //!   `item.rs` and replace call sites by adding only the minimal semantic
 //!   method(s) here.
 
+mod context_independence;
+pub(crate) use context_independence::WithoutCallerPremises;
 pub mod index;
 mod provision;
 pub use provision::Provision;

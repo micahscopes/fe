@@ -803,8 +803,7 @@ fn semantic_callee_key_with_assumptions<'db>(
         *arg = canonicalize_ty_for_mode(db, *arg, canon_env, ConstCanonMode::Identity);
     }
 
-    let independent_context =
-        crate::analysis::ty::trait_resolution::WithoutCallerPremises::at(db, owner.scope());
+    let independent_context = crate::core::semantic::WithoutCallerPremises::at(db, owner.scope());
     // A fully concrete implementation can shed caller context only when the
     // same implementation is selected without it. Symbolic calls and
     // assumption-selected defaults keep the caller's proof environment.
