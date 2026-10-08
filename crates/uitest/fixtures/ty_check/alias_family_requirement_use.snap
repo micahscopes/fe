@@ -1,0 +1,70 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/alias_family_requirement_use.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_family_requirement_use.fe:20:20
+   │
+20 │ struct Direct { f: Fam<Other, 0> }
+   │                    ^^^^^^^^^^^^^ `Other` doesn't implement `Foo`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_family_requirement_use.fe:21:22
+   │
+21 │ struct ViaAlias { f: A0 }
+   │                      ^^ `Other` doesn't implement `Foo`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_family_requirement_use.fe:22:24
+   │
+22 │ struct Generic<T> { f: A1<T> }
+   │                        ^^^^^ `T` doesn't implement `Foo`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_family_requirement_use.fe:23:22
+   │
+23 │ struct Concrete { f: A1<Other> }
+   │                      ^^^^^^^^^ `Other` doesn't implement `Foo`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_family_requirement_use.fe:24:27
+   │
+24 │ struct ThroughNested { f: Nested<Other> }
+   │                           ^^^^^^^^^^^^^ `Other` doesn't implement `Foo`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_family_requirement_use.fe:26:18
+   │
+26 │ fn param<T>(_ x: A1<T>) {}
+   │                  ^^^^^ `T` doesn't implement `Foo`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_family_requirement_use.fe:27:13
+   │
+27 │ fn ret() -> A1<Other> { make() }
+   │             ^^^^^^^^^ `Other` doesn't implement `Foo`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_family_requirement_use.fe:29:13
+   │
+29 │     let _a: A1<T> = make()
+   │             ^^^^^ `T` doesn't implement `Foo`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_family_requirement_use.fe:30:13
+   │
+30 │     let _b: A0 = make()
+   │             ^^ `Other` doesn't implement `Foo`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_family_requirement_use.fe:32:14
+   │
+32 │ impl<T> Wrap<A1<T>> {}
+   │              ^^^^^ `T` doesn't implement `Foo`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_family_requirement_use.fe:33:21
+   │
+33 │ trait Tr { const C: A1<Other> }
+   │                     ^^^^^^^^^ `Other` doesn't implement `Foo`

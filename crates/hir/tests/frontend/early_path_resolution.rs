@@ -146,7 +146,7 @@ fn resolved_declaration_keeps_alias_arguments_under_destination_shadowing() {
     let shadow = resolve_path(&db, path, destination_mod.scope(), assumptions, false).unwrap();
     fn alias_type<'db>(resolution: &PathRes<'db>) -> fe_hir::analysis::ty::ty_def::TyId<'db> {
         match resolution {
-            PathRes::TyAlias(_, ty) => *ty,
+            PathRes::TyAlias(_, ty, _) => *ty,
             other => panic!("expected alias, got {other:?}"),
         }
     }

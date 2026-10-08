@@ -204,7 +204,7 @@ fn resolve_type_in_scope<'db>(
 
     let assumptions = PredicateListId::empty_list(db);
     match resolve_path(db, path_id, scope, assumptions, true).ok()? {
-        PathRes::Ty(_) | PathRes::TyAlias(_, _) => Some(()),
+        PathRes::Ty(_) | PathRes::TyAlias(_, _, _) => Some(()),
         _ => None,
     }
 }

@@ -1786,7 +1786,7 @@ fn segment_const_args<'db>(
         match res {
             // An alias's arguments are its own parameters', whether or not the
             // aliased type uses them.
-            PathRes::TyAlias(alias, _) => {
+            PathRes::TyAlias(alias, _, _) => {
                 for (arg, param) in args.data(db).iter().zip(alias.params(db)) {
                     if let GenericArg::Const(arg) = arg
                         && let ConstGenericArgValue::Expr(Partial::Present(body)) = arg.value

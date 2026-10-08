@@ -231,6 +231,95 @@ pub(crate) fn is_const_fault(cause: &InvalidCause<'_>) -> bool {
     )
 }
 
+/// The types a resolved path segment applies, whose requirements its use must
+/// meet. An alias use applies what the alias's right-hand side applies,
+/// instantiated with the use's arguments, as if written at the use.
+fn push_type_uses<'db>(
+    type_uses: &mut Vec<(PathId<'db>, TyId<'db>)>,
+    path: PathId<'db>,
+    reso: &PathRes<'db>,
+) {
+    match reso {
+        PathRes::Ty(ty) => type_uses.push((path, *ty)),
+        PathRes::TyAlias(_, ty, applied) => {
+            type_uses.push((path, *ty));
+            type_uses.extend(applied.iter().map(|&applied| (path, applied)));
+        }
+        _ => {}
+    }
+}
+
+/// The types applied by the paths written in `hir_ty`, as each segment
+/// resolves before normalization (alias uses contribute their own applied
+/// types), keeping only the family applications whose requirements a use must
+/// meet. Paths are resolved with `minter`, the lowering context of the type's
+/// owner, so constants in them are the owner's own. Const expressions in the
+/// type are not visited, and applications still holding a constant hole are
+/// left out (their requirements are checked where the hole is filled).
+pub(crate) fn written_type_uses<'db>(
+    db: &'db dyn HirAnalysisDb,
+    hir_ty: TypeId<'db>,
+    span: LazyTySpan<'db>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    minter: &LoweringContext<'db>,
+) -> Vec<TyId<'db>> {
+    struct WrittenUses<'a, 'db> {
+        db: &'db dyn HirAnalysisDb,
+        assumptions: PredicateListId<'db>,
+        minter: &'a LoweringContext<'db>,
+        uses: Vec<TyId<'db>>,
+    }
+    impl<'db> Visitor<'db> for WrittenUses<'_, 'db> {
+        fn visit_body(
+            &mut self,
+            _: &mut VisitorCtxt<'db, crate::span::item::LazyBodySpan<'db>>,
+            _: crate::hir_def::Body<'db>,
+        ) {
+        }
+
+        fn visit_path(
+            &mut self,
+            ctxt: &mut VisitorCtxt<'db, LazyPathSpan<'db>>,
+            path: PathId<'db>,
+        ) {
+            let scope = ctxt.scope();
+            let mut type_uses = Vec::new();
+            let mut collect =
+                |path: PathId<'db>, reso: &PathRes<'db>| push_type_uses(&mut type_uses, path, reso);
+            let _ = resolve_path_with_observer_and_minter(
+                self.db,
+                path,
+                scope,
+                self.assumptions,
+                false,
+                &mut collect,
+                self.minter,
+            );
+            let db = self.db;
+            self.uses
+                .extend(type_uses.into_iter().map(|(_, ty)| ty).filter(|&ty| {
+                    let has_requirements = matches!(
+                        ty.decompose_ty_app(db).0.data(db),
+                        TyData::TyBase(super::ty_def::TyBase::TypeFn(_))
+                    ) || ty.family_parameter_bounds(db).is_some()
+                        || ty.lacks_args_for_parameter_bounds(db).is_some();
+                    has_requirements && !super::layout_holes::ty_contains_const_hole(db, ty)
+                }));
+            walk_path(self, ctxt, path);
+        }
+    }
+    let mut visitor = WrittenUses {
+        db,
+        assumptions,
+        minter,
+        uses: Vec::new(),
+    };
+    let mut ctxt = VisitorCtxt::new(db, scope, span);
+    visitor.visit_ty(&mut ctxt, hir_ty);
+    visitor.uses
+}
+
 struct ApplicationRequirementVisitor<'db> {
     db: &'db dyn HirAnalysisDb,
     assumptions: PredicateListId<'db>,
@@ -252,9 +341,7 @@ impl<'db> Visitor<'db> for ApplicationRequirementVisitor<'db> {
         let path_span = ctxt.span().unwrap();
         let mut type_uses = Vec::new();
         let mut collect = |path: PathId<'db>, reso: &PathRes<'db>| {
-            if let PathRes::Ty(ty) | PathRes::TyAlias(_, ty) = reso {
-                type_uses.push((path, *ty));
-            }
+            push_type_uses(&mut type_uses, path, reso);
         };
         let context = LoweringContext::for_const_bodies(
             HoleAnchor::TemplatePath {
@@ -343,7 +430,7 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
         {
             let is_const_like = match resolved {
                 PathRes::Const(..) | PathRes::TraitConst(..) | PathRes::InherentConst(..) => true,
-                PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => {
+                PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) => {
                     matches!(ty.data(self.db), TyData::ConstTy(_))
                 }
                 PathRes::EnumVariant(v) => v.ty.is_unit_variant_only_enum(self.db),
@@ -515,9 +602,7 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
         let mut invisible = None;
         let mut type_uses = Vec::new();
         let mut check_visibility = |path: PathId<'db>, reso: &PathRes<'db>| {
-            if let PathRes::Ty(ty) | PathRes::TyAlias(_, ty) = reso {
-                type_uses.push((path, *ty));
-            }
+            push_type_uses(&mut type_uses, path, reso);
             if invisible.is_some() {
                 return;
             }

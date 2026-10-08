@@ -465,7 +465,7 @@ fn func_not_found_err<'db>(
     parent: Option<PathRes<'db>>,
 ) -> PathResDiag<'db> {
     match parent {
-        Some(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => PathResDiag::MethodNotFound {
+        Some(PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _)) => PathResDiag::MethodNotFound {
             primary: span,
             method_name: ident,
             receiver: Either::Left(ty),
@@ -561,7 +561,12 @@ fn make_query<'db>(
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub enum PathRes<'db> {
     Ty(TyId<'db>),
-    TyAlias(TyAlias<'db>, TyId<'db>),
+    /// A type alias use: the alias, the type it stands for at this use, and
+    /// the types its right-hand side applies, instantiated with this use's
+    /// arguments. Lowering normalizes the right-hand side, so a family
+    /// application in it is visible only through the last field, which is
+    /// what lets each use check that application's requirements.
+    TyAlias(TyAlias<'db>, TyId<'db>, Vec<TyId<'db>>),
     Func(TyId<'db>),
     FuncParam(ItemKind<'db>, u16),
     Trait(TraitInstId<'db>),
@@ -589,7 +594,10 @@ impl<'db> PathRes<'db> {
     {
         match self {
             PathRes::Ty(ty) => PathRes::Ty(f(ty)),
-            PathRes::TyAlias(alias, ty) => PathRes::TyAlias(alias, f(ty)),
+            PathRes::TyAlias(alias, ty, applied) => {
+                let ty = f(ty);
+                PathRes::TyAlias(alias, ty, applied.into_iter().map(&mut f).collect())
+            }
             PathRes::Func(ty) => PathRes::Func(f(ty)),
             PathRes::Const(const_, ty) => PathRes::Const(const_, f(ty)),
             PathRes::EnumVariant(v) => PathRes::EnumVariant(ResolvedVariant { ty: f(v.ty), ..v }),
@@ -617,7 +625,7 @@ impl<'db> PathRes<'db> {
                 let idx = impl_.const_index(db, *name)? as u16;
                 Some(ScopeId::ImplConst(*impl_, idx))
             }
-            PathRes::TyAlias(alias, _) => Some(alias.alias.scope()),
+            PathRes::TyAlias(alias, _, _) => Some(alias.alias.scope()),
             PathRes::Trait(trait_) => Some(trait_.def(db).scope()),
             PathRes::TraitMethod(_inst, method) => Some(method.scope()),
             PathRes::EnumVariant(variant) => Some(ScopeId::Variant(variant.variant)),
@@ -688,7 +696,7 @@ impl<'db> PathRes<'db> {
 
         match self {
             PathRes::Ty(ty) | PathRes::Func(ty) => ty_path(*ty),
-            PathRes::TyAlias(alias, _) => alias.alias.scope().pretty_path(db),
+            PathRes::TyAlias(alias, _, _) => alias.alias.scope().pretty_path(db),
             PathRes::EnumVariant(v) => Some(format!(
                 "{}::{}",
                 ty_path(v.ty).unwrap_or_else(|| "<missing>".into()),
@@ -1026,7 +1034,7 @@ where
             derivation: super::NameDerivation::Def,
         };
         let parent_ty = parent_res.as_ref().and_then(|parent| match parent {
-            PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => Some(*ty),
+            PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) => Some(*ty),
             _ => None,
         });
         let result = resolve_name_res_unexpanded(
@@ -1138,7 +1146,7 @@ where
         .unwrap_or(scope);
 
     match parent_res {
-        Some(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => {
+        Some(PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _)) => {
             // Fast paths for qualified types `<A as Trait>::...`.
             //
             // NOTE: This must run before generic associated-const probing, otherwise
@@ -1480,7 +1488,7 @@ where
     let bucket = resolve_query(db, query);
 
     let parent_ty = parent_res.as_ref().and_then(|res| match res {
-        PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => Some(*ty),
+        PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) => Some(*ty),
         _ => None,
     });
 
@@ -2382,7 +2390,9 @@ fn resolve_name_res_unexpanded<'db>(
                             path,
                         ));
                     }
-                    PathRes::TyAlias(alias.clone(), alias.instantiate(db, &args(), minter))
+                    let args = args();
+                    let applied = alias.applied_types(db, &args);
+                    PathRes::TyAlias(alias.clone(), alias.instantiate(db, &args, minter), applied)
                 }
 
                 ItemKind::Impl(impl_) => {

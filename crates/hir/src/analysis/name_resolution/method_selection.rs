@@ -1011,7 +1011,7 @@ fn test_it() {
         )
         .unwrap()
         {
-            PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => ty,
+            PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) => ty,
             res => panic!("expected Address to resolve to a type, got {res:?}"),
         };
         let wordrepr = match resolve_path(

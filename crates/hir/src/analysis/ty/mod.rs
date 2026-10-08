@@ -846,7 +846,7 @@ pub fn resolve_default_root_effect_ty<'db>(
         target_path = target_path.push_str(db, segment);
     }
     let target_ty = match resolve_path(db, target_path, scope, assumptions, false).ok()? {
-        PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => ty,
+        PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) => ty,
         _ => return None,
     };
 

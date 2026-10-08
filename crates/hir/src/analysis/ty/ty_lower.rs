@@ -305,7 +305,7 @@ fn collect_layout_root_uses_in_hir_ty<'db>(
                 LayoutHoleArgSite::Path(path),
                 minter,
             );
-            if let Ok(PathRes::TyAlias(alias, _)) =
+            if let Ok(PathRes::TyAlias(alias, _, _)) =
                 resolve_path_with_minter(db, path, scope, assumptions, false, minter)
             {
                 let instantiated = alias.instantiate_layout(db, &args, minter);
@@ -518,7 +518,7 @@ pub(crate) fn lower_const_body_path<'db>(
                     ConstTyId::invalid(db, InvalidCause::Other)
                 }
             }
-            Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => match ty.data(db) {
+            Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _)) => match ty.data(db) {
                 TyData::ConstTy(const_ty) => *const_ty,
                 _ => return None,
             },
@@ -642,7 +642,7 @@ pub(crate) fn lower_type_position_path<'db>(
     let res =
         resolve_type_position_path_with_minter(db, path, scope, assumptions, position, minter)?;
     Ok(match res {
-        PathRes::Ty(ty) | PathRes::TyAlias(_, ty) | PathRes::Func(ty) => ty,
+        PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) | PathRes::Func(ty) => ty,
         PathRes::Const(const_def, ty) => {
             if let Some(body) = const_def.body(db).to_opt() {
                 let const_ty = ConstTyId::from_body(db, body, Some(ty), Some(const_def));
@@ -3613,6 +3613,38 @@ fn lower_type_alias_cycle_initial<'db>(
     }
 }
 
+/// The types a type alias's right-hand side applies, as each written path
+/// segment resolves before normalization, over the alias's own parameters.
+/// Nested alias uses contribute their own applied types.
+#[salsa::tracked(return_ref, cycle_fn=alias_applied_types_cycle_recover, cycle_initial=alias_applied_types_cycle_initial)]
+pub(crate) fn alias_applied_types<'db>(
+    db: &'db dyn HirAnalysisDb,
+    alias: HirTypeAlias<'db>,
+) -> Binder<'db, Vec<TyId<'db>>> {
+    Binder::bind(
+        alias.into(),
+        crate::core::semantic::alias_applied_types_body(db, alias),
+    )
+}
+
+fn alias_applied_types_cycle_initial<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    alias: HirTypeAlias<'db>,
+) -> Binder<'db, Vec<TyId<'db>>> {
+    Binder::bind(alias.into(), Vec::new())
+}
+
+fn alias_applied_types_cycle_recover<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    _value: &Binder<'db, Vec<TyId<'db>>>,
+    _count: u32,
+    alias: HirTypeAlias<'db>,
+) -> salsa::CycleRecoveryAction<Binder<'db, Vec<TyId<'db>>>> {
+    // An alias cycle is reported where the alias is lowered; its uses apply
+    // nothing further.
+    salsa::CycleRecoveryAction::Fallback(Binder::bind(alias.into(), Vec::new()))
+}
+
 fn lower_type_alias_cycle_recover<'db>(
     _db: &'db dyn HirAnalysisDb,
     _value: &TyAlias<'db>,
@@ -3671,6 +3703,26 @@ pub struct TyAlias<'db> {
 impl<'db> TyAlias<'db> {
     pub fn params(&self, db: &'db dyn HirAnalysisDb) -> &'db [TyId<'db>] {
         self.param_set.params(db)
+    }
+
+    /// The types this alias's right-hand side applies, as written (before
+    /// normalization), instantiated with a use's arguments. An alias means
+    /// exactly the type it stands for, so a use must meet the requirements of
+    /// these applications as if they were written at the use.
+    pub(crate) fn applied_types(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        args: &[TyId<'db>],
+    ) -> Vec<TyId<'db>> {
+        // Only uses that give every parameter are covered: completing a
+        // default here would evaluate the default's constants outside the
+        // owner that declares them.
+        if args.len() != self.params(db).len() || self.alias_to.skip_binder().has_invalid(db) {
+            return Vec::new();
+        }
+        alias_applied_types(db, self.alias)
+            .clone()
+            .instantiate(db, args)
     }
 
     pub(crate) fn instantiate(

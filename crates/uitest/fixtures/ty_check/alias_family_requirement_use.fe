@@ -1,0 +1,36 @@
+// An alias means exactly the type it stands for: each use of an alias must
+// meet the requirements of the family applications on its right-hand side,
+// reported at the use, as a direct use of the family is.
+trait Foo {}
+impl Foo for u256 {}
+struct Other {}
+struct Wrap<T> {}
+
+recursive type fn Fam<X: Foo, const N: usize>() -> (*) {
+    match N {
+        0 => Wrap<X>
+        _ => Fam<X, {N - 1}>
+    }
+}
+
+type A0 = Fam<Other, 0>
+type A1<T> = Fam<T, 0>
+type Nested<T> = Wrap<A1<T>>
+
+struct Direct { f: Fam<Other, 0> }
+struct ViaAlias { f: A0 }
+struct Generic<T> { f: A1<T> }
+struct Concrete { f: A1<Other> }
+struct ThroughNested { f: Nested<Other> }
+
+fn param<T>(_ x: A1<T>) {}
+fn ret() -> A1<Other> { make() }
+fn local<T>() {
+    let _a: A1<T> = make()
+    let _b: A0 = make()
+}
+impl<T> Wrap<A1<T>> {}
+trait Tr { const C: A1<Other> }
+
+fn ok<T: Foo>(_ x: A1<T>) -> Nested<u256> { make() }
+fn make<T>() -> T { make() }

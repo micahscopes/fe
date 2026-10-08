@@ -459,7 +459,7 @@ where
                     index as u32,
                 )));
             }
-            if let QuoteNameClass::Rooted(PathRes::TyAlias(alias, _)) = &name_use.class {
+            if let QuoteNameClass::Rooted(PathRes::TyAlias(alias, _, _)) = &name_use.class {
                 let parameters = alias.params(db);
                 if arguments.len() > parameters.len() {
                     return Ok(None);
@@ -1617,7 +1617,7 @@ impl<'db> RecordInput<'db> {
                 }
 
                 let constructor = match &name.class {
-                    QuoteNameClass::Rooted(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => {
+                    QuoteNameClass::Rooted(PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _)) => {
                         match ty.base_ty(self.db).data(self.db) {
                             TyData::TyBase(TyBase::Adt(adt))
                                 if matches!(adt.adt_ref(self.db), AdtRef::Struct(_)) =>

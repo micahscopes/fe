@@ -2279,7 +2279,7 @@ pub(crate) fn evaluate_const_ty<'db>(
         let assumptions = selected_const_body_assumptions(db, body, impl_env);
         if let Ok(resolved_path) = resolve_path(db, path, body.scope(), assumptions, true) {
             match resolved_path {
-                PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => {
+                PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) => {
                     if let TyData::ConstTy(const_ty) = ty.data(db) {
                         if let ConstTyData::TyParam(..) = const_ty.data(db)
                             && let Some(arg) = capture_subst().and_then(|subst| {

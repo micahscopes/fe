@@ -487,7 +487,7 @@ impl<'db> TyChecker<'db> {
         }
 
         let (actual, analysis) = match res {
-            Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty) | PathRes::Func(ty)) => {
+            Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) | PathRes::Func(ty)) => {
                 let record_like = RecordLike::from_ty(ty);
                 if record_like.is_record(self.db) {
                     (
@@ -827,7 +827,7 @@ impl<'db> TyChecker<'db> {
         ) {
             Ok(res) => match res {
                 PathRes::Ty(ty)
-                | PathRes::TyAlias(_, ty)
+                | PathRes::TyAlias(_, ty, _)
                 | PathRes::Func(ty)
                 | PathRes::Const(_, ty)
                 | PathRes::TraitConst(ty, ..)
@@ -1018,7 +1018,7 @@ impl<'db> TyChecker<'db> {
         );
         let (actual, analysis) = match resolved {
             Ok(reso) => match reso {
-                PathRes::Ty(ty) | PathRes::TyAlias(_, ty)
+                PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _)
                     if RecordLike::from_ty(ty).is_record(self.db) =>
                 {
                     let semantic_ty = self.equate_ty(ty, expected, pat.span(self.body()).into());
@@ -1039,7 +1039,7 @@ impl<'db> TyChecker<'db> {
                 }
 
                 PathRes::Ty(ty)
-                | PathRes::TyAlias(_, ty)
+                | PathRes::TyAlias(_, ty, _)
                 | PathRes::Func(ty)
                 | PathRes::Const(_, ty)
                 | PathRes::TraitConst(ty, ..)

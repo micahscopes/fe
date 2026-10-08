@@ -87,7 +87,7 @@ fn resolve_sol_abi_ty<'db>(
         .push_ident(db, IdentId::new(db, "Sol".to_string()));
 
     match resolve_path(db, sol_path, scope, assumptions, false).ok()? {
-        PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => Some(ty),
+        PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) => Some(ty),
         _ => None,
     }
 }
@@ -917,7 +917,7 @@ pub(super) fn resolve_recv_msg_mod<'db>(
     let assumptions = PredicateListId::empty_list(db);
 
     match resolve_path(db, msg_path, contract.scope(), assumptions, false) {
-        Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => {
+        Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _)) => {
             if emit_diag {
                 diags.push(
                     BodyDiag::RecvExpectedMsgType {

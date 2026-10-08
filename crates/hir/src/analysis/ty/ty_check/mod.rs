@@ -1033,7 +1033,7 @@ fn predicate_names_a_type<'db>(db: &'db dyn HirAnalysisDb, body: Body<'db>) -> b
     );
     matches!(
         resolved,
-        Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) if ty.const_ty_ty(db).is_none()
+        Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _)) if ty.const_ty_ty(db).is_none()
     )
 }
 

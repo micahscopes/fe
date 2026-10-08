@@ -1451,7 +1451,9 @@ impl<'db> TyChecker<'db> {
             ResolvedPathInBody::Binding(binding) => Some(binding.def_span(&self.env)),
             ResolvedPathInBody::Reso(value) => {
                 let is_value = match value {
-                    PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => ty.const_ty_ty(self.db).is_some(),
+                    PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) => {
+                        ty.const_ty_ty(self.db).is_some()
+                    }
                     PathRes::EnumVariant(variant) => {
                         matches!(
                             variant.kind(self.db),
@@ -4495,7 +4497,7 @@ impl<'db> TyChecker<'db> {
                     let named_only = match (&err.kind, err.failed_at == path) {
                         (
                             PathResErrorKind::NotFound {
-                                parent: Some(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)),
+                                parent: Some(PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _)),
                                 ..
                             },
                             true,
@@ -4556,7 +4558,7 @@ impl<'db> TyChecker<'db> {
             ResolvedPathInBody::Invalid => ExprProp::invalid(self.db),
 
             ResolvedPathInBody::Reso(reso) => match reso {
-                PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => {
+                PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) => {
                     if let Some(const_ty_ty) = ty.const_ty_ty(self.db) {
                         self.env
                             .register_value_path_ref(expr, ValuePathRef::TypeConst(ty));
@@ -4954,7 +4956,7 @@ impl<'db> TyChecker<'db> {
         };
 
         match reso {
-            PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => {
+            PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) => {
                 // Use the expected type to constrain the record's generic args
                 // before checking fields. A structural layout hole unifies as
                 // a wildcard, so a successful nominal match must also adopt

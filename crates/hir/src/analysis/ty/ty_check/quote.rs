@@ -1312,7 +1312,7 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
 
 fn is_generic_param<'db>(db: &'db dyn crate::analysis::HirAnalysisDb, res: &PathRes<'db>) -> bool {
     match res {
-        PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => {
+        PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) => {
             let (base, _) = ty.decompose_ty_app(db);
             match base.data(db) {
                 TyData::TyParam(_) => true,

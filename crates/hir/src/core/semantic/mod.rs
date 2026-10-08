@@ -132,6 +132,32 @@ pub(crate) fn lower_type_alias_body<'db>(
     lower_type_alias_from_hir(db, alias, hir_ty_opt)
 }
 
+/// The types a type alias's right-hand side applies as written, over the
+/// alias's own parameters; see `TyAlias::applied_types`.
+pub(crate) fn alias_applied_types_body<'db>(
+    db: &'db dyn HirAnalysisDb,
+    alias: TypeAlias<'db>,
+) -> Vec<crate::analysis::ty::ty_def::TyId<'db>> {
+    let Some(hir_ty) = alias.type_ref(db).to_opt() else {
+        return Vec::new();
+    };
+    // The alias's own lowering context, so constants in its right-hand side
+    // are the ones its lowering produced.
+    let assumptions = constraints_for(db, alias.into());
+    let minter = crate::analysis::ty::const_ty::LoweringContext::for_const_bodies(
+        crate::analysis::ty::const_ty::HoleAnchor::AliasTemplate(alias),
+        crate::analysis::ty::const_ty::ConstBodyLowering::Eager,
+    );
+    crate::analysis::ty::ty_error::written_type_uses(
+        db,
+        hir_ty,
+        alias.span().ty(),
+        alias.scope(),
+        assumptions,
+        &minter,
+    )
+}
+
 pub(crate) fn lower_type_alias_body_deferred<'db>(
     db: &'db dyn HirAnalysisDb,
     alias: TypeAlias<'db>,
@@ -3045,7 +3071,7 @@ fn resolve_sol_abi_ty<'db>(
         .push_ident(db, IdentId::new(db, "Sol".to_string()));
 
     match resolve_path(db, sol_path, scope, assumptions, false).ok()? {
-        PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => Some(ty),
+        PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) => Some(ty),
         _ => None,
     }
 }
