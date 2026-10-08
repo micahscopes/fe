@@ -223,3 +223,23 @@ fn generic_generated_implementation_preserves_runtime_values() {
         "../../driver/tests/fixtures/generic_derive/owner_binders.fe"
     ));
 }
+
+#[test]
+fn bounded_family_constructor_results_execute_at_o0_and_o2() {
+    execute(
+        r#"trait Allowed {}
+impl Allowed for bool {}
+struct NotAllowed {}
+struct Box<T> { value: T }
+trait Factory { type Out<T: Allowed>: * -> * }
+struct Provider {}
+impl Factory for Provider { type Out<U> = Box }
+fn pass<F: Factory>(x: own <F as Factory>::Out<bool, u256>) -> <F as Factory>::Out<bool, u256> { x }
+pub fn main() -> u256 { pass<Provider>(x: Box { value: 42 }).value }
+#[test]
+fn run() { let x: Box<u256> = Box { value: 42 }
+ let y = pass<Provider>(x)
+ assert(y.value == 42) }
+"#,
+    );
+}

@@ -5329,9 +5329,12 @@ impl<'db> TraitAssocTypeView<'db> {
         inst: TraitInstId<'db>,
         args: &[TyId<'db>],
     ) -> Option<PredicateListId<'db>> {
-        if inst.def(db) != self.owner || args.len() != self.generic_params(db).data(db).len() {
+        let parameter_count = self.generic_params(db).data(db).len();
+        if inst.def(db) != self.owner || args.len() < parameter_count {
             return None;
         }
+        // Further arguments apply to the constructor returned by the family.
+        let args = &args[..parameter_count];
         let params = self.family_parameters(db);
         let mut requirements = Vec::new();
         for (subject, param) in params.into_iter().zip(self.generic_params(db).data(db)) {
@@ -5607,7 +5610,7 @@ impl<'db> TyId<'db> {
                 _ => false,
             }))
         });
-        (args.len() != params.len() && has_bounds).then(|| decl.name(db))?
+        (args.len() < params.len() && has_bounds).then(|| decl.name(db))?
     }
 
     /// Local declaration guards instantiated at a family application. The
@@ -5633,6 +5636,9 @@ impl<'db> TyId<'db> {
             return None;
         }
         let (decl, inst, args) = self.associated_family_context(db)?;
+        if args.len() != decl.generic_params(db).data(db).len() {
+            return None;
+        }
         let trait_owner = inst.def(db);
         let instantiate = |bound| {
             let mapping = crate::analysis::ty::ty_lower::CompleteSubst::for_associated_type(

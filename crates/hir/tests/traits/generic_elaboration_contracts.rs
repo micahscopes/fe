@@ -377,3 +377,63 @@ fn equivalent_copy_clone_answers_retain_the_call_choice() {
             .expect("accepted clone call must pass borrow checking");
     }
 }
+
+#[test]
+fn family_constructor_results_accept_extra_arguments_after_parameter_bounds() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "family_constructor_extra_arguments.fe".into(),
+        r#"
+trait Allowed {}
+impl Allowed for bool {}
+struct Box<T> {}
+trait Factory { type Out<T: Allowed>: * -> * }
+struct Provider {}
+impl Factory for Provider { type Out<U> = Box }
+fn concrete(_ x: <Provider as Factory>::Out<bool, u256>) {}
+fn generic<F: Factory>(_ x: <F as Factory>::Out<bool, u256>) {}
+"#,
+    );
+    let (module, _) = db.top_mod(file);
+    db.assert_no_diags(module);
+}
+
+#[test]
+fn family_constructor_extra_arguments_preserve_parameter_bounds() {
+    for argument in ["bool", "NotAllowed"] {
+        let mut db = HirAnalysisTestDb::default();
+        let source = format!(
+            r#"
+trait Allowed {{}}
+impl Allowed for bool {{}}
+struct NotAllowed {{}}
+struct Box<T> {{}}
+trait Factory {{ type Out<T: Allowed>: * -> * }}
+struct Provider {{}}
+impl Factory for Provider {{ type Out<U> = Box }}
+fn concrete(_ x: <Provider as Factory>::Out<{argument}, u256>) {{}}
+fn generic<F: Factory>(_ x: <F as Factory>::Out<{argument}, u256>) {{}}
+"#
+        );
+        let file = db.new_stand_alone("family_constructor_bound_control.fe".into(), &source);
+        let (module, _) = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(module);
+        if argument == "bool" {
+            assert!(diagnostics.is_empty());
+        } else {
+            assert!(
+                !diagnostics.is_empty(),
+                "extra constructor arguments must not bypass family bounds"
+            );
+            for diagnostic in diagnostics {
+                let diagnostic = diagnostic.to_complete(&db);
+                assert_ne!(
+                    diagnostic.error_code.to_string(),
+                    "3-0061",
+                    "all family arguments are present"
+                );
+                assert_eq!(diagnostic.message, "trait bound is not satisfied");
+            }
+        }
+    }
+}
