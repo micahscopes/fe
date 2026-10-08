@@ -2127,17 +2127,14 @@ impl<'db> Diagnosable<'db> for Trait<'db> {
 
     fn diags(self, db: &'db dyn HirAnalysisDb) -> Vec<Self::Diagnostic> {
         let mut out = Vec::new();
-        let assumptions = constraints_for(db, self.into());
+        let premises = crate::semantic::context_at(db, self.scope(), None).premises(db);
         for assoc in self.assoc_consts(db) {
             if let Some(hir_ty) = assoc.hir_ty(db) {
                 out.extend(ty::ty_error::collect_hir_ty_diags(
                     db,
                     hir_ty,
                     assoc.span().ty(),
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        self.scope(),
-                        assumptions,
-                    ),
+                    premises,
                 ));
             }
         }
