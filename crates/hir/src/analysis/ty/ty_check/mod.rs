@@ -1109,6 +1109,38 @@ fn static_assert_bool_value<'db>(
 /// Whether a const body with these diagnostics can still be evaluated: it
 /// has none, or only integer literals whose type inference left open, which
 /// evaluation defaults.
+/// The receiver types method lookup tries, in order: the receiver's own
+/// type, then its capability fallbacks (a borrowed or viewed form, then the
+/// inner type). Used by the checker and by readers that find a call's method
+/// again after checking.
+pub(super) fn receiver_lookup_candidates<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    ty: TyId<'db>,
+) -> Vec<TyId<'db>> {
+    let mut candidates = vec![ty];
+    if let TyData::TyVar(var) = ty.base_ty(db).data(db)
+        && matches!(var.sort, TyVarSort::String { .. })
+        && let Some(text_ty) = resolve_lib_type_path(db, scope, "core::abi::DynString")
+    {
+        candidates.push(text_ty);
+        candidates.push(TyId::view_of(db, text_ty));
+    }
+    if let Some((cap, inner)) = ty.as_capability(db) {
+        if matches!(cap, CapabilityKind::Mut) {
+            candidates.push(TyId::borrow_ref_of(db, inner));
+        }
+        if !matches!(cap, CapabilityKind::View) {
+            candidates.push(TyId::view_of(db, inner));
+        }
+        candidates.push(inner);
+    } else {
+        candidates.push(TyId::view_of(db, ty));
+    }
+    candidates.dedup();
+    candidates
+}
+
 fn diags_allow_evaluation<'db>(db: &'db dyn HirAnalysisDb, diags: &[FuncBodyDiag<'db>]) -> bool {
     diags.iter().all(|diag| {
         matches!(
@@ -3993,28 +4025,7 @@ impl<'db> TyChecker<'db> {
     }
 
     fn capability_fallback_candidates(&self, ty: TyId<'db>) -> Vec<TyId<'db>> {
-        let mut candidates = vec![ty];
-        if let TyData::TyVar(var) = ty.base_ty(self.db).data(self.db)
-            && matches!(var.sort, TyVarSort::String { .. })
-            && let Some(text_ty) =
-                resolve_lib_type_path(self.db, self.env.scope(), "core::abi::DynString")
-        {
-            candidates.push(text_ty);
-            candidates.push(TyId::view_of(self.db, text_ty));
-        }
-        if let Some((cap, inner)) = ty.as_capability(self.db) {
-            if matches!(cap, CapabilityKind::Mut) {
-                candidates.push(TyId::borrow_ref_of(self.db, inner));
-            }
-            if !matches!(cap, CapabilityKind::View) {
-                candidates.push(TyId::view_of(self.db, inner));
-            }
-            candidates.push(inner);
-        } else {
-            candidates.push(TyId::view_of(self.db, ty));
-        }
-        candidates.dedup();
-        candidates
+        receiver_lookup_candidates(self.db, self.env.scope(), ty)
     }
 
     fn pattern_binds_any(&self, pat: PatId) -> bool {

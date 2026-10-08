@@ -4,7 +4,9 @@
 //! unknown parameters or assuming the obligation being checked.
 use super::*;
 use crate::analysis::name_resolution::{
-    method_selection::{MethodCandidate, MethodLookup, select_method_candidate},
+    method_selection::{
+        MethodCandidate, MethodLookup, MethodSelectionError, select_method_candidate,
+    },
     resolve_path_with_minter,
 };
 use crate::analysis::semantic::{SelectedApplication, eval_const_instance};
@@ -1945,19 +1947,31 @@ fn expression_const_bodies<'db>(
                 if receiver_ty.has_invalid(db) {
                     return None;
                 }
-                candidate_def(
-                    select_method_candidate(
-                        db,
-                        &Canonicalized::new(db, receiver_ty),
-                        *name,
-                        MethodLookup::at(
-                            db,
-                            crate::semantic::context_at(db, body.scope(), Some((typed, expr))),
-                        ),
-                        None,
-                    )
-                    .ok()?,
-                )
+                // Look the method up as the checker did: at the call's
+                // position, trying the receiver's capability fallbacks in order.
+                let lookup = MethodLookup::at(
+                    db,
+                    crate::semantic::context_at(db, body.scope(), Some((typed, expr))),
+                );
+                let candidates = super::receiver_lookup_candidates(db, body.scope(), receiver_ty);
+                let select = |ty| {
+                    select_method_candidate(db, &Canonicalized::new(db, ty), *name, lookup, None)
+                };
+                let mut selected = select(candidates[0]);
+                if matches!(
+                    selected,
+                    Err(MethodSelectionError::NotFound
+                        | MethodSelectionError::ReceiverTypeMustBeKnown)
+                ) {
+                    for &candidate in &candidates[1..] {
+                        let fallback = select(candidate);
+                        if !matches!(fallback, Err(MethodSelectionError::NotFound)) {
+                            selected = fallback;
+                            break;
+                        }
+                    }
+                }
+                candidate_def(selected.ok()?)
             }
             _ => return None,
         };
@@ -3789,6 +3803,52 @@ const fn caller<T>(_ evidence: Evidence<Read<T>>) -> u256 {
                     super::Discharge::Holds(super::RequirementProof::Evaluated)
                 ),
             }
+        }
+    }
+
+    /// A call whose explicit arguments failed has no checked callable, so its
+    /// const arguments are found again from the receiver, as the checker
+    /// found the method: through the receiver's capability fallbacks (a
+    /// parameter is a view), and at the call's own position, where
+    /// `with (Named)` makes the named-only method visible.
+    #[test]
+    fn failed_call_const_arguments_find_the_method_again() {
+        let source = "trait Tr { fn m<const A: usize, const B: usize>(self) -> usize }
+struct S {}
+impl Tr for S as Named { fn m<const A: usize, const B: usize>(self) -> usize { A + B } }
+struct P {}
+impl Tr for P { fn m<const A: usize, const B: usize>(self) -> usize { A + B } }
+fn plain(_ p: P) -> usize { p.m<{ true }, { 2 }>() }
+fn named(_ s: S) -> usize { with (Named) { s.m<{ true }, { 2 }>() } }";
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("failed_call_const_arguments.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        for name in ["plain", "named"] {
+            let function = top
+                .all_funcs(&db)
+                .iter()
+                .copied()
+                .find(|f| f.name(&db).to_opt().is_some_and(|n| n.data(&db) == name))
+                .unwrap();
+            let (_, typed) = super::super::check_func_body(&db, function);
+            let body = function.body(&db).unwrap();
+            let call = body
+                .exprs(&db)
+                .iter()
+                .find(|(_, data)| {
+                    matches!(
+                        data,
+                        crate::hir_def::Partial::Present(crate::hir_def::Expr::MethodCall(..))
+                    )
+                })
+                .map(|(expr, _)| expr)
+                .expect("method call");
+            assert!(
+                typed.callable_expr(call).is_none(),
+                "{name}: the call failed"
+            );
+            let bodies = super::expression_const_bodies(&db, body, &typed);
+            assert_eq!(bodies.len(), 2, "{name}: both const arguments are typed");
         }
     }
 
