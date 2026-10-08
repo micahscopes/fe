@@ -5293,6 +5293,7 @@ fn rd121_immutable_evidence_and_scalar_branches_remain_accepted() {
         .join("tests/fixtures/evidence_boundary_runtime/evidence_choice_checks");
     for name in [
         "rd121-immutable_const_function_binding.fe",
+        "rd121-immutable_parameter_aliases.fe",
         "rd121-runtime_branch_around_scalar_use.fe",
         "rd121-const_method_known_receiver.fe",
     ] {

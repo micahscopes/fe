@@ -113,7 +113,20 @@ impl<'db> TyChecker<'db> {
                 && self.type_contains_evidence(prop.ty)
                 && let Some(failure) = self.compile_time_source_failure(*expr, true)
             {
-                self.report_evidence_source_failure(failure);
+                // Preserve immutable parameter aliases while their source
+                // policy is pending. An index, branch, or call still has to
+                // satisfy its structural source check.
+                let parameter_alias = matches!(
+                    expr.data(self.db, self.body()),
+                    Partial::Present(Expr::Path(_))
+                ) && matches!(
+                    self.env.typed_expr(failure).and_then(|prop| prop.binding),
+                    Some(LocalBinding::Param { ty, is_mut: false, .. })
+                        if self.type_contains_evidence(ty)
+                );
+                if !parameter_alias {
+                    self.report_evidence_source_failure(failure);
+                }
             }
             let (pat_expected, mode) = self.destructure_source_mode(prop.ty);
             let layout = self.pattern_layout_context(*expr);

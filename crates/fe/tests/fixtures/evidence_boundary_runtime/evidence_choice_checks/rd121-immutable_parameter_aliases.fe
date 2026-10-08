@@ -1,0 +1,13 @@
+// Preserve existing immutable aliases while evidence-parameter policy is pending.
+use core::obligations::Evidence
+trait Inspect {}
+const fn inner<T>() {}
+const fn one<T>(_ second: Evidence<Inspect<T>>) {
+    let local = second
+    with (local) { inner<T>() }
+}
+const fn two<T>(_ second: Evidence<Inspect<T>>) {
+    let intermediate = second
+    let local = intermediate
+    with (local) { inner<T>() }
+}
