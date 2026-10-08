@@ -1186,15 +1186,11 @@ impl<'db> Func<'db> {
         let Some(hir_ty) = self.ret_type_ref(db) else {
             return Vec::new();
         };
-        let assumptions = self.assumptions(db);
         collect_ty_lower_errors(
             db,
             hir_ty,
             self.span().sig().ret_ty(),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.scope(),
-                assumptions,
-            ),
+            context_at(db, self.scope(), None).premises(db),
         )
     }
 
@@ -1696,10 +1692,7 @@ impl<'db> FuncParamView<'db> {
             db,
             hir_ty,
             self.lazy_ty_span(db),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                func.scope(),
-                assumptions,
-            ),
+            context_at(db, func.scope(), None).premises(db),
         );
         if !errs.is_empty() {
             return errs;

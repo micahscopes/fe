@@ -1,0 +1,32 @@
+// Inside a trait, `Self` implements the trait (and its super-traits), so a
+// trait method's written return and parameter types may apply a family whose
+// parameter requires that.
+trait Foo {}
+impl Foo for u256 {}
+trait Super { type A }
+trait Sub: Super<A = u256> {}
+
+struct Wrap<T> {}
+
+recursive type fn SelfFam<X: Tr, const N: usize>() -> (*) {
+    match N {
+        0 => Wrap<X>
+        _ => SelfFam<X, {N - 1}>
+    }
+}
+
+recursive type fn Fam<X: Foo, const N: usize>() -> (*) {
+    match N {
+        0 => Wrap<X>
+        _ => Fam<X, {N - 1}>
+    }
+}
+
+trait Tr {
+    fn ret(self) -> SelfFam<Self, 0>
+    fn param(self, _ x: SelfFam<Self, 1>)
+}
+
+trait Tr2: Sub {
+    fn ret(self) -> Fam<<Self as Super>::A, 0>
+}

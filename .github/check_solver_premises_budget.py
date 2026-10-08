@@ -189,7 +189,7 @@ EXPOSED = {
     "crates/hir/src/analysis/ty/generic_defaults.rs": (1, WRITTEN_TYPES),
     "crates/hir/src/analysis/ty/provider.rs": (1, EFFECT_HANDLE),
     "crates/hir/src/analysis/ty/ty_lower.rs": (1, EFFECT_HANDLE),
-    "crates/hir/src/core/semantic/mod.rs": (5, WRITTEN_TYPES),
+    "crates/hir/src/core/semantic/mod.rs": (3, WRITTEN_TYPES),
     "crates/hir/src/diagnosable.rs": (2, WRITTEN_TYPES),
 }
 
