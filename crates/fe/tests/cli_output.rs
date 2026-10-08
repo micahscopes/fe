@@ -5241,6 +5241,12 @@ fn evidence_named_only_method_at_o0_and_o2() {
 }
 
 #[test]
+#[ignore = "Dependent named choice reaches type checking but executable callee validation loses it (16-0009); tied to H1d"]
+fn named_choice_two_level_bound_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("named_choice_two_level_bound_pending.fe");
+}
+
+#[test]
 fn rd121_mutable_places_cannot_hold_evidence() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/evidence_boundary_runtime/evidence_choice_checks");
