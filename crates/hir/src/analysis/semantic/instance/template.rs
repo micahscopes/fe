@@ -307,11 +307,7 @@ impl<'db> ImplEnv<'db> {
             db, adt, variant, field, args,
         );
         let source = self.contextualize_const_types(db, source);
-        crate::analysis::ty::normalize::normalize_ty(
-            db,
-            source,
-            self.premises(db),
-        )
+        crate::analysis::ty::normalize::normalize_ty(db, source, self.premises(db))
     }
 
     /// Solver premises and normalization scope come from one position context.
