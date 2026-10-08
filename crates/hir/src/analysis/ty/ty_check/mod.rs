@@ -5926,7 +5926,8 @@ impl<'db> TypedBody<'db> {
             && let Selection::Unique(method) =
                 crate::analysis::semantic::instance::recorded_method_instance(
                     db,
-                    TraitSolveCx::new(db, body.scope()).with_assumptions(self.assumptions()),
+                    crate::semantic::context_at(db, body.scope(), Some((self, expr)))
+                        .solver_context(db),
                     self.decisions()
                         .choice_ref(&DecisionSite::trait_reference(expr.span(body).into()))
                         .expect("a source trait call must retain its accepted choice"),
