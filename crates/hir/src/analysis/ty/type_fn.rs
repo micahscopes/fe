@@ -254,10 +254,7 @@ pub(super) fn check_definition_templates<'db>(
             db,
             hir_ty,
             span.clone(),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                def.scope(),
-                assumptions,
-            ),
+            crate::semantic::context_at(db, def.scope(), None).premises(db),
         );
         if !source_diags.is_empty() {
             diags.extend(source_diags);
