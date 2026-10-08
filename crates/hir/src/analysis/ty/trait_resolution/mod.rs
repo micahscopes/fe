@@ -38,6 +38,9 @@ pub use table_solver::TargetSolutionStatus;
 
 pub(crate) const TRAIT_SOLVER_ROOT_ANSWER_LIMIT: usize = 2;
 
+// Exactly the selection fields read by dependent proof search.
+type ProofSelections<'db> = Vec<(TraitInstId<'db>, ImplementorId<'db>)>;
+
 // RD74 permits pure, fueled type normalization in proof search. Impl const
 // conditions belong to the checker after the proof returns. Keep this guard
 // across indirect helper calls and cached obligation queries.
@@ -480,20 +483,20 @@ fn is_query_satisfiable<'db>(
     db: &'db dyn HirAnalysisDb,
     use_scope: ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
-    context: Option<crate::analysis::semantic::ImplEnv<'db>>,
+    selections: ProofSelections<'db>,
 ) -> GoalSatisfiability<'db> {
     if query.flags(db).contains(TyFlags::HAS_INVALID) {
         return GoalSatisfiability::ContainsInvalid;
     };
 
-    solve(db, use_scope, query, context)
+    solve(db, use_scope, query, selections)
 }
 
 fn is_query_satisfiable_cycle_initial<'db>(
     _db: &'db dyn HirAnalysisDb,
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
-    _context: Option<crate::analysis::semantic::ImplEnv<'db>>,
+    _selections: ProofSelections<'db>,
 ) -> GoalSatisfiability<'db> {
     // A cycle can arise while collecting an impl whose constraints contain an associated-type
     // projection: resolving the projection needs the trait environment that is currently being
@@ -511,7 +514,7 @@ fn is_query_satisfiable_cycle_recover<'db>(
     _count: u32,
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
-    _context: Option<crate::analysis::semantic::ImplEnv<'db>>,
+    _selections: ProofSelections<'db>,
 ) -> salsa::CycleRecoveryAction<GoalSatisfiability<'db>> {
     salsa::CycleRecoveryAction::Iterate
 }
@@ -525,13 +528,13 @@ fn query_has_solution<'db>(
     use_scope: ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
     target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
-    context: Option<crate::analysis::semantic::ImplEnv<'db>>,
+    selections: ProofSelections<'db>,
 ) -> TargetSolutionStatus {
     let (target, relation) = target;
     if query.flags(db).contains(TyFlags::HAS_INVALID) {
         return TargetSolutionStatus::NotFound;
     }
-    has_solution(db, use_scope, query, target, relation, None, context).status
+    has_solution(db, use_scope, query, target, relation, None, selections).status
 }
 
 #[salsa::tracked(
@@ -558,7 +561,7 @@ fn query_candidate_proves_goal<'db>(
         target,
         TargetSolutionMatch::Equal,
         Some(candidate),
-        None,
+        Vec::new(),
     )
 }
 
@@ -630,7 +633,7 @@ fn query_has_solution_cycle_initial<'db>(
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
     _target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
-    _context: Option<crate::analysis::semantic::ImplEnv<'db>>,
+    _selections: ProofSelections<'db>,
 ) -> TargetSolutionStatus {
     TargetSolutionStatus::Incomplete
 }
@@ -642,7 +645,7 @@ fn query_has_solution_cycle_recover<'db>(
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
     _target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
-    _context: Option<crate::analysis::semantic::ImplEnv<'db>>,
+    _selections: ProofSelections<'db>,
 ) -> salsa::CycleRecoveryAction<TargetSolutionStatus> {
     salsa::CycleRecoveryAction::Iterate
 }
@@ -659,10 +662,25 @@ pub(crate) fn goal_query_has_solution<'db>(
             solve_cx.origin_scope(db),
             query.canonical(),
             (target, TargetSolutionMatch::Equal),
-            None,
+            Vec::new(),
         ),
         TargetSolutionStatus::Found
     )
+}
+
+// The search reads only the visible selected applications, never the rest of
+// the position context. Empty projections share the ordinary proof cache key.
+fn projected_selections<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: crate::analysis::semantic::ImplEnv<'db>,
+) -> ProofSelections<'db> {
+    context
+        .selections(db)
+        .iter()
+        .copied()
+        .filter(|selection| context.selection_for(db, selection.goal()) == Some(*selection))
+        .map(|selection| (selection.goal(), selection.candidate()))
+        .collect()
 }
 
 pub(crate) fn goal_query_has_no_distinct_solution_at_context<'db>(
@@ -678,7 +696,7 @@ pub(crate) fn goal_query_has_no_distinct_solution_at_context<'db>(
             solve_cx.origin_scope(db),
             query.canonical(),
             (target, TargetSolutionMatch::NotEqual),
-            context,
+            context.map_or_else(Vec::new, |context| projected_selections(db, context)),
         ),
         TargetSolutionStatus::NotFound
     )
@@ -689,7 +707,7 @@ pub fn is_goal_query_satisfiable<'db>(
     solve_cx: TraitSolveCx<'db>,
     query: &CanonicalGoalQuery<'db>,
 ) -> GoalSatisfiability<'db> {
-    is_query_satisfiable(db, solve_cx.origin_scope(db), query.canonical(), None).clone()
+    is_query_satisfiable(db, solve_cx.origin_scope(db), query.canonical(), Vec::new()).clone()
 }
 
 pub(crate) fn is_goal_query_satisfiable_at_context<'db>(
@@ -705,7 +723,7 @@ pub(crate) fn is_goal_query_satisfiable_at_context<'db>(
         db,
         solve_cx.origin_scope(db),
         query.canonical(),
-        Some(context),
+        projected_selections(db, context),
     )
     .clone()
 }
@@ -2451,6 +2469,96 @@ impl Produce for Subject {
                 assert_eq!(warm, observe(&fresh, fresh_file, !reverse, left));
             }
         }
+    }
+
+    #[test]
+    fn proof_selection_projection_ignores_unread_position_fields() {
+        use crate::analysis::semantic::{ImplEnv, SelectedApplication};
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "proof_selection_projection.fe".into(),
+            "trait Foo {} trait Marker {} struct S {} impl Foo for S {} fn position() {}",
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let subject = named_struct_ty(&db, top_mod, "S");
+        let goal = TraitInstId::new(
+            &db,
+            named_trait(&db, top_mod, "Foo"),
+            vec![subject],
+            IndexMap::new(),
+        );
+        let assumptions = PredicateListId::empty_list(&db);
+        let candidate = candidates_for_goal(&db, top_mod, goal)[0];
+        let evidence = prove_selected_impl_evidence(
+            &db,
+            TraitSolveCx::new(&db, top_mod.scope()),
+            candidate,
+            goal,
+        )
+        .unwrap();
+        let selection = SelectedApplication::from_evidence(&evidence);
+        let marker = TraitInstId::new(
+            &db,
+            named_trait(&db, top_mod, "Marker"),
+            vec![subject],
+            IndexMap::new(),
+        );
+        let a = ImplEnv::new_with_selections(
+            &db,
+            top_mod.scope(),
+            assumptions,
+            Vec::new(),
+            vec![selection],
+        );
+        let b = ImplEnv::new_with_selections(
+            &db,
+            top_mod.all_funcs(&db)[0].scope(),
+            PredicateListId::new(&db, vec![marker]),
+            vec![marker],
+            vec![selection],
+        );
+        assert_ne!(a, b);
+        assert_eq!(
+            super::projected_selections(&db, a),
+            super::projected_selections(&db, b)
+        );
+        // Even the selected application's captured proof origin is unread by
+        // this search: only its goal and candidate restrict the subgoal.
+        let other_evidence = prove_selected_impl_evidence(
+            &db,
+            TraitSolveCx::new(&db, top_mod.all_funcs(&db)[0].scope())
+                .with_assumptions(PredicateListId::new(&db, vec![marker])),
+            candidate,
+            goal,
+        )
+        .unwrap();
+        let other_selection = SelectedApplication::from_evidence(&other_evidence);
+        assert_ne!(selection, other_selection);
+        let c = b.with_selections(&db, vec![other_selection]);
+        assert_eq!(
+            super::projected_selections(&db, a),
+            super::projected_selections(&db, c)
+        );
+        let ordinary = ImplEnv::new(&db, top_mod.scope(), assumptions, vec![goal]);
+        assert!(super::projected_selections(&db, ordinary).is_empty());
+        let query = CanonicalGoalQuery::new(&db, goal, assumptions);
+        let cx = TraitSolveCx::new(&db, top_mod.scope());
+        assert_eq!(
+            super::goal_query_has_no_distinct_solution_at_context(
+                &db,
+                cx,
+                &query,
+                Canonical::new(&db, goal),
+                None
+            ),
+            super::goal_query_has_no_distinct_solution_at_context(
+                &db,
+                cx,
+                &query,
+                Canonical::new(&db, goal),
+                Some(ordinary)
+            )
+        );
     }
 
     #[test]
