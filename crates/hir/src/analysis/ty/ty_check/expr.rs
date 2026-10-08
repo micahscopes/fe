@@ -4225,22 +4225,16 @@ impl<'db> TyChecker<'db> {
         }
 
         let receiver_tys = self.method_receiver_tys(*receiver, &receiver_prop);
-        let method_assumptions = self.env.method_lookup_assumptions();
         let lookup_scope = self
             .body()
             .quote_scope(self.db, expr)
             .unwrap_or(self.env.scope());
+        let lookup = self.env.method_lookup(lookup_scope);
 
         let mut selected_receiver_ty = receiver_tys[0];
         let mut canonical_r_ty = Canonicalized::new(self.db, selected_receiver_ty);
-        let mut candidate = select_method_candidate(
-            self.db,
-            &canonical_r_ty,
-            method_name,
-            lookup_scope,
-            method_assumptions,
-            None,
-        );
+        let mut candidate =
+            select_method_candidate(self.db, &canonical_r_ty, method_name, lookup, None);
         if matches!(
             candidate,
             Err(MethodSelectionError::NotFound | MethodSelectionError::ReceiverTypeMustBeKnown)
@@ -4251,8 +4245,7 @@ impl<'db> TyChecker<'db> {
                     self.db,
                     &fallback_canonical,
                     method_name,
-                    lookup_scope,
-                    method_assumptions,
+                    lookup,
                     None,
                 );
 
@@ -6470,7 +6463,7 @@ impl<'db> TyChecker<'db> {
         };
 
         let lhs_candidates = self.capability_fallback_candidates(lhs_ty);
-        let method_assumptions = self.env.method_lookup_assumptions();
+        let lookup = self.env.method_lookup(self.env.scope());
         let mut checked_rhs_ty = None;
 
         let (method, inst) = if let Some(rhs_expr) = rhs_expr {
@@ -6480,8 +6473,7 @@ impl<'db> TyChecker<'db> {
                 self.db,
                 &c_lhs_ty,
                 op.trait_method(self.db),
-                self.env.scope(),
-                method_assumptions,
+                lookup,
                 trait_def,
             );
             if matches!(
@@ -6494,8 +6486,7 @@ impl<'db> TyChecker<'db> {
                         self.db,
                         &c_candidate_ty,
                         op.trait_method(self.db),
-                        self.env.scope(),
-                        method_assumptions,
+                        lookup,
                         trait_def,
                     );
                     if fallback.is_ok() || !matches!(fallback, Err(MethodSelectionError::NotFound))
@@ -6636,8 +6627,7 @@ impl<'db> TyChecker<'db> {
                 self.db,
                 &c_lhs_ty,
                 op.trait_method(self.db),
-                self.env.scope(),
-                method_assumptions,
+                lookup,
                 Some(trait_def),
             );
             if matches!(
@@ -6650,8 +6640,7 @@ impl<'db> TyChecker<'db> {
                         self.db,
                         &c_candidate_ty,
                         op.trait_method(self.db),
-                        self.env.scope(),
-                        method_assumptions,
+                        lookup,
                         Some(trait_def),
                     );
                     if fallback.is_ok() || !matches!(fallback, Err(MethodSelectionError::NotFound))

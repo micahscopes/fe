@@ -715,6 +715,17 @@ impl<'db> TyCheckEnv<'db> {
         })
     }
 
+    /// Method lookup at `scope` reads the checker's current provision chain.
+    pub(super) fn method_lookup(
+        &self,
+        scope: ScopeId<'db>,
+    ) -> crate::analysis::name_resolution::method_selection::MethodLookup<'db> {
+        crate::analysis::name_resolution::method_selection::MethodLookup::at(
+            self.db,
+            self.provisions.context(self.db, scope),
+        )
+    }
+
     pub(super) fn method_lookup_assumptions(&self) -> PredicateListId<'db> {
         self.provisions.method_lookup_assumptions(self.db)
     }

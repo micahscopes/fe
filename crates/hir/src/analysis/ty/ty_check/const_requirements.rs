@@ -4,7 +4,7 @@
 //! unknown parameters or assuming the obligation being checked.
 use super::*;
 use crate::analysis::name_resolution::{
-    method_selection::{MethodCandidate, select_method_candidate},
+    method_selection::{MethodCandidate, MethodLookup, select_method_candidate},
     resolve_path_with_minter,
 };
 use crate::analysis::semantic::{SelectedApplication, eval_const_instance};
@@ -1950,8 +1950,10 @@ fn expression_const_bodies<'db>(
                         db,
                         &Canonicalized::new(db, receiver_ty),
                         *name,
-                        body.scope(),
-                        typed.assumptions(),
+                        MethodLookup::at(
+                            db,
+                            crate::semantic::context_at(db, body.scope(), Some((typed, expr))),
+                        ),
                         None,
                     )
                     .ok()?,

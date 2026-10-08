@@ -18,7 +18,9 @@ use super::{
     EarlyNameQueryId, ExpectedPathKind, NameDomain,
     diagnostics::PathResDiag,
     is_scope_visible_from,
-    method_selection::{MethodCandidate, MethodSelectionError, select_method_candidate},
+    method_selection::{
+        MethodCandidate, MethodLookup, MethodSelectionError, select_method_candidate,
+    },
     name_resolver::{NameRes, NameResBucket, NameResKind, NameResolutionError},
     resolve_query,
     visibility_checker::is_ty_visible_from,
@@ -1257,8 +1259,7 @@ where
                     db,
                     &receiver_ty,
                     ident,
-                    parent_scope,
-                    assumptions,
+                    MethodLookup::from_path_premises(db, parent_scope, assumptions),
                     None,
                 ) {
                     Ok(cand) => {

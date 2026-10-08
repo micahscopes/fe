@@ -12,8 +12,8 @@ use crate::analysis::{
         method_table::{MethodProbe, ProbedMethod, probe_method},
         trait_def::{ImplementorId, TraitInstId, impls_for_trait_and_ty, impls_for_ty},
         trait_resolution::{
-            CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitSolveCx,
-            goal_query_has_solution, is_goal_query_satisfiable,
+            GoalSatisfiability, PredicateListId, TraitSolveCx, goal_query_has_solution,
+            is_goal_query_satisfiable,
         },
         ty_def::{TyData, TyId},
         unify::UnificationTable,
@@ -103,12 +103,54 @@ enum TraitCandidateCheck<'db> {
     Rejected,
 }
 
+/// The context a method is looked up in: the lookup position's scope, which
+/// decides visibility and trait availability, and the solver context its
+/// candidates are proved in.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MethodLookup<'db> {
+    scope: ScopeId<'db>,
+    solve_cx: TraitSolveCx<'db>,
+}
+
+impl<'db> MethodLookup<'db> {
+    /// Lookup at a program position reads that position's context. Its
+    /// premises are the context's lookup premises: opened evidence is a
+    /// premise, and a named choice shadows its slot's goal so lookup sees the
+    /// chosen application, without becoming proof authority elsewhere.
+    pub(crate) fn at(
+        db: &'db dyn HirAnalysisDb,
+        context: crate::analysis::semantic::ImplEnv<'db>,
+    ) -> Self {
+        let premises = context.lookup_premises(db);
+        Self {
+            scope: premises.scope(),
+            solve_cx: premises.solver_context(db),
+        }
+    }
+
+    /// Path resolution still receives its scope and premises from its caller
+    /// (decision 1 replaces that pair with the position context).
+    pub(crate) fn from_path_premises(
+        db: &'db dyn HirAnalysisDb,
+        scope: ScopeId<'db>,
+        assumptions: PredicateListId<'db>,
+    ) -> Self {
+        Self {
+            scope,
+            solve_cx: TraitSolveCx::new(db, scope).with_assumptions(assumptions),
+        }
+    }
+
+    fn assumptions(self) -> PredicateListId<'db> {
+        self.solve_cx.assumptions()
+    }
+}
+
 pub(crate) fn select_method_candidate<'db>(
     db: &'db dyn HirAnalysisDb,
     receiver: &Canonicalized<'db, TyId<'db>>,
     method_name: IdentId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    lookup: MethodLookup<'db>,
     trait_: Option<Trait<'db>>,
 ) -> Result<MethodCandidate<'db>, MethodSelectionError<'db>> {
     let receiver_ty = receiver.original();
@@ -116,10 +158,9 @@ pub(crate) fn select_method_candidate<'db>(
         return Err(MethodSelectionError::ReceiverTypeMustBeKnown);
     }
 
-    let candidates =
-        assemble_method_candidates(db, receiver, method_name, scope, assumptions, trait_);
+    let candidates = assemble_method_candidates(db, receiver, method_name, lookup, trait_);
 
-    let selector = MethodSelector::new(db, receiver, scope, assumptions, candidates);
+    let selector = MethodSelector::new(db, receiver, lookup, candidates);
 
     selector.select()
 }
@@ -128,8 +169,7 @@ pub(crate) fn select_trait_method_candidates<'db>(
     db: &'db dyn HirAnalysisDb,
     receiver: &Canonicalized<'db, TyId<'db>>,
     method_name: IdentId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    lookup: MethodLookup<'db>,
     trait_: Trait<'db>,
 ) -> Result<AmbiguousTraitMethods<'db>, MethodSelectionError<'db>> {
     let receiver_ty = receiver.original();
@@ -137,10 +177,9 @@ pub(crate) fn select_trait_method_candidates<'db>(
         return Err(MethodSelectionError::ReceiverTypeMustBeKnown);
     }
 
-    let candidates =
-        assemble_method_candidates(db, receiver, method_name, scope, assumptions, Some(trait_));
+    let candidates = assemble_method_candidates(db, receiver, method_name, lookup, Some(trait_));
 
-    let selector = MethodSelector::new(db, receiver, scope, assumptions, candidates);
+    let selector = MethodSelector::new(db, receiver, lookup, candidates);
 
     selector.select_visible_trait_method_candidates()
 }
@@ -149,16 +188,15 @@ fn assemble_method_candidates<'db>(
     db: &'db dyn HirAnalysisDb,
     receiver: &Canonicalized<'db, TyId<'db>>,
     method_name: IdentId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    lookup: MethodLookup<'db>,
     trait_: Option<Trait<'db>>,
 ) -> AssembledCandidates<'db> {
     CandidateAssembler {
         db,
         receiver,
         method_name,
-        scope,
-        assumptions,
+        scope: lookup.scope,
+        assumptions: lookup.assumptions(),
         trait_,
         candidates: AssembledCandidates::default(),
     }
@@ -321,8 +359,8 @@ struct MethodSelector<'db, 'a> {
     /// Visibility and trait availability are judged from this lookup scope.
     scope: ScopeId<'db>,
     candidates: AssembledCandidates<'db>,
-    /// The caller's lookup scope and premises as one solver context. Every
-    /// candidate check proves its goals in this same context.
+    /// The lookup's solver context. Every candidate check proves its goals in
+    /// this same context.
     solve_cx: TraitSolveCx<'db>,
 }
 
@@ -330,16 +368,15 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
     fn new(
         db: &'db dyn HirAnalysisDb,
         receiver: &'a Canonicalized<'db, TyId<'db>>,
-        scope: ScopeId<'db>,
-        assumptions: PredicateListId<'db>,
+        lookup: MethodLookup<'db>,
         candidates: AssembledCandidates<'db>,
     ) -> Self {
         Self {
             db,
             receiver,
-            scope,
+            scope: lookup.scope,
             candidates,
-            solve_cx: TraitSolveCx::new(db, scope).with_assumptions(assumptions),
+            solve_cx: lookup.solve_cx,
         }
     }
 
@@ -675,7 +712,7 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
         }
 
         let solve_cx = self.solve_cx;
-        let query = CanonicalGoalQuery::new(self.db, candidate_inst, self.solve_cx.assumptions());
+        let query = self.solve_cx.goal_query(self.db, candidate_inst);
         let confirmed = Canonical::new(self.db, confirmed_inst);
         let mut table = UnificationTable::new(self.db);
         match is_goal_query_satisfiable(self.db, solve_cx, &query) {
@@ -739,7 +776,7 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
         let mut unsatisfied = false;
         for &constraint in implementor.constraints(self.db).list(self.db) {
             let constraint = constraint.fold_with(self.db, &mut table);
-            let query = CanonicalGoalQuery::new(self.db, constraint, self.solve_cx.assumptions());
+            let query = self.solve_cx.goal_query(self.db, constraint);
             match is_goal_query_satisfiable(self.db, solve_cx, &query) {
                 GoalSatisfiability::Satisfied(solution) => {
                     // A unique solution can bind impl parameters that the self
@@ -840,7 +877,7 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
         // whose signatures don't mention those args (e.g. `AbiDecoder<A>::read_word`).
         let receiver_is_ty_param = receiver_is_ty_param_like(self.db, self.receiver.original());
 
-        let query = CanonicalGoalQuery::new(self.db, inst, self.solve_cx.assumptions());
+        let query = self.solve_cx.goal_query(self.db, inst);
         let inst = if receiver_is_ty_param {
             inst
         } else {

@@ -315,6 +315,22 @@ impl<'db> ImplEnv<'db> {
         self.premises(db).solver_context(db)
     }
 
+    /// Premises for member lookup at this position. Opened evidence is a
+    /// premise; a named choice shadows the matching goal so lookup sees the
+    /// chosen application, without becoming proof authority for anything else.
+    /// This is the projection the type checker's chain gives lookup.
+    pub(crate) fn lookup_premises(self, db: &'db dyn HirAnalysisDb) -> SolverPremises<'db> {
+        SolverPremises {
+            scope: self.normalization_scope(db),
+            assumptions: crate::semantic::lookup_assumptions(
+                db,
+                self.assumptions(db),
+                [],
+                self.selections(db).iter().copied(),
+            ),
+        }
+    }
+
     /// Attach this restricted position context to uncaptured signature constants.
     /// Values and constants that already captured their choice keep that identity.
     pub(crate) fn contextualize_const_types(
