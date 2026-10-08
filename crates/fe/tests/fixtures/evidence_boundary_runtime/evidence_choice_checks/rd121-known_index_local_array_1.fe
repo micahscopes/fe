@@ -1,0 +1,18 @@
+// RD121 pending: a literal index fixes the evidence choice before runtime lowering.
+use core::obligations::{Evidence, prove}
+trait Read { const fn read() -> u256 }
+struct Subject {}
+impl Read for Subject { const fn read() -> u256 { 1 } }
+impl Read for Subject as Alternative { const fn read() -> u256 { 2 } }
+const fn read_with(_ e: Evidence<Read<Subject>>) -> u256 { with (e) { <Subject as Read>::read() } }
+// Evidence constants cannot be const items (8-0064), so const fn results stand in.
+const fn ord() -> Evidence<Read<Subject>> { prove<Read<Subject>>() }
+const fn alt() -> Evidence<Read<Subject>> { with (Alternative) { prove<Read<Subject>>() } }
+fn pick(_ i: usize) -> u256 {
+    let es = [ord(), alt()]
+    let e = es[1]
+    read_with(e)
+}
+
+#[test]
+fn known_index() { assert(pick(0) == 2) }
