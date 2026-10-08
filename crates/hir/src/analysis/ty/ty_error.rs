@@ -279,7 +279,7 @@ impl<'db> Visitor<'db> for ApplicationRequirementVisitor<'db> {
         // The visitor's root scope is the context's normalization scope, and
         // written types introduce no scopes of their own (const bodies are
         // skipped above), so these are the premises of this path's position.
-        debug_assert_eq!(scope, self.context.normalization_scope(self.db));
+        assert_eq!(scope, self.context.normalization_scope(self.db));
         self.diags.extend(application_requirement_diags(
             self.db,
             self.context.premises(self.db),
