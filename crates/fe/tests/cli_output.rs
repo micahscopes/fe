@@ -5247,6 +5247,12 @@ fn named_choice_two_level_bound_at_o0_and_o2() {
 }
 
 #[test]
+#[ignore = "C5: named candidate prerequisites must use the provisions at the same position, including revalidation"]
+fn named_choice_prerequisite_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("named_choice_prerequisite_pending.fe");
+}
+
+#[test]
 fn rd121_mutable_places_cannot_hold_evidence() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/evidence_boundary_runtime/evidence_choice_checks");
