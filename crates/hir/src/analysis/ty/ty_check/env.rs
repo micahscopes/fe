@@ -579,8 +579,48 @@ impl<'db> TyCheckEnv<'db> {
         self.provisions.evidence_assumptions(self.db)
     }
 
-    pub(super) fn enter_context_frame(&mut self) {
+    pub(super) fn enter_context_frame(&mut self, site: ExprId) {
+        let outside = self.selection_context();
+        let variable_block = self.current_block_idx();
         self.provisions.within(Frame::default());
+        self.provisions.current_data_mut().selection_boundary =
+            Some(keyed_effect_env::SelectionBoundary {
+                site,
+                outside,
+                variable_block,
+                reported: false,
+            });
+    }
+
+    pub(super) fn selection_boundaries(
+        &self,
+        destination: Option<LocalBinding<'db>>,
+    ) -> Vec<keyed_effect_env::SelectionBoundary<'db>> {
+        self.provisions
+            .frame_data()
+            .rev()
+            .filter_map(|frame| {
+                let boundary = frame.selection_boundary?;
+                if boundary.reported {
+                    return None;
+                }
+                if let Some(binding @ LocalBinding::Local { .. }) = destination
+                    && !self
+                        .var_env
+                        .iter()
+                        .take(boundary.variable_block + 1)
+                        .any(|block| block.vars.values().any(|&value| value == binding))
+                {
+                    return None;
+                }
+                Some(boundary)
+            })
+            .collect()
+    }
+
+    pub(super) fn mark_selection_boundary_reported(&mut self, site: ExprId) {
+        // The diagnostic belongs to the live frame, not to a parallel stack.
+        self.provisions.mark_boundary_reported(site);
     }
 
     pub(super) fn leave_context_frame(&mut self) {

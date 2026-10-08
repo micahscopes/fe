@@ -738,7 +738,7 @@ fn lower_semantic_locals<'db>(
                 // An element of an empty array has no backing storage. The
                 // index check terminates execution before this alias is used.
                 if let Some(place) = nonself_alias_source_place_for_local(db, body, SLocalId::new(idx))
-                    && place_index_bounds(db, body, &place).iter().any(|(_, len)| *len == 0)
+                    && place_index_bounds(db, cx.env, carriers, &place).iter().any(|(_, len)| *len == 0)
                 {
                     return RuntimeLocalLowering::Erased;
                 }

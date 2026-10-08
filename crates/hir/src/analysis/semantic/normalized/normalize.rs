@@ -15,7 +15,7 @@ use crate::{
             capability::{
                 handle::OpaqueHandleContract,
                 semantics::{CapabilityClass, CapabilitySemantics, capability_semantics},
-                shape::{ArrayLength, ShapeId, capability_shape},
+                shape::{ArrayLength, ShapeId, capability_shape_at_context},
             },
             eval_const_ref, get_or_build_semantic_instance,
             lower::layout_backing_source_path_is_prefix,
@@ -1106,12 +1106,9 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
     }
 
     fn shape(&self, ty: TyId<'db>) -> Result<ShapeId<'db>, NormalizeError<'db>> {
-        capability_shape(
+        capability_shape_at_context(
             self.db,
-            self.instance
-                .key(self.db)
-                .impl_env(self.db)
-                .normalization_scope(self.db),
+            self.instance.key(self.db).impl_env(self.db),
             self.assumptions,
             ty,
         )

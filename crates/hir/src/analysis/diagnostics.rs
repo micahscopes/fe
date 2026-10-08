@@ -3692,6 +3692,13 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 primary.resolve(db),
                 error_code,
             ),
+            Self::SelectedConstantTypeEscape(primary) => primary_diag(
+                severity,
+                "value cannot leave this `with` block",
+                "its type depends on a constant changed by this block's selection",
+                primary.resolve(db),
+                error_code,
+            ),
             Self::ObligationOpening { primary, reason } => primary_diag(
                 severity,
                 "trait evidence opening failed",

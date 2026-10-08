@@ -55,9 +55,19 @@ pub enum FamilyKeyedEntry<'db> {
 
 #[derive(Clone, Default)]
 pub struct EffectFrame<'db> {
+    pub(super) selection_boundary: Option<SelectionBoundary<'db>>,
     keyed_by_family:
         FxHashMap<EffectFamily<'db>, SmallVec<[KeyedEffectEntry<'db, ProvidedEffect<'db>>; 2]>>,
     unkeyed: SmallVec<[ProvidedEffect<'db>; 2]>,
+}
+
+/// The same lexical frame owns both its provisions and its exit boundary.
+#[derive(Clone, Copy)]
+pub(super) struct SelectionBoundary<'db> {
+    pub site: crate::hir_def::ExprId,
+    pub outside: crate::analysis::semantic::ImplEnv<'db>,
+    pub variable_block: usize,
+    pub reported: bool,
 }
 
 // Effect matching reads the same lexical frames as trait provisions.
@@ -65,6 +75,16 @@ pub struct EffectFrame<'db> {
 pub(crate) type EffectEnv<'db> = crate::core::semantic::Chain<'db, EffectFrame<'db>>;
 
 impl<'db> EffectEnv<'db> {
+    pub(super) fn mark_boundary_reported(&mut self, site: crate::hir_def::ExprId) {
+        for frame in self.frame_data_mut() {
+            if let Some(boundary) = &mut frame.selection_boundary
+                && boundary.site == site
+            {
+                boundary.reported = true;
+            }
+        }
+    }
+
     fn current_frame_mut(&mut self) -> &mut EffectFrame<'db> {
         self.current_data_mut()
     }

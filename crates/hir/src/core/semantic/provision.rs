@@ -199,6 +199,10 @@ impl<'db, Data> Chain<'db, Data> {
         self.frames.iter().map(|frame| &frame.data)
     }
 
+    pub fn frame_data_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut Data> + '_ {
+        self.frames.iter_mut().map(|frame| &mut frame.data)
+    }
+
     pub fn insert(
         &mut self,
         db: &'db dyn HirAnalysisDb,

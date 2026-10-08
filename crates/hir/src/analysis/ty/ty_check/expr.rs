@@ -29,7 +29,9 @@ use super::{
 use crate::analysis::place::{Place, PlaceBase, PlaceProjection};
 use crate::analysis::semantic::{RuntimeSizeError, runtime_size_bytes};
 use crate::analysis::ty::{
-    adt_def::{AdtRef, instantiate_adt_field_shape},
+    adt_def::{
+        AdtRef, instantiate_adt_field_shape, instantiate_adt_field_source_for_concrete_demand,
+    },
     assoc_const::{AssocConstUse, InherentConstUse},
     canonical::{Canonicalized, Solution},
     const_ty::{BodyHoleSite, HoleAnchor, LoweringContext, instantiate_inherent_const_decl_ty},
@@ -470,7 +472,7 @@ impl<'db> TyChecker<'db> {
             Expr::Assign(..) => self.check_assign(expr, expr_data),
             Expr::AugAssign(..) => self.check_aug_assign(expr, expr_data),
             Expr::With(bindings, body) => {
-                self.check_with(bindings, *body, expected, result_discarded)
+                self.check_with(expr, bindings, *body, expected, result_discarded)
             }
         };
         self.env.leave_expr();
@@ -1571,12 +1573,13 @@ impl<'db> TyChecker<'db> {
 
     fn check_with(
         &mut self,
+        site: ExprId,
         bindings: &[WithBinding<'db>],
         body_expr: ExprId,
         expected: TyId<'db>,
         result_discarded: bool,
     ) -> ExprProp<'db> {
-        self.env.enter_context_frame();
+        self.env.enter_context_frame(site);
 
         for binding in bindings {
             if binding.key_path.is_none()
@@ -1691,8 +1694,85 @@ impl<'db> TyChecker<'db> {
         } else {
             self.check_expr(body_expr, expected)
         };
+        let boundary = self
+            .env
+            .selection_boundaries(None)
+            .into_iter()
+            .find(|boundary| boundary.site == site);
+        let escaped =
+            boundary.is_some_and(|boundary| self.reject_selection_type_escape(result.ty, boundary));
         self.env.leave_context_frame();
-        result
+        if escaped {
+            ExprProp::invalid(self.db)
+        } else {
+            result
+        }
+    }
+
+    pub(super) fn reject_selection_type_escape(
+        &mut self,
+        ty: TyId<'db>,
+        boundary: super::effect_env::SelectionBoundary<'db>,
+    ) -> bool {
+        use crate::analysis::ty::const_ty::{ConstCanonEnv, concretize_const_ty_if_ground};
+        let inside = self.env.selection_context();
+        struct Ground<'db>(crate::analysis::semantic::ImplEnv<'db>);
+        impl<'db> TyFolder<'db> for Ground<'db> {
+            fn fold_ty(
+                &mut self,
+                db: &'db dyn crate::analysis::HirAnalysisDb,
+                ty: TyId<'db>,
+            ) -> TyId<'db> {
+                let ty = ty.super_fold_with(db, self);
+                if let TyData::ConstTy(value) = ty.data(db) {
+                    let env = ConstCanonEnv::new(
+                        self.0.normalization_scope(db),
+                        self.0.assumptions(db),
+                        None,
+                    );
+                    if let Some(value) = concretize_const_ty_if_ground(db, *value, env) {
+                        return TyId::const_ty(db, value);
+                    }
+                }
+                ty
+            }
+        }
+        let mut pending = vec![ty.fold_with(self.db, &mut self.table)];
+        let mut visited = FxHashSet::default();
+        while let Some(source) = pending.pop() {
+            if !visited.insert(source) || source.has_invalid(self.db) {
+                continue;
+            }
+            let inner = inside
+                .contextualize_const_types(self.db, source)
+                .fold_with(self.db, &mut Ground(inside));
+            let outer = boundary
+                .outside
+                .contextualize_const_types(self.db, source)
+                .fold_with(self.db, &mut Ground(boundary.outside));
+            if inner != outer && !inner.has_invalid(self.db) && !outer.has_invalid(self.db) {
+                self.env.mark_selection_boundary_reported(boundary.site);
+                self.push_diag(BodyDiag::SelectedConstantTypeEscape(
+                    boundary.site.span(self.body()).into(),
+                ));
+                return true;
+            }
+            pending.extend(source.generic_args(self.db).iter().copied());
+            if let Some(adt) = source.adt_def(self.db) {
+                for (variant, fields) in adt.fields(self.db).iter().enumerate() {
+                    for field in 0..fields.num_types() {
+                        pending.push(instantiate_adt_field_source_for_concrete_demand(
+                            self.db,
+                            adt,
+                            variant,
+                            field,
+                            source.generic_args(self.db),
+                        ));
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// A callee's signature with its generic arguments filled in can contain a
@@ -5052,6 +5132,29 @@ impl<'db> TyChecker<'db> {
                         {
                             return ExprProp::new(self.table.fold_ty(self.db, projected), is_mut);
                         }
+                        let context = self.env.selection_context();
+                        let field_ty = if !context.selections(self.db).is_empty()
+                            || !context.witnesses(self.db).is_empty()
+                        {
+                            let source = instantiate_adt_field_source_for_concrete_demand(
+                                self.db,
+                                resolved_field
+                                    .base_ty
+                                    .adt_def(self.db)
+                                    .expect("record field ADT"),
+                                0,
+                                usize::from(resolved_field.index),
+                                resolved_field.base_ty.generic_args(self.db),
+                            );
+                            let source = source.fold_with(self.db, &mut self.table);
+                            let source =
+                                context.contextualize_const_types_with(self.db, source, |goal| {
+                                    self.env.provision_for_goal(goal)
+                                });
+                            self.normalize_ty(source)
+                        } else {
+                            field_ty
+                        };
                         return ExprProp::new(field_ty, is_mut);
                     }
                 }
@@ -5999,6 +6102,15 @@ impl<'db> TyChecker<'db> {
             rhs_prop.ty = coerced;
         }
         rhs_prop.ty = self.unify_ty(Typeable::Expr(*rhs, rhs_prop.clone()), rhs_prop.ty, lhs_ty);
+
+        if let Some(place) = self.env.expr_place(*lhs) {
+            let PlaceBase::Binding(binding) = place.base;
+            for boundary in self.env.selection_boundaries(Some(binding)) {
+                if self.reject_selection_type_escape(rhs_prop.ty, boundary) {
+                    return ExprProp::invalid(self.db);
+                }
+            }
+        }
 
         let lhs_status = self.check_assign_lhs(*lhs, &typed_lhs);
         self.record_implicit_move_for_owned_expr(*rhs, rhs_prop.ty);

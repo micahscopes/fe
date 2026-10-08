@@ -46,8 +46,8 @@ pub(crate) fn layout_for_ty_in_env<'db>(
     LayoutId::new(
         db,
         LayoutKey::Struct(StructLayout {
-            fields: ty
-                .field_types(db)
+            fields: env
+                .field_types(db, ty)
                 .into_iter()
                 .map(|field| stored_class_for_ty_in_env(db, env, field))
                 .collect(),

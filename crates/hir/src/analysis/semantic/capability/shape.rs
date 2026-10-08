@@ -7,7 +7,7 @@ use crate::{
         HirAnalysisDb,
         semantic::{FieldIndex, SemConstValue, VariantIndex},
         ty::{
-            adt_def::{AdtRef, instantiate_adt_field_shape},
+            adt_def::{AdtRef, instantiate_adt_field_source_for_concrete_demand},
             const_ty::{ConstTyData, ConstTyId, normalize_const_tys_for_comparison},
             fold::TyFoldable,
             normalize::normalize_ty,
@@ -212,14 +212,40 @@ impl<'db> ShapeId<'db> {
 
 // Borrow checking and transport contracts ask for the shapes of the same
 // types at every access; building one normalizes and walks every field.
-#[salsa::tracked]
 pub fn capability_shape<'db>(
     db: &'db dyn HirAnalysisDb,
     scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
     ty: TyId<'db>,
 ) -> Result<ShapeId<'db>, ShapeError<'db>> {
+    capability_shape_query(db, scope, assumptions, ty, None)
+}
+
+pub fn capability_shape_at_context<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: crate::analysis::semantic::ImplEnv<'db>,
+    assumptions: PredicateListId<'db>,
+    ty: TyId<'db>,
+) -> Result<ShapeId<'db>, ShapeError<'db>> {
+    capability_shape_query(
+        db,
+        context.normalization_scope(db),
+        assumptions,
+        ty,
+        Some(context),
+    )
+}
+
+#[salsa::tracked]
+fn capability_shape_query<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    ty: TyId<'db>,
+    context: Option<crate::analysis::semantic::ImplEnv<'db>>,
+) -> Result<ShapeId<'db>, ShapeError<'db>> {
     ShapeCx {
+        context,
         db,
         scope,
         assumptions,
@@ -229,6 +255,7 @@ pub fn capability_shape<'db>(
 }
 
 struct ShapeCx<'db> {
+    context: Option<crate::analysis::semantic::ImplEnv<'db>>,
     db: &'db dyn HirAnalysisDb,
     scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
@@ -236,9 +263,25 @@ struct ShapeCx<'db> {
 }
 
 impl<'db> ShapeCx<'db> {
+    fn field_type(
+        &self,
+        adt: crate::analysis::ty::adt_def::AdtDef<'db>,
+        variant: usize,
+        field: usize,
+        args: &[TyId<'db>],
+    ) -> TyId<'db> {
+        self.context.map_or_else(
+            || instantiate_adt_field_source_for_concrete_demand(self.db, adt, variant, field, args),
+            |context| context.adt_field_type(self.db, adt, variant, field, args),
+        )
+    }
+
     fn build(&mut self, ty: TyId<'db>) -> Result<ShapeId<'db>, ShapeError<'db>> {
         // Fields may contain associated projections even when their enclosing
         // nominal type is normalized. Use the same semantic types as the IR.
+        let ty = self
+            .context
+            .map_or(ty, |context| context.contextualize_const_types(self.db, ty));
         let ty = normalize_ty(
             self.db,
             ty,
@@ -275,7 +318,14 @@ impl<'db> ShapeCx<'db> {
                 ShapeChildren::Array { len, element }
             }
         } else if ty.is_tuple(self.db) || ty.is_struct(self.db) {
-            ShapeChildren::Product(self.fields(ty, ty.field_types(self.db))?)
+            let fields = if let Some(adt) = ty.adt_def(self.db) {
+                (0..adt.fields(self.db)[0].num_types())
+                    .map(|field| self.field_type(adt, 0, field, ty.generic_args(self.db)))
+                    .collect()
+            } else {
+                ty.field_types(self.db)
+            };
+            ShapeChildren::Product(self.fields(ty, fields)?)
         } else if let Some(adt) = ty.adt_def(self.db)
             && matches!(adt.adt_ref(self.db), AdtRef::Enum(_))
         {
@@ -284,15 +334,7 @@ impl<'db> ShapeCx<'db> {
                 let variant =
                     VariantIndex(u16::try_from(index).map_err(|_| ShapeError::TooManyFields(ty))?);
                 let field_types = (0..fields.num_types())
-                    .map(|field| {
-                        instantiate_adt_field_shape(
-                            self.db,
-                            adt,
-                            index,
-                            field,
-                            ty.generic_args(self.db),
-                        )
-                    })
+                    .map(|field| self.field_type(adt, index, field, ty.generic_args(self.db)))
                     .collect();
                 let children = ShapeChildren::Product(self.fields(ty, field_types)?);
                 variants.push((

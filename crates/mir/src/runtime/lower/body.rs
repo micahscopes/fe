@@ -2304,7 +2304,7 @@ impl<'db> RmirEmitter<'db> {
             let elem_ty = args.first().copied().expect("array element type");
             vec![elem_ty; arity]
         } else {
-            ty.field_types(self.db)
+            self.env.field_types(self.db, ty)
         };
         assert_eq!(
             field_tys.len(),
@@ -3576,7 +3576,9 @@ impl<'db> RmirEmitter<'db> {
                         .value(value.value)
                         .expect("verified structural projection source exists")
                         .ty;
-                    self.lower_data_path_index_checks(bb, ty, &path.0);
+                    let class = BodyEnv::new(self.db, &self.semantic_body, &self.facts)
+                        .normalized_value_structural_class(&self.semantic_carriers, value.value);
+                    self.lower_data_path_index_checks(bb, ty, &path.0, class);
                 }
             }
             NStatementKind::Store { destination, .. } => {
@@ -3596,14 +3598,24 @@ impl<'db> RmirEmitter<'db> {
         let Some(ty) = self.semantic_place_root_ty(place) else {
             return;
         };
-        self.lower_data_path_index_checks(bb, ty, &place.path);
+        let mut root = place.clone();
+        root.path = NDataPath::default();
+        let class = BodyEnv::new(self.db, &self.semantic_body, &self.facts)
+            .normalized_place_class(&self.semantic_carriers, &root);
+        self.lower_data_path_index_checks(bb, ty, &place.path, class);
     }
 
-    fn lower_data_path_index_checks(&mut self, bb: RBlockId, ty: TyId<'db>, path: &NDataPath) {
+    fn lower_data_path_index_checks(
+        &mut self,
+        bb: RBlockId,
+        ty: TyId<'db>,
+        path: &NDataPath,
+        class: Option<RuntimeClass<'db>>,
+    ) {
         if self.terminated_blocks[bb.index()] {
             return;
         }
-        for (index, len) in data_path_index_bounds(self.db, ty, path) {
+        for (index, len) in data_path_index_bounds(self.db, ty, path, class) {
             let index = match index {
                 NIndex::Const(index) => IndexSource::Constant(index),
                 NIndex::Value(index) => IndexSource::Dynamic(self.read_normalized_value(bb, index)),

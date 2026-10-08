@@ -31,7 +31,7 @@ use crate::analysis::{
             path::{Projection, RegionPath, StructuralPath},
             region::{ProviderRegionId, RegionRoot, RegionSet, SymbolicPlace},
             repack::ReferentRepackId,
-            shape::{ShapeChildren, ShapeError, ShapeId, capability_shape},
+            shape::{ShapeChildren, ShapeError, ShapeId, capability_shape_at_context},
             source::SourceExpr,
             state::{BorrowState, CapabilityValue},
             value::Guarded,
@@ -189,12 +189,9 @@ impl<'db> Borrowck<'db> {
     }
 
     pub fn shape(&self, ty: TyId<'db>) -> Result<ShapeId<'db>, SemanticDiagnostic<'db>> {
-        capability_shape(
+        capability_shape_at_context(
             self.db,
-            self.instance
-                .key(self.db)
-                .impl_env(self.db)
-                .normalization_scope(self.db),
+            self.instance.key(self.db).impl_env(self.db),
             self.instance.assumptions(self.db),
             ty,
         )

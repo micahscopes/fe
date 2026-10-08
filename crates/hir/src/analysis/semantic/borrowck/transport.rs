@@ -11,7 +11,7 @@ use crate::analysis::{
             index::IndexExpr,
             path::{Projection, RegionPath, project_referent_ty},
             semantics::{CapabilityClass, CapabilitySemantics, TransportClass},
-            shape::{ShapeError, ShapeId, capability_shape},
+            shape::{ShapeError, ShapeId, capability_shape_at_context},
             source::InputOrigin,
         },
         normalized::{NRootKind, NValueDefinition, NormalizedBody},
@@ -142,9 +142,9 @@ impl<'db> InputTransportContract<'db> {
         db: &'db dyn HirAnalysisDb,
         ty: TyId<'db>,
     ) -> Result<ShapeId<'db>, ShapeError<'db>> {
-        capability_shape(
+        capability_shape_at_context(
             db,
-            self.instance.key(db).impl_env(db).normalization_scope(db),
+            self.instance.key(db).impl_env(db),
             self.instance.assumptions(db),
             ty,
         )

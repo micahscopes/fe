@@ -20,6 +20,7 @@ use crate::{
 };
 
 use super::{
+    classify::project_variant_field_place_class,
     classify::{
         BodyEnv, carrier_value_class, provider_erases_runtime_root,
         runtime_class_for_direct_value_provider_in_env,
@@ -33,12 +34,17 @@ use super::{
 /// Both alias erasure and emitted bounds checks must inspect the same path.
 pub(super) fn place_index_bounds<'db>(
     db: &'db dyn MirDb,
-    body: &RuntimeSemanticBody<'db>,
+    env: BodyEnv<'_, 'db>,
+    carriers: &[RuntimeCarrier<'db>],
     place: &NPlace<'db>,
 ) -> Vec<(NIndex, usize)> {
-    body.normalized
+    let mut root = place.clone();
+    root.path = NDataPath::default();
+    let class = env.normalized_place_class(carriers, &root);
+    env.body()
+        .normalized
         .place_base_ty(db, place.base)
-        .map(|ty| data_path_index_bounds(db, ty, &place.path))
+        .map(|ty| data_path_index_bounds(db, ty, &place.path, class))
         .unwrap_or_default()
 }
 
@@ -46,9 +52,10 @@ pub(super) fn data_path_index_bounds<'db>(
     db: &'db dyn MirDb,
     mut ty: TyId<'db>,
     path: &NDataPath,
+    mut class: Option<RuntimeClass<'db>>,
 ) -> Vec<(NIndex, usize)> {
     let mut bounds = Vec::new();
-    for projection in path.iter() {
+    for (position, projection) in path.iter().enumerate() {
         while let Some((_, inner)) = ty.as_capability(db) {
             ty = inner;
         }
@@ -69,9 +76,16 @@ pub(super) fn data_path_index_bounds<'db>(
                 )
             }),
             NDataProjection::Index(index) => {
-                let len = runtime_array_len(db, ty)
-                    .expect("valid runtime array length")
-                    .expect("normalized index projection must retain a concrete array length");
+                let len = match &class {
+                    Some(class) => class
+                        .array_len(db)
+                        .expect("normalized index projection must retain an array class")
+                        .try_into()
+                        .expect("runtime array length fits usize"),
+                    None => runtime_array_len(db, ty)
+                        .expect("valid runtime array length")
+                        .expect("normalized index projection must retain a concrete array length"),
+                };
                 bounds.push((*index, len));
                 if len == 0 {
                     return bounds;
@@ -80,6 +94,20 @@ pub(super) fn data_path_index_bounds<'db>(
             }
         }
         .expect("verified normalized data path");
+        class = class.map(|current| match projection {
+            NDataProjection::Field(field) => {
+                crate::runtime::place::project_field_class(db, current, *field)
+            }
+            NDataProjection::VariantField { variant, field } => {
+                project_variant_field_place_class(db, current, *variant, *field)
+            }
+            NDataProjection::Index(_) => crate::runtime::place::project_index_class(db, current),
+        });
+        if position + 1 < path.len()
+            && let Some(target) = class.as_ref().and_then(|class| class.deref_target(db))
+        {
+            class = Some(target);
+        }
     }
     bounds
 }

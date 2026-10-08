@@ -5330,3 +5330,32 @@ fn rd121_runtime_producers_and_mutable_aggregates_are_rejected() {
         );
     }
 }
+
+#[test]
+fn selected_const_aggregate_inside_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("signature_const_aggregate_inside.fe");
+}
+
+#[test]
+fn selected_const_aggregate_cannot_escape_with_block() {
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evidence_boundary_runtime");
+    for name in [
+        "signature_const_aggregate_leak.fe",
+        "signature_const_aggregate_moved.fe",
+        "signature_const_aggregate_forwarded.fe",
+    ] {
+        let fixture = root.join(name);
+        let (output, exit_code) =
+            run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+        assert_eq!(
+            exit_code, 1,
+            "{name}: expected a normal compile error: {output}"
+        );
+        assert!(
+            output.contains("cannot leave this `with` block"),
+            "{name}: missing selection boundary diagnostic: {output}"
+        );
+        assert_eq!(output.matches("error[").count(), 1, "{name}: {output}");
+    }
+}

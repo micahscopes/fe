@@ -1,6 +1,6 @@
 use hir::{
     analysis::{
-        semantic::SemanticInstance,
+        semantic::{ImplEnv, SemanticInstance},
         ty::{
             ProviderAddressSpace, ProviderKind,
             const_ty::{ConcreteArrayLengthError, demand_concrete_array_length},
@@ -29,8 +29,9 @@ use crate::{
 
 use super::layout::layout_for_ty_in_env;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update)]
 pub(crate) struct RuntimeTypeEnv<'db> {
+    pub(crate) impl_env: Option<ImplEnv<'db>>,
     pub(crate) scope: Option<hir::hir_def::scope_graph::ScopeId<'db>>,
     pub(crate) assumptions: PredicateListId<'db>,
 }
@@ -40,11 +41,28 @@ impl<'db> RuntimeTypeEnv<'db> {
         scope: Option<hir::hir_def::scope_graph::ScopeId<'db>>,
         assumptions: PredicateListId<'db>,
     ) -> Self {
-        Self { scope, assumptions }
+        Self {
+            impl_env: None,
+            scope,
+            assumptions,
+        }
+    }
+
+    pub(crate) fn field_types(self, db: &'db dyn MirDb, ty: TyId<'db>) -> Vec<TyId<'db>> {
+        if let Some(context) = self.impl_env
+            && let Some(adt) = ty.adt_def(db)
+            && ty.is_struct(db)
+        {
+            return (0..adt.fields(db)[0].num_types())
+                .map(|field| context.adt_field_type(db, adt, 0, field, ty.generic_args(db)))
+                .collect();
+        }
+        ty.field_types(db)
     }
 
     pub(crate) fn for_semantic(db: &'db dyn MirDb, semantic: SemanticInstance<'db>) -> Self {
         Self {
+            impl_env: Some(semantic.key(db).impl_env(db)),
             scope: Some(semantic.key(db).owner(db).scope()),
             assumptions: semantic.assumptions(db),
         }
@@ -422,7 +440,7 @@ pub(crate) fn top_level_class_for_ty_in_env<'db>(
     ty: TyId<'db>,
     default_space: AddressSpaceKind,
 ) -> Option<RuntimeClass<'db>> {
-    runtime_top_level_class(db, ty, default_space, env.scope, env.assumptions)
+    runtime_top_level_class(db, ty, default_space, env)
 }
 
 pub(crate) fn stored_class_for_ty_in_env<'db>(
@@ -430,7 +448,7 @@ pub(crate) fn stored_class_for_ty_in_env<'db>(
     env: RuntimeTypeEnv<'db>,
     ty: TyId<'db>,
 ) -> RuntimeClass<'db> {
-    runtime_stored_class(db, ty, env.scope, env.assumptions)
+    runtime_stored_class(db, ty, env)
 }
 
 pub(crate) fn object_ref_class_for_target_in_env<'db>(
@@ -677,35 +695,27 @@ fn runtime_top_level_class<'db>(
     db: &'db dyn MirDb,
     ty: TyId<'db>,
     default_space: AddressSpaceKind,
-    scope: Option<hir::hir_def::scope_graph::ScopeId<'db>>,
-    assumptions: PredicateListId<'db>,
+    env: RuntimeTypeEnv<'db>,
 ) -> Option<RuntimeClass<'db>> {
-    runtime_type_model(db, ty, scope, assumptions).top_level_class(
-        db,
-        default_space,
-        RuntimeTypeEnv::new(scope, assumptions),
-    )
+    runtime_type_model(db, ty, env).top_level_class(db, default_space, env)
 }
 
 #[salsa::tracked]
 fn runtime_type_model<'db>(
     db: &'db dyn MirDb,
     ty: TyId<'db>,
-    scope: Option<hir::hir_def::scope_graph::ScopeId<'db>>,
-    assumptions: PredicateListId<'db>,
+    env: RuntimeTypeEnv<'db>,
 ) -> RuntimeTypeModel<'db> {
-    RuntimeTypeModel::new(db, ty, RuntimeTypeEnv::new(scope, assumptions))
+    RuntimeTypeModel::new(db, ty, env)
 }
 
 #[salsa::tracked]
 fn runtime_stored_class<'db>(
     db: &'db dyn MirDb,
     ty: TyId<'db>,
-    scope: Option<hir::hir_def::scope_graph::ScopeId<'db>>,
-    assumptions: PredicateListId<'db>,
+    env: RuntimeTypeEnv<'db>,
 ) -> RuntimeClass<'db> {
-    runtime_type_model(db, ty, scope, assumptions)
-        .stored_class(db, RuntimeTypeEnv::new(scope, assumptions))
+    runtime_type_model(db, ty, env).stored_class(db, env)
 }
 
 #[salsa::tracked]
@@ -745,7 +755,7 @@ pub(super) fn runtime_transport_sensitive_aggregate<'db>(
     scope: Option<hir::hir_def::scope_graph::ScopeId<'db>>,
     assumptions: PredicateListId<'db>,
 ) -> bool {
-    runtime_type_model(db, ty, scope, assumptions)
+    runtime_type_model(db, ty, RuntimeTypeEnv::new(scope, assumptions))
         .transport_sensitive_aggregate(db, RuntimeTypeEnv::new(scope, assumptions))
 }
 

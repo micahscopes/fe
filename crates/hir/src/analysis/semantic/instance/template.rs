@@ -294,6 +294,26 @@ impl<'db> ImplEnv<'db> {
         }
     }
 
+    /// Read a declared field before ordinary const evaluation loses its choice.
+    pub fn adt_field_type(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        adt: crate::analysis::ty::adt_def::AdtDef<'db>,
+        variant: usize,
+        field: usize,
+        args: &[TyId<'db>],
+    ) -> TyId<'db> {
+        let source = crate::analysis::ty::adt_def::instantiate_adt_field_source_for_concrete_demand(
+            db, adt, variant, field, args,
+        );
+        let source = self.contextualize_const_types(db, source);
+        crate::analysis::ty::normalize::normalize_ty(
+            db,
+            source,
+            self.premises(db),
+        )
+    }
+
     /// Solver premises and normalization scope come from one position context.
     pub fn solver_context(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
         self.premises(db).solver_context(db)

@@ -512,6 +512,14 @@ impl<'db> TyChecker<'db> {
                 (None, None, TyId::unit(self.db), false)
             };
 
+        if !had_child_err {
+            for boundary in self.env.selection_boundaries(None) {
+                if self.reject_selection_type_escape(returned_ty, boundary) {
+                    return TyId::never(self.db);
+                }
+            }
+        }
+
         if !had_child_err && self.type_contains_evidence(returned_ty) {
             let runtime_branch = self.env.active_exprs().iter().rev().copied().find(|site| {
                 match site.data(self.db, self.body()) {

@@ -1320,7 +1320,7 @@ impl<'db> ExprStaticFactsBuilder<'_, 'db> {
                     let elem_ty = args.first().copied().expect("array element type");
                     vec![elem_ty; fields.len()]
                 } else {
-                    ty.field_types(db)
+                    type_env.field_types(db, *ty)
                 };
                 if field_tys.len() != fields.len() {
                     return None;
@@ -2695,7 +2695,7 @@ fn normalized_value_runtime_class<'db>(
     }
 }
 
-fn project_variant_field_place_class<'db>(
+pub(super) fn project_variant_field_place_class<'db>(
     db: &'db dyn MirDb,
     class: RuntimeClass<'db>,
     variant: VariantIndex,

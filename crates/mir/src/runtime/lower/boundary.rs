@@ -861,7 +861,7 @@ pub(crate) fn boundary_spec_for_ty_in_env<'db>(
     ty: TyId<'db>,
     default_space: AddressSpaceKind,
 ) -> Option<RuntimeBoundarySpec<'db>> {
-    runtime_boundary_spec(db, ty, default_space, env.scope, env.assumptions)
+    runtime_boundary_spec(db, ty, default_space, env)
 }
 
 pub(crate) fn default_borrow_transport_set(
@@ -908,13 +908,13 @@ fn runtime_boundary_spec<'db>(
     db: &'db dyn MirDb,
     ty: TyId<'db>,
     default_space: AddressSpaceKind,
-    scope: Option<ScopeId<'db>>,
-    assumptions: PredicateListId<'db>,
+    env: RuntimeTypeEnv<'db>,
 ) -> Option<RuntimeBoundarySpec<'db>> {
-    let env = RuntimeTypeEnv::new(scope, assumptions);
+    let scope = env.scope;
+    let assumptions = env.assumptions;
     let interface_ty = runtime_interface_ty_in_env(db, env, ty);
     if let Some((CapabilityKind::View, inner)) = interface_ty.as_capability(db) {
-        let inner_boundary = runtime_boundary_spec(db, inner, default_space, scope, assumptions);
+        let inner_boundary = runtime_boundary_spec(db, inner, default_space, env);
         if runtime_zero_sized_ty(db, inner, scope, assumptions) {
             return inner_boundary;
         }

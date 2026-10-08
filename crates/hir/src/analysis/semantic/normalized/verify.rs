@@ -7,7 +7,7 @@ use crate::{
         semantic::{
             BorrowActivation, CallSiteId, FieldIndex, Mutability, SConst, SemOrigin,
             SemanticInstance, VariantIndex,
-            capability::{handle::OpaqueHandleContract, shape::capability_shape},
+            capability::{handle::OpaqueHandleContract, shape::capability_shape_at_context},
             get_or_build_semantic_instance,
             lower::{effect_param_site, enum_tag_ty},
             normalized::*,
@@ -963,9 +963,9 @@ fn has_capability<'db>(
     body: &NormalizedBody<'db>,
     ty: TyId<'db>,
 ) -> Result<bool, NormalizedBodyVerifyError> {
-    capability_shape(
+    capability_shape_at_context(
         db,
-        body.owner.key(db).impl_env(db).normalization_scope(db),
+        body.owner.key(db).impl_env(db),
         body.owner.assumptions(db),
         ty,
     )
