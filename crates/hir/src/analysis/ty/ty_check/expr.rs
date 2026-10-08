@@ -1786,9 +1786,21 @@ impl<'db> TyChecker<'db> {
             let inner = inside
                 .contextualize_const_types_with(tc.db, source, |goal| chain.lookup(tc.db, goal));
             let inner = tc.ground_selection_type(inner, inside);
+            let current = tc.env.selection_context();
             let outer = tc.normalize_callable_type(callable, source);
-            let outer = tc.ground_selection_type(outer, tc.env.selection_context());
-            (inner, outer)
+            let outer = tc.ground_selection_type(outer, current);
+            let here = current.contextualize_const_types_with(tc.db, source, |goal| {
+                tc.env.provision_for_goal(goal)
+            });
+            let here = tc.ground_selection_type(here, current);
+            // A callee that receives this provision remains inside its selection.
+            // An argument formed under another provision must then fail ordinary
+            // parameter checking, rather than being diagnosed as an escape.
+            if here == outer {
+                (inner, inner)
+            } else {
+                (inner, outer)
+            }
         });
         if differs {
             self.push_diag(BodyDiag::SelectedConstantTypeEscape(span));

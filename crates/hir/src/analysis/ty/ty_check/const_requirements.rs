@@ -3959,6 +3959,11 @@ fn use_it() -> u256 { read<7>() }";
             .expect("fixture function");
         let mut checker =
             super::super::TyChecker::new(&db, super::BodyOwner::Func(function)).expect("checker");
+        // Match infer_body_query's root setup before checking expressions directly.
+        checker.env.set_root_context(
+            crate::semantic::Chain::<()>::new(&db, super::PredicateListId::empty_list(&db))
+                .context(&db, super::BodyOwner::Func(function).scope()),
+        );
         let snapshot = checker.snapshot_state();
         let root = checker.body().expr(&db);
         checker.check_expr_unknown(root);
