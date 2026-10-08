@@ -5396,7 +5396,6 @@ fn selected_signature_arrays_cannot_escape_with_block() {
 }
 
 #[test]
-#[ignore = "RD121: known evidence array indices pass checking but fail runtime lowering"]
 fn rd121_known_evidence_array_indices_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2(
         "evidence_choice_checks/rd121-known_index_const_array_0.fe",

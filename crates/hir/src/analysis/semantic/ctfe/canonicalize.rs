@@ -162,7 +162,7 @@ fn canonicalize_semantic_consts_from_body_with_mode<'db>(
     }
 
     if matches!(mode, ConstCanonicalizationMode::Runtime) {
-        discard_unused_evidence_constants(db, &mut body);
+        discard_unused_constants(&mut body);
     }
     body
 }
@@ -425,6 +425,22 @@ fn canonicalize_expr<'db>(
                             Some(value),
                         );
                     }
+                    // Complete values remain known to subsequent folds even
+                    // when they contain fields with no runtime representation.
+                    // Runtime consumers fold away before unused constants are
+                    // removed; semantic checking keeps its original operations.
+                    if cx
+                        .instance
+                        .normalized_ty(cx.db, crate::analysis::semantic::sem_const_ty(cx.db, value))
+                        == cx.instance.normalized_ty(cx.db, result_ty)
+                    {
+                        let folded = if matches!(cx.mode, ConstCanonicalizationMode::Runtime) {
+                            SExpr::Const(SConst::from_trusted_source(cx.db, value))
+                        } else {
+                            expr.clone()
+                        };
+                        return (folded, Some(value));
+                    }
                 }
                 FoldAttempt::NotFoldable(_) => {}
                 FoldAttempt::InvariantFailure(failure) => {
@@ -525,12 +541,9 @@ fn block_successors<'db>(term: &STerminatorKind<'db>) -> Vec<SBlockId> {
     }
 }
 
-/// A completely evaluated witness needs no runtime operation once every
-/// consumer has folded. The operation-preserving body still owns checking.
-fn discard_unused_evidence_constants<'db>(
-    db: &'db dyn HirAnalysisDb,
-    body: &mut SemanticBody<'db>,
-) {
+/// Completely evaluated, unused constants need no runtime operation. The
+/// operation-preserving body still owns semantic checking.
+fn discard_unused_constants<'db>(body: &mut SemanticBody<'db>) {
     use crate::analysis::semantic::normalized::{
         expr_used_locals, place_used_locals, terminator_used_locals,
     };
@@ -548,22 +561,12 @@ fn discard_unused_evidence_constants<'db>(
         }
     }
     for block in &mut body.blocks {
-        block.stmts.retain(|statement| {
-            let SStmtKind::Assign {
+        block.stmts.retain(|statement| match &statement.kind {
+            SStmtKind::Assign {
                 dst,
-                expr: SExpr::Const(SConst::Value(value)),
-            } = &statement.kind
-            else {
-                return true;
-            };
-            used.contains(dst)
-                || !matches!(
-                    value.value().value(db),
-                    SemConstValue::Structural {
-                        handle: crate::analysis::semantic::StructuralHandle::Evidence(_),
-                        ..
-                    }
-                )
+                expr: SExpr::Const(SConst::Value(_)),
+            } => used.contains(dst),
+            _ => true,
         });
     }
 }
