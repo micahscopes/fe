@@ -165,7 +165,7 @@ CEILINGS = {
     "crates/hir/src/analysis/ty/ty_check/const_requirements.rs": 2,
     "crates/hir/src/analysis/ty/ty_check/env.rs": 2,
     "crates/hir/src/analysis/ty/ty_check/expr.rs": 9,
-    "crates/hir/src/analysis/ty/ty_check/mod.rs": 8,
+    "crates/hir/src/analysis/ty/ty_check/mod.rs": 7,
     "crates/hir/src/analysis/ty/ty_check/pat.rs": 1,
     "crates/hir/src/analysis/ty/ty_lower.rs": 6,
     "crates/hir/src/core/semantic/mod.rs": 3,

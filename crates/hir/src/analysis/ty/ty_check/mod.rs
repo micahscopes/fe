@@ -169,10 +169,7 @@ pub fn check_const_body<'db>(
                 db,
                 hir_ty,
                 const_.span().ty(),
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    const_.scope(),
-                    PredicateListId::empty_list(db),
-                ),
+                crate::semantic::context_at(db, const_.scope(), None).premises(db),
             )
             .into_iter()
             .map(Into::into),
