@@ -5374,6 +5374,7 @@ fn selected_signature_arrays_cannot_escape_with_block() {
         "signature_const_array_direct_array_escape.fe",
         "signature_const_array_moved_array_escape.fe",
         "signature_const_array_forwarded_array_escape.fe",
+        "signature_const_array_field_array_escape.fe",
     ] {
         let fixture = root.join(name);
         let (output, exit_code) =

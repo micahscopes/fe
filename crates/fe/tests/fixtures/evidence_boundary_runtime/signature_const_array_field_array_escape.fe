@@ -1,0 +1,11 @@
+// RD120 pending: field projection must retain the authored constant dependency.
+trait Compute { const N: usize }
+struct Subject {}
+impl Compute for Subject { const N: usize = 1 }
+impl Compute for Subject as Other { const N: usize = 2 }
+struct Buf<T: Compute> { a: [u256; T::N] }
+fn make<T: Compute>(_ a: [u256; T::N]) -> Buf<T> { Buf { a } }
+fn value() -> u256 { let a = with (Other) { make<Subject>([7,8]).a }
+a[1] }
+#[test]
+fn t(){assert(value()==8)}
