@@ -1259,7 +1259,13 @@ where
                     db,
                     &receiver_ty,
                     ident,
-                    MethodLookup::from_path_premises(db, parent_scope, assumptions),
+                    MethodLookup::from_path_premises(
+                        db,
+                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                            parent_scope,
+                            assumptions,
+                        ),
+                    ),
                     None,
                 ) {
                     Ok(cand) => {

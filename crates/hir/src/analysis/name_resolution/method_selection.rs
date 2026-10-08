@@ -129,15 +129,15 @@ impl<'db> MethodLookup<'db> {
     }
 
     /// Path resolution still receives its scope and premises from its caller
-    /// (decision 1 replaces that pair with the position context).
+    /// as an unpositioned pair (decision 1 replaces it with the position
+    /// context).
     pub(crate) fn from_path_premises(
         db: &'db dyn HirAnalysisDb,
-        scope: ScopeId<'db>,
-        assumptions: PredicateListId<'db>,
+        premises: crate::analysis::semantic::SolverPremises<'db>,
     ) -> Self {
         Self {
-            scope,
-            solve_cx: TraitSolveCx::new(db, scope).with_assumptions(assumptions),
+            scope: premises.scope(),
+            solve_cx: premises.solver_context(db),
         }
     }
 
