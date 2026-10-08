@@ -5410,3 +5410,8 @@ fn rd121_known_evidence_array_indices_at_o0_and_o2() {
         "evidence_choice_checks/rd121-known_index_local_array_1.fe",
     );
 }
+
+#[test]
+fn constant_layout_backing_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("constant_layout_backing.fe");
+}

@@ -552,10 +552,40 @@ fn discard_unused_constants<'db>(body: &mut SemanticBody<'db>) {
         used.extend(terminator_used_locals(&block.terminator.kind));
         for statement in &block.stmts {
             match &statement.kind {
-                SStmtKind::Assign { expr, .. } => used.extend(expr_used_locals(expr)),
+                SStmtKind::Assign { dst, expr } => {
+                    used.extend(expr_used_locals(expr));
+                    if !matches!(expr, SExpr::Const(SConst::Value(_))) {
+                        // This assignment survives cleanup, so normalization
+                        // will also consume its destination's layout backings.
+                        used.insert(*dst);
+                    }
+                }
                 SStmtKind::Store { dst, src } => {
                     used.extend(place_used_locals(dst));
                     used.insert(src.value);
+                }
+            }
+        }
+    }
+    // Layout provenance is an implicit read during normalization. Follow it
+    // transitively for surviving values, including dynamic projection indices.
+    // An unused constant's own metadata must not keep that constant alive.
+    let mut pending = used.iter().copied().collect::<Vec<_>>();
+    while let Some(local) = pending.pop() {
+        for backing in &body.locals[local.index()].layout_backing_sources {
+            let dependencies = match &backing.source {
+                LayoutBackingPlace::Local(place) => place_used_locals(place),
+                LayoutBackingPlace::RootProvider { path, .. } => path
+                    .iter()
+                    .filter_map(|projection| match projection {
+                        Projection::Index(IndexSource::Dynamic(local)) => Some(*local),
+                        _ => None,
+                    })
+                    .collect(),
+            };
+            for dependency in dependencies {
+                if used.insert(dependency) {
+                    pending.push(dependency);
                 }
             }
         }

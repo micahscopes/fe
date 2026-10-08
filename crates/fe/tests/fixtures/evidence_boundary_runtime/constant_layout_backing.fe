@@ -1,0 +1,20 @@
+mod author {
+    use core::meta::{Code, Item, Record}
+
+    pub struct Half { pub a: u256, b: u256 }
+
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            pub fn generated() -> u256 {
+                let h = Half { a: 1, b: 2 }
+                h.a
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+pub struct T {}
+
+#[test]
+fn constant_field_read() { assert!(generated() == 1) }
