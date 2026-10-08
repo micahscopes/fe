@@ -103,11 +103,20 @@ impl<'db> TyChecker<'db> {
         let ascription = ascription.map(|ty| self.lower_ty(ty, span.clone().ty(), true));
 
         if let Some(expr) = expr {
+            let before = self.diags.len();
             let prop = if let Some(ascription) = ascription {
                 self.check_expr(*expr, ascription)
             } else {
                 self.check_expr_unknown(*expr)
             };
+            if self.diags.len() == before
+                && self.type_contains_evidence(prop.ty)
+                && !self.has_compile_time_source(*expr)
+            {
+                self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
+                    primary: expr.span(self.body()).into(),
+                });
+            }
             let (pat_expected, mode) = self.destructure_source_mode(prop.ty);
             let layout = self.pattern_layout_context(*expr);
             self.check_pat_with_layout(*pat, pat_expected, layout.as_ref());
@@ -527,7 +536,7 @@ impl<'db> TyChecker<'db> {
                         !self.has_compile_time_condition_source(*cond)
                     }
                     Partial::Present(Expr::Match(scrutinee, _)) => {
-                        !self.has_compile_time_source(*scrutinee)
+                        !self.has_compile_time_selector_source(*scrutinee)
                     }
                     _ => false,
                 }

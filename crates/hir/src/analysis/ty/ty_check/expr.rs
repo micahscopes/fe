@@ -5763,11 +5763,14 @@ impl<'db> TyChecker<'db> {
 
     /// Recognize compile-time source forms without executing or propagating values.
     pub(super) fn has_compile_time_source(&self, root: ExprId) -> bool {
-        // Const-language checking validates these bodies. Calls producing evidence
-        // require compile-time arguments at their caller, before evaluation.
-        if self.in_const_context() {
-            return true;
-        }
+        self.has_compile_time_source_for(root, true)
+    }
+
+    pub(super) fn has_compile_time_selector_source(&self, root: ExprId) -> bool {
+        self.has_compile_time_source_for(root, false)
+    }
+
+    fn has_compile_time_source_for(&self, root: ExprId, allow_method: bool) -> bool {
         let mut pending = vec![root];
         let mut seen = FxHashSet::default();
         while let Some(expr) = pending.pop() {
@@ -5779,9 +5782,7 @@ impl<'db> TyChecker<'db> {
             };
             match data {
                 Expr::Lit(_) => {}
-                Expr::Un(inner, _) | Expr::Cast(inner, _) | Expr::Field(inner, _) => {
-                    pending.push(*inner)
-                }
+                Expr::Un(inner, _) | Expr::Cast(inner, _) => pending.push(*inner),
                 Expr::Bin(lhs, rhs, _) => pending.extend([*lhs, *rhs]),
                 Expr::Tuple(items) | Expr::Array(items) => pending.extend(items.iter().copied()),
                 Expr::RecordInit(_, fields) => {
@@ -5826,7 +5827,20 @@ impl<'db> TyChecker<'db> {
                     };
                     pending.push(initializer);
                 }
+                Expr::If(cond, then, otherwise) => {
+                    if !self.has_compile_time_condition_source(*cond) {
+                        return false;
+                    }
+                    pending.push(*then);
+                    pending.extend(otherwise.iter().copied());
+                }
                 Expr::Call(_, args) | Expr::MethodCall(_, _, _, args) => {
+                    if let Expr::MethodCall(receiver, ..) = data {
+                        if !allow_method {
+                            return false;
+                        }
+                        pending.push(*receiver);
+                    }
                     let Some(callable) = self.env.callable_expr(expr) else {
                         return false;
                     };
@@ -5835,9 +5849,6 @@ impl<'db> TyChecker<'db> {
                     };
                     if !func.is_const(self.db) {
                         return false;
-                    }
-                    if let Expr::MethodCall(receiver, ..) = data {
-                        pending.push(*receiver);
                     }
                     pending.extend(args.iter().map(|arg| arg.expr));
                 }
@@ -5852,7 +5863,7 @@ impl<'db> TyChecker<'db> {
         while let Some(cond) = pending.pop() {
             match cond.data(self.db, self.body()) {
                 Partial::Present(Cond::Expr(expr)) => {
-                    if !self.has_compile_time_source(*expr) {
+                    if !self.has_compile_time_selector_source(*expr) {
                         return false;
                     }
                 }
@@ -5997,7 +6008,9 @@ impl<'db> TyChecker<'db> {
             }
         }
 
-        if self.type_contains_evidence(match_ty) && !self.has_compile_time_source(*scrutinee) {
+        if self.type_contains_evidence(match_ty)
+            && !self.has_compile_time_selector_source(*scrutinee)
+        {
             self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
                 primary: expr.span(self.body()).into(),
             });

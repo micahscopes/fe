@@ -5266,6 +5266,11 @@ fn rd121_mutable_places_cannot_hold_evidence() {
         "rd121-ordinary_method_return.fe",
         "rd121-const_call_runtime_argument.fe",
         "rd121-runtime_field_selector.fe",
+        "rd121-const_method_selector.fe",
+        "rd121-const_field_selector.fe",
+        "rd121-runtime_index_const_array.fe",
+        "rd121-runtime_index_local_array.fe",
+        "rd121-const_fn_runtime_evidence_branch.fe",
     ] {
         let fixture = root.join(name);
         let (output, exit_code) =
@@ -5290,8 +5295,6 @@ fn rd121_immutable_evidence_and_scalar_branches_remain_accepted() {
         "rd121-immutable_const_function_binding.fe",
         "rd121-runtime_branch_around_scalar_use.fe",
         "rd121-const_method_known_receiver.fe",
-        "rd121-const_method_selector.fe",
-        "rd121-const_field_selector.fe",
     ] {
         let fixture = root.join(name);
         let (output, exit_code) =
