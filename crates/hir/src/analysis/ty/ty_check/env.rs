@@ -991,6 +991,10 @@ impl<'db> TyCheckEnv<'db> {
         self.decisions.choices.len()
     }
 
+    pub(super) fn trait_choice(&self, site: &DecisionSite<'db>) -> Option<TraitChoiceId<'db>> {
+        self.decisions.choice_ref(site)
+    }
+
     pub(super) fn record_trait_choice(
         &mut self,
         site: DecisionSite<'db>,

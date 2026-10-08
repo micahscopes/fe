@@ -4984,15 +4984,50 @@ fn rd103_impl_bound_condition_and_body_at_o0_and_o2() {
 }
 
 #[test]
-#[ignore = "Step 2: loop choice convergence must preserve array inference and borrowing"]
 fn loop_seq_selections_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("loop_seq_selections.fe");
 }
 
 #[test]
-#[ignore = "Step 2: generic loop resolution must read the caller's Seq bound"]
 fn loop_seq_bound_choice_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("loop_seq_bound_choice.fe");
+}
+
+#[test]
+fn loop_missing_seq_reports_the_receiver() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/loop_missing_seq.fe");
+    let (output, exit_code) = run_fe_main(&[
+        "check",
+        "--standalone",
+        fixture.to_str().expect("fixture path utf8"),
+    ]);
+    assert_eq!(exit_code, 1, "{output}");
+    assert_eq!(output.matches("error[8-0020]").count(), 1, "{output}");
+    assert_eq!(output.matches("error[").count(), 1, "{output}");
+    assert!(
+        output.contains("`Seq` needs to be implemented for NotSeq"),
+        "{output}"
+    );
+    assert!(output.contains("for x in value"), "{output}");
+}
+
+#[test]
+fn loop_seq_descriptor_requires_impl_bounds() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/loop_missing_impl_bound.fe");
+    let (output, exit_code) = run_fe_main(&[
+        "check",
+        "--standalone",
+        fixture.to_str().expect("fixture path utf8"),
+    ]);
+    assert_eq!(exit_code, 1, "{output}");
+    assert_eq!(output.matches("error[8-0020]").count(), 1, "{output}");
+    assert_eq!(output.matches("error[").count(), 1, "{output}");
+    assert!(
+        output.contains("`Seq` needs to be implemented for V<N>"),
+        "{output}"
+    );
 }
 
 fn evidence_boundary_runtime_at_o0_and_o2(name: &str) {

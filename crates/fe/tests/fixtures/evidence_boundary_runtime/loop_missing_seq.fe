@@ -1,0 +1,5 @@
+struct NotSeq {}
+
+fn run(value: NotSeq) {
+    for x in value { let _ = x }
+}

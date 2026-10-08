@@ -1,0 +1,10 @@
+use core::seq::Seq
+struct V<T> { value: T }
+impl<T: Copy> Seq for V<T> {
+ type Item = T
+ fn len(self) -> usize { 1 }
+ fn get(self, _ i: usize) -> T { self.value }
+}
+struct N {}
+fn run() { let v = V { value: N {} }
+ for x in v { let _ = x } }
