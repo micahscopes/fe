@@ -8,7 +8,10 @@ use crate::{
         semantic::{FieldIndex, SemConstValue, VariantIndex},
         ty::{
             adt_def::{AdtRef, instantiate_adt_field_source_for_concrete_demand},
-            const_ty::{ConstTyData, ConstTyId, normalize_const_tys_for_comparison},
+            const_ty::{
+                ConstCanonEnv, ConstCanonMode, ConstTyData, ConstTyId, canonicalize_ty_for_mode,
+                normalize_const_tys_for_comparison,
+            },
             fold::TyFoldable,
             normalize::normalize_ty,
             trait_resolution::PredicateListId,
@@ -289,6 +292,15 @@ impl<'db> ShapeCx<'db> {
                 self.scope,
                 self.assumptions,
             ),
+        );
+        // Capability identity includes the complete target type, including
+        // lengths behind references. Deferred field bodies and evaluated
+        // signatures must use the same identity before building that shape.
+        let ty = canonicalize_ty_for_mode(
+            self.db,
+            ty,
+            ConstCanonEnv::new(self.scope, self.assumptions, None),
+            ConstCanonMode::Identity,
         );
         let direct = capability_semantics(self.db, self.scope, self.assumptions, ty)
             .map_err(|error| ShapeError::UnresolvedCapability(error.0))?;
