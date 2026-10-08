@@ -1,0 +1,10 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: rendered
+input_file: tests/fixtures/quote_forms/unsupported/where_const_generic_literal.fe
+---
+file://<project>/crates/driver/tests/fixtures/quote_forms/unsupported/where_const_generic_literal.fe: error[8-0119]: a const generic argument is not supported inside a quote yet
+  ┌─ where_const_generic_literal.fe:6:53
+  │
+6 │             fn generated<T>() where T: ingot::Sized<2> {}
+  │                                                     ^ not supported inside a quote yet

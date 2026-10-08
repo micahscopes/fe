@@ -1,0 +1,11 @@
+trait Sized<const N: u256> {}
+mod author {
+    use core::meta::{Code, Item, Record}
+    pub const fn emit(_ record: Record) -> Code<Item> {
+        quote {
+            fn generated<T>() where T: ingot::Sized<2> {}
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct Target {}

@@ -21,10 +21,11 @@ use crate::{
     },
     core::meta::{MetaItem, QuoteMember},
     hir_def::{
-        Body, CallableDef, Cond, CondId, Expr, ExprId, FuncParamName, GenericArg, GenericArgListId,
-        GenericParam, GenericParamListId, IdentId, Partial, Pat, PatId, PathId, PathKind, Quote,
-        QuoteHolePosition, QuoteItem, QuoteKind, QuoteUnsupportedForm, QuoteWhereClause,
-        QuoteWherePredicate, Stmt, StmtId, TypeBound, TypeId as HirTyId, TypeKind,
+        Body, CallableDef, Cond, CondId, ConstGenericArgValue, Expr, ExprId, FuncParamName,
+        GenericArg, GenericArgListId, GenericParam, GenericParamListId, IdentId, Partial, Pat,
+        PatId, PathId, PathKind, Quote, QuoteHolePosition, QuoteItem, QuoteKind,
+        QuoteUnsupportedForm, QuoteWhereClause, QuoteWherePredicate, Stmt, StmtId, TypeBound,
+        TypeId as HirTyId, TypeKind,
     },
     span::DynLazySpan,
 };
@@ -728,9 +729,15 @@ impl<'a, 'db> TemplateWalk<'a, 'db> {
             GenericArg::Type(arg) => self.walk_ty_opt(arg.ty),
             GenericArg::AssocType(arg) => self.walk_ty_opt(arg.ty),
             // Its body's names would bind where the code lands.
-            GenericArg::Const(_) => {
-                self.unsupported_type_form(QuoteUnsupportedForm::ConstGenericArgument)
-            }
+            GenericArg::Const(arg) => match arg.value {
+                ConstGenericArgValue::Expr(Partial::Present(body)) => self.unsupported(
+                    body.expr(self.db()).span(body).into(),
+                    QuoteUnsupportedForm::ConstGenericArgument,
+                ),
+                ConstGenericArgValue::Expr(Partial::Absent) | ConstGenericArgValue::Hole => {
+                    self.unsupported_type_form(QuoteUnsupportedForm::ConstGenericArgument)
+                }
+            },
         }
     }
 

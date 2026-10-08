@@ -4,7 +4,7 @@ expression: rendered
 input_file: tests/fixtures/quote_forms/unsupported/const_generic_literal.fe
 ---
 file://<project>/crates/driver/tests/fixtures/quote_forms/unsupported/const_generic_literal.fe: error[8-0119]: a const generic argument is not supported inside a quote yet
-  ┌─ const_generic_literal.fe:7:36
+  ┌─ const_generic_literal.fe:7:49
   │
 7 │             pub fn gen() -> u256 { ingot::width<2>() }
-  │                                    ^^^^^^^^^^^^^^^ not supported inside a quote yet
+  │                                                 ^ not supported inside a quote yet
