@@ -165,7 +165,10 @@ impl<'db> ConstFnChecker<'db, '_> {
                 choice?,
                 name,
             )
-            .ok()?
+            // A choice that cannot be read back here still has its trait
+            // declaration, whose const contract is checked instead: failing to
+            // find the body must not let the call pass unchecked.
+            .unwrap_or(Selection::NotFound)
             && let Some(impl_func) = method.body()
         {
             return Some(impl_func);
