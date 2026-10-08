@@ -111,11 +111,9 @@ impl<'db> TyChecker<'db> {
             };
             if self.diags.len() == before
                 && self.type_contains_evidence(prop.ty)
-                && !self.has_compile_time_source(*expr)
+                && let Some(failure) = self.compile_time_source_failure(*expr, true)
             {
-                self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
-                    primary: expr.span(self.body()).into(),
-                });
+                self.report_evidence_source_failure(failure);
             }
             let (pat_expected, mode) = self.destructure_source_mode(prop.ty);
             let layout = self.pattern_layout_context(*expr);
@@ -212,6 +210,7 @@ impl<'db> TyChecker<'db> {
                 if !ty.has_invalid(self.db) && self.type_contains_evidence(ty) {
                     self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
                         primary: pat.span(self.body()).into_path_pat().mut_token().into(),
+                        reason: None,
                     });
                     return;
                 }
@@ -530,21 +529,23 @@ impl<'db> TyChecker<'db> {
         }
 
         if !had_child_err && self.type_contains_evidence(returned_ty) {
-            let runtime_branch = self.env.active_exprs().iter().rev().copied().find(|site| {
-                match site.data(self.db, self.body()) {
+            let failure = self
+                .env
+                .active_exprs()
+                .iter()
+                .rev()
+                .copied()
+                .find_map(|site| match site.data(self.db, self.body()) {
                     Partial::Present(Expr::If(cond, _, _)) => {
-                        !self.has_compile_time_condition_source(*cond)
+                        self.compile_time_condition_failure(*cond)
                     }
                     Partial::Present(Expr::Match(scrutinee, _)) => {
-                        !self.has_compile_time_selector_source(*scrutinee)
+                        self.compile_time_source_failure(*scrutinee, false)
                     }
-                    _ => false,
-                }
-            });
-            if let Some(site) = runtime_branch {
-                self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
-                    primary: site.span(self.body()).into(),
+                    _ => None,
                 });
+            if let Some(failure) = failure {
+                self.report_evidence_source_failure(failure);
             }
         }
 

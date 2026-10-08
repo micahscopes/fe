@@ -1920,6 +1920,7 @@ impl<'db> TyChecker<'db> {
                     if mutable && self.type_contains_evidence(ty) {
                         self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
                             primary: func.span().params().param(idx).ty().into(),
+                            reason: None,
                         });
                     }
                 }
@@ -1939,6 +1940,7 @@ impl<'db> TyChecker<'db> {
                     if mutable && self.type_contains_evidence(ty) {
                         self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
                             primary: contract.span().init_block().params().param(idx).ty().into(),
+                            reason: None,
                         });
                     }
                 }

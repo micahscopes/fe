@@ -745,6 +745,7 @@ pub enum BodyDiag<'db> {
     /// `let mut` local bindings must bind owned values, not capability handles.
     EvidenceChoiceNotCompileTime {
         primary: DynLazySpan<'db>,
+        reason: Option<String>,
     },
 
     MutableBindingCannotBeCapability {

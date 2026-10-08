@@ -5748,29 +5748,30 @@ impl<'db> TyChecker<'db> {
         args: &[HirCallArg<'db>],
         receiver: Option<ExprId>,
     ) {
-        if self.type_contains_evidence(result)
-            && (!matches!(callable.callable_def(), CallableDef::Func(func) if func.is_const(self.db))
-                || !args
-                    .iter()
-                    .all(|arg| self.has_compile_time_source(arg.expr))
-                || receiver.is_some_and(|expr| !self.has_compile_time_source(expr)))
+        if !self.type_contains_evidence(result) {
+            return;
+        }
+        let failure = if !matches!(callable.callable_def(), CallableDef::Func(func) if func.is_const(self.db))
         {
-            self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
-                primary: expr.span(self.body()).into(),
-            });
+            Some(expr)
+        } else {
+            args.iter()
+                .find_map(|arg| self.compile_time_source_failure(arg.expr, true))
+                .or_else(|| {
+                    receiver.and_then(|receiver| self.compile_time_source_failure(receiver, true))
+                })
+        };
+        if let Some(failure) = failure {
+            self.report_evidence_source_failure(failure);
         }
     }
 
     /// Recognize compile-time source forms without executing or propagating values.
-    pub(super) fn has_compile_time_source(&self, root: ExprId) -> bool {
-        self.has_compile_time_source_for(root, true)
-    }
-
-    pub(super) fn has_compile_time_selector_source(&self, root: ExprId) -> bool {
-        self.has_compile_time_source_for(root, false)
-    }
-
-    fn has_compile_time_source_for(&self, root: ExprId, allow_method: bool) -> bool {
+    pub(super) fn compile_time_source_failure(
+        &self,
+        root: ExprId,
+        allow_method: bool,
+    ) -> Option<ExprId> {
         let mut pending = vec![root];
         let mut seen = FxHashSet::default();
         while let Some(expr) = pending.pop() {
@@ -5778,7 +5779,7 @@ impl<'db> TyChecker<'db> {
                 continue;
             }
             let Partial::Present(data) = expr.data(self.db, self.body()) else {
-                return false;
+                return Some(expr);
             };
             match data {
                 Expr::Lit(_) => {}
@@ -5791,10 +5792,10 @@ impl<'db> TyChecker<'db> {
                 Expr::With(_, body) => pending.push(*body),
                 Expr::Block(stmts) => {
                     let Some(stmt) = stmts.last() else { continue };
-                    let Partial::Present(Stmt::Expr(expr)) = stmt.data(self.db, self.body()) else {
-                        return false;
+                    let Partial::Present(Stmt::Expr(tail)) = stmt.data(self.db, self.body()) else {
+                        return Some(expr);
                     };
-                    pending.push(*expr);
+                    pending.push(*tail);
                 }
                 Expr::Path(_) => {
                     if self.env.expr_const_ref(expr).is_some()
@@ -5808,7 +5809,7 @@ impl<'db> TyChecker<'db> {
                     let Some(LocalBinding::Local { pat, is_mut: false }) =
                         self.env.typed_expr(expr).and_then(|p| p.binding)
                     else {
-                        return false;
+                        return Some(expr);
                     };
                     let initializer =
                         self.body()
@@ -5823,13 +5824,13 @@ impl<'db> TyChecker<'db> {
                                 _ => None,
                             });
                     let Some(initializer) = initializer else {
-                        return false;
+                        return Some(expr);
                     };
                     pending.push(initializer);
                 }
                 Expr::If(cond, then, otherwise) => {
-                    if !self.has_compile_time_condition_source(*cond) {
-                        return false;
+                    if let Some(failure) = self.compile_time_condition_failure(*cond) {
+                        return Some(failure);
                     }
                     pending.push(*then);
                     pending.extend(otherwise.iter().copied());
@@ -5837,46 +5838,75 @@ impl<'db> TyChecker<'db> {
                 Expr::Call(_, args) | Expr::MethodCall(_, _, _, args) => {
                     if let Expr::MethodCall(receiver, ..) = data {
                         if !allow_method {
-                            return false;
+                            return Some(expr);
                         }
                         pending.push(*receiver);
                     }
                     let Some(callable) = self.env.callable_expr(expr) else {
-                        return false;
+                        return Some(expr);
                     };
                     let CallableDef::Func(func) = callable.callable_def() else {
-                        return false;
+                        return Some(expr);
                     };
                     if !func.is_const(self.db) {
-                        return false;
+                        return Some(expr);
                     }
                     pending.extend(args.iter().map(|arg| arg.expr));
                 }
-                _ => return false,
+                _ => return Some(expr),
             }
         }
-        true
+        None
     }
 
-    pub(super) fn has_compile_time_condition_source(&self, root: CondId) -> bool {
+    pub(super) fn compile_time_condition_failure(&self, root: CondId) -> Option<ExprId> {
         let mut pending = vec![root];
         while let Some(cond) = pending.pop() {
             match cond.data(self.db, self.body()) {
                 Partial::Present(Cond::Expr(expr)) => {
-                    if !self.has_compile_time_selector_source(*expr) {
-                        return false;
+                    if let Some(failure) = self.compile_time_source_failure(*expr, false) {
+                        return Some(failure);
                     }
                 }
                 Partial::Present(Cond::Bin(lhs, rhs, _)) => pending.extend([*lhs, *rhs]),
-                _ => return false,
+                Partial::Present(Cond::Let(_, value)) => return Some(*value),
+                _ => return Some(self.body().expr(self.db)),
             }
         }
-        true
+        None
+    }
+
+    pub(super) fn report_evidence_source_failure(&mut self, expr: ExprId) {
+        let reason = match expr.data(self.db, self.body()) {
+            Partial::Present(Expr::Path(Partial::Present(path))) => {
+                let name = path.pretty_print(self.db);
+                match self.env.typed_expr(expr).and_then(|prop| prop.binding) {
+                    Some(LocalBinding::Param { .. } | LocalBinding::EffectParam { .. }) => {
+                        format!("`{name}` is a parameter, not a compile-time source")
+                    }
+                    Some(LocalBinding::Local { is_mut: true, .. }) => {
+                        format!("`{name}` is a mutable place")
+                    }
+                    _ => format!("`{name}` is a runtime value"),
+                }
+            }
+            Partial::Present(Expr::Field(..) | Expr::MethodCall(..)) => {
+                "this selector cannot choose evidence at compile time".to_string()
+            }
+            Partial::Present(Expr::Call(..)) => {
+                "this call is not a compile-time evidence source".to_string()
+            }
+            _ => "this expression is not a compile-time evidence source".to_string(),
+        };
+        self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
+            primary: expr.span(self.body()).into(),
+            reason: Some(reason),
+        });
     }
 
     fn check_if(
         &mut self,
-        expr: ExprId,
+        _expr: ExprId,
         expr_data: &Expr<'db>,
         expected: TyId<'db>,
         result_discarded: bool,
@@ -5904,11 +5934,9 @@ impl<'db> TyChecker<'db> {
             self.env.leave_scope();
             let else_prop = self.check_expr_in_new_scope(*else_, expected, result_discarded);
             if self.type_contains_evidence(else_prop.ty)
-                && !self.has_compile_time_condition_source(*cond)
+                && let Some(failure) = self.compile_time_condition_failure(*cond)
             {
-                self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
-                    primary: expr.span(self.body()).into(),
-                });
+                self.report_evidence_source_failure(failure);
             }
             let borrow_provider = self.merge_concrete_borrow_providers(
                 then.span(self.body()).into(),
@@ -6009,11 +6037,9 @@ impl<'db> TyChecker<'db> {
         }
 
         if self.type_contains_evidence(match_ty)
-            && !self.has_compile_time_selector_source(*scrutinee)
+            && let Some(failure) = self.compile_time_source_failure(*scrutinee, false)
         {
-            self.push_diag(BodyDiag::EvidenceChoiceNotCompileTime {
-                primary: expr.span(self.body()).into(),
-            });
+            self.report_evidence_source_failure(failure);
         }
 
         if !scrutinee_pat_ty.has_invalid(self.db)
