@@ -5359,3 +5359,33 @@ fn selected_const_aggregate_cannot_escape_with_block() {
         assert_eq!(output.matches("error[").count(), 1, "{name}: {output}");
     }
 }
+
+#[test]
+fn fixed_literal_array_can_leave_selected_constant_scope_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("signature_const_array_fixed_literal_control.fe");
+}
+
+#[test]
+#[ignore = "RD120: preserve the authored constant dependency through direct, moved and forwarded array results"]
+fn selected_signature_arrays_cannot_escape_with_block() {
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evidence_boundary_runtime");
+    for name in [
+        "signature_const_array_direct_array_escape.fe",
+        "signature_const_array_moved_array_escape.fe",
+        "signature_const_array_forwarded_array_escape.fe",
+    ] {
+        let fixture = root.join(name);
+        let (output, exit_code) =
+            run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+        assert_eq!(
+            exit_code, 1,
+            "{name}: selected constant-dependent array escaped: {output}"
+        );
+        assert!(
+            output.contains("error[8-0121]"),
+            "{name}: missing boundary diagnostic: {output}"
+        );
+        assert_eq!(output.matches("error[").count(), 1, "{name}: {output}");
+    }
+}

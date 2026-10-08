@@ -1,0 +1,11 @@
+// RD120: a fixed literal array has no selected-constant type dependency.
+trait Compute { const N: usize }
+struct Subject {}
+impl Compute for Subject { const N: usize = 1 }
+impl Compute for Subject as Other { const N: usize = 2 }
+fn make<T: Compute>(_ a: [u256; T::N]) -> [u256; T::N] { a }
+fn pass<T: Compute>(_ a: [u256; T::N]) -> [u256; T::N] { a }
+fn leak() -> u256 { let a = with (Other) { [7,8] }
+a[1] }
+#[test]
+fn t(){assert(leak()==8)}
