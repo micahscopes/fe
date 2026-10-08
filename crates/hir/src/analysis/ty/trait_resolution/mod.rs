@@ -309,7 +309,8 @@ impl<'db> TraitSolveCx<'db> {
     /// implementations rather than about a program position; under the orphan
     /// rule the caller's own scope cannot change which of them are visible.
     /// Only the caller's assumptions are read from `premises`. Used only by
-    /// the constrained implementation search in `trait_def`.
+    /// the constrained implementation search in `trait_def`;
+    /// `.github/check_solver_premises_budget.py` keeps it to that one caller.
     pub(in crate::analysis::ty) fn ingot_impl_search(
         db: &'db dyn HirAnalysisDb,
         ingot: Ingot<'db>,
