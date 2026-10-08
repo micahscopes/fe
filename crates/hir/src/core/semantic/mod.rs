@@ -6023,15 +6023,11 @@ impl<'db> FieldView<'db> {
         // First, surface name-resolution errors for the field's HIR type path.
         let hir_ty = self.parent.fields_list(db).data(db)[self.idx].type_ref;
         if let Some(hir_ty) = hir_ty.to_opt() {
-            let assumptions = constraints_for(db, self.owner_item());
             let errs = collect_hir_ty_diags(
                 db,
                 hir_ty,
                 self.lazy_ty_span(),
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    self.scope(),
-                    assumptions,
-                ),
+                context_at(db, self.scope(), None).premises(db),
             );
             if !errs.is_empty() {
                 return errs;

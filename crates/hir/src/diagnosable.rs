@@ -1623,10 +1623,7 @@ impl<'db> VariantView<'db> {
                     db,
                     hir_ty,
                     span.clone(),
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        scope,
-                        assumptions,
-                    ),
+                    crate::semantic::context_at(db, scope, None).premises(db),
                 );
                 if !errs.is_empty() {
                     out.append(&mut errs);
