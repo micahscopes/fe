@@ -513,10 +513,9 @@ impl<'db> Callable<'db> {
                 if given.has_invalid(tc.db) {
                     for diag in crate::analysis::ty::ty_error::collect_generic_arg_errors(
                         tc.db,
-                        tc.env.scope(),
                         &args.data(tc.db)[idx],
                         span.clone().arg(idx),
-                        tc.env.assumptions(),
+                        tc.env.position_context().premises(tc.db),
                     ) {
                         tc.push_diag(diag);
                     }
@@ -544,10 +543,9 @@ impl<'db> Callable<'db> {
                     if !error.from_default && args.is_given(tc.db) {
                         let diags = crate::analysis::ty::ty_error::collect_generic_arg_errors(
                             tc.db,
-                            tc.env.scope(),
                             &args.data(tc.db)[error.index],
                             span.clone().arg(error.index),
-                            tc.env.assumptions(),
+                            tc.env.position_context().premises(tc.db),
                         );
                         if !diags.is_empty() {
                             for diag in diags {
@@ -923,14 +921,7 @@ impl<'db> Callable<'db> {
             .get(arg_idx)?
             .instantiate(tc.db, &self.generic_args);
         expected = self.normalize_with_trait_evidence(tc.db, expected);
-        let expected = normalize_ty(
-            tc.db,
-            expected,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                tc.env.scope(),
-                tc.env.assumptions(),
-            ),
-        );
+        let expected = normalize_ty(tc.db, expected, tc.env.position_context().premises(tc.db));
         if tc.string_literal_should_use_byte_array(expected)
             || self
                 .callable_def

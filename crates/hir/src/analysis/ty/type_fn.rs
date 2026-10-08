@@ -252,10 +252,12 @@ pub(super) fn check_definition_templates<'db>(
         let hir_ty = arm.ty.to_opt().expect("checked arm shape");
         let source_diags = super::ty_error::collect_hir_ty_diags(
             db,
-            def.scope(),
             hir_ty,
             span.clone(),
-            assumptions,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                def.scope(),
+                assumptions,
+            ),
         );
         if !source_diags.is_empty() {
             diags.extend(source_diags);

@@ -511,9 +511,8 @@ impl<'db> Func<'db> {
                 diags.push(TyLowerDiag::ConstHoleInValuePosition { span, ty: ret }.into());
             } else if let Some(diag) = ty::ty_error::normalization_limit_diag(
                 db,
-                self.scope(),
+                crate::semantic::context_at(db, self.scope(), None).premises(db),
                 ret,
-                crate::semantic::context_at(db, self.scope(), None).assumptions(db),
                 span.clone(),
             ) {
                 diags.push(diag);
@@ -626,10 +625,12 @@ impl<'db> Trait<'db> {
             let assumptions = assoc.with_parameter_bounds(db, assumptions);
             let source_diags = ty::ty_error::collect_hir_ty_diags(
                 db,
-                assoc.scope(),
                 assoc.default_hir_ty(db).expect("default type has source"),
                 assoc.span().ty(),
-                assumptions,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    assoc.scope(),
+                    assumptions,
+                ),
             );
             if !source_diags.is_empty() {
                 diags.extend(source_diags);
@@ -889,10 +890,12 @@ impl<'db> Impl<'db> {
             if let Some(hir_ty) = impl_const.hir_ty(db) {
                 let ty_diags = ty::ty_error::collect_hir_ty_diags(
                     db,
-                    self.scope(),
                     hir_ty,
                     impl_const.span().ty(),
-                    assumptions,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        self.scope(),
+                        assumptions,
+                    ),
                 );
                 if !ty_diags.is_empty() {
                     diags.extend(ty_diags);
@@ -1151,7 +1154,15 @@ impl<'db> ImplTrait<'db> {
             let assumptions = constraints_for(db, self.into());
             if impl_header_ty.has_invalid(db) {
                 let errs = impl_const.hir_ty(db).map(|hir_ty| {
-                    collect_ty_lower_errors(db, scope, hir_ty, impl_const.span().ty(), assumptions)
+                    collect_ty_lower_errors(
+                        db,
+                        hir_ty,
+                        impl_const.span().ty(),
+                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                            scope,
+                            assumptions,
+                        ),
+                    )
                 });
                 match errs {
                     Some(errs) if !errs.is_empty() => diags.extend(errs),
@@ -1617,10 +1628,12 @@ impl<'db> VariantView<'db> {
             if !is_const_path {
                 let mut errs = ty::ty_error::collect_ty_lower_errors(
                     db,
-                    scope,
                     hir_ty,
                     span.clone(),
-                    assumptions,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        scope,
+                        assumptions,
+                    ),
                 );
                 if !errs.is_empty() {
                     out.append(&mut errs);
@@ -1796,10 +1809,12 @@ impl<'db> GenericParamOwner<'db> {
             let span = view.span().into_const_param().ty();
             let mut source_diags = collect_ty_lower_errors(
                 db,
-                self.scope(),
                 hir_ty,
                 span.clone(),
-                generic_param_owner_assumptions(db, self.scope()),
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    self.scope(),
+                    generic_param_owner_assumptions(db, self.scope()),
+                ),
             );
             if !source_diags.is_empty() {
                 out.append(&mut source_diags);
@@ -2127,10 +2142,12 @@ impl<'db> Diagnosable<'db> for Trait<'db> {
             if let Some(hir_ty) = assoc.hir_ty(db) {
                 out.extend(ty::ty_error::collect_hir_ty_diags(
                     db,
-                    self.scope(),
                     hir_ty,
                     assoc.span().ty(),
-                    assumptions,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        self.scope(),
+                        assumptions,
+                    ),
                 ));
             }
         }

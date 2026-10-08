@@ -22,66 +22,51 @@ use super::{
 };
 use crate::visitor::prelude::LazyTraitRefSpan;
 
-/// Collect all type-lowering diagnostics for a HIR type.
+/// Collect all type-lowering diagnostics for a HIR type written at the
+/// position whose premises are `premises`: the type is lowered and resolved
+/// under them, and its type applications' requirements are checked under them.
 ///
 /// This encapsulates the two-phase error collection strategy:
 /// 1. First tries to get precise HIR-based errors (path resolution, visibility)
 /// 2. Falls back to semantic `InvalidCause` errors if none found
 pub fn collect_hir_ty_diags<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
     hir_ty: TypeId<'db>,
     span: LazyTySpan<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
-    collect_hir_ty_diags_in_mode(
-        db,
-        scope,
-        hir_ty,
-        span,
-        assumptions,
-        ConstBodyLowering::Eager,
-    )
+    collect_hir_ty_diags_in_mode(db, hir_ty, span, premises, ConstBodyLowering::Eager)
 }
 
 /// Collect structural diagnostics for a declaration template. Anonymous const
 /// bodies are checked by the declaration's body-validation owner.
 pub(crate) fn collect_hir_ty_diags_deferred<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
     hir_ty: TypeId<'db>,
     span: LazyTySpan<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
-    collect_hir_ty_diags_in_mode(
-        db,
-        scope,
-        hir_ty,
-        span,
-        assumptions,
-        ConstBodyLowering::Deferred,
-    )
+    collect_hir_ty_diags_in_mode(db, hir_ty, span, premises, ConstBodyLowering::Deferred)
 }
 
 fn collect_hir_ty_diags_in_mode<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
     hir_ty: TypeId<'db>,
     span: LazyTySpan<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     const_bodies: ConstBodyLowering,
 ) -> Vec<TyDiagCollection<'db>> {
     // Try precise HIR-based errors first
-    let diags =
-        collect_ty_lower_errors_in_mode(db, scope, hir_ty, span.clone(), assumptions, const_bodies);
+    let diags = collect_ty_lower_errors_in_mode(db, hir_ty, span.clone(), premises, const_bodies);
     if !diags.is_empty() {
         return diags;
     }
 
     // Fall back to semantic errors
+    let (scope, assumptions) = (premises.scope(), premises.assumptions());
     let ty = lower_hir_ty_in_mode(db, hir_ty, scope, assumptions, const_bodies);
     emit_invalid_ty_error(db, ty, span.clone().into())
-        .or_else(|| normalization_limit_diag(db, scope, ty, assumptions, span.into()))
+        .or_else(|| normalization_limit_diag(db, premises, ty, span.into()))
         .into_iter()
         .collect()
 }
@@ -90,19 +75,14 @@ fn collect_hir_ty_diags_in_mode<'db>(
 /// consume its invalid normalized result. The existing reducer owns the limit.
 pub(crate) fn normalization_limit_diag<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     ty: TyId<'db>,
-    assumptions: PredicateListId<'db>,
     span: DynLazySpan<'db>,
 ) -> Option<TyDiagCollection<'db>> {
     if !ty.has_projection(db) {
         return None;
     }
-    let normalized = super::normalize::normalize_ty(
-        db,
-        ty,
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
-    );
+    let normalized = super::normalize::normalize_ty(db, ty, premises);
     super::fold::ty_contains(
         db,
         normalized,
@@ -111,56 +91,48 @@ pub(crate) fn normalization_limit_diag<'db>(
     .then(|| TyLowerDiag::TypeNormalizationLimit(span).into())
 }
 
+/// Type-lowering errors for a HIR type written at the position whose premises
+/// are `premises`.
 pub fn collect_ty_lower_errors<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
     hir_ty: TypeId<'db>,
     span: LazyTySpan<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
-    collect_ty_lower_errors_in_mode(
-        db,
-        scope,
-        hir_ty,
-        span,
-        assumptions,
-        ConstBodyLowering::Eager,
-    )
+    collect_ty_lower_errors_in_mode(db, hir_ty, span, premises, ConstBodyLowering::Eager)
 }
 
 fn collect_ty_lower_errors_in_mode<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
     hir_ty: TypeId<'db>,
     span: LazyTySpan<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     const_bodies: ConstBodyLowering,
 ) -> Vec<TyDiagCollection<'db>> {
     let mut vis = HirTyErrVisitor {
         db,
-        assumptions,
+        premises,
         diags: Vec::new(),
         const_bodies,
     };
-    let mut ctxt = VisitorCtxt::new(db, scope, span);
+    let mut ctxt = VisitorCtxt::new(db, premises.scope(), span);
     vis.visit_ty(&mut ctxt, hir_ty);
     vis.diags
 }
 
 pub(crate) fn collect_generic_arg_errors<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
     arg: &GenericArg<'db>,
     span: LazyGenericArgSpan<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
     let mut visitor = HirTyErrVisitor {
         db,
-        assumptions,
+        premises,
         diags: Vec::new(),
         const_bodies: super::const_ty::ConstBodyLowering::Eager,
     };
-    let mut ctxt = VisitorCtxt::new(db, scope, span);
+    let mut ctxt = VisitorCtxt::new(db, premises.scope(), span);
     visitor.visit_generic_arg(&mut ctxt, arg);
     visitor.diags
 }
@@ -322,7 +294,9 @@ impl<'db> Visitor<'db> for ApplicationRequirementVisitor<'db> {
 struct HirTyErrVisitor<'db> {
     db: &'db dyn HirAnalysisDb,
     diags: Vec<TyDiagCollection<'db>>,
-    assumptions: PredicateListId<'db>,
+    /// Premises of the written type's position. Written types introduce no
+    /// scopes and const bodies are skipped, so every path visited is there.
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     const_bodies: ConstBodyLowering,
 }
 
@@ -332,7 +306,7 @@ impl<'db> HirTyErrVisitor<'db> {
             HoleAnchor::TemplatePath {
                 path,
                 scope,
-                assumptions: self.assumptions,
+                assumptions: self.premises.assumptions(),
             },
             self.const_bodies,
         )
@@ -362,7 +336,7 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
                 self.db,
                 path,
                 ctxt.scope(),
-                self.assumptions,
+                self.premises.assumptions(),
                 true,
                 &self.path_context(path, ctxt.scope()),
             )
@@ -398,7 +372,7 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
                         self.db,
                         path,
                         scope,
-                        self.assumptions,
+                        self.premises.assumptions(),
                         true,
                         &mut check_visibility,
                         &self.path_context(path, scope),
@@ -456,7 +430,7 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
             self.db,
             hir_ty,
             ctxt.scope(),
-            self.assumptions,
+            self.premises.assumptions(),
             self.const_bodies,
         );
 
@@ -556,7 +530,7 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
             self.db,
             path,
             scope,
-            self.assumptions,
+            self.premises.assumptions(),
             false,
             &mut check_visibility,
             &self.path_context(path, scope),
@@ -574,12 +548,12 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
             }
         };
 
+        // Written types introduce no scopes and const bodies are skipped, so
+        // this path is at the written type's position.
+        assert_eq!(scope, self.premises.scope());
         self.diags.extend(application_requirement_diags(
             self.db,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                scope,
-                self.assumptions,
-            ),
+            self.premises,
             &path_span,
             type_uses,
             None,
@@ -631,7 +605,7 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
             self.db,
             path,
             scope,
-            self.assumptions,
+            self.premises.assumptions(),
             false,
             &mut check_visibility,
             &self.path_context(path, scope),

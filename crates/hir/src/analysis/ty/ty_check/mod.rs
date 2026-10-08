@@ -167,10 +167,12 @@ pub fn check_const_body<'db>(
         diags.extend(
             super::ty_error::collect_hir_ty_diags(
                 db,
-                const_.scope(),
                 hir_ty,
                 const_.span().ty(),
-                PredicateListId::empty_list(db),
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    const_.scope(),
+                    PredicateListId::empty_list(db),
+                ),
             )
             .into_iter()
             .map(Into::into),
@@ -2309,10 +2311,7 @@ impl<'db> TyChecker<'db> {
         let binding_ty = normalize_ty(
             self.db,
             self.env.lookup_binding_ty(&binding),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.env.scope(),
-                self.env.assumptions(),
-            ),
+            self.env.position_context().premises(self.db),
         );
         let place_result_ty = normalize_ty(
             self.db,
@@ -2320,10 +2319,7 @@ impl<'db> TyChecker<'db> {
                 .projections
                 .last()
                 .map_or(binding_ty, |projection| projection.result_ty()),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.env.scope(),
-                self.env.assumptions(),
-            ),
+            self.env.position_context().premises(self.db),
         );
         if binding_ty.as_capability(self.db).is_some() {
             return self.concrete_borrow_provider_for_binding(binding);
@@ -3556,14 +3552,7 @@ impl<'db> TyChecker<'db> {
     }
 
     fn ty_is_copy(&self, ty: TyId<'db>) -> bool {
-        crate::analysis::ty::ty_is_copy(
-            self.db,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.env.scope(),
-                self.env.assumptions(),
-            ),
-            ty,
-        )
+        crate::analysis::ty::ty_is_copy(self.db, self.env.position_context().premises(self.db), ty)
     }
 
     fn copy_inner_from_borrow(&self, ty: TyId<'db>) -> Option<TyId<'db>> {
@@ -3878,10 +3867,7 @@ impl<'db> TyChecker<'db> {
         let expected = normalize_ty(
             self.db,
             expected,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.env.scope(),
-                self.env.assumptions(),
-            ),
+            self.env.position_context().premises(self.db),
         );
         let (base, args) = expected.decompose_ty_app(self.db);
         matches!(
@@ -3920,14 +3906,7 @@ impl<'db> TyChecker<'db> {
             let ty = context.contextualize_const_types_with(self.db, ty, |goal| {
                 self.env.provision_for_goal(goal)
             });
-            normalize_ty(
-                self.db,
-                ty,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    self.env.scope(),
-                    self.env.assumptions(),
-                ),
-            )
+            normalize_ty(self.db, ty, self.env.position_context().premises(self.db))
         } else if context.selections(self.db).is_empty() {
             lower_hir_ty(self.db, hir_ty, self.env.scope(), self.env.assumptions())
         } else {
@@ -3951,10 +3930,9 @@ impl<'db> TyChecker<'db> {
         if ty.has_invalid(self.db) {
             let diags = collect_ty_lower_errors(
                 self.db,
-                self.env.scope(),
                 hir_ty,
                 span.clone(),
-                self.env.assumptions(),
+                self.env.position_context().premises(self.db),
             );
             if !diags.is_empty() {
                 for d in diags {
@@ -3982,9 +3960,8 @@ impl<'db> TyChecker<'db> {
 
         if let Some(diag) = super::ty_error::normalization_limit_diag(
             self.db,
-            self.env.scope(),
+            self.env.position_context().premises(self.db),
             ty,
-            self.env.assumptions(),
             span.clone().into(),
         ) {
             self.push_diag(diag);
@@ -4448,10 +4425,7 @@ impl<'db> TyChecker<'db> {
         normalize_ty(
             self.db,
             ty.fold_with(self.db, &mut self.table),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.env.scope(),
-                self.env.assumptions(),
-            ),
+            self.env.position_context().premises(self.db),
         )
     }
 }

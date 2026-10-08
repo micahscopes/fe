@@ -272,10 +272,12 @@ pub(crate) fn type_default_diags<'db>(
         let span = view.span().into_type_param().default_ty();
         let mut errors = collect_hir_ty_diags_deferred(
             db,
-            owner.scope(),
             hir_ty,
             span.clone(),
-            default_assumptions(db, owner),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                owner.scope(),
+                default_assumptions(db, owner),
+            ),
         );
         if errors.is_empty()
             && let Err(error) = generic_default(db, owner, view.idx)

@@ -1189,10 +1189,12 @@ impl<'db> Func<'db> {
         let assumptions = self.assumptions(db);
         collect_ty_lower_errors(
             db,
-            self.scope(),
             hir_ty,
             self.span().sig().ret_ty(),
-            assumptions,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.scope(),
+                assumptions,
+            ),
         )
     }
 
@@ -1690,8 +1692,15 @@ impl<'db> FuncParamView<'db> {
         }
 
         // Surface name-resolution errors for the parameter type first
-        let errs =
-            collect_hir_ty_diags(db, func.scope(), hir_ty, self.lazy_ty_span(db), assumptions);
+        let errs = collect_hir_ty_diags(
+            db,
+            hir_ty,
+            self.lazy_ty_span(db),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                func.scope(),
+                assumptions,
+            ),
+        );
         if !errs.is_empty() {
             return errs;
         }
@@ -3788,7 +3797,15 @@ impl<'db> TypeAlias<'db> {
         let assumptions = constraints_for(db, self.into());
         let ty = lower_hir_ty(db, hir_ty, self.scope(), assumptions);
         if ty.has_invalid(db) {
-            collect_ty_lower_errors(db, self.scope(), hir_ty, self.span().ty(), assumptions)
+            collect_ty_lower_errors(
+                db,
+                hir_ty,
+                self.span().ty(),
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    self.scope(),
+                    assumptions,
+                ),
+            )
         } else if let Some(cause) = demanded_ground_const_cause(db, ty) {
             diag_from_invalid_cause(self.span().ty().into(), &cause)
                 .into_iter()
@@ -3796,9 +3813,11 @@ impl<'db> TypeAlias<'db> {
         } else {
             crate::analysis::ty::ty_error::normalization_limit_diag(
                 db,
-                self.scope(),
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    self.scope(),
+                    assumptions,
+                ),
                 ty,
-                assumptions,
                 self.span().ty().into(),
             )
             .into_iter()
@@ -4197,10 +4216,12 @@ impl<'db> Impl<'db> {
         let assumptions = constraints_for(db, self.into());
         collect_ty_lower_errors(
             db,
-            self.scope(),
             hir_ty,
             self.span().target_ty(),
-            assumptions,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.scope(),
+                assumptions,
+            ),
         )
     }
 
@@ -4352,7 +4373,15 @@ impl<'db> ImplTrait<'db> {
             return Vec::new();
         };
         let assumptions = constraints_for(db, self.into());
-        collect_ty_lower_errors(db, self.scope(), hir_ty, self.span().ty(), assumptions)
+        collect_ty_lower_errors(
+            db,
+            hir_ty,
+            self.span().ty(),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.scope(),
+                assumptions,
+            ),
+        )
     }
 
     /// Lowers this impl-trait to a semantic implementor view, performing
@@ -5039,7 +5068,15 @@ impl<'db> ImplAssocTypeView<'db> {
         let ty_span = self.span().ty();
         let assumptions = self.with_parameter_bounds(db, constraints_for(db, self.owner.into()));
 
-        let errs = collect_ty_lower_errors(db, self.scope(), hir, ty_span.clone(), assumptions);
+        let errs = collect_ty_lower_errors(
+            db,
+            hir,
+            ty_span.clone(),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                self.scope(),
+                assumptions,
+            ),
+        );
         if !errs.is_empty() {
             return errs;
         }
@@ -5995,8 +6032,15 @@ impl<'db> FieldView<'db> {
         let hir_ty = self.parent.fields_list(db).data(db)[self.idx].type_ref;
         if let Some(hir_ty) = hir_ty.to_opt() {
             let assumptions = constraints_for(db, self.owner_item());
-            let errs =
-                collect_hir_ty_diags(db, self.scope(), hir_ty, self.lazy_ty_span(), assumptions);
+            let errs = collect_hir_ty_diags(
+                db,
+                hir_ty,
+                self.lazy_ty_span(),
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    self.scope(),
+                    assumptions,
+                ),
+            );
             if !errs.is_empty() {
                 return errs;
             }

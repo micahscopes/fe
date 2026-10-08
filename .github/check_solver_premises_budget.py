@@ -128,13 +128,11 @@ CEILINGS = {
     "crates/hir/src/analysis/ty/trait_def.rs": 2,
     "crates/hir/src/analysis/ty/trait_resolution/mod.rs": 2,
     "crates/hir/src/analysis/ty/trait_resolution/table_solver.rs": 1,
-    "crates/hir/src/analysis/ty/ty_check/callable.rs": 1,
     "crates/hir/src/analysis/ty/ty_check/const_requirements.rs": 2,
     "crates/hir/src/analysis/ty/ty_check/env.rs": 2,
     "crates/hir/src/analysis/ty/ty_check/expr.rs": 9,
-    "crates/hir/src/analysis/ty/ty_check/mod.rs": 13,
+    "crates/hir/src/analysis/ty/ty_check/mod.rs": 8,
     "crates/hir/src/analysis/ty/ty_check/pat.rs": 1,
-    "crates/hir/src/analysis/ty/ty_error.rs": 2,
     "crates/hir/src/analysis/ty/ty_lower.rs": 6,
     "crates/hir/src/core/semantic/mod.rs": 3,
     "crates/hir/src/core/semantic/storage_layout.rs": 3,
@@ -149,12 +147,17 @@ CEILINGS = {
 # entry is (count, reason); entries may only decrease, and are removed before
 # the main ceilings when their sites get a position context.
 EFFECT_HANDLE = "resolve_effect_handle takes SolverPremises; this caller holds only a pair"
+WRITTEN_TYPES = "written-type diagnostics take one premises value; this item caller holds only its pair"
 EXPOSED = {
     "crates/hir/src/analysis/semantic/capability/handle.rs": (1, EFFECT_HANDLE),
     "crates/hir/src/analysis/semantic/capability/semantics.rs": (1, EFFECT_HANDLE),
     "crates/hir/src/analysis/semantic/layout_evidence/lower.rs": (1, EFFECT_HANDLE),
+    "crates/hir/src/analysis/ty/generic_defaults.rs": (1, WRITTEN_TYPES),
     "crates/hir/src/analysis/ty/provider.rs": (1, EFFECT_HANDLE),
     "crates/hir/src/analysis/ty/ty_lower.rs": (1, EFFECT_HANDLE),
+    "crates/hir/src/analysis/ty/type_fn.rs": (1, WRITTEN_TYPES),
+    "crates/hir/src/core/semantic/mod.rs": (8, WRITTEN_TYPES),
+    "crates/hir/src/diagnosable.rs": (6, WRITTEN_TYPES),
 }
 
 if __name__ == "__main__":
