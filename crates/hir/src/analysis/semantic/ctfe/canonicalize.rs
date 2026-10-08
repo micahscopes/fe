@@ -162,7 +162,7 @@ fn canonicalize_semantic_consts_from_body_with_mode<'db>(
     }
 
     if matches!(mode, ConstCanonicalizationMode::Runtime) {
-        discard_unused_constants(&mut body);
+        discard_unused_constants(db, instance, &mut body);
     }
     body
 }
@@ -541,12 +541,35 @@ fn block_successors<'db>(term: &STerminatorKind<'db>) -> Vec<SBlockId> {
     }
 }
 
-/// Completely evaluated, unused constants need no runtime operation. The
-/// operation-preserving body still owns semantic checking.
-fn discard_unused_constants<'db>(body: &mut SemanticBody<'db>) {
+/// Remove unused compile-time constants that have no runtime representation.
+/// Ordinary runtime constants keep their existing normalization and codegen.
+fn discard_unused_constants<'db>(
+    db: &'db dyn HirAnalysisDb,
+    instance: SemanticInstance<'db>,
+    body: &mut SemanticBody<'db>,
+) {
     use crate::analysis::semantic::normalized::{
         expr_used_locals, place_used_locals, terminator_used_locals,
     };
+    let mut compile_time_only = FxHashSet::default();
+    for block in &body.blocks {
+        for statement in &block.stmts {
+            if let SStmtKind::Assign {
+                dst,
+                expr: SExpr::Const(SConst::Value(value)),
+            } = &statement.kind
+                && reify_runtime_const_for_ty(
+                    db,
+                    instance,
+                    body.locals[dst.index()].ty,
+                    value.value(),
+                )
+                .is_none()
+            {
+                compile_time_only.insert(*dst);
+            }
+        }
+    }
     let mut used = FxHashSet::default();
     for block in &body.blocks {
         used.extend(terminator_used_locals(&block.terminator.kind));
@@ -554,7 +577,9 @@ fn discard_unused_constants<'db>(body: &mut SemanticBody<'db>) {
             match &statement.kind {
                 SStmtKind::Assign { dst, expr } => {
                     used.extend(expr_used_locals(expr));
-                    if !matches!(expr, SExpr::Const(SConst::Value(_))) {
+                    if !matches!(expr, SExpr::Const(SConst::Value(_)))
+                        || !compile_time_only.contains(dst)
+                    {
                         // This assignment survives cleanup, so normalization
                         // will also consume its destination's layout backings.
                         used.insert(*dst);
@@ -595,7 +620,7 @@ fn discard_unused_constants<'db>(body: &mut SemanticBody<'db>) {
             SStmtKind::Assign {
                 dst,
                 expr: SExpr::Const(SConst::Value(_)),
-            } => used.contains(dst),
+            } => !compile_time_only.contains(dst) || used.contains(dst),
             _ => true,
         });
     }
