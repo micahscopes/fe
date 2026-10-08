@@ -23,7 +23,7 @@ use crate::{
             trait_def::{
                 ImplementorOrigin, MethodArgMapError, ResolvedImplInstance, ResolvedMethodInstance,
                 SelectedEvidenceError, TraitInstId, assoc_const_body_template_for_trait_inst,
-                instantiate_selected_impl, resolve_trait_method_instance, resolved_method_instance,
+                instantiate_selected_impl, resolved_method_instance,
                 selected_assoc_const_body_template,
             },
             trait_lower::complete_selected_impl,
@@ -33,7 +33,6 @@ use crate::{
                     collect_func_decl_constraints, collect_func_def_constraints,
                     is_trait_effect_provider_constraint,
                 },
-                is_goal_satisfiable,
             },
             ty_check::{
                 BodyOwner, Callable, ConstRef, DecisionSite, EffectParamSite,
@@ -804,7 +803,8 @@ fn semantic_callee_key_with_assumptions<'db>(
         *arg = canonicalize_ty_for_mode(db, *arg, canon_env, ConstCanonMode::Identity);
     }
 
-    let independent_context = TraitSolveCx::new(db, owner.scope());
+    let independent_context =
+        crate::analysis::ty::trait_resolution::WithoutCallerPremises::at(db, owner.scope());
     // A fully concrete implementation can shed caller context only when the
     // same implementation is selected without it. Symbolic calls and
     // assumption-selected defaults keep the caller's proof environment.
@@ -820,16 +820,7 @@ fn semantic_callee_key_with_assumptions<'db>(
                 | collect_flags(db, resolved.trait_inst()),
         );
         let original_ground = is_ground(collect_flags(db, inst));
-        let independent = body_ground
-            && matches!(
-                resolve_trait_method_instance(
-                    db,
-                    independent_context,
-                    resolved.trait_inst(),
-                    name,
-                ),
-                Selection::Unique(method) if method.resolved() == resolved
-            );
+        let independent = body_ground && independent_context.selects_method(db, resolved, name);
         // A symbolic nominal receiver can be discarded after selection only if
         // it normalizes to the independent implementation and neither signature
         // has additional effects, method bounds, or layout slots to carry.
@@ -955,9 +946,9 @@ fn semantic_callee_key_with_assumptions<'db>(
                     // a named-only implementation. Never substitute an
                     // ordinary answer when this candidate needs its caller.
                     return choice.data(db).goal() == bound
-                        && choice.in_proven_context(db, independent_context).is_ok();
+                        && independent_context.prove_choice(db, *choice).is_ok();
                 }
-                match is_goal_satisfiable(db, independent_context, bound) {
+                match independent_context.prove(db, bound) {
                     GoalSatisfiability::Satisfied(solution) => {
                         if opened_provisions.is_empty()
                             && !retained_selections
@@ -1014,12 +1005,12 @@ fn semantic_callee_key_with_assumptions<'db>(
         // it establishes the same application without caller premises. A
         // context-dependent selection retains its original validating context.
         for selection in &mut retained_selections {
-            if let Ok(proof) = selection.revalidate(db, independent_context, selection.goal()) {
+            if let Ok(proof) = independent_context.revalidate(db, *selection) {
                 *selection = super::SelectedApplication::from_evidence(&proof);
             }
         }
         for (_, choice) in &mut source_choice.bounds {
-            if let Ok(proven) = choice.in_proven_context(db, independent_context) {
+            if let Ok(proven) = independent_context.prove_choice(db, *choice) {
                 *choice = proven;
             }
         }
