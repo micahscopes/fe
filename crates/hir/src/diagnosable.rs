@@ -795,7 +795,6 @@ impl<'db> Impl<'db> {
         use ty::diagnostics::ImplDiag;
 
         let mut diags = Vec::new();
-        let assumptions = constraints_for(db, self.into());
         let target_enum = self
             .admissible_inherent_impl_ty(db)
             .and_then(|ty| ty.as_enum(db));
@@ -892,10 +891,7 @@ impl<'db> Impl<'db> {
                     db,
                     hir_ty,
                     impl_const.span().ty(),
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        self.scope(),
-                        assumptions,
-                    ),
+                    crate::semantic::context_at(db, self.scope(), None).premises(db),
                 );
                 if !ty_diags.is_empty() {
                     diags.extend(ty_diags);
@@ -1158,10 +1154,7 @@ impl<'db> ImplTrait<'db> {
                         db,
                         hir_ty,
                         impl_const.span().ty(),
-                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                            scope,
-                            assumptions,
-                        ),
+                        crate::semantic::context_at(db, scope, None).premises(db),
                     )
                 });
                 match errs {

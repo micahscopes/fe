@@ -4213,15 +4213,11 @@ impl<'db> Impl<'db> {
         let Some(hir_ty) = self.type_ref(db).to_opt() else {
             return Vec::new();
         };
-        let assumptions = constraints_for(db, self.into());
         collect_ty_lower_errors(
             db,
             hir_ty,
             self.span().target_ty(),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.scope(),
-                assumptions,
-            ),
+            context_at(db, self.scope(), None).premises(db),
         )
     }
 
@@ -4372,15 +4368,11 @@ impl<'db> ImplTrait<'db> {
         let Some(hir_ty) = self.type_ref(db).to_opt() else {
             return Vec::new();
         };
-        let assumptions = constraints_for(db, self.into());
         collect_ty_lower_errors(
             db,
             hir_ty,
             self.span().ty(),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.scope(),
-                assumptions,
-            ),
+            context_at(db, self.scope(), None).premises(db),
         )
     }
 

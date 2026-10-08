@@ -190,8 +190,8 @@ EXPOSED = {
     "crates/hir/src/analysis/ty/provider.rs": (1, EFFECT_HANDLE),
     "crates/hir/src/analysis/ty/ty_lower.rs": (1, EFFECT_HANDLE),
     "crates/hir/src/analysis/ty/type_fn.rs": (1, WRITTEN_TYPES),
-    "crates/hir/src/core/semantic/mod.rs": (8, WRITTEN_TYPES),
-    "crates/hir/src/diagnosable.rs": (6, WRITTEN_TYPES),
+    "crates/hir/src/core/semantic/mod.rs": (6, WRITTEN_TYPES),
+    "crates/hir/src/diagnosable.rs": (4, WRITTEN_TYPES),
 }
 
 if __name__ == "__main__":
