@@ -1,0 +1,13 @@
+// Known limit of premise normalization (pinned, not a guarantee): an impl
+// that needs a premise to apply is not used to normalize a premise, because
+// premise normalization never solves under the premise list it belongs to.
+// `<Wrap<T> as Super>::Assoc` is `u8` here, so `uses_it` is correct, but it
+// is rejected: "`U` doesn't implement `Need<u8>`". See
+// `constraints::conditional_impl_projection_premise_is_a_known_limit`.
+trait Gate {}
+trait Super { type Assoc }
+struct Wrap<T> {}
+impl<T: Gate> Super for Wrap<T> { type Assoc = u8 }
+trait Need<X> {}
+fn want_u8<U: Need<u8>>() {}
+fn uses_it<T: Gate, U: Need<<Wrap<T> as Super>::Assoc>>() { want_u8<U>() }

@@ -1498,10 +1498,7 @@ impl<'db> PredicateListId<'db> {
                 let inst = normalize_from_assumptions(
                     db,
                     super_trait.instantiate(db, pred.args(db)),
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        hir_trait.scope(),
-                        evidence,
-                    ),
+                    unpositioned_premises(hir_trait.scope(), evidence),
                 );
                 if predicate_has_recursive_assoc_projection(db, inst) {
                     continue;
@@ -1536,10 +1533,7 @@ impl<'db> PredicateListId<'db> {
                     let trait_inst = normalize_from_assumptions(
                         db,
                         Binder::bind(hir_trait.into(), bound).instantiate(db, pred.args(db)),
-                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                            hir_trait.scope(),
-                            evidence,
-                        ),
+                        unpositioned_premises(hir_trait.scope(), evidence),
                     );
                     if predicate_has_recursive_assoc_projection(db, trait_inst) {
                         continue;
@@ -1582,6 +1576,98 @@ fn extend_all_bounds_cycle_recover<'db>(
     _predicates: PredicateListId<'db>,
 ) -> salsa::CycleRecoveryAction<PredicateListId<'db>> {
     salsa::CycleRecoveryAction::Iterate
+}
+
+/// Premises given to elaboration and premise normalization: only those
+/// stated, never a position's context.
+fn unpositioned_premises<'db>(
+    scope: ScopeId<'db>,
+    premises: PredicateListId<'db>,
+) -> crate::analysis::semantic::SolverPremises<'db> {
+    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, premises)
+}
+
+/// Whether a premise mentions an associated-type projection, the only thing
+/// premise normalization can rewrite.
+pub(crate) fn premise_has_projection<'db>(
+    db: &'db dyn HirAnalysisDb,
+    premise: TraitInstId<'db>,
+) -> bool {
+    premise
+        .args(db)
+        .iter()
+        .chain(premise.assoc_type_bindings(db).values())
+        .any(|ty| ty.has_projection(db))
+}
+
+/// A premise stated the way a goal is when the two are compared. Computed
+/// once per premise and list, and only when the premise as stated does not
+/// match. The normalized form is only for matching: it is not elaborated and
+/// does not enter any premise list, so an implementation that wraps its
+/// argument cannot make a list grow.
+#[salsa::tracked(
+    cycle_initial = normalized_premise_cycle_initial,
+    cycle_fn = normalized_premise_cycle_recover
+)]
+pub(crate) fn normalized_premise<'db>(
+    db: &'db dyn HirAnalysisDb,
+    premise: TraitInstId<'db>,
+    premises: PredicateListId<'db>,
+) -> TraitInstId<'db> {
+    normalize_premise(db, premise, premises)
+}
+
+fn normalized_premise_cycle_initial<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    premise: TraitInstId<'db>,
+    _premises: PredicateListId<'db>,
+) -> TraitInstId<'db> {
+    premise
+}
+
+fn normalized_premise_cycle_recover<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    _value: &TraitInstId<'db>,
+    _count: u32,
+    _premise: TraitInstId<'db>,
+    _premises: PredicateListId<'db>,
+) -> salsa::CycleRecoveryAction<TraitInstId<'db>> {
+    salsa::CycleRecoveryAction::Iterate
+}
+
+/// One premise normalized as a goal would be, without solving under the
+/// list it belongs to: first by the associated equalities the list itself
+/// establishes, then by implementations under no premises. A projection an
+/// implementation fixes needs none, and solving under the list would re-enter
+/// it. An implementation that needs a premise to apply is therefore not used.
+fn normalize_premise<'db>(
+    db: &'db dyn HirAnalysisDb,
+    premise: TraitInstId<'db>,
+    premises: PredicateListId<'db>,
+) -> TraitInstId<'db> {
+    let scope = TraitSolveCx::normalization_scope_for_trait_inst_with_origin(
+        db,
+        premise.def(db).ingot(db),
+        premise,
+    );
+    let by_premises =
+        normalize_from_assumptions(db, premise, unpositioned_premises(scope, premises));
+    let normalized = by_premises.normalize(db, scope, PredicateListId::empty_list(db));
+    let has_invalid = |inst: TraitInstId<'db>| {
+        inst.args(db).iter().any(|ty| ty.has_invalid(db))
+            || inst
+                .assoc_type_bindings(db)
+                .values()
+                .any(|ty| ty.has_invalid(db))
+    };
+    // A normalization fault leaves the premise as far as it got.
+    if !has_invalid(normalized) || has_invalid(premise) {
+        normalized
+    } else if !has_invalid(by_premises) {
+        by_premises
+    } else {
+        premise
+    }
 }
 
 fn predicate_has_recursive_assoc_projection<'db>(

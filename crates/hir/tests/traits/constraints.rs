@@ -492,3 +492,280 @@ fn probe() {
     let (top_mod, _) = db.top_mod(file);
     db.assert_no_diags(top_mod);
 }
+
+/// Shared declarations for the premise-normalization cases: `Sub` fixes
+/// `<Self as Super>::Assoc` to `u8`, `Wide` fixes it to `u16`.
+const PREMISE_NORMALIZATION: &str = r#"
+trait Small {}
+impl Small for u8 {}
+impl Small for u16 {}
+trait Super { type Assoc: Small }
+trait Sub: Super<Assoc = u8> {}
+trait Wide: Super<Assoc = u16> {}
+trait Need<X: Small> {}
+
+fn needs<U: Need<u8>>(_ u: own U) {}
+"#;
+
+fn premise_normalization_diags(name: &str, body: &str) -> Vec<CompleteDiagnostic> {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        format!("{name}.fe").as_str().into(),
+        &format!("{PREMISE_NORMALIZATION}{body}"),
+    );
+    let (top_mod, _) = db.top_mod(file);
+    diagnostics_for(&db, top_mod)
+}
+
+/// A premise and a goal are compared after the same normalization: with
+/// `T: Sub`, the premise `U: Need<<T as Super>::Assoc>` is `U: Need<u8>`.
+#[test]
+fn projected_premise_satisfies_its_normalized_goal() {
+    let diags = premise_normalization_diags(
+        "projected_premise_satisfies_its_normalized_goal",
+        r#"
+fn f<T: Sub, U: Need<<T as Super>::Assoc>>(_ t: own T, _ u: own U) {
+    needs(u)
+}
+"#,
+    );
+    assert!(diags.is_empty(), "{diags:#?}");
+}
+
+/// The same premise read through an enum constructor's declared bound.
+#[test]
+fn projected_premise_satisfies_constructor_bound() {
+    let diags = premise_normalization_diags(
+        "projected_premise_satisfies_constructor_bound",
+        r#"
+enum E<T: Sub, U: Need<<T as Super>::Assoc>> { A(T, U) }
+
+fn f<T: Sub, U: Need<<T as Super>::Assoc>>(t: own T, u: own U) {
+    let _e = E::A(t, u)
+}
+"#,
+    );
+    assert!(diags.is_empty(), "{diags:#?}");
+}
+
+/// Control: a normalized premise satisfies a projected goal.
+#[test]
+fn normalized_premise_satisfies_projected_goal() {
+    let diags = premise_normalization_diags(
+        "normalized_premise_satisfies_projected_goal",
+        r#"
+fn needs_projected<T: Sub, U: Need<<T as Super>::Assoc>>(_ t: own T, _ u: own U) {}
+
+fn f<T: Sub, U: Need<u8>>(t: own T, u: own U) {
+    needs_projected(t, u)
+}
+"#,
+    );
+    assert!(diags.is_empty(), "{diags:#?}");
+}
+
+/// An unmet bound still fails.
+#[test]
+fn missing_premise_still_fails() {
+    let diags = premise_normalization_diags(
+        "missing_premise_still_fails",
+        r#"
+fn f<T: Sub, U>(_ t: own T, u: own U) {
+    needs(u)
+}
+"#,
+    );
+    assert_unsatisfied_bound(&diags, "`U` doesn't implement `Need<u8>`");
+}
+
+/// A premise whose projection normalizes to a different type does not
+/// satisfy the goal.
+#[test]
+fn premise_projecting_to_another_type_fails() {
+    let diags = premise_normalization_diags(
+        "premise_projecting_to_another_type_fails",
+        r#"
+fn f<T: Wide, U: Need<<T as Super>::Assoc>>(_ t: own T, u: own U) {
+    needs(u)
+}
+"#,
+    );
+    assert_unsatisfied_bound(&diags, "`U` doesn't implement `Need<u8>`");
+}
+
+/// A projection that no premise fixes stays a projection and does not
+/// satisfy a concrete goal.
+#[test]
+fn unfixed_projection_premise_fails() {
+    let diags = premise_normalization_diags(
+        "unfixed_projection_premise_fails",
+        r#"
+fn f<T: Super, U: Need<<T as Super>::Assoc>>(_ t: own T, u: own U) {
+    needs(u)
+}
+"#,
+    );
+    assert_unsatisfied_bound(&diags, "`U` doesn't implement `Need<u8>`");
+}
+
+/// A premise whose projection only an implementation fixes is stated the way
+/// the goal is: `<S as Super>::Assoc` is `u8`.
+#[test]
+fn impl_fixed_projection_premise_satisfies_goal() {
+    let diags = premise_normalization_diags(
+        "impl_fixed_projection_premise_satisfies_goal",
+        r#"
+struct S {}
+impl Super for S { type Assoc = u8 }
+
+fn f<U: Need<<S as Super>::Assoc>>(u: own U) {
+    needs(u)
+}
+"#,
+    );
+    assert!(diags.is_empty(), "{diags:#?}");
+}
+
+/// An implementation fixing the projection to another type does not satisfy
+/// the goal.
+#[test]
+fn impl_fixed_projection_to_another_type_fails() {
+    let diags = premise_normalization_diags(
+        "impl_fixed_projection_to_another_type_fails",
+        r#"
+struct S {}
+impl Super for S { type Assoc = u16 }
+
+fn f<U: Need<<S as Super>::Assoc>>(u: own U) {
+    needs(u)
+}
+"#,
+    );
+    assert_unsatisfied_bound(&diags, "`U` doesn't implement `Need<u8>`");
+}
+
+/// Normalizing premises terminates when an implementation's projection is
+/// cyclic, and the unmet bound is still reported.
+#[test]
+fn cyclic_impl_projection_premise_terminates() {
+    let diags = premise_normalization_diags(
+        "cyclic_impl_projection_premise_terminates",
+        r#"
+struct C {}
+impl Super for C { type Assoc = <C as Super>::Assoc }
+
+fn f<U: Need<<C as Super>::Assoc>>(u: own U) {
+    needs(u)
+}
+"#,
+    );
+    assert!(
+        !diags.is_empty(),
+        "a cyclic projection must not be accepted"
+    );
+}
+
+/// Normalizing premises terminates when a premise's equality refers to its
+/// own projection, and the unmet bound is still reported.
+#[test]
+fn self_referential_premise_terminates() {
+    let diags = premise_normalization_diags(
+        "self_referential_premise_terminates",
+        r#"
+fn f<T: Super<Assoc = <T as Super>::Assoc>, U: Need<<T as Super>::Assoc>>(_ t: own T, u: own U) {
+    needs(u)
+}
+"#,
+    );
+    assert_unsatisfied_bound(&diags, "`U` doesn't implement `Need<u8>`");
+}
+
+/// Elaboration with premise normalization finishes on programs whose
+/// associated types grow through implementations, and reports nothing.
+fn assert_finishes_cleanly(name: &'static str, source: &'static str) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(format!("{name}.fe").as_str().into(), source);
+        let (top_mod, _) = db.top_mod(file);
+        let messages: Vec<String> = diagnostics_for(&db, top_mod)
+            .into_iter()
+            .map(|diag| diag.message)
+            .collect();
+        sender.send(messages).expect("test thread is waiting");
+    });
+    match receiver.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(messages) => assert!(messages.is_empty(), "{name}: {messages:?}"),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{name} did not finish within 30 seconds")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("{name} panicked"),
+    }
+}
+
+/// A blanket implementation whose associated type wraps its argument.
+#[test]
+fn growing_blanket_impl_premises_terminate() {
+    assert_finishes_cleanly(
+        "growing_blanket_impl_premises_terminate",
+        r#"
+trait Tr { type A: Tr }
+struct Box<T> {}
+impl<T> Tr for T { type A = Box<T> }
+fn f<T: Tr>() -> u256 { 1 }
+fn g() -> u256 { f<u8>() }
+"#,
+    );
+}
+
+/// Two traits whose associated types point at each other through wrapping
+/// implementations.
+#[test]
+fn mutual_wrapping_impl_premises_terminate() {
+    assert_finishes_cleanly(
+        "mutual_wrapping_impl_premises_terminate",
+        r#"
+trait Ping { type P: Pong }
+trait Pong { type Q: Ping }
+struct A<T> {}
+struct B<T> {}
+impl<T> Ping for A<T> { type P = B<A<T>> }
+impl<T> Pong for B<T> { type Q = A<B<T>> }
+fn f<T: Ping>() -> u256 { 1 }
+fn g() -> u256 { f<A<u8>>() }
+"#,
+    );
+}
+
+/// A doubling associated type with a bound back on the trait.
+#[test]
+fn doubling_family_premises_terminate() {
+    assert_finishes_cleanly(
+        "doubling_family_premises_terminate",
+        r#"
+trait Grow { type Out: Grow }
+impl<T> Grow for (T, T) { type Out = ((T, T), (T, T)) }
+impl Grow for u8 { type Out = (u8, u8) }
+fn f<T: Grow>() -> u256 { 1 }
+fn g() -> u256 { f<u8>() }
+"#,
+    );
+}
+
+/// Pins the known limit recorded in the pending fixture
+/// `trait_resolution_conformance/pending/conditional_impl_projection_premise.fe`:
+/// an implementation that needs a premise to apply does not normalize a
+/// premise. When this starts passing, move the fixture out of `pending`.
+#[test]
+fn conditional_impl_projection_premise_is_a_known_limit() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "conditional_impl_projection_premise.fe".into(),
+        include_str!(
+            "../../test_files/trait_resolution_conformance/pending/conditional_impl_projection_premise.fe"
+        ),
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_unsatisfied_bound(&diags, "`U` doesn't implement `Need<u8>`");
+}

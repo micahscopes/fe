@@ -672,20 +672,50 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
                 let Some(&assumption) = query.assumptions.list(self.db).get(index) else {
                     return Ok(Transition::Reject);
                 };
-                if let Err(error) = unify_trait_inst_with_normalized_assoc_bindings(
+                // A premise is compared with the goal as stated, and, when that
+                // fails and the premise has a projection, after the
+                // normalization the goal received (see `normalized_premise`).
+                let fault = |error| match error {
+                    UnificationError::NormalizationFault => {
+                        Transition::Stop(StopReason::NormalizationFault)
+                    }
+                    _ => Transition::Reject,
+                };
+                let mut stated = table.clone();
+                match unify_trait_inst_with_normalized_assoc_bindings(
                     self.db,
-                    &mut table,
+                    &mut stated,
                     assumption,
                     normalized_goal,
                     scope,
                     query.assumptions,
                 ) {
-                    return Ok(match error {
-                        UnificationError::NormalizationFault => {
-                            Transition::Stop(StopReason::NormalizationFault)
+                    Ok(()) => table = stated,
+                    Err(UnificationError::NormalizationFault) => {
+                        return Ok(fault(UnificationError::NormalizationFault));
+                    }
+                    Err(_) => {
+                        if assumption.def(self.db) != normalized_goal.def(self.db)
+                            || !super::premise_has_projection(self.db, assumption)
+                        {
+                            return Ok(Transition::Reject);
                         }
-                        _ => Transition::Reject,
-                    });
+                        let normalized =
+                            super::normalized_premise(self.db, assumption, query.assumptions);
+                        if normalized == assumption {
+                            return Ok(Transition::Reject);
+                        }
+                        if let Err(error) = unify_trait_inst_with_normalized_assoc_bindings(
+                            self.db,
+                            &mut table,
+                            normalized,
+                            normalized_goal,
+                            scope,
+                            query.assumptions,
+                        ) {
+                            return Ok(fault(error));
+                        }
+                    }
                 }
                 ImplementorId::assumption(self.db, query.goal.fold_with(self.db, &mut table))
             }
