@@ -1172,12 +1172,11 @@ impl<'db> Callable<'db> {
                 && let CallableDef::Func(func) = self.callable_def
                 && let Some(method) = func.name(db).to_opt()
                 && matches!(
-                    crate::analysis::semantic::resolve_trait_method_with_selections(
+                    crate::analysis::semantic::provisional_opened_method(
                         db,
                         context.solver_context(db),
                         goal,
                         method,
-                        context,
                     ),
                     Err(crate::analysis::ty::trait_def::SelectedEvidenceError::NotProven)
                 )

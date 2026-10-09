@@ -1464,7 +1464,7 @@ impl<'db> PredicateListId<'db> {
         )
     }
 
-    pub(super) fn merge(self, db: &'db dyn HirAnalysisDb, other: Self) -> Self {
+    pub(crate) fn merge(self, db: &'db dyn HirAnalysisDb, other: Self) -> Self {
         let mut predicates: IndexSet<_> = self.list(db).iter().copied().collect();
         predicates.extend(other.list(db).iter().copied());
         PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>())

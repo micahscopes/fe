@@ -1,8 +1,7 @@
 use super::{
     EffectProviderSubst, GenericSubst, ImplEnv, SemanticInstance, SemanticInstanceKey,
     provisional_provider_binding_for_instance_effect, provisional_provider_idx_for_requirement,
-    resolve_trait_method_with_selections, resolved_effect_binding_ty_for_instance_effect,
-    resolved_provider_binding_for_instance_effect,
+    resolved_effect_binding_ty_for_instance_effect, resolved_provider_binding_for_instance_effect,
 };
 use crate::{
     analysis::{
@@ -23,7 +22,7 @@ use crate::{
             trait_def::{
                 ImplementorOrigin, MethodArgMapError, ResolvedImplInstance, ResolvedMethodInstance,
                 SelectedEvidenceError, TraitInstId, assoc_const_body_template_for_trait_inst,
-                instantiate_selected_impl, resolved_method_instance,
+                instantiate_selected_impl, resolve_trait_impl_instance, resolved_method_instance,
                 selected_assoc_const_body_template,
             },
             trait_lower::complete_selected_impl,
@@ -364,7 +363,14 @@ pub(crate) fn semantic_callee_key_with_effect_providers<'db>(
         caller.assumptions(db),
         ProviderResolutionMode::Final,
         inherit_trait_selection,
-        source_trait_choices(db, caller_key, callable, inherit_trait_selection, origin),
+        source_trait_choices(
+            db,
+            caller_key,
+            callable,
+            inherit_trait_selection,
+            origin,
+            caller.assumptions(db),
+        )?,
     )
 }
 
@@ -407,7 +413,14 @@ pub(crate) fn provisional_semantic_callee_key<'db>(
         assumptions,
         ProviderResolutionMode::Provisional,
         inherit_trait_selection,
-        source_trait_choices(db, caller_key, callable, inherit_trait_selection, origin),
+        source_trait_choices(
+            db,
+            caller_key,
+            callable,
+            inherit_trait_selection,
+            origin,
+            assumptions,
+        )?,
     )
 }
 
@@ -472,12 +485,10 @@ pub fn generated_callee_key<'db>(
     Ok(callee.key)
 }
 
-// Each unresolved category is ratcheted by check_trait_choice_fallback_budget.py.
-// Remove these variants as bound transport and generation-time recording land.
+// Every source trait call supplies its accepted choice, including specialization.
 enum TraitCallChoice<'db> {
     NotTrait,
     Recorded(TraitChoiceId<'db>),
-    UntransportedBound,
 }
 
 struct CalleeChoices<'db> {
@@ -491,7 +502,8 @@ fn source_trait_choices<'db>(
     callable: &Callable<'db>,
     inherit_trait_selection: bool,
     origin: SemOrigin<'db>,
-) -> CalleeChoices<'db> {
+    assumptions: PredicateListId<'db>,
+) -> Result<CalleeChoices<'db>, MethodArgMapError<'db>> {
     let bounds = match origin {
         SemOrigin::Expr(expr) => {
             let typed = caller.typed_body(db);
@@ -512,10 +524,17 @@ fn source_trait_choices<'db>(
         }
         _ => Vec::new(),
     };
-    CalleeChoices {
-        method: source_method_choice(db, caller, callable, inherit_trait_selection, origin),
+    Ok(CalleeChoices {
+        method: source_method_choice(
+            db,
+            caller,
+            callable,
+            inherit_trait_selection,
+            origin,
+            assumptions,
+        )?,
         bounds,
-    }
+    })
 }
 
 // Bind against the unspecialized declaration. Never recover a slot from a folded
@@ -554,9 +573,10 @@ fn source_method_choice<'db>(
     callable: &Callable<'db>,
     inherit_trait_selection: bool,
     origin: SemOrigin<'db>,
-) -> TraitCallChoice<'db> {
+    assumptions: PredicateListId<'db>,
+) -> Result<TraitCallChoice<'db>, MethodArgMapError<'db>> {
     if callable.trait_inst().is_none() {
-        return TraitCallChoice::NotTrait;
+        return Ok(TraitCallChoice::NotTrait);
     }
     let typed = caller.typed_body(db);
     let body = typed.body().expect("a source trait call has a body");
@@ -570,7 +590,7 @@ fn source_method_choice<'db>(
         .decisions()
         .choice_ref(&site)
         .expect("a source trait call must retain its accepted choice");
-    if inherit_trait_selection {
+    Ok(if inherit_trait_selection {
         let symbolic_provider = record.data(db).goal().self_ty(db).has_param(db)
             && matches!(caller.owner(db), BodyOwner::Func(owner)
                 if crate::analysis::ty::ty_check::infer_body(db, caller.owner(db)).1.decisions().choice(db, &site)
@@ -590,11 +610,68 @@ fn source_method_choice<'db>(
             {
                 TraitCallChoice::Recorded(answer)
             }
-            _ => TraitCallChoice::UntransportedBound,
+            _ => {
+                // Specialize an assumption at its source position, before any
+                // consumer reads the choice. Retain transported caller answers
+                // and the position's accepted lexical provisions.
+                let expr = match origin {
+                    SemOrigin::Expr(expr) => expr,
+                    SemOrigin::Stmt(stmt) => match stmt.data(db, body).borrowed().to_opt() {
+                        Some(crate::hir_def::Stmt::For(_, iter, _, _)) => *iter,
+                        _ => panic!("a statement trait call must be a for-loop"),
+                    },
+                    _ => unreachable!(),
+                };
+                let caller_env = caller.impl_env(db);
+                let position = crate::core::semantic::context_at(
+                    db,
+                    caller_env.normalization_scope(db),
+                    Some((typed, expr)),
+                );
+                let mut selections = caller_env.selections(db).clone();
+                selections.extend_from_slice(position.selections(db));
+                let position = position
+                    .with_selections(db, selections)
+                    .with_witnesses(db, caller_env.witnesses(db).clone());
+                // The caller's checked effect/transport premises also survive
+                // specialization; witness goals alone are not proof premises.
+                let context = position
+                    .solver_context(db)
+                    .with_assumptions(position.assumptions(db).merge(db, assumptions));
+                let goal = record.data(db).goal();
+                let answer = if let Some(selection) = position.selection_for(db, goal) {
+                    let proof = selection
+                        .revalidate(db, context, goal)
+                        .map_err(MethodArgMapError::SelectedEvidence)?;
+                    TraitChoiceId::for_selected_application(
+                        db,
+                        super::SelectedApplication::from_evidence(&proof),
+                    )
+                } else {
+                    match resolve_trait_impl_instance(db, context, goal) {
+                        Selection::Unique(instance) => {
+                            TraitChoiceId::for_resolved_implementation(db, instance)
+                        }
+                        // A symbolic or unavailable implementation retains the
+                        // accepted bound answer; it cannot become concrete here.
+                        Selection::NotFound | Selection::Ambiguous(_) => record,
+                    }
+                };
+                let normalize = |goal| {
+                    crate::analysis::ty::trait_resolution::normalize_trait_inst_preserving_validity(
+                        db,
+                        goal,
+                        position.normalization_scope(db),
+                        context.assumptions(),
+                    )
+                };
+                debug_assert_eq!(normalize(answer.data(db).goal()), normalize(goal));
+                TraitCallChoice::Recorded(answer)
+            }
         }
     } else {
         TraitCallChoice::Recorded(record)
-    }
+    })
 }
 
 pub(crate) fn recorded_method_instance<'db>(
@@ -649,7 +726,7 @@ fn semantic_callee_key_with_assumptions<'db>(
     let mut requirements = callable.selection_requirements(db).list(db).to_vec();
     let method_choice = match &source_choice.method {
         TraitCallChoice::Recorded(choice) => Some(*choice),
-        TraitCallChoice::NotTrait | TraitCallChoice::UntransportedBound => None,
+        TraitCallChoice::NotTrait => None,
     };
     for record in method_choice
         .into_iter()
@@ -725,9 +802,16 @@ fn semantic_callee_key_with_assumptions<'db>(
                     if matches!(
                         choice.data(db).answer_origin(db),
                         ImplementorOrigin::Assumption
-                    ) && opened_provisions.iter().any(|&(_, opened)| {
+                    ) && (opened_provisions.iter().any(|&(_, opened)| {
                         opened.def(db) == inst.def(db) && opened.args(db) == inst.args(db)
-                    }) =>
+                    }) || (!inst
+                        .args(db)
+                        .iter()
+                        .any(|ty| ty.has_param(db) || ty.has_var(db))
+                        && matches!(
+                            selection_env.provision_for(db, inst),
+                            Some(crate::semantic::Provision::Bound(_))
+                        ))) =>
                 {
                     super::template::provisional_opened_method(db, context, inst, name)
                 }
@@ -735,9 +819,6 @@ fn semantic_callee_key_with_assumptions<'db>(
                     recorded_method_instance(db, context, choice, name)
                 }
                 TraitCallChoice::NotTrait => unreachable!("trait call requires a choice"),
-                TraitCallChoice::UntransportedBound => {
-                    resolve_trait_method_with_selections(db, context, inst, name, selection_env)
-                }
             }
         }
         .map_err(MethodArgMapError::SelectedEvidence)?

@@ -7,8 +7,7 @@ use crate::{
             subst::substitute_complete,
             trait_def::{
                 ImplementorId, ResolvedMethodInstance, SelectedEvidenceError, SelectedImplEvidence,
-                TraitInstId, prove_selected_impl_evidence, resolve_trait_method_instance,
-                resolved_method_instance,
+                TraitInstId, prove_selected_impl_evidence, resolved_method_instance,
             },
             trait_resolution::{PredicateListId, ProofProvisions, Selection, TraitSolveCx},
             ty_check::{BodyOwner, TraitChoiceId, TypedBody, infer_body},
@@ -177,53 +176,6 @@ impl<'db> SelectedApplication<'db> {
         let destination =
             destination.with_provisions(self.provisions.within(db, destination.provisions()));
         prove_selected_impl_evidence(db, destination, self.candidate, goal)
-    }
-}
-
-/// Resolve one trait method through the selected application in scope, or
-/// through ordinary lookup when no selection covers the goal. An invalid
-/// selection must never fall back to an unrelated ordinary implementation.
-pub fn resolve_trait_method_with_selections<'db>(
-    db: &'db dyn HirAnalysisDb,
-    context: TraitSolveCx<'db>,
-    goal: TraitInstId<'db>,
-    method: IdentId<'db>,
-    impl_env: ImplEnv<'db>,
-) -> Result<Selection<ResolvedMethodInstance<'db>>, SelectedEvidenceError> {
-    if let Some(selection) = impl_env.selection_for(db, goal) {
-        let evidence = selection.revalidate(db, context, goal)?;
-        Ok(resolved_method_instance(
-            db,
-            context,
-            evidence.resolved_instance(),
-            method,
-        ))
-    } else {
-        let resolved = resolve_trait_method_instance(db, context, goal, method);
-        // Only a witness answers this concrete goal: evidence opened by a
-        // caller, whose operand evaluation passes in its place.
-        let witnessed_only = match &resolved {
-            Selection::NotFound => true,
-            Selection::Unique(method) => matches!(
-                method.resolved().selected().origin(db),
-                crate::analysis::ty::trait_def::ImplementorOrigin::Assumption
-            ),
-            Selection::Ambiguous(_) => false,
-        };
-        if witnessed_only
-            && !goal
-                .args(db)
-                .iter()
-                .any(|ty| ty.has_param(db) || ty.has_var(db))
-            && matches!(
-                impl_env.provision_for(db, goal),
-                Some(crate::semantic::Provision::Bound(_))
-            )
-        {
-            provisional_opened_method(db, context, goal, method)
-        } else {
-            Ok(resolved)
-        }
     }
 }
 

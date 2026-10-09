@@ -19,15 +19,15 @@ pub use diagnostics::{
     BlockedSemanticBody, SemanticDiagnostic, SemanticDiagnosticId, SemanticDiagnosticKind,
     SemanticDiagnosticLabel, SemanticDiagnosticSpan, SemanticNormalizationFailure,
 };
-pub(crate) use instance::CallSiteProviderRefinement;
+pub(crate) use instance::{CallSiteProviderRefinement, provisional_opened_method};
 pub use instance::{
     EffectProviderSubst, GenericSubst, ImplEnv, InstantiatedEffectEnv, RootSemanticInstanceError,
     SelectedApplication, SemanticEffectEnvInstantiationError, SemanticInstance,
     SemanticInstanceKey, SolverPremises, TypedBodyTemplate, generated_callee_key,
     get_or_build_semantic_instance, identity_semantic_instance_key, instantiate_typed_body,
-    instantiated_effect_env, resolve_trait_method_with_selections,
-    resolved_provider_binding_for_instance_effect, root_semantic_instance_key,
-    semantic_layout_bundle_signature, typed_body_template, validate_instantiated_effect_env_key,
+    instantiated_effect_env, resolved_provider_binding_for_instance_effect,
+    root_semantic_instance_key, semantic_layout_bundle_signature, typed_body_template,
+    validate_instantiated_effect_env_key,
 };
 pub(crate) use instance::{
     provisional_provider_binding_for_instance_effect, provisional_provider_idx_for_requirement,

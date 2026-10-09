@@ -22,6 +22,7 @@ pub(crate) use semantic::{
 };
 pub use template::{
     EffectProviderSubst, GenericSubst, ImplEnv, SelectedApplication, SolverPremises,
-    TypedBodyTemplate, instantiate_typed_body, resolve_trait_method_with_selections,
-    typed_body_template,
+    TypedBodyTemplate, instantiate_typed_body, typed_body_template,
 };
+
+pub(crate) use template::provisional_opened_method;
