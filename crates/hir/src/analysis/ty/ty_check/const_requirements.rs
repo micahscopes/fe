@@ -3909,7 +3909,7 @@ fn block_import(_ q: Q) -> usize {
                 typed.callable_expr(call).is_none(),
                 "{name}: the call failed"
             );
-            let bodies = super::expression_const_bodies(&db, body, &typed);
+            let bodies = super::expression_const_bodies(&db, body, typed);
             assert_eq!(bodies.len(), 2, "{name}: both const arguments are typed");
         }
     }
