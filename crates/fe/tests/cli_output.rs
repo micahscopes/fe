@@ -4868,6 +4868,11 @@ fn evidence_prove_captures_open_operands_at_o0_and_o2() {
 }
 
 #[test]
+fn associated_length_array_returns_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("associated_length_array_return.fe");
+}
+
+#[test]
 fn evidence_opened_direct_bound_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("evidence_opened_direct_bound.fe");
 }

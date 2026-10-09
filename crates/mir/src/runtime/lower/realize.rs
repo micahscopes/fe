@@ -26,7 +26,7 @@ pub(super) struct SelectedRuntimeArg<'db> {
 pub(super) enum RuntimeArgSource<'db> {
     SemanticOperand(RuntimeOperand),
     DirectValueMaterialization {
-        local: SLocalId,
+        operand: RuntimeOperand,
         materialized_class: RuntimeClass<'db>,
     },
     RuntimeValue(SLocalId),
@@ -345,13 +345,13 @@ impl<'db> SelectedRuntimeArg<'db> {
     }
 
     pub(super) fn direct_value_materialization(
-        local: SLocalId,
+        operand: RuntimeOperand,
         materialized_class: RuntimeClass<'db>,
         class: RuntimeClass<'db>,
     ) -> Self {
         Self::coerce(
             RuntimeArgSource::DirectValueMaterialization {
-                local,
+                operand,
                 materialized_class,
             },
             class,

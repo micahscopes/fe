@@ -5339,11 +5339,11 @@ impl<'db> RmirEmitter<'db> {
                     .iter()
                     .any(|selected| match &selected.source {
                         RuntimeArgSource::SemanticOperand(operand)
-                        | RuntimeArgSource::AggregateFromRuntimeSource(operand) => {
+                        | RuntimeArgSource::AggregateFromRuntimeSource(operand)
+                        | RuntimeArgSource::DirectValueMaterialization { operand, .. } => {
                             operand.value == Some(value) || operand.local == local
                         }
-                        RuntimeArgSource::DirectValueMaterialization { local: source, .. }
-                        | RuntimeArgSource::RuntimeValue(source)
+                        RuntimeArgSource::RuntimeValue(source)
                         | RuntimeArgSource::HandleLikeValue(source)
                         | RuntimeArgSource::SemanticPlaceAddress(source, _) => *source == local,
                         RuntimeArgSource::PlaceAddress(place, _)
@@ -5744,15 +5744,30 @@ impl<'db> RmirEmitter<'db> {
     fn materialize_direct_value(
         &mut self,
         bb: RBlockId,
-        local: SLocalId,
+        operand: RuntimeOperand,
         materialized_class: &RuntimeClass<'db>,
     ) -> Option<RLocalId> {
-        let place = self
-            .try_semantic_place(bb, local)
-            .or_else(|| self.place_from_direct_value_transport(local, materialized_class))?;
+        // A normalized definition may live in a temp instead of its source
+        // local. Read that SSA value; never load an uninitialized source carrier.
+        let actual = operand
+            .value
+            .and_then(|value| self.normalized_value_temps[value.index()]);
+        let place = if let Some(value) = actual {
+            if !self.value_class(value)?.is_transport() {
+                return Some(self.coerce_value_if_needed(bb, value, materialized_class));
+            }
+            self.place_from_direct_value_transport(value, materialized_class)
+        } else {
+            self.try_semantic_place(bb, operand.local).or_else(|| {
+                self.place_from_direct_value_transport(
+                    self.runtime_value(operand.local),
+                    materialized_class,
+                )
+            })
+        }?;
         let place_class = self.project_place_class(&place);
         let temp = self.alloc_runtime_temp(
-            self.locals[local.index()].semantic_ty,
+            self.locals[operand.local.index()].semantic_ty,
             RuntimeCarrier::Value(place_class.clone()),
         );
         self.push_stmt(
@@ -5767,10 +5782,9 @@ impl<'db> RmirEmitter<'db> {
 
     fn place_from_direct_value_transport(
         &self,
-        local: SLocalId,
+        value: RLocalId,
         target: &RuntimeClass<'db>,
     ) -> Option<RuntimePlace<'db>> {
-        let value = self.runtime_value(local);
         match self.value_class(value)? {
             RuntimeClass::Ref { .. } => Some(RuntimePlace {
                 root: PlaceRoot::Ref(value),
@@ -6196,21 +6210,21 @@ impl<'emitter, 'db> RuntimeArgLowerer<'emitter, 'db> {
             }
             (
                 RuntimeArgSource::DirectValueMaterialization {
-                    local,
+                    operand,
                     materialized_class,
                 },
                 use_plan,
             ) => {
                 let Some(value) =
                     self.emitter
-                        .materialize_direct_value(self.bb, *local, materialized_class)
+                        .materialize_direct_value(self.bb, *operand, materialized_class)
                 else {
                     panic!(
-                        "selected direct-value materialization was not lowerable: caller={:?}; local={local:?}; selected={selected:?}",
+                        "selected direct-value materialization was not lowerable: caller={:?}; operand={operand:?}; selected={selected:?}",
                         self.emitter.current_semantic_key(),
                     )
                 };
-                self.apply_use_plan(value, use_plan.clone(), self.semantic_local_ty(*local))
+                self.apply_use_plan(value, use_plan.clone(), self.semantic_ty(*operand))
             }
             (RuntimeArgSource::RuntimeValue(local), use_plan) => {
                 let value = self.emitter.runtime_value(*local);

@@ -286,7 +286,7 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
             if let Some(selected) = self.select_semantic_place_value_for_class(arg, target) {
                 return Some(selected);
             }
-            if let Some(selected) = self.select_direct_value_materialization(local, target) {
+            if let Some(selected) = self.select_direct_value_materialization(arg, target) {
                 return Some(selected);
             }
         }
@@ -408,9 +408,10 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
 
     fn select_direct_value_materialization(
         &self,
-        local: SLocalId,
+        arg: RuntimeOperand,
         target: &RuntimeClass<'db>,
     ) -> Option<SelectedRuntimeArg<'db>> {
+        let local = arg.local;
         let local_data = self.env.body().local(local)?;
         if !matches!(
             local_data.role,
@@ -430,7 +431,7 @@ impl<'a, 'carriers, 'roots, 'cache, 'db> RuntimeArgSelector<'a, 'carriers, 'root
             return None;
         }
         Some(SelectedRuntimeArg::direct_value_materialization(
-            local,
+            arg,
             materialized_class,
             target.clone(),
         ))

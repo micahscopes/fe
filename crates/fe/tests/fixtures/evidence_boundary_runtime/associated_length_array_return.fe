@@ -1,0 +1,25 @@
+trait Compute { const N: usize }
+struct Subject {}
+impl Compute for Subject { const N: usize = 1 }
+
+fn make<T: Compute>() -> [u256; T::N] { [7; T::N] }
+
+fn via_local<T: Compute>() -> [u256; T::N] {
+    let values = [9; T::N]
+    values
+}
+
+fn literal_length<T: Compute>() -> [u256; 1] { [11; 1] }
+
+fn consume_locally<T: Compute>() -> u256 {
+    let values: [u256; T::N] = [13; T::N]
+    values[0]
+}
+
+#[test]
+fn associated_length_array_returns_preserve_defined_values() {
+    assert!(make<Subject>()[0] == 7)
+    assert!(via_local<Subject>()[0] == 9)
+    assert!(literal_length<Subject>()[0] == 11)
+    assert!(consume_locally<Subject>() == 13)
+}
