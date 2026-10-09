@@ -1,0 +1,22 @@
+// cd207ff6e: a deferred obligation registered inside `with (e)` (evidence for a
+// trait that has only a named impl), whose type is fixed only after the block.
+// The premise exists only inside the opening; it must be the registration's.
+use core::obligations::{Evidence, prove}
+trait Foo { const fn v() -> u256 }
+struct S {}
+impl Foo for S as OnlyNamed { const fn v() -> u256 { 5 } }
+struct Wrap<T> {}
+const fn needs<T: Foo>(_ w: Wrap<T>) -> u256 { 1 }
+const fn inside(_ e: Evidence<Foo<S>>) -> u256 {
+    let w = Wrap {}
+    let r = with (e) { needs(w) }
+    let _fix: Wrap<S> = w
+    r
+}
+// rejected control: the same call outside the opening
+const fn outside() -> u256 {
+    let w = Wrap {}
+    let r = needs(w)
+    let _fix: Wrap<S> = w
+    r
+}

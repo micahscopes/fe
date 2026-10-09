@@ -719,7 +719,10 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
                         return Ok(fault(UnificationError::NormalizationFault));
                     }
                     Err(_) => {
-                        if assumption.def(self.db) != normalized_goal.def(self.db)
+                        // Only stated premises retry H1's bounded normalization;
+                        // opened evidence retains L32's matching rule.
+                        if matches!(clause, Clause::Opened(_))
+                            || assumption.def(self.db) != normalized_goal.def(self.db)
                             || !super::premise_has_projection(self.db, assumption)
                         {
                             return Ok(Transition::Reject);

@@ -1,0 +1,25 @@
+// L32: Deferred registration retains the evidence opened at the call, even when its type is fixed later.
+// cd207ff6e: a deferred obligation registered inside `with (e)` (evidence for a
+// trait that has only a named impl), whose type is fixed only after the block.
+// The premise exists only inside the opening; it must be the registration's.
+use core::obligations::{Evidence, prove}
+trait Foo { const fn v() -> u256 }
+struct S {}
+impl Foo for S as OnlyNamed { const fn v() -> u256 { 5 } }
+struct Wrap<T> {}
+const fn needs<T: Foo>(_ w: Wrap<T>) -> u256 { 1 }
+const fn inside(_ e: Evidence<Foo<S>>) -> u256 {
+    let w = Wrap {}
+    let r = with (e) { needs(w) }
+    let _fix: Wrap<S> = w
+    r
+}
+
+const fn selected_evidence() -> Evidence<Foo<S>> {
+    with (OnlyNamed) { prove<Foo<S>>() }
+}
+
+#[test]
+fn result() {
+    assert(inside(selected_evidence()) == 1)
+}

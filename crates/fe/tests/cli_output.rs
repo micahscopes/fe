@@ -5350,6 +5350,39 @@ fn one_provision_controls_are_rejected() {
 }
 
 #[test]
+fn evidence_deferred_registration_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_deferred_registration.fe");
+}
+
+#[test]
+fn evidence_type_formation_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_type_formation.fe");
+}
+
+#[test]
+fn evidence_opening_does_not_prove_later_or_other_body_obligations() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/one_provision_controls");
+    for (name, location) in [
+        (
+            "evidence_deferred_registration_does_not_prove_outside.fe",
+            ":19:13",
+        ),
+        ("evidence_type_formation_after_opening.fe", ":15:26"),
+    ] {
+        let fixture = root.join(name);
+        let (output, exit_code) =
+            run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+        assert_eq!(exit_code, 1, "{name}: outside opening must fail: {output}");
+        assert_eq!(output.matches("error[").count(), 1, "{name}: {output}");
+        assert!(
+            output.contains("error[6-0003]") && output.contains(location),
+            "{name}: {output}"
+        );
+    }
+}
+
+#[test]
 fn rd121_mutable_places_cannot_hold_evidence() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/evidence_boundary_runtime/evidence_choice_checks");

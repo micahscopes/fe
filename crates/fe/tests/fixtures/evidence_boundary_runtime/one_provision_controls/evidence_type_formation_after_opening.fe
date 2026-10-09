@@ -1,0 +1,17 @@
+// cd207ff6e: a type written in a nested block, under an opening, whose
+// formation is checked after the body: it must use the premises where it was
+// written, not the end of the body.
+use core::obligations::{Evidence, prove}
+trait Foo {}
+struct S {}
+impl Foo for S as OnlyNamed {}
+struct NeedFoo<X: Foo> {}
+const fn written_inside(_ e: Evidence<Foo<S>>) -> u256 {
+    with (e) { let _x: NeedFoo<S> = NeedFoo<S> {} }
+    1
+}
+const fn written_after(_ e: Evidence<Foo<S>>) -> u256 {
+    with (e) { }
+    let _x: NeedFoo<S> = NeedFoo<S> {}
+    1
+}
