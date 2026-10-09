@@ -11,8 +11,9 @@ ceiling (zero unless listed), which only decreases, plus an EXPOSED allowance
 for pairs a migration made visible rather than added, each with its reason; so
 such sites can be removed but not added or moved to another file. The
 tables themselves are checked against the integration base
-(PREMISES_GUARD_BASE, default `mb3`): main plus exposed may not rise unless
-the commit touches only this guard and says `guard-only:`.
+(PREMISES_GUARD_BASE, default `mb3`), HEAD's parent and HEAD: main plus
+exposed may not rise unless the commit touches only this guard and says
+`guard-only:`. A missing base fails unless skipped explicitly.
 """
 from pathlib import Path
 import importlib.util
@@ -96,35 +97,61 @@ def budget(text: str) -> int:
     )
 
 
-def base_check() -> int:
-    """The total (main plus exposed) may not rise against the integration
-    base, whatever this commit does to the tables. A guard-only commit that
-    says so in its message (`guard-only:`) may change them."""
-    base = os.environ.get("PREMISES_GUARD_BASE", "mb3")
-    git = ["git", "-C", str(ROOT)]
-    shown = subprocess.run(
-        git + ["show", f"{base}:.github/check_solver_premises_budget.py"],
-        capture_output=True,
-        text=True,
-    )
-    if shown.returncode != 0:
-        print(f"premises guard: no integration base {base!r}; base comparison skipped")
+GUARD = ".github/check_solver_premises_budget.py"
+
+
+def git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True)
+
+
+def guard_only(rev: str) -> bool:
+    """`rev` changes only this guard and says so (`guard-only:`)."""
+    shown = git("show", "--name-only", "--format=%B", rev)
+    files = [line for line in shown.stdout.splitlines() if line.startswith(("crates/", ".github/"))]
+    return "guard-only:" in shown.stdout and files == [GUARD]
+
+
+def rise(label: str, before_text: str, after_text: str, exempt: bool) -> int:
+    before, after = budget(before_text), budget(after_text)
+    if after <= before or exempt:
         return 0
-    before = budget(shown.stdout)
-    after = budget((ROOT / ".github/check_solver_premises_budget.py").read_text())
-    if after <= before:
-        return 0
-    head = subprocess.run(
-        git + ["show", "--name-only", "--format=%B", "HEAD"], capture_output=True, text=True
-    ).stdout
-    files = [line for line in head.splitlines() if line.startswith("crates/")]
-    if "guard-only:" in head and not files:
-        return 0
-    print(
-        f"premises budget rose against {base}: {before} -> {after} (main + exposed)",
-        file=sys.stderr,
-    )
+    print(f"premises budget rose against {label}: {before} -> {after} (main + exposed)", file=sys.stderr)
     return 1
+
+
+def base_check() -> int:
+    """Main plus exposed may not rise, whatever a commit does to the tables:
+    not against the integration base, not against HEAD's parent (so a raised
+    ceiling cannot hide a new pair under the base total), and not in
+    uncommitted changes against HEAD. Only a commit that touches nothing but
+    this guard and says `guard-only:` may raise them.
+
+    The base is PREMISES_GUARD_BASE (default `mb3`). A missing base fails,
+    unless PREMISES_GUARD_BASE was set explicitly or
+    PREMISES_GUARD_SKIP_BASE=1 says to skip it."""
+    current = (ROOT / GUARD).read_text()
+    status = 0
+    base = os.environ.get("PREMISES_GUARD_BASE")
+    skip = os.environ.get("PREMISES_GUARD_SKIP_BASE") == "1"
+    shown = git("show", f"{base or 'mb3'}:{GUARD}")
+    if shown.returncode == 0:
+        status |= rise(f"base {base or 'mb3'}", shown.stdout, current, guard_only("HEAD"))
+    elif skip:
+        print("premises guard: base comparison skipped (PREMISES_GUARD_SKIP_BASE=1)")
+    else:
+        print(
+            f"premises guard: integration base {base or 'mb3'!r} not found; set "
+            f"PREMISES_GUARD_BASE to an available ref or PREMISES_GUARD_SKIP_BASE=1",
+            file=sys.stderr,
+        )
+        status = 1
+    head = git("show", f"HEAD:{GUARD}")
+    parent = git("show", f"HEAD^:{GUARD}")
+    if head.returncode == 0 and parent.returncode == 0:
+        status |= rise("HEAD's parent", parent.stdout, head.stdout, guard_only("HEAD"))
+    if head.returncode == 0:
+        status |= rise("HEAD (uncommitted changes)", head.stdout, current, False)
+    return status
 
 
 def main() -> int:
