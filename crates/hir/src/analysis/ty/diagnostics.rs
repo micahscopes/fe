@@ -997,6 +997,7 @@ pub enum BodyDiag<'db> {
         reason: &'static str,
     },
     SelectedConstantTypeEscape(DynLazySpan<'db>),
+    SelectedConstantArgumentLayoutMismatch(DynLazySpan<'db>),
     ObligationOpening {
         primary: DynLazySpan<'db>,
         reason: &'static str,
@@ -1152,7 +1153,8 @@ impl<'db> BodyDiag<'db> {
             Self::TypeSizeOverflow { .. } => 88,
             Self::ObligationIntroduction { .. } => 96,
             Self::ObligationOpening { .. } => 97,
-            Self::SelectedConstantTypeEscape(..) => 121,
+            Self::SelectedConstantTypeEscape(..)
+            | Self::SelectedConstantArgumentLayoutMismatch(..) => 121,
             Self::UnknownNamedSelection { .. } => 99,
             Self::AmbiguousNamedSelection { .. } => 100,
             Self::ValueAndNamedSelection { .. } => 116,

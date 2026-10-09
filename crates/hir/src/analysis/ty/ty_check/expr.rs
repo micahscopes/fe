@@ -1772,6 +1772,12 @@ impl<'db> TyChecker<'db> {
                     else {
                         break;
                     };
+                    if matches!(binding, LocalBinding::Param { .. }) {
+                        // A parameter arrives in the body's root context, before
+                        // any lexical selection at this argument expression.
+                        origin = self.body().expr(self.db);
+                        break;
+                    }
                     let Some(source) = self.env.binding_source(binding) else {
                         break;
                     };
@@ -1789,21 +1795,12 @@ impl<'db> TyChecker<'db> {
             let current = tc.env.selection_context();
             let outer = tc.normalize_callable_type(callable, source);
             let outer = tc.ground_selection_type(outer, current);
-            let here = current.contextualize_const_types_with(tc.db, source, |goal| {
-                tc.env.provision_for_goal(goal)
-            });
-            let here = tc.ground_selection_type(here, current);
-            // A callee that receives this provision remains inside its selection.
-            // An argument formed under another provision must then fail ordinary
-            // parameter checking, rather than being diagnosed as an escape.
-            if here == outer {
-                (inner, inner)
-            } else {
-                (inner, outer)
-            }
+            // Nominal parameter equality does not compare selected field layouts.
+            // Compare the value's origin with the callee in either direction.
+            (inner, outer)
         });
         if differs {
-            self.push_diag(BodyDiag::SelectedConstantTypeEscape(span));
+            self.push_diag(BodyDiag::SelectedConstantArgumentLayoutMismatch(span));
         }
         differs
     }

@@ -437,3 +437,58 @@ fn generic<F: Factory>(_ x: <F as Factory>::Out<{argument}, u256>) {{}}
         }
     }
 }
+
+#[test]
+fn selection_argument_layout_is_checked_when_entering_a_frame() {
+    let source = r#"// P3: a value formed outside a selection (ordinary layout, N = 1) enters
+// `with (Other)` and is passed to a callee that receives the selection (N = 2).
+// RD120's escape check covers leaving; this is entering.
+trait Compute { const N: usize }
+struct Subject {}
+impl Compute for Subject { const N: usize = 1 }
+impl Compute for Subject as Other { const N: usize = 2 }
+struct Buf<T: Compute> { a: [u256; T::N] }
+fn make<T: Compute>(_ a: [u256; T::N]) -> Buf<T> { Buf { a } }
+fn last<T: Compute>(_ b: own Buf<T>) -> u256 { b.a[T::N - 1] }
+fn enter(_ b: own Buf<Subject>) -> u256 { with (Other) { last<Subject>(b) } }
+#[test]
+fn t() { assert(enter(make<Subject>([5])) == 5) }
+"#;
+    for (source, rejects) in [
+        (source.to_string(), true),
+        (
+            source.replace(
+                "with (Other) { last<Subject>(b) }",
+                "let alias = b\n with (Other) { last<Subject>(alias) }",
+            ),
+            true,
+        ),
+        (
+            source
+                .replace("last<Subject>(b)", "last<Subject>(make<Subject>([5, 6]))")
+                .replace("== 5", "== 6"),
+            false,
+        ),
+        (
+            source.replace("const N: usize = 2", "const N: usize = 1"),
+            false,
+        ),
+    ] {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("selection_argument_enter.fe".into(), &source);
+        let (module, _) = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(module);
+        if rejects {
+            assert!(
+                diagnostics.iter().any(|diagnostic| diagnostic
+                    .to_complete(&db)
+                    .error_code
+                    .to_string()
+                    == "8-0121"),
+                "different origin and callee layouts must reject at the argument"
+            );
+        } else {
+            assert!(diagnostics.is_empty(), "an equal layout must remain valid");
+        }
+    }
+}

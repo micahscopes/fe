@@ -3692,6 +3692,13 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 primary.resolve(db),
                 error_code,
             ),
+            Self::SelectedConstantArgumentLayoutMismatch(primary) => primary_diag(
+                severity,
+                "argument cannot cross this selection boundary",
+                "its field layout differs between its origin and this callee",
+                primary.resolve(db),
+                error_code,
+            ),
             Self::SelectedConstantTypeEscape(primary) => primary_diag(
                 severity,
                 "value cannot leave this `with` block",
