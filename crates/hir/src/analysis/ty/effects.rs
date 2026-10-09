@@ -203,11 +203,13 @@ pub(crate) fn lower_effect_key_schema<'db>(
     assumptions: PredicateListId<'db>,
     minter: &LoweringContext<'db>,
 ) -> ResolvedEffectKey<'db> {
+    let premises =
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
     let TypeKind::Path(path) = key_ty.data(db) else {
         let carrier = normalize_from_assumptions(
             db,
             lower_hir_ty_with_minter(db, key_ty, scope, assumptions, minter),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+            premises,
         );
         return if carrier.is_star_kind(db) {
             ResolvedEffectKey::Type(TypeKeySchema { carrier })
@@ -220,14 +222,7 @@ pub(crate) fn lower_effect_key_schema<'db>(
     };
     match resolve_path_with_minter(db, key_path, scope, assumptions, false, minter) {
         Ok(PathRes::Ty(ty)) if ty.is_star_kind(db) => {
-            let ty = normalize_from_assumptions(
-                db,
-                ty,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    scope,
-                    assumptions,
-                ),
-            );
+            let ty = normalize_from_assumptions(db, ty, premises);
             let schema = TypeKeySchema {
                 carrier: existentialize_omitted_const_args_in_effect_key(
                     db,
@@ -241,14 +236,7 @@ pub(crate) fn lower_effect_key_schema<'db>(
         }
         Ok(PathRes::TyAlias(_, ty)) if ty.is_star_kind(db) => {
             let schema = TypeKeySchema {
-                carrier: normalize_from_assumptions(
-                    db,
-                    ty,
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        scope,
-                        assumptions,
-                    ),
-                ),
+                carrier: normalize_from_assumptions(db, ty, premises),
             };
             ResolvedEffectKey::Type(schema)
         }

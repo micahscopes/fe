@@ -316,22 +316,12 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         src: PatternValue<'db>,
     ) {
         let scope = self.body.scope();
-        let src_ty = normalize_ty(
-            self.db,
-            src.carrier_ty.0,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                scope,
-                self.assumptions,
-            ),
+        let premises = crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+            scope,
+            self.assumptions,
         );
-        let dst_ty = normalize_ty(
-            self.db,
-            self.locals[dst.index()].ty,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                scope,
-                self.assumptions,
-            ),
-        );
+        let src_ty = normalize_ty(self.db, src.carrier_ty.0, premises);
+        let dst_ty = normalize_ty(self.db, self.locals[dst.index()].ty, premises);
         debug_assert_eq!(
             src_ty,
             dst_ty,
@@ -378,21 +368,13 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                         == Some(PatBindingMode::ByBorrow);
                     let source_matches_dst = {
                         let scope = self.body.scope();
-                        normalize_ty(
-                            self.db,
-                            value.carrier_ty.0,
+                        let premises =
                             crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
                                 scope,
                                 self.assumptions,
-                            ),
-                        ) == normalize_ty(
-                            self.db,
-                            dst_ty,
-                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                                scope,
-                                self.assumptions,
-                            ),
-                        )
+                            );
+                        normalize_ty(self.db, value.carrier_ty.0, premises)
+                            == normalize_ty(self.db, dst_ty, premises)
                     };
                     let needs_borrow_read = by_borrow && !source_matches_dst;
                     let binding_value = if needs_borrow_read {

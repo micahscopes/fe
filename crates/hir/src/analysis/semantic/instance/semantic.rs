@@ -286,18 +286,12 @@ fn receiver_lowering_plan<'db>(
     scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
 ) -> Option<ReceiverLoweringPlan<'db>> {
+    let premises =
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
     let receiver = call_like_receiver_expr(expr_data)?;
     let borrowed_ty = callable.arg_ty(db, 0)?;
-    let borrowed_ty = normalize_ty(
-        db,
-        borrowed_ty,
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
-    );
-    let receiver_ty = normalize_ty(
-        db,
-        typed_body.expr_ty(db, receiver),
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
-    );
+    let borrowed_ty = normalize_ty(db, borrowed_ty, premises);
+    let receiver_ty = normalize_ty(db, typed_body.expr_ty(db, receiver), premises);
     let (kind, _) = borrowed_ty.as_capability(db)?;
     // A `view` receiver (a parameter declared without `own`) is borrowed for
     // a `ref self` method, as an explicit `ref` would borrow it.
@@ -1957,17 +1951,11 @@ fn classify_binding_role<'db>(
 ) -> SemanticLocalRole<'db> {
     let owner = instance.key(db).owner(db);
     let scope = owner.scope();
-    let ty = normalize_ty(
-        db,
-        ty,
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
-    );
+    let premises =
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
+    let ty = normalize_ty(db, ty, premises);
     if let Some((_, value_ty)) = ty.as_capability(db) {
-        let value_ty = normalize_ty(
-            db,
-            value_ty,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
-        );
+        let value_ty = normalize_ty(db, value_ty, premises);
         return SemanticLocalRole::PlaceCarrier { provider, value_ty };
     }
     // A raw-address provider names storage of the binding type, including a

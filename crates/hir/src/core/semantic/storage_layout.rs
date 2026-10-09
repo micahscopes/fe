@@ -1235,6 +1235,8 @@ fn instantiate_provider_target_layout<'db>(
     impl_instance: ResolvedImplInstance<'db>,
     target_template: TyId<'db>,
 ) -> Result<LayoutInstantiation<'db>, ContractLayoutError<'db>> {
+    let premises =
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
     let boundary = LayoutBoundaryIdentity::ProviderTarget(impl_instance.selected());
     let schema = match impl_instance.selected().origin(db) {
         ImplementorOrigin::Hir(impl_trait) => Some(ParamSchemaId::full(db, impl_trait.into())),
@@ -1261,16 +1263,8 @@ fn instantiate_provider_target_layout<'db>(
         boundary,
         vec![LayoutOccurrenceStep::Instantiation(0)],
     );
-    let normalized_root_uses = normalize_layout_root_uses(
-        db,
-        target.ty,
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
-    );
-    let normalized = normalize_ty(
-        db,
-        target.ty,
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
-    );
+    let normalized_root_uses = normalize_layout_root_uses(db, target.ty, premises);
+    let normalized = normalize_ty(db, target.ty, premises);
     // Normalization can expose structural roots owned by another associated
     // type definition. Re-land the complete equality partition under this
     // provider occurrence so every root carries the exact provider boundary.
@@ -1297,10 +1291,7 @@ fn instantiate_provider_target_layout<'db>(
                     db,
                     Binder::bind(schema.owner(db), owner)
                         .instantiate(db, impl_instance.impl_args(db)),
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        scope,
-                        assumptions,
-                    ),
+                    premises,
                 )
             }),
             selector: root_use.selector,

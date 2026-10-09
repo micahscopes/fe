@@ -1027,21 +1027,13 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         expr_ty: TyId<'db>,
     ) -> PathReadSemantics {
         let scope = self.body.scope();
-        if normalize_ty(
-            self.db,
-            expr_ty,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                scope,
-                self.assumptions,
-            ),
-        ) == normalize_ty(
-            self.db,
-            self.binding_ty(binding),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                scope,
-                self.assumptions,
-            ),
-        ) {
+        let premises = crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+            scope,
+            self.assumptions,
+        );
+        if normalize_ty(self.db, expr_ty, premises)
+            == normalize_ty(self.db, self.binding_ty(binding), premises)
+        {
             return PathReadSemantics::ReuseLocal;
         }
 
@@ -1052,16 +1044,9 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             | SemanticLocalRole::PlaceBoundValue { .. }
             | SemanticLocalRole::DirectCarrier { .. } => PathReadSemantics::ForwardInterface,
             SemanticLocalRole::PlaceCarrier { .. }
-                if normalize_ty(
-                    self.db,
-                    expr_ty,
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        scope,
-                        self.assumptions,
-                    ),
-                )
-                .as_capability(self.db)
-                .is_some() =>
+                if normalize_ty(self.db, expr_ty, premises)
+                    .as_capability(self.db)
+                    .is_some() =>
             {
                 PathReadSemantics::ForwardInterface
             }
@@ -1283,26 +1268,18 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         callable: &Callable<'db>,
         param: usize,
     ) -> SValueId {
+        let premises = crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+            self.body.scope(),
+            self.assumptions,
+        );
         let ty = self.expr_ty(expr);
-        if !ty_is_copy(
-            self.db,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.body.scope(),
-                self.assumptions,
-            ),
-            ty,
-        ) && callable.arg_ty(self.db, param).is_some_and(|param_ty| {
-            normalize_ty(
-                self.db,
-                param_ty,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    self.body.scope(),
-                    self.assumptions,
-                ),
-            )
-            .as_view(self.db)
-            .is_some()
-        }) && let Some(place) = self.try_lower_place(expr)
+        if !ty_is_copy(self.db, premises, ty)
+            && callable.arg_ty(self.db, param).is_some_and(|param_ty| {
+                normalize_ty(self.db, param_ty, premises)
+                    .as_view(self.db)
+                    .is_some()
+            })
+            && let Some(place) = self.try_lower_place(expr)
             && !place.path.is_empty()
         {
             return self.emit_expr_with_origin(

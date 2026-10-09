@@ -1278,6 +1278,10 @@ impl<'db> ResolvedMethodInstance<'db> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             for (origin, actual_ty) in value_inputs.chain(effect_inputs) {
+                let premises = crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    self.normalization_scope,
+                    assumptions,
+                );
                 let Some(formal_ty) = callable_input_layout_origin_ty(db, body, origin) else {
                     continue;
                 };
@@ -1285,19 +1289,9 @@ impl<'db> ResolvedMethodInstance<'db> {
                     db,
                     substitute_complete(db, formal_ty, &args.residualize(db))
                         .expect("selected input template must match body schema"),
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        self.normalization_scope,
-                        assumptions,
-                    ),
+                    premises,
                 );
-                let actual_ty = normalize_ty(
-                    db,
-                    actual_ty,
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        self.normalization_scope,
-                        assumptions,
-                    ),
-                );
+                let actual_ty = normalize_ty(db, actual_ty, premises);
                 let mut bindings = Vec::new();
                 if !collect_layout_arg_bindings(db, formal_ty, actual_ty, &mut bindings) {
                     continue;
