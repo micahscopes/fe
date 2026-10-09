@@ -164,6 +164,41 @@ pub(crate) fn impls_for_trait_and_ty<'db>(
         .collect()
 }
 
+/// The goals a proof of `requirements` can reach: the requirements, and, at
+/// any depth, the prerequisites (with supertraits) of every implementation
+/// visible from `ingot`, ordinary or named, whose header matches a reached
+/// goal, instantiated by that match. A goal still written with parameters
+/// stays symbolic, so a choice for a concrete goal never reaches it.
+#[salsa::tracked(return_ref)]
+pub(crate) fn goals_reached_through_impl_bounds<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+    requirements: PredicateListId<'db>,
+) -> Vec<TraitInstId<'db>> {
+    // Bounds the walk on non-regular impls; past it nothing more is reached.
+    const LIMIT: usize = 256;
+    let mut reached = IndexSet::new();
+    let mut pending = requirements.list(db).to_vec();
+    while let Some(goal) = pending.pop() {
+        if reached.len() >= LIMIT || !reached.insert(goal) {
+            continue;
+        }
+        for &candidate in impls_for_trait_def(db, ingot, goal.def(db)) {
+            let ImplementorOrigin::Hir(item) = candidate.origin(db) else {
+                continue;
+            };
+            let Some(instance) = instantiate_selected_impl(db, candidate, goal) else {
+                continue;
+            };
+            let bounds = collect_candidate_constraints(db, item.into())
+                .instantiate(db, instance.impl_args(db))
+                .extend_all_bounds(db);
+            pending.extend(bounds.list(db).iter().copied());
+        }
+    }
+    reached.into_iter().collect()
+}
+
 /// Returns all implementors for the given trait inst, searching across a
 /// deterministic set of ingots.
 ///

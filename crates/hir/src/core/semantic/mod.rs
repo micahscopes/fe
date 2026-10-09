@@ -477,13 +477,13 @@ pub(crate) fn call_evidence_at<'db>(
         return evidence;
     }
     let requirements = call_requirements_at(db, typed, expr);
+    let Some(body) = typed.body() else {
+        return Vec::new();
+    };
+    let ingot = body.scope().ingot(db);
     evidence
         .into_iter()
-        .filter(|(_, goal)| {
-            requirements.list(db).iter().any(|required| {
-                goal.def(db) == required.def(db) && goal.args(db) == required.args(db)
-            })
-        })
+        .filter(|(_, goal)| requirements_reach_goal(db, ingot, requirements, *goal))
         .collect()
 }
 
@@ -574,13 +574,48 @@ pub(crate) fn call_selections_at<'db>(
     selections
         .iter()
         .copied()
-        .filter(|selection| {
-            requirements
-                .list(db)
-                .iter()
-                .any(|goal| selection.matches(db, *goal))
-        })
+        .filter(|selection| requirements_reach_selection(db, requirements, *selection))
         .collect()
+}
+
+/// Whether proving `requirements` can read `selection`; see
+/// [`requirements_reach_goal`].
+pub(crate) fn requirements_reach_selection<'db>(
+    db: &'db dyn HirAnalysisDb,
+    requirements: PredicateListId<'db>,
+    selection: crate::analysis::semantic::SelectedApplication<'db>,
+) -> bool {
+    requirements_reach_goal(
+        db,
+        selection.scope().ingot(db),
+        requirements,
+        selection.goal(),
+    )
+}
+
+/// Whether proving `requirements` can read a provision for `goal`, of either
+/// spelling: `goal` is one of them or a prerequisite they reach through impl
+/// bounds, at any depth. A concrete goal written in a callee's body cannot read
+/// its caller's provisions, and a goal written with parameters is not the
+/// provided concrete goal, so a provision no requirement reaches is not
+/// carried into the callee.
+pub(crate) fn requirements_reach_goal<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: crate::Ingot<'db>,
+    requirements: PredicateListId<'db>,
+    goal: TraitInstId<'db>,
+) -> bool {
+    let matches = |required: &TraitInstId<'db>| {
+        required.def(db) == goal.def(db) && required.args(db) == goal.args(db)
+    };
+    requirements.list(db).iter().any(matches)
+        || crate::analysis::ty::trait_def::goals_reached_through_impl_bounds(
+            db,
+            ingot,
+            requirements,
+        )
+        .iter()
+        .any(matches)
 }
 
 /// Trait header validation must not assume `Self: Trait` yet.

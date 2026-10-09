@@ -4831,7 +4831,8 @@ impl<'db> TyChecker<'db> {
                                 inst,
                                 name,
                             )
-                            .with_provision(provision),
+                            .with_provision(provision)
+                            .with_dependent_provisions(self.db, self.env.position_context()),
                         ),
                     );
                     // Look up the associated const's declared type in the trait and

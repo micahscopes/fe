@@ -670,10 +670,7 @@ fn semantic_callee_key_with_assumptions<'db>(
             // The source view has already frozen lexical applicability,
             // including bounds of the recorded impl before specialization.
             lexical_selections.contains(selection)
-                || requirements
-                    .list(db)
-                    .iter()
-                    .any(|goal| selection.matches(db, *goal))
+                || crate::core::semantic::requirements_reach_selection(db, requirements, *selection)
         })
         .collect::<Vec<_>>();
     let mut selected_trait_method: Option<(ResolvedImplInstance<'db>, TraitInstId<'db>)> = None;
@@ -695,30 +692,52 @@ fn semantic_callee_key_with_assumptions<'db>(
         && let Some(inst) = callable.trait_inst()
         && let Some(name) = nominal_func.name(db).to_opt()
         && let Selection::Unique(method) = {
+            let selection_env = if inherit_trait_selection {
+                impl_env
+            } else {
+                ImplEnv::new_with_selections(
+                    db,
+                    callable.callable_def.scope(),
+                    PredicateListId::empty_list(db),
+                    Vec::new(),
+                    lexical_selections.to_vec(),
+                )
+            };
+            // The method is resolved, and its impl's prerequisites proved,
+            // under the provisions this call sees, including evidence opened
+            // around it.
             let context = TraitSolveCx::new(db, impl_env.normalization_scope(db))
-                .with_assumptions(assumptions);
+                .with_assumptions(assumptions)
+                .with_provisions(
+                    selection_env
+                        .with_witnesses(
+                            db,
+                            opened_provisions.iter().map(|&(_, goal)| goal).collect(),
+                        )
+                        .proof_provisions(db),
+                );
             match source_choice.method {
+                // Opened evidence answered this call and no implementation
+                // could. As where an implementation answers it, the static
+                // callee is provisional: evaluation validates the evidence's
+                // actual choice and dispatches to it.
+                TraitCallChoice::Recorded(choice)
+                    if matches!(
+                        choice.data(db).answer_origin(db),
+                        ImplementorOrigin::Assumption
+                    ) && opened_provisions.iter().any(|&(_, opened)| {
+                        opened.def(db) == inst.def(db) && opened.args(db) == inst.args(db)
+                    }) =>
+                {
+                    super::template::provisional_opened_method(db, context, inst, name)
+                }
                 TraitCallChoice::Recorded(choice) => {
                     recorded_method_instance(db, context, choice, name)
                 }
                 TraitCallChoice::NotTrait => unreachable!("trait call requires a choice"),
-                TraitCallChoice::UntransportedBound => resolve_trait_method_with_selections(
-                    db,
-                    context,
-                    inst,
-                    name,
-                    if inherit_trait_selection {
-                        impl_env
-                    } else {
-                        ImplEnv::new_with_selections(
-                            db,
-                            callable.callable_def.scope(),
-                            PredicateListId::empty_list(db),
-                            Vec::new(),
-                            lexical_selections.to_vec(),
-                        )
-                    },
-                ),
+                TraitCallChoice::UntransportedBound => {
+                    resolve_trait_method_with_selections(db, context, inst, name, selection_env)
+                }
             }
         }
         .map_err(MethodArgMapError::SelectedEvidence)?
@@ -1017,7 +1036,14 @@ fn semantic_callee_key_with_assumptions<'db>(
     let mut witnesses: IndexSet<_> = if context_independent {
         IndexSet::new()
     } else {
-        impl_env.witnesses(db).iter().copied().collect()
+        // Evidence opened at the call answers the callee's dependent goals
+        // too; evaluation passes the operand's own choice in its place.
+        impl_env
+            .witnesses(db)
+            .iter()
+            .copied()
+            .chain(opened_provisions.iter().map(|&(_, goal)| goal))
+            .collect()
     };
     if let Some(witness) = callable.trait_inst().filter(|_| nominal_witness_required) {
         witnesses.insert(witness);
@@ -1348,13 +1374,29 @@ fn semantic_const_key_for_assoc_const<'db>(
         BodyOwner::AnonConstBody { body, expected: ty },
         GenericSubst::complete(db, subst),
         EffectProviderSubst::empty(db),
+        // The constant's body reads the provisions its goal reaches.
         ImplEnv::new(
             db,
             assoc.origin_scope(),
             assoc.assumptions(),
-            vec![assoc.inst()],
+            assoc
+                .dependent_context()
+                .map(|env| env.witnesses(db).clone())
+                .unwrap_or_default()
+                .into_iter()
+                .chain([assoc.inst()])
+                .collect(),
         )
-        .with_selections(db, selection.into_iter().collect()),
+        .with_selections(
+            db,
+            assoc
+                .dependent_context()
+                .map(|env| env.selections(db).clone())
+                .unwrap_or_default()
+                .into_iter()
+                .chain(selection)
+                .collect(),
+        ),
     ))
 }
 

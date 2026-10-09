@@ -97,8 +97,7 @@ use super::{
     trait_def::TraitInstId,
     trait_resolution::{
         CanonicalGoalQuery, GoalSatisfiability, PredicateListId, Selection, TraitSolveCx,
-        goal_query_has_no_distinct_solution_at_context, is_goal_query_satisfiable_at_context,
-        is_goal_satisfiable,
+        goal_query_has_no_distinct_solution, is_goal_query_satisfiable, is_goal_satisfiable,
     },
     ty_contains_const_hole,
     ty_def::{
@@ -2806,7 +2805,7 @@ impl<'db> TyChecker<'db> {
         }
         let goal = obligation.goal;
         let query = solve_cx.goal_query(db, goal);
-        match is_goal_query_satisfiable_at_context(db, solve_cx, &query, obligation.context) {
+        match is_goal_query_satisfiable(db, solve_cx, &query) {
             GoalSatisfiability::Satisfied(solution) => {
                 self.accept_trait_answer(obligation, final_pass, &query, solution)
             }
@@ -2828,12 +2827,11 @@ impl<'db> TyChecker<'db> {
                     && first_projected.is_some_and(|first_projected| {
                         ambiguous.iter().all(|solution| {
                             Canonical::new(db, solution.value.inst) == first_projected
-                        }) && goal_query_has_no_distinct_solution_at_context(
+                        }) && goal_query_has_no_distinct_solution(
                             db,
                             solve_cx,
                             &query,
                             first_projected,
-                            Some(obligation.context),
                         )
                     });
                 let answers_complete_for_inference =

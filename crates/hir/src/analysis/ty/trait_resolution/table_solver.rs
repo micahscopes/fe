@@ -208,6 +208,9 @@ pub(crate) enum TargetSolutionMatch {
 enum Clause<'db> {
     Implementor(ImplementorId<'db>),
     Assumption(usize),
+    /// Opened evidence for this goal: a proof made when the evidence was
+    /// formed, so it answers the goal even when the goal is concrete.
+    Opened(TraitInstId<'db>),
     FamilyBound {
         bound: TraitInstId<'db>,
         requirements: super::PredicateListId<'db>,
@@ -280,7 +283,7 @@ struct TraitResolutionContext<'db> {
     target: Option<TargetAnswer<'db>>,
     found_target_conditions: Cell<Option<ImplConditionsId<'db>>>,
     type_depth_budget: TypeDepthBudget,
-    selections: super::ProofSelections<'db>,
+    provisions: super::ProofProvisions<'db>,
 }
 
 impl<'db> TraitResolutionContext<'db> {
@@ -289,7 +292,7 @@ impl<'db> TraitResolutionContext<'db> {
         use_scope: crate::hir_def::scope_graph::ScopeId<'db>,
         root: TraitSolverQuery<'db>,
         target: Option<TargetAnswer<'db>>,
-        selections: super::ProofSelections<'db>,
+        provisions: super::ProofProvisions<'db>,
     ) -> Self {
         Self {
             db,
@@ -298,7 +301,7 @@ impl<'db> TraitResolutionContext<'db> {
             target,
             found_target_conditions: Cell::new(None),
             type_depth_budget: TypeDepthBudget::new(db, root, target),
-            selections,
+            provisions,
         }
     }
 
@@ -486,18 +489,19 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
             self.origin_ingot,
             prepared.query.goal,
         );
-        // A lexical choice selects a candidate at every dependent impl bound.
-        // It never becomes an ordinary proof premise: the chosen candidate's
-        // header and prerequisites still run through the normal clause path.
-        let selected_candidate = key.selected_candidate.or_else(|| {
-            crate::core::semantic::lookup_trait_goal(
-                self.db,
-                prepared.normalized_goal,
-                self.selections.iter().copied(),
-                |selection| selection.0,
-            )
-            .map(|selection| selection.1)
-        });
+        // The provision in force for this goal, at every dependent impl bound
+        // and not only at the root. A named choice selects its candidate and
+        // never becomes an ordinary premise: the chosen candidate's header and
+        // prerequisites still run through the normal clause path.
+        let provision = crate::core::semantic::lookup_trait_goal(
+            self.db,
+            prepared.normalized_goal,
+            self.provisions.entries(self.db).iter().copied(),
+            |provision| provision.0,
+        );
+        let selected_candidate = key
+            .selected_candidate
+            .or_else(|| provision.and_then(|provision| provision.1));
         let implementors = impls_for_trait_in_ingots(
             self.db,
             primary,
@@ -518,6 +522,19 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
             );
         } else {
             clauses.extend(implementors.iter().copied().map(Clause::Implementor));
+        }
+        // Opened evidence answers its goal. Where an implementation can also
+        // answer it, that implementation stays the provisional static callee
+        // (evaluation dispatches on the evidence's own choice), so the
+        // evidence adds an answer only where no implementation applies.
+        if let Some((opened, None)) = provision
+            && key.selected_candidate.is_none()
+            && !prepared.query.require_impl
+            && !implementors.iter().any(|&candidate| {
+                impl_header_may_match(self.db, candidate, prepared.normalized_goal)
+            })
+        {
+            clauses.push(Clause::Opened(opened));
         }
         if selected_candidate.is_none()
             && !prepared.query.require_impl
@@ -668,9 +685,16 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
                 };
                 return Ok(self.continue_branch(key, branch, query.assumptions));
             }
-            Clause::Assumption(index) => {
-                let Some(&assumption) = query.assumptions.list(self.db).get(index) else {
-                    return Ok(Transition::Reject);
+            Clause::Assumption(_) | Clause::Opened(_) => {
+                let assumption = match clause {
+                    Clause::Opened(opened) => opened,
+                    Clause::Assumption(index) => {
+                        let Some(&assumption) = query.assumptions.list(self.db).get(index) else {
+                            return Ok(Transition::Reject);
+                        };
+                        assumption
+                    }
+                    _ => unreachable!(),
                 };
                 // A premise is compared with the goal as stated, and, when that
                 // fails and the premise has a projection, after the
@@ -945,12 +969,12 @@ pub(super) fn solve<'db>(
     db: &'db dyn HirAnalysisDb,
     use_scope: crate::hir_def::scope_graph::ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
-    selections: super::ProofSelections<'db>,
+    provisions: super::ProofProvisions<'db>,
 ) -> GoalSatisfiability<'db> {
     let _proof_search = super::enter_proof_search();
     let mut root_table = PersistentUnificationTable::new_proof(db);
     let root_goal = query.extract_identity(&mut root_table);
-    let mut context = TraitResolutionContext::new(db, use_scope, root_goal, None, selections);
+    let mut context = TraitResolutionContext::new(db, use_scope, root_goal, None, provisions);
     let mut observer = UnresolvedGoalObserver::default();
     let config = Config {
         limits: Limits {
@@ -1004,7 +1028,7 @@ pub(super) fn has_solution<'db>(
     target: Canonical<TraitInstId<'db>>,
     relation: TargetSolutionMatch,
     selected_candidate: Option<ImplementorId<'db>>,
-    selections: super::ProofSelections<'db>,
+    provisions: super::ProofProvisions<'db>,
 ) -> TargetSearchResult<'db> {
     let _proof_search = super::enter_proof_search();
     let mut root_table = PersistentUnificationTable::new_proof(db);
@@ -1019,7 +1043,7 @@ pub(super) fn has_solution<'db>(
         relation,
     };
     let mut context =
-        TraitResolutionContext::new(db, use_scope, root_goal, Some(target), selections);
+        TraitResolutionContext::new(db, use_scope, root_goal, Some(target), provisions);
     let options = ReportOptions::default().with_answerless(AnswerlessMode::Omit);
     // A target can occur after a non-regular recursive clause. Fair scheduling
     // keeps that branch from starving later root clauses before the type-depth

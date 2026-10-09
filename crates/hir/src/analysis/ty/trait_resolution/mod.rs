@@ -38,8 +38,72 @@ pub use table_solver::TargetSolutionStatus;
 
 pub(crate) const TRAIT_SOLVER_ROOT_ANSWER_LIMIT: usize = 2;
 
-// Exactly the selection fields read by dependent proof search.
-type ProofSelections<'db> = Vec<(TraitInstId<'db>, ImplementorId<'db>)>;
+/// The provisions in force at a position, as proof search reads them: each
+/// visible goal with the implementation a named choice selects, or `None` when
+/// opened evidence (or a transported witness) answers it. Search reads nothing
+/// else of the position, so an ordinary position shares the empty key.
+#[salsa::interned]
+#[derive(Debug)]
+pub struct ProofProvisions<'db> {
+    #[return_ref]
+    pub entries: Vec<(TraitInstId<'db>, Option<ImplementorId<'db>>)>,
+}
+
+impl<'db> ProofProvisions<'db> {
+    pub fn none(db: &'db dyn HirAnalysisDb) -> Self {
+        Self::new(db, Vec::new())
+    }
+
+    /// These provisions, with `inner`'s answering their own goals first, as an
+    /// inner frame shadows an outer one.
+    pub(crate) fn within(self, db: &'db dyn HirAnalysisDb, inner: Self) -> Self {
+        if inner.entries(db).is_empty() {
+            return self;
+        }
+        let same = |a: TraitInstId<'db>, b: TraitInstId<'db>| {
+            a.def(db) == b.def(db) && a.args(db) == b.args(db)
+        };
+        let entries = self
+            .entries(db)
+            .iter()
+            .copied()
+            .filter(|(goal, _)| !inner.entries(db).iter().any(|(own, _)| same(*goal, *own)))
+            .chain(inner.entries(db).iter().copied())
+            .collect::<Vec<_>>();
+        Self::new(db, entries)
+    }
+}
+
+impl<'db> TyVisitable<'db> for ProofProvisions<'db> {
+    fn visit_with<V: TyVisitor<'db> + ?Sized>(&self, visitor: &mut V) {
+        for (goal, candidate) in self.entries(visitor.db()) {
+            goal.visit_with(visitor);
+            if let Some(candidate) = candidate {
+                candidate.visit_with(visitor);
+            }
+        }
+    }
+}
+
+impl<'db> TyFoldable<'db> for ProofProvisions<'db> {
+    fn super_fold_with<F: super::fold::TyFolder<'db>>(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        folder: &mut F,
+    ) -> Self {
+        let entries = self
+            .entries(db)
+            .iter()
+            .map(|&(goal, candidate)| {
+                (
+                    goal.fold_with(db, folder),
+                    candidate.map(|candidate| candidate.fold_with(db, folder)),
+                )
+            })
+            .collect::<Vec<_>>();
+        Self::new(db, entries)
+    }
+}
 
 // RD74 permits pure, fueled type normalization in proof search. Impl const
 // conditions belong to the checker after the proof returns. Keep this guard
@@ -221,6 +285,7 @@ pub struct TraitSolveCx<'db> {
     scope: ScopeId<'db>,
     origin_ingot: Ingot<'db>,
     assumptions: PredicateListId<'db>,
+    provisions: ProofProvisions<'db>,
 }
 
 impl<'db> TraitSolveCx<'db> {
@@ -237,7 +302,19 @@ impl<'db> TraitSolveCx<'db> {
             scope,
             origin_ingot: scope.ingot(db),
             assumptions: PredicateListId::empty_list(db),
+            provisions: ProofProvisions::none(db),
         }
+    }
+
+    /// Every proof made with this context sees the same provisions: a named
+    /// choice restricts its goal to the chosen impl, whose prerequisites are
+    /// still proved; opened evidence answers its own goal.
+    pub(crate) fn with_provisions(self, provisions: ProofProvisions<'db>) -> Self {
+        Self { provisions, ..self }
+    }
+
+    pub(crate) fn provisions(self) -> ProofProvisions<'db> {
+        self.provisions
     }
 
     pub fn with_assumptions(self, assumptions: PredicateListId<'db>) -> Self {
@@ -484,20 +561,20 @@ fn is_query_satisfiable<'db>(
     db: &'db dyn HirAnalysisDb,
     use_scope: ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
-    selections: ProofSelections<'db>,
+    provisions: ProofProvisions<'db>,
 ) -> GoalSatisfiability<'db> {
     if query.flags(db).contains(TyFlags::HAS_INVALID) {
         return GoalSatisfiability::ContainsInvalid;
     };
 
-    solve(db, use_scope, query, selections)
+    solve(db, use_scope, query, provisions)
 }
 
 fn is_query_satisfiable_cycle_initial<'db>(
     _db: &'db dyn HirAnalysisDb,
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
-    _selections: ProofSelections<'db>,
+    _provisions: ProofProvisions<'db>,
 ) -> GoalSatisfiability<'db> {
     // A cycle can arise while collecting an impl whose constraints contain an associated-type
     // projection: resolving the projection needs the trait environment that is currently being
@@ -515,7 +592,7 @@ fn is_query_satisfiable_cycle_recover<'db>(
     _count: u32,
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
-    _selections: ProofSelections<'db>,
+    _provisions: ProofProvisions<'db>,
 ) -> salsa::CycleRecoveryAction<GoalSatisfiability<'db>> {
     salsa::CycleRecoveryAction::Iterate
 }
@@ -529,13 +606,13 @@ fn query_has_solution<'db>(
     use_scope: ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
     target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
-    selections: ProofSelections<'db>,
+    provisions: ProofProvisions<'db>,
 ) -> TargetSolutionStatus {
     let (target, relation) = target;
     if query.flags(db).contains(TyFlags::HAS_INVALID) {
         return TargetSolutionStatus::NotFound;
     }
-    has_solution(db, use_scope, query, target, relation, None, selections).status
+    has_solution(db, use_scope, query, target, relation, None, provisions).status
 }
 
 #[salsa::tracked(
@@ -548,6 +625,7 @@ fn query_candidate_proves_goal<'db>(
     query: Canonical<TraitSolverQuery<'db>>,
     candidate: ImplementorId<'db>,
     target: Canonical<TraitInstId<'db>>,
+    provisions: ProofProvisions<'db>,
 ) -> TargetSearchResult<'db> {
     if query.flags(db).contains(TyFlags::HAS_INVALID) {
         return TargetSearchResult {
@@ -562,7 +640,7 @@ fn query_candidate_proves_goal<'db>(
         target,
         TargetSolutionMatch::Equal,
         Some(candidate),
-        Vec::new(),
+        provisions,
     )
 }
 
@@ -572,6 +650,7 @@ fn query_candidate_proves_goal_cycle_initial<'db>(
     _query: Canonical<TraitSolverQuery<'db>>,
     _candidate: ImplementorId<'db>,
     _target: Canonical<TraitInstId<'db>>,
+    _provisions: ProofProvisions<'db>,
 ) -> TargetSearchResult<'db> {
     TargetSearchResult {
         status: TargetSolutionStatus::Incomplete,
@@ -579,6 +658,8 @@ fn query_candidate_proves_goal_cycle_initial<'db>(
     }
 }
 
+// Salsa fixes this signature: the query's arguments plus the recovery inputs.
+#[allow(clippy::too_many_arguments)]
 fn query_candidate_proves_goal_cycle_recover<'db>(
     _db: &'db dyn HirAnalysisDb,
     _value: &TargetSearchResult<'db>,
@@ -587,6 +668,7 @@ fn query_candidate_proves_goal_cycle_recover<'db>(
     _query: Canonical<TraitSolverQuery<'db>>,
     _candidate: ImplementorId<'db>,
     _target: Canonical<TraitInstId<'db>>,
+    _provisions: ProofProvisions<'db>,
 ) -> salsa::CycleRecoveryAction<TargetSearchResult<'db>> {
     salsa::CycleRecoveryAction::Iterate
 }
@@ -626,6 +708,7 @@ pub(crate) fn candidate_proves_goal_with_conditions<'db>(
         query.canonical(),
         candidate,
         Canonical::new(db, goal),
+        solve_cx.provisions,
     )
 }
 
@@ -634,7 +717,7 @@ fn query_has_solution_cycle_initial<'db>(
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
     _target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
-    _selections: ProofSelections<'db>,
+    _provisions: ProofProvisions<'db>,
 ) -> TargetSolutionStatus {
     TargetSolutionStatus::Incomplete
 }
@@ -646,7 +729,7 @@ fn query_has_solution_cycle_recover<'db>(
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
     _target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
-    _selections: ProofSelections<'db>,
+    _provisions: ProofProvisions<'db>,
 ) -> salsa::CycleRecoveryAction<TargetSolutionStatus> {
     salsa::CycleRecoveryAction::Iterate
 }
@@ -663,33 +746,19 @@ pub(crate) fn goal_query_has_solution<'db>(
             solve_cx.origin_scope(db),
             query.canonical(),
             (target, TargetSolutionMatch::Equal),
-            Vec::new(),
+            solve_cx.provisions,
         ),
         TargetSolutionStatus::Found
     )
 }
 
-// The search reads only the visible selected applications, never the rest of
-// the position context. Empty projections share the ordinary proof cache key.
-fn projected_selections<'db>(
-    db: &'db dyn HirAnalysisDb,
-    context: crate::analysis::semantic::ImplEnv<'db>,
-) -> ProofSelections<'db> {
-    context
-        .selections(db)
-        .iter()
-        .copied()
-        .filter(|selection| context.selection_for(db, selection.goal()) == Some(*selection))
-        .map(|selection| (selection.goal(), selection.candidate()))
-        .collect()
-}
-
-pub(crate) fn goal_query_has_no_distinct_solution_at_context<'db>(
+/// Whether no answer for `query` differs from `target`, under the provisions
+/// of `solve_cx`.
+pub(crate) fn goal_query_has_no_distinct_solution<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
     query: &CanonicalGoalQuery<'db>,
     target: Canonical<TraitInstId<'db>>,
-    context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> bool {
     matches!(
         query_has_solution(
@@ -697,7 +766,7 @@ pub(crate) fn goal_query_has_no_distinct_solution_at_context<'db>(
             solve_cx.origin_scope(db),
             query.canonical(),
             (target, TargetSolutionMatch::NotEqual),
-            context.map_or_else(Vec::new, |context| projected_selections(db, context)),
+            solve_cx.provisions,
         ),
         TargetSolutionStatus::NotFound
     )
@@ -708,23 +777,11 @@ pub fn is_goal_query_satisfiable<'db>(
     solve_cx: TraitSolveCx<'db>,
     query: &CanonicalGoalQuery<'db>,
 ) -> GoalSatisfiability<'db> {
-    is_query_satisfiable(db, solve_cx.origin_scope(db), query.canonical(), Vec::new()).clone()
-}
-
-pub(crate) fn is_goal_query_satisfiable_at_context<'db>(
-    db: &'db dyn HirAnalysisDb,
-    solve_cx: TraitSolveCx<'db>,
-    query: &CanonicalGoalQuery<'db>,
-    context: crate::analysis::semantic::ImplEnv<'db>,
-) -> GoalSatisfiability<'db> {
-    if context.selections(db).is_empty() {
-        return is_goal_query_satisfiable(db, solve_cx, query);
-    }
     is_query_satisfiable(
         db,
         solve_cx.origin_scope(db),
         query.canonical(),
-        projected_selections(db, context),
+        solve_cx.provisions,
     )
     .clone()
 }
@@ -2559,11 +2616,11 @@ impl Produce for Subject {
     }
 
     #[test]
-    fn proof_selection_projection_ignores_unread_position_fields() {
+    fn proof_provisions_ignore_unread_position_fields() {
         use crate::analysis::semantic::{ImplEnv, SelectedApplication};
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
-            "proof_selection_projection.fe".into(),
+            "proof_provisions_projection.fe".into(),
             "trait Foo {} trait Marker {} struct S {} impl Foo for S {} fn position() {}",
         );
         let (top_mod, _) = db.top_mod(file);
@@ -2597,20 +2654,18 @@ impl Produce for Subject {
             Vec::new(),
             vec![selection],
         );
+        // Scope and premises differ; the search reads neither.
         let b = ImplEnv::new_with_selections(
             &db,
             top_mod.all_funcs(&db)[0].scope(),
             PredicateListId::new(&db, vec![marker]),
-            vec![marker],
+            Vec::new(),
             vec![selection],
         );
         assert_ne!(a, b);
-        assert_eq!(
-            super::projected_selections(&db, a),
-            super::projected_selections(&db, b)
-        );
-        // Even the selected application's captured proof origin is unread by
-        // this search: only its goal and candidate restrict the subgoal.
+        assert_eq!(a.proof_provisions(&db), b.proof_provisions(&db));
+        // Nor does it read the selected application's captured origin: only
+        // its goal and candidate restrict the subgoal.
         let other_evidence = prove_selected_impl_evidence(
             &db,
             TraitSolveCx::new(&db, top_mod.all_funcs(&db)[0].scope())
@@ -2622,28 +2677,40 @@ impl Produce for Subject {
         let other_selection = SelectedApplication::from_evidence(&other_evidence);
         assert_ne!(selection, other_selection);
         let c = b.with_selections(&db, vec![other_selection]);
+        assert_eq!(a.proof_provisions(&db), c.proof_provisions(&db));
+        // Opened evidence is read: it answers its own goal.
+        let opened = ImplEnv::new(&db, top_mod.scope(), assumptions, vec![marker]);
         assert_eq!(
-            super::projected_selections(&db, a),
-            super::projected_selections(&db, c)
+            opened.proof_provisions(&db).entries(&db),
+            &vec![(marker, None)]
         );
-        let ordinary = ImplEnv::new(&db, top_mod.scope(), assumptions, vec![goal]);
-        assert!(super::projected_selections(&db, ordinary).is_empty());
+        // Ordinary positions, whatever their scope and premises, share the
+        // empty projection, and so the same proof query keys as a context
+        // built without any position.
+        let ordinary = ImplEnv::new(&db, top_mod.scope(), assumptions, Vec::new());
+        let other_ordinary = ImplEnv::new(
+            &db,
+            top_mod.all_funcs(&db)[0].scope(),
+            PredicateListId::new(&db, vec![marker]),
+            Vec::new(),
+        );
+        let empty = TraitSolveCx::new(&db, top_mod.scope()).provisions();
+        assert_eq!(ordinary.proof_provisions(&db), empty);
+        assert_eq!(other_ordinary.proof_provisions(&db), empty);
+        assert_eq!(ordinary.solver_context(&db).provisions(), empty);
         let query = CanonicalGoalQuery::new(&db, goal, assumptions);
-        let cx = TraitSolveCx::new(&db, top_mod.scope());
         assert_eq!(
-            super::goal_query_has_no_distinct_solution_at_context(
+            super::goal_query_has_no_distinct_solution(
                 &db,
-                cx,
+                TraitSolveCx::new(&db, top_mod.scope()),
                 &query,
                 Canonical::new(&db, goal),
-                None
             ),
-            super::goal_query_has_no_distinct_solution_at_context(
+            super::goal_query_has_no_distinct_solution(
                 &db,
-                cx,
+                ordinary.solver_context(&db),
                 &query,
                 Canonical::new(&db, goal),
-                Some(ordinary)
             )
         );
     }

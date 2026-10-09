@@ -2740,16 +2740,36 @@ pub(crate) fn const_ty_from_assoc_const_use<'db>(
             .ok()?;
         let const_ty =
             const_ty_from_resolved_trait_const(db, proof.resolved_instance(), assoc.name())?;
+        let dependent = assoc.dependent_context();
         let impl_env = ImplEnv::new(
             db,
             assoc.origin_scope(),
             assoc.assumptions(),
-            vec![assoc.inst()],
+            dependent
+                .map(|env| env.witnesses(db).clone())
+                .unwrap_or_default()
+                .into_iter()
+                .chain([assoc.inst()])
+                .collect(),
         )
-        .with_selections(db, vec![selection]);
+        .with_selections(
+            db,
+            dependent
+                .map(|env| env.selections(db).clone())
+                .unwrap_or_default()
+                .into_iter()
+                .chain([selection])
+                .collect(),
+        );
         Some(const_ty.with_impl_env(db, impl_env))
     } else {
-        const_ty_from_trait_const(db, assoc.solve_cx(db), assoc.inst(), assoc.name())
+        let const_ty =
+            const_ty_from_trait_const(db, assoc.solve_cx(db), assoc.inst(), assoc.name())?;
+        // The constant's body reads the provisions its goal reaches.
+        Some(match assoc.dependent_context() {
+            Some(dependent) => const_ty.with_impl_env(db, dependent),
+            None => const_ty,
+        })
     }
 }
 

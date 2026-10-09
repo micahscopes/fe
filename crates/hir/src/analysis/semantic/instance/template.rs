@@ -10,7 +10,7 @@ use crate::{
                 TraitInstId, prove_selected_impl_evidence, resolve_trait_method_instance,
                 resolved_method_instance,
             },
-            trait_resolution::{PredicateListId, Selection, TraitSolveCx},
+            trait_resolution::{PredicateListId, ProofProvisions, Selection, TraitSolveCx},
             ty_check::{BodyOwner, TraitChoiceId, TypedBody, infer_body},
             ty_def::TyId,
             ty_lower::CompleteSubst,
@@ -112,6 +112,7 @@ pub struct SelectedApplication<'db> {
     candidate: ImplementorId<'db>,
     scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
+    provisions: ProofProvisions<'db>,
 }
 
 impl<'db> SelectedApplication<'db> {
@@ -121,6 +122,7 @@ impl<'db> SelectedApplication<'db> {
             candidate: evidence.selected(),
             scope: evidence.context().scope(),
             assumptions: evidence.context().assumptions(),
+            provisions: evidence.context().provisions(),
         }
     }
 
@@ -159,12 +161,21 @@ impl<'db> SelectedApplication<'db> {
         if !self.matches(db, goal) {
             return Err(SelectedEvidenceError::NotProven);
         }
+        // The origin's premises and provisions are those the choice was made
+        // with, so a prerequisite another provision met there is met again.
         prove_selected_impl_evidence(
             db,
-            TraitSolveCx::new(db, self.scope).with_assumptions(self.assumptions),
+            TraitSolveCx::new(db, self.scope)
+                .with_assumptions(self.assumptions)
+                .with_provisions(self.provisions),
             self.candidate,
             self.goal,
         )?;
+        // The choice carries how its prerequisites were met: the provisions
+        // it was made under hold wherever it is used, unless the destination
+        // provides the same goal itself.
+        let destination =
+            destination.with_provisions(self.provisions.within(db, destination.provisions()));
         prove_selected_impl_evidence(db, destination, self.candidate, goal)
     }
 }
@@ -188,8 +199,50 @@ pub fn resolve_trait_method_with_selections<'db>(
             method,
         ))
     } else {
-        Ok(resolve_trait_method_instance(db, context, goal, method))
+        let resolved = resolve_trait_method_instance(db, context, goal, method);
+        // Only a witness answers this concrete goal: evidence opened by a
+        // caller, whose operand evaluation passes in its place.
+        let witnessed_only = match &resolved {
+            Selection::NotFound => true,
+            Selection::Unique(method) => matches!(
+                method.resolved().selected().origin(db),
+                crate::analysis::ty::trait_def::ImplementorOrigin::Assumption
+            ),
+            Selection::Ambiguous(_) => false,
+        };
+        if witnessed_only
+            && !goal
+                .args(db)
+                .iter()
+                .any(|ty| ty.has_param(db) || ty.has_var(db))
+            && matches!(
+                impl_env.provision_for(db, goal),
+                Some(crate::semantic::Provision::Bound(_))
+            )
+        {
+            provisional_opened_method(db, context, goal, method)
+        } else {
+            Ok(resolved)
+        }
     }
+}
+
+/// The provisional static callee of a goal answered only by opened evidence:
+/// the first visible implementation, ordinary or named, that proves the goal
+/// here, as where an implementation answers it. Evaluation validates the
+/// evidence's own choice and dispatches to it.
+pub(crate) fn provisional_opened_method<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    goal: TraitInstId<'db>,
+    method: IdentId<'db>,
+) -> Result<Selection<ResolvedMethodInstance<'db>>, SelectedEvidenceError> {
+    let ingot = context.scope().ingot(db);
+    crate::analysis::ty::trait_def::impls_for_trait_def(db, ingot, goal.def(db))
+        .iter()
+        .find_map(|&candidate| prove_selected_impl_evidence(db, context, candidate, goal).ok())
+        .map(|proof| resolved_method_instance(db, context, proof.resolved_instance(), method))
+        .ok_or(SelectedEvidenceError::NotProven)
 }
 
 impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for SelectedApplication<'db> {
@@ -199,6 +252,7 @@ impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for SelectedApplication
     ) {
         self.goal.visit_with(visitor);
         self.assumptions.visit_with(visitor);
+        self.provisions.visit_with(visitor);
     }
 }
 
@@ -207,6 +261,7 @@ impl<'db> TyFoldable<'db> for SelectedApplication<'db> {
         Self {
             goal: self.goal.fold_with(db, folder),
             assumptions: self.assumptions.fold_with(db, folder),
+            provisions: self.provisions.fold_with(db, folder),
             ..self
         }
     }
@@ -310,9 +365,39 @@ impl<'db> ImplEnv<'db> {
         crate::analysis::ty::normalize::normalize_ty(db, source, self.premises(db))
     }
 
-    /// Solver premises and normalization scope come from one position context.
+    /// Solver premises, normalization scope and provisions come from one
+    /// position context.
     pub fn solver_context(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
-        self.premises(db).solver_context(db)
+        self.premises(db)
+            .solver_context(db)
+            .with_provisions(self.proof_provisions(db))
+    }
+
+    /// The provisions proof search reads at this position: for each goal, the
+    /// visible provision's answer, a named choice's implementation or `None`
+    /// for opened evidence and transported witnesses. Scope, premises and the
+    /// choices' captured origins are not read, so they are not in the key.
+    pub(crate) fn proof_provisions(self, db: &'db dyn HirAnalysisDb) -> ProofProvisions<'db> {
+        use crate::semantic::Provision;
+        let mut entries: Vec<(TraitInstId<'db>, Option<ImplementorId<'db>>)> = Vec::new();
+        let goals = self
+            .witnesses(db)
+            .iter()
+            .copied()
+            .chain(self.selections(db).iter().map(|selection| selection.goal()));
+        for goal in goals {
+            let entry = match self.provision_for(db, goal) {
+                Some(Provision::Named(selection)) => {
+                    (selection.goal(), Some(selection.candidate()))
+                }
+                Some(provision) => (provision.goal(), None),
+                None => continue,
+            };
+            if !entries.contains(&entry) {
+                entries.push(entry);
+            }
+        }
+        ProofProvisions::new(db, entries)
     }
 
     /// Premises for member lookup at this position. Opened evidence is a
@@ -435,6 +520,70 @@ impl<'db> ImplEnv<'db> {
             self.assumptions(db),
             self.witnesses(db).clone(),
             selections,
+            self.bound_choices(db).clone(),
+        )
+    }
+
+    /// The provisions of this context, other than `goal`'s own, that proving
+    /// `goal` reaches through impl prerequisites, as a context over
+    /// `premises`; `None` when there are none.
+    pub(crate) fn reached_from(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+        premises: SolverPremises<'db>,
+    ) -> Option<Self> {
+        let requirements = PredicateListId::new(db, vec![goal]);
+        let ingot = premises.scope().ingot(db);
+        let reached = |provided: TraitInstId<'db>| {
+            !(provided.def(db) == goal.def(db) && provided.args(db) == goal.args(db))
+                && crate::core::semantic::requirements_reach_goal(db, ingot, requirements, provided)
+        };
+        let witnesses = self
+            .witnesses(db)
+            .iter()
+            .copied()
+            .filter(|provided| reached(*provided))
+            .collect::<Vec<_>>();
+        let selections = self
+            .selections(db)
+            .iter()
+            .copied()
+            .filter(|selection| reached(selection.goal()))
+            .collect::<Vec<_>>();
+        (!witnesses.is_empty() || !selections.is_empty()).then(|| {
+            Self::new_with_selections(
+                db,
+                premises.scope(),
+                premises.assumptions(),
+                witnesses,
+                selections,
+            )
+        })
+    }
+
+    /// This context with `goals` also answered by opened evidence; existing
+    /// witnesses and choices are kept.
+    pub(crate) fn with_witnesses(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        goals: Vec<TraitInstId<'db>>,
+    ) -> Self {
+        if goals.iter().all(|goal| self.witnesses(db).contains(goal)) {
+            return self;
+        }
+        let mut witnesses = self.witnesses(db).clone();
+        witnesses.extend(
+            goals
+                .into_iter()
+                .filter(|goal| !self.witnesses(db).contains(goal)),
+        );
+        Self::new_with_choices(
+            db,
+            self.normalization_scope(db),
+            self.assumptions(db),
+            witnesses,
+            self.selections(db).clone(),
             self.bound_choices(db).clone(),
         )
     }

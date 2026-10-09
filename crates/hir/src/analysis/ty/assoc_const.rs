@@ -20,6 +20,10 @@ pub struct AssocConstUse<'db> {
     inst: TraitInstId<'db>,
     name: IdentId<'db>,
     provision: Option<crate::semantic::Provision<'db>>,
+    /// The other provisions in force where the use was written that proving
+    /// its goal reaches through impl prerequisites. Only these are read, so
+    /// only these are part of the use's identity.
+    dependent: Option<crate::analysis::semantic::ImplEnv<'db>>,
 }
 
 impl<'db> AssocConstUse<'db> {
@@ -33,7 +37,27 @@ impl<'db> AssocConstUse<'db> {
             inst,
             name,
             provision: None,
+            dependent: None,
         }
+    }
+
+    /// Keep the provisions of `context` that proving this use's goal can
+    /// reach, other than the goal's own provision.
+    pub(crate) fn with_dependent_provisions(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        context: crate::analysis::semantic::ImplEnv<'db>,
+    ) -> Self {
+        Self {
+            dependent: context.reached_from(db, self.inst, self.premises),
+            ..self
+        }
+    }
+
+    /// The reached provisions of the use's position, as a context for the
+    /// constant's body.
+    pub(crate) fn dependent_context(self) -> Option<crate::analysis::semantic::ImplEnv<'db>> {
+        self.dependent
     }
 
     pub fn premises(self) -> crate::analysis::semantic::SolverPremises<'db> {
@@ -134,7 +158,13 @@ impl<'db> AssocConstUse<'db> {
     }
 
     pub fn solve_cx(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
-        self.premises.solver_context(db)
+        match self.dependent {
+            Some(dependent) => self
+                .premises
+                .solver_context(db)
+                .with_provisions(dependent.proof_provisions(db)),
+            None => self.premises.solver_context(db),
+        }
     }
 }
 
@@ -147,6 +177,9 @@ impl<'db> TyVisitable<'db> for AssocConstUse<'db> {
         self.inst.visit_with(visitor);
         if let Some(provision) = self.provision {
             provision.visit_with(visitor);
+        }
+        if let Some(dependent) = self.dependent {
+            dependent.visit_with(visitor);
         }
     }
 }
@@ -170,6 +203,9 @@ impl<'db> TyFoldable<'db> for AssocConstUse<'db> {
             provision: self
                 .provision
                 .map(|provision| provision.fold_with(db, folder)),
+            dependent: self
+                .dependent
+                .map(|dependent| dependent.fold_with(db, folder)),
         }
     }
 }
