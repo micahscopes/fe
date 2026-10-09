@@ -2324,9 +2324,11 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         // Validate at the call site. The callee's own trait requirements
         // cannot establish the selected application's prerequisites.
         let mut selections = env.selections(db).clone();
+        let mut bound_choices = env.bound_choices(db).clone();
         let mut opened_method = None;
         for &(witness, goal) in provisions {
             let (selection, proof) = self.opened_proof(frame_idx, witness, goal, origin)?;
+            let supplied = crate::analysis::semantic::SelectedApplication::from_evidence(&proof);
             if opened_call.is_some_and(|(required, _)| required == goal) {
                 opened_method = Some(proof);
             }
@@ -2334,8 +2336,19 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             // shadows any choice inherited through the callee's bounds.
             selections.retain(|inherited| !inherited.matches(db, goal));
             selections.push(selection);
+            // The operand supplies the callee's bound arguments as well as
+            // its selection context. Keeping a provisional ordinary answer
+            // here would make the body dispatch differently from the opening.
+            for (_, choice) in &mut bound_choices {
+                if choice.data(db).goal() == goal {
+                    *choice =
+                        crate::analysis::ty::ty_check::TraitChoiceId::for_selected_application(
+                            db, supplied,
+                        );
+                }
+            }
         }
-        let env = env.with_selections(db, selections);
+        let env = env.with_call_choices(db, selections, bound_choices);
         let key = SemanticInstanceKey::new(
             db,
             key.owner(db),

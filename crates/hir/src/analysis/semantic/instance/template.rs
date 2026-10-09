@@ -509,7 +509,17 @@ impl<'db> ImplEnv<'db> {
         db: &'db dyn HirAnalysisDb,
         selections: Vec<SelectedApplication<'db>>,
     ) -> Self {
-        if *self.selections(db) == selections {
+        self.with_call_choices(db, selections, self.bound_choices(db).clone())
+    }
+
+    /// Transport actual call choices without rebuilding the position's premises.
+    pub(crate) fn with_call_choices(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        selections: Vec<SelectedApplication<'db>>,
+        bound_choices: Vec<(usize, TraitChoiceId<'db>)>,
+    ) -> Self {
+        if *self.selections(db) == selections && *self.bound_choices(db) == bound_choices {
             return self;
         }
         // Visibility is established by the source chain. Transport preserves
@@ -520,7 +530,7 @@ impl<'db> ImplEnv<'db> {
             self.assumptions(db),
             self.witnesses(db).clone(),
             selections,
-            self.bound_choices(db).clone(),
+            bound_choices,
         )
     }
 

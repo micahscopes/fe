@@ -2108,6 +2108,20 @@ pub struct TraitChoiceId<'db> {
 }
 
 impl<'db> TraitChoiceId<'db> {
+    /// Record the actual application supplied by a validated evidence operand.
+    pub(crate) fn for_selected_application(
+        db: &'db dyn HirAnalysisDb,
+        selection: SelectedApplication<'db>,
+    ) -> Self {
+        Self::new(
+            db,
+            TraitChoice {
+                goal: selection.goal(),
+                via: TraitChoiceVia::Selected(selection),
+            },
+        )
+    }
+
     /// Transport the accepted selection into a context that independently
     /// proves it. Ordinary answers already have no selection context to shed.
     pub(crate) fn in_proven_context(

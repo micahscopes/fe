@@ -1,0 +1,40 @@
+use core::obligations::{Evidence, prove}
+
+trait Produce {
+    const fn produce() -> u64
+}
+
+struct Subject {}
+
+impl Produce for Subject {
+    const fn produce() -> u64 { 42 }
+}
+
+impl Produce for Subject as Alternate {
+    const fn produce() -> u64 { 7 }
+}
+
+const fn captured() -> Evidence<Produce<Subject>> {
+    with (Alternate) { prove<Produce<Subject>>() }
+}
+
+const fn ordinary() -> Evidence<Produce<Subject>> {
+    prove<Produce<Subject>>()
+}
+
+const fn helper<T: Produce>() -> u64 { T::produce() }
+
+const INLINE: u64 = with (Alternate) {
+    with (prove<Produce<Subject>>()) { helper<Subject>() }
+}
+const DIRECT: u64 = with (captured()) { <Subject as Produce>::produce() }
+const HELPER: u64 = with (captured()) { helper<Subject>() }
+const ORDINARY: u64 = with (ordinary()) { helper<Subject>() }
+
+#[test]
+fn opened_direct_bound_uses_captured_choice() {
+    assert!(DIRECT == 7)
+    assert!(ORDINARY == 42)
+    assert!(INLINE == 7)
+    assert!(HELPER == 7)
+}
