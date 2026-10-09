@@ -1157,9 +1157,45 @@ impl<'db> Callable<'db> {
                 Some(crate::semantic::Provision::Named(selection)) => Some(selection),
                 _ => None,
             };
+            let context = tc.context_with_selection(selection);
+            let goal = tc.normalize_trait_goal(goal);
+            // Opened evidence proves its goal, but a concrete call still needs
+            // a provisional body for lowering. Diagnose a missing body here,
+            // before semantic call validation can turn it into an internal error.
+            if matches!(
+                context.provision_for(db, goal),
+                Some(crate::semantic::Provision::Bound(_))
+            ) && !goal
+                .args(db)
+                .iter()
+                .any(|ty| ty.has_param(db) || ty.has_var(db))
+                && let CallableDef::Func(func) = self.callable_def
+                && let Some(method) = func.name(db).to_opt()
+                && matches!(
+                    crate::analysis::semantic::resolve_trait_method_with_selections(
+                        db,
+                        context.solver_context(db),
+                        goal,
+                        method,
+                        context,
+                    ),
+                    Err(crate::analysis::ty::trait_def::SelectedEvidenceError::NotProven)
+                )
+            {
+                tc.push_diag(crate::analysis::ty::diagnostics::TyDiagCollection::from(
+                    crate::analysis::ty::diagnostics::TraitConstraintDiag::TraitBoundNotSat {
+                        span: call_expr.span(tc.body()).into(),
+                        primary_goal: goal,
+                        unsat_subgoal: None,
+                        required_by: None,
+                        capability_hint: None,
+                    },
+                ));
+                return progressed;
+            }
             let obligation = super::env::TraitObligation {
-                context: tc.context_with_selection(selection),
-                goal: tc.normalize_trait_goal(goal),
+                context,
+                goal,
                 origin: super::env::TraitObligationOrigin::GenericConfirmation,
                 span: call_expr.span(tc.body()).into(),
             };
