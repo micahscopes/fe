@@ -833,15 +833,6 @@ impl<'db> SelectedImplEvidence<'db> {
             .map_err(|_| SelectedEvidenceError::Unsupported)?;
         Ok(Some((method, args)))
     }
-
-    /// Reproves the same selected application under destination assumptions.
-    /// Rigid parameter identities are retained; this performs no substitution.
-    pub fn revalidate(
-        &self,
-        destination: TraitSolveCx<'db>,
-    ) -> Result<Self, SelectedEvidenceError> {
-        prove_selected_impl_evidence(self.db, destination, self.candidate, self.goal)
-    }
 }
 
 fn evidence_types_supported<'db>(db: &'db dyn HirAnalysisDb, value: impl TyVisitable<'db>) -> bool {

@@ -2706,8 +2706,12 @@ fn context<T: Marker>() where T: Unused {}
             )],
         );
         assert_eq!(
-            evidence
-                .revalidate(TraitSolveCx::new(&db, func.scope()).with_assumptions(required_only))
+            crate::analysis::semantic::SelectedApplication::from_evidence(&evidence)
+                .revalidate(
+                    &db,
+                    TraitSolveCx::new(&db, func.scope()).with_assumptions(required_only),
+                    goal
+                )
                 .unwrap()
                 .associated_type(output)
                 .unwrap(),
@@ -2722,7 +2726,9 @@ fn context<T: Marker>() where T: Unused {}
                 } else {
                     PredicateListId::empty_list(&db)
                 });
-                match evidence.revalidate(cx) {
+                match crate::analysis::semantic::SelectedApplication::from_evidence(&evidence)
+                    .revalidate(&db, cx, goal)
+                {
                     Ok(moved) => {
                         assert!(has_premise);
                         assert_eq!(moved.associated_type(output).unwrap(), Some(param));
