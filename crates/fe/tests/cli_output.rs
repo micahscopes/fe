@@ -5096,7 +5096,22 @@ fn evidence_constant_concrete_signature_rejects_other_provision_length() {
 
 #[test]
 fn evidence_constant_symbolic_signature_rejects_other_provision_length() {
-    reject_evidence_constant_wrong_length("evidence_constant_symbolic_wrong_length.fe");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "tests/fixtures/evidence_boundary_runtime/evidence_constant_symbolic_wrong_length.fe",
+    );
+    let (output, code) = run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+    assert_ne!(
+        code, 0,
+        "a different provision's array length was accepted: {output}"
+    );
+    assert!(
+        output.contains("error[8-0121]")
+            && output.contains("argument cannot cross this selection boundary")
+            && output.contains("its field layout differs between its origin and this callee")
+            && !output.contains("error[16-")
+            && !output.contains("panicked"),
+        "the entering argument must report its selection layout mismatch: {output}"
+    );
 }
 
 #[test]
