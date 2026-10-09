@@ -606,27 +606,10 @@ fn query_has_solution<'db>(
     use_scope: ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
     target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
-    provisions: ProofProvisions<'db>,
-) -> TargetSolutionStatus {
-    let (target, relation) = target;
-    if query.flags(db).contains(TyFlags::HAS_INVALID) {
-        return TargetSolutionStatus::NotFound;
-    }
-    has_solution(db, use_scope, query, target, relation, None, provisions).status
-}
-
-#[salsa::tracked(
-    cycle_fn=query_candidate_proves_goal_cycle_recover,
-    cycle_initial=query_candidate_proves_goal_cycle_initial
-)]
-fn query_candidate_proves_goal<'db>(
-    db: &'db dyn HirAnalysisDb,
-    use_scope: ScopeId<'db>,
-    query: Canonical<TraitSolverQuery<'db>>,
-    candidate: ImplementorId<'db>,
-    target: Canonical<TraitInstId<'db>>,
+    selected_candidate: Option<ImplementorId<'db>>,
     provisions: ProofProvisions<'db>,
 ) -> TargetSearchResult<'db> {
+    let (target, relation) = target;
     if query.flags(db).contains(TyFlags::HAS_INVALID) {
         return TargetSearchResult {
             status: TargetSolutionStatus::NotFound,
@@ -638,62 +621,13 @@ fn query_candidate_proves_goal<'db>(
         use_scope,
         query,
         target,
-        TargetSolutionMatch::Equal,
-        Some(candidate),
+        relation,
+        selected_candidate,
         provisions,
     )
 }
 
-fn query_candidate_proves_goal_cycle_initial<'db>(
-    _db: &'db dyn HirAnalysisDb,
-    _use_scope: ScopeId<'db>,
-    _query: Canonical<TraitSolverQuery<'db>>,
-    _candidate: ImplementorId<'db>,
-    _target: Canonical<TraitInstId<'db>>,
-    _provisions: ProofProvisions<'db>,
-) -> TargetSearchResult<'db> {
-    TargetSearchResult {
-        status: TargetSolutionStatus::Incomplete,
-        impl_conditions: None,
-    }
-}
-
-// Salsa fixes this signature: the query's arguments plus the recovery inputs.
-#[allow(clippy::too_many_arguments)]
-fn query_candidate_proves_goal_cycle_recover<'db>(
-    _db: &'db dyn HirAnalysisDb,
-    _value: &TargetSearchResult<'db>,
-    _count: u32,
-    _use_scope: ScopeId<'db>,
-    _query: Canonical<TraitSolverQuery<'db>>,
-    _candidate: ImplementorId<'db>,
-    _target: Canonical<TraitInstId<'db>>,
-    _provisions: ProofProvisions<'db>,
-) -> salsa::CycleRecoveryAction<TargetSearchResult<'db>> {
-    salsa::CycleRecoveryAction::Iterate
-}
-
-/// Proves a complete trait instance through one selected implementor.
-///
-/// `candidate` identifies an implementor definition, rather than a separately
-/// instantiated impl application. `Found` means that this implementor can
-/// realize `goal` and that all of its substituted premises have proofs. It does
-/// not imply that the implementor is unique or coherent with other
-/// implementors. `Incomplete` means solver limits or pending cycle convergence
-/// prevented a definitive answer. Complete goals may contain rigid type
-/// parameters backed by `solve_cx` assumptions, but inference-bearing goals are
-/// outside this entry point's contract because target equality is checked after
-/// solving.
-pub fn candidate_proves_goal<'db>(
-    db: &'db dyn HirAnalysisDb,
-    solve_cx: TraitSolveCx<'db>,
-    candidate: ImplementorId<'db>,
-    goal: TraitInstId<'db>,
-) -> TargetSolutionStatus {
-    candidate_proves_goal_with_conditions(db, solve_cx, candidate, goal).status
-}
-
-pub(crate) fn candidate_proves_goal_with_conditions<'db>(
+pub(crate) fn restricted_goal_query_result<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
     candidate: ImplementorId<'db>,
@@ -702,12 +636,12 @@ pub(crate) fn candidate_proves_goal_with_conditions<'db>(
     let scope = solve_cx.normalization_scope_for_trait_inst(db, goal);
     let goal = normalize_trait_inst_preserving_validity(db, goal, scope, solve_cx.assumptions());
     let query = CanonicalGoalQuery::new(db, goal, solve_cx.assumptions());
-    query_candidate_proves_goal(
+    query_has_solution(
         db,
         solve_cx.origin_scope(db),
         query.canonical(),
-        candidate,
-        Canonical::new(db, goal),
+        (Canonical::new(db, goal), TargetSolutionMatch::Equal),
+        Some(candidate),
         solve_cx.provisions,
     )
 }
@@ -717,20 +651,26 @@ fn query_has_solution_cycle_initial<'db>(
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
     _target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
+    _selected_candidate: Option<ImplementorId<'db>>,
     _provisions: ProofProvisions<'db>,
-) -> TargetSolutionStatus {
-    TargetSolutionStatus::Incomplete
+) -> TargetSearchResult<'db> {
+    TargetSearchResult {
+        status: TargetSolutionStatus::Incomplete,
+        impl_conditions: None,
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn query_has_solution_cycle_recover<'db>(
     _db: &'db dyn HirAnalysisDb,
-    _value: &TargetSolutionStatus,
+    _value: &TargetSearchResult<'db>,
     _count: u32,
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
     _target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
+    _selected_candidate: Option<ImplementorId<'db>>,
     _provisions: ProofProvisions<'db>,
-) -> salsa::CycleRecoveryAction<TargetSolutionStatus> {
+) -> salsa::CycleRecoveryAction<TargetSearchResult<'db>> {
     salsa::CycleRecoveryAction::Iterate
 }
 
@@ -746,8 +686,10 @@ pub(crate) fn goal_query_has_solution<'db>(
             solve_cx.origin_scope(db),
             query.canonical(),
             (target, TargetSolutionMatch::Equal),
+            None,
             solve_cx.provisions,
-        ),
+        )
+        .status,
         TargetSolutionStatus::Found
     )
 }
@@ -766,8 +708,10 @@ pub(crate) fn goal_query_has_no_distinct_solution<'db>(
             solve_cx.origin_scope(db),
             query.canonical(),
             (target, TargetSolutionMatch::NotEqual),
+            None,
             solve_cx.provisions,
-        ),
+        )
+        .status,
         TargetSolutionStatus::NotFound
     )
 }
@@ -1798,8 +1742,8 @@ mod tests {
 
     use super::{
         CanonicalGoalQuery, GoalSatisfiability, Selection, TargetSolutionStatus, TraitInstId,
-        TraitSolveCompletion, TraitSolveCx, candidate_proves_goal, goal_query_has_solution,
-        is_goal_query_satisfiable, is_goal_satisfiable,
+        TraitSolveCompletion, TraitSolveCx, goal_query_has_solution, is_goal_query_satisfiable,
+        is_goal_satisfiable, restricted_goal_query_result,
     };
     use crate::{
         analysis::ty::{
@@ -2417,7 +2361,7 @@ impl Goal for Subject {}
                 if solution.value.implementor == accepted
         ));
         assert_eq!(
-            candidate_proves_goal(&db, solve_cx, rejected, goal),
+            restricted_goal_query_result(&db, solve_cx, rejected, goal).status,
             TargetSolutionStatus::NotFound
         );
         assert!(matches!(
@@ -2426,7 +2370,7 @@ impl Goal for Subject {}
         ));
         assert!(prove_selected_impl_evidence(&db, solve_cx, accepted, goal).is_ok());
         assert_eq!(
-            candidate_proves_goal(&db, solve_cx, accepted, goal),
+            restricted_goal_query_result(&db, solve_cx, accepted, goal).status,
             TargetSolutionStatus::Found
         );
     }
@@ -2468,11 +2412,11 @@ impl Produce for Subject {
             .next()
             .expect("missing Select<A> candidate");
         assert_eq!(
-            candidate_proves_goal(&db, solve_cx, select_candidate, select_a),
+            restricted_goal_query_result(&db, solve_cx, select_candidate, select_a).status,
             TargetSolutionStatus::Found
         );
         assert_eq!(
-            candidate_proves_goal(&db, solve_cx, select_candidate, select_b),
+            restricted_goal_query_result(&db, solve_cx, select_candidate, select_b).status,
             TargetSolutionStatus::NotFound
         );
 
@@ -2494,11 +2438,11 @@ impl Produce for Subject {
             .next()
             .expect("missing Produce candidate");
         assert_eq!(
-            candidate_proves_goal(&db, solve_cx, produce_candidate, produce_a),
+            restricted_goal_query_result(&db, solve_cx, produce_candidate, produce_a).status,
             TargetSolutionStatus::Found
         );
         assert_eq!(
-            candidate_proves_goal(&db, solve_cx, produce_candidate, produce_b),
+            restricted_goal_query_result(&db, solve_cx, produce_candidate, produce_b).status,
             TargetSolutionStatus::NotFound
         );
     }
@@ -2571,11 +2515,11 @@ impl Produce for Subject {
                         }
                     }
                     assert_eq!(
-                        candidate_proves_goal(db, cx, candidate, goal),
+                        restricted_goal_query_result(db, cx, candidate, goal).status,
                         TargetSolutionStatus::Found
                     );
                     assert_eq!(
-                        candidate_proves_goal(db, cx, candidate, bound),
+                        restricted_goal_query_result(db, cx, candidate, bound).status,
                         if matches {
                             TargetSolutionStatus::Found
                         } else {
@@ -2790,7 +2734,7 @@ fn context<T: Marker>() where T: Unused {}
                     }
                 }
                 assert_eq!(
-                    candidate_proves_goal(&db, cx, candidate, goal),
+                    restricted_goal_query_result(&db, cx, candidate, goal).status,
                     if has_premise {
                         TargetSolutionStatus::Found
                     } else {
@@ -2949,12 +2893,12 @@ impl Proof for Dead where Dead: Proof {}
             .expect("missing recursive Dead candidate");
 
         assert_eq!(
-            candidate_proves_goal(&db, solve_cx, recursive_grounded, grounded_goal),
+            restricted_goal_query_result(&db, solve_cx, recursive_grounded, grounded_goal).status,
             TargetSolutionStatus::Found,
             "the selected root's recursive premise may use the base impl"
         );
         assert_eq!(
-            candidate_proves_goal(&db, solve_cx, recursive_dead, dead_goal),
+            restricted_goal_query_result(&db, solve_cx, recursive_dead, dead_goal).status,
             TargetSolutionStatus::NotFound,
             "an ungrounded inductive cycle is not a proof"
         );
@@ -3018,11 +2962,11 @@ fn without_marker<T>() {}
             .expect("missing generic Goal candidate");
 
         assert_eq!(
-            candidate_proves_goal(&db, with_cx, candidate, with_goal),
+            restricted_goal_query_result(&db, with_cx, candidate, with_goal).status,
             TargetSolutionStatus::Found
         );
         assert_eq!(
-            candidate_proves_goal(&db, without_cx, candidate, without_goal),
+            restricted_goal_query_result(&db, without_cx, candidate, without_goal).status,
             TargetSolutionStatus::NotFound
         );
     }
@@ -3050,12 +2994,13 @@ impl<T> Grow for T where Wrap<T>: Grow {}
             .expect("missing growing candidate");
 
         assert_eq!(
-            candidate_proves_goal(
+            restricted_goal_query_result(
                 &db,
                 TraitSolveCx::new(&db, top_mod.scope()),
                 candidate,
                 goal,
-            ),
+            )
+            .status,
             TargetSolutionStatus::Incomplete
         );
         assert!(matches!(

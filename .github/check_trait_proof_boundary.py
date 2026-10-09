@@ -71,7 +71,7 @@ def violations(solver_sources: dict[str, str], other_sources: dict[str, str]) ->
         if path.startswith("ty_check/"):
             continue
         bridge_start = source.find("pub fn prove_selected_impl_evidence")
-        proof_done = source.find("let proof = candidate_proves_goal_with_conditions", bridge_start)
+        proof_done = source.find("let proof = restricted_goal_query_result", bridge_start)
         bridge_end = source.find("Ok(SelectedImplEvidence", proof_done)
         offset = 0
         for number, raw_line in enumerate(production(source).splitlines(keepends=True), 1):
@@ -102,7 +102,7 @@ def main() -> int:
         if not p.is_relative_to(SOLVER)
     }
     entrypoints = {
-        "mod.rs": ("fn is_query_satisfiable<", "fn query_candidate_proves_goal<"),
+        "mod.rs": ("fn is_query_satisfiable<", "fn query_has_solution<"),
         "table_solver.rs": ("fn solve<", "fn has_solution<", "impl<'db> ResolutionContext"),
     }
     errors = violations(solver_sources, other_sources)

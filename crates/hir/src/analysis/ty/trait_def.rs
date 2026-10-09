@@ -861,14 +861,14 @@ pub fn prove_selected_impl_evidence<'db>(
     candidate: ImplementorId<'db>,
     goal: TraitInstId<'db>,
 ) -> Result<SelectedImplEvidence<'db>, SelectedEvidenceError> {
-    use super::trait_resolution::{TargetSolutionStatus, candidate_proves_goal_with_conditions};
+    use super::trait_resolution::{TargetSolutionStatus, restricted_goal_query_result};
     if !evidence_types_supported(db, goal)
         || !evidence_types_supported(db, context.assumptions())
         || matches!(candidate.origin(db), ImplementorOrigin::Assumption)
     {
         return Err(SelectedEvidenceError::Unsupported);
     }
-    let proof = candidate_proves_goal_with_conditions(db, context, candidate, goal);
+    let proof = restricted_goal_query_result(db, context, candidate, goal);
     match proof.status {
         TargetSolutionStatus::NotFound => return Err(SelectedEvidenceError::NotProven),
         TargetSolutionStatus::Incomplete => return Err(SelectedEvidenceError::Incomplete),
