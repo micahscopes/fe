@@ -13,7 +13,6 @@ use tablesolve::{
     AnswerlessMode, CallbackOutcome, Canonical as TabledCanonical, CanonicalizeOutcome, Completion,
     Config, ConsumerId, ContextTransition, Event, Limits, Observer, ReportOptions,
     ResolutionContext, ResumeProvenance, Scheduling, Transition, solve_with_observer_and_options,
-    solve_with_options,
 };
 
 use super::{
@@ -968,6 +967,40 @@ fn map_completion(completion: Completion<StopReason>) -> TraitSolveCompletion {
     }
 }
 
+// Both projections use the same canonical root, adapter and engine invocation.
+// Each projection keeps its proof-search guard until its result is mapped.
+fn run_proof_query<'db, O: Observer<TraitResolutionContext<'db>>>(
+    db: &'db dyn HirAnalysisDb,
+    use_scope: ScopeId<'db>,
+    root: Query<'db>,
+    target: Option<TargetAnswer<'db>>,
+    provisions: super::ProofProvisions<'db>,
+    config: Config,
+    observer: &mut O,
+) -> (
+    tablesolve::SolveReport<TraitResolutionContext<'db>>,
+    Option<ImplConditionsId<'db>>,
+) {
+    let mut root_table = PersistentUnificationTable::new_proof(db);
+    let root_goal = root.query.extract_identity(&mut root_table);
+    let mut context = TraitResolutionContext::new(db, use_scope, root_goal, target, provisions);
+    let options = ReportOptions::default().with_answerless(AnswerlessMode::Omit);
+    let report = match solve_with_observer_and_options(
+        &mut context,
+        Goal {
+            query: root_goal,
+            selected_candidate: root.selected_candidate,
+        },
+        config,
+        options,
+        observer,
+    ) {
+        Ok(report) => report,
+        Err(never) => match never {},
+    };
+    (report, context.found_target_conditions.get())
+}
+
 pub(super) fn solve<'db>(
     db: &'db dyn HirAnalysisDb,
     use_scope: crate::hir_def::scope_graph::ScopeId<'db>,
@@ -975,9 +1008,6 @@ pub(super) fn solve<'db>(
     provisions: super::ProofProvisions<'db>,
 ) -> GoalSatisfiability<'db> {
     let _proof_search = super::enter_proof_search();
-    let mut root_table = PersistentUnificationTable::new_proof(db);
-    let root_goal = query.extract_identity(&mut root_table);
-    let mut context = TraitResolutionContext::new(db, use_scope, root_goal, None, provisions);
     let mut observer = UnresolvedGoalObserver::default();
     let config = Config {
         limits: Limits {
@@ -986,20 +1016,18 @@ pub(super) fn solve<'db>(
         },
         ..Config::default()
     };
-    let options = ReportOptions::default().with_answerless(AnswerlessMode::Omit);
-    let report = match solve_with_observer_and_options(
-        &mut context,
-        Goal {
-            query: root_goal,
+    let (report, _) = run_proof_query(
+        db,
+        use_scope,
+        Query {
+            query,
             selected_candidate: None,
         },
+        None,
+        provisions,
         config,
-        options,
         &mut observer,
-    ) {
-        Ok(report) => report,
-        Err(never) => match never {},
-    };
+    );
     let root = report.root;
     let solutions: IndexSet<_> = report.answers.into_iter().collect();
     if matches!(
@@ -1034,8 +1062,6 @@ pub(super) fn has_solution<'db>(
     provisions: super::ProofProvisions<'db>,
 ) -> TargetSearchResult<'db> {
     let _proof_search = super::enter_proof_search();
-    let mut root_table = PersistentUnificationTable::new_proof(db);
-    let root_goal = query.extract_identity(&mut root_table);
     let root_key = Query {
         query,
         selected_candidate,
@@ -1045,9 +1071,6 @@ pub(super) fn has_solution<'db>(
         inst: target,
         relation,
     };
-    let mut context =
-        TraitResolutionContext::new(db, use_scope, root_goal, Some(target), provisions);
-    let options = ReportOptions::default().with_answerless(AnswerlessMode::Omit);
     // A target can occur after a non-regular recursive clause. Fair scheduling
     // keeps that branch from starving later root clauses before the type-depth
     // guard makes the search incomplete.
@@ -1055,22 +1078,19 @@ pub(super) fn has_solution<'db>(
         scheduling: Scheduling::Fair,
         ..Config::default()
     };
-    let report = match solve_with_options(
-        &mut context,
-        Goal {
-            query: root_goal,
-            selected_candidate,
-        },
+    let (report, found_conditions) = run_proof_query(
+        db,
+        use_scope,
+        root_key,
+        Some(target),
+        provisions,
         config,
-        options,
-    ) {
-        Ok(report) => report,
-        Err(never) => match never {},
-    };
+        &mut (),
+    );
     match report.completion {
         Completion::Adapter(StopReason::TargetFound) => TargetSearchResult {
             status: TargetSolutionStatus::Found,
-            impl_conditions: context.found_target_conditions.get(),
+            impl_conditions: found_conditions,
         },
         Completion::Adapter(StopReason::NormalizationFault) => {
             TargetSearchResult::without_conditions(TargetSolutionStatus::NormalizationFault)
