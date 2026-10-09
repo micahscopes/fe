@@ -141,7 +141,7 @@ pub(crate) fn probe_method<'db>(
         .collect()
 }
 
-#[salsa::tracked(return_ref)]
+#[salsa::tracked(return_ref, cycle_fn=probe_canonical_method_cycle_recover, cycle_initial=probe_canonical_method_cycle_initial)]
 fn probe_canonical_method<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
@@ -151,6 +151,30 @@ fn probe_canonical_method<'db>(
 ) -> Vec<(CallableDef<'db>, Solution<BoundInherentMethod<'db>>)> {
     let table = collect_methods(db, ingot);
     table.probe(db, query, scope, name)
+}
+
+fn probe_canonical_method_cycle_initial<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    _ingot: Ingot<'db>,
+    _query: Canonical<MethodProbe<'db>>,
+    _scope: ScopeId<'db>,
+    _name: IdentId<'db>,
+) -> Vec<(CallableDef<'db>, Solution<BoundInherentMethod<'db>>)> {
+    Vec::new()
+}
+
+fn probe_canonical_method_cycle_recover<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    _value: &Vec<(CallableDef<'db>, Solution<BoundInherentMethod<'db>>)>,
+    _count: u32,
+    _ingot: Ingot<'db>,
+    _query: Canonical<MethodProbe<'db>>,
+    _scope: ScopeId<'db>,
+    _name: IdentId<'db>,
+) -> salsa::CycleRecoveryAction<Vec<(CallableDef<'db>, Solution<BoundInherentMethod<'db>>)>> {
+    // Method collection can need this lookup while lowering an impl header.
+    // Iterate with collection rather than caching its initially empty answer.
+    salsa::CycleRecoveryAction::Iterate
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Update)]
