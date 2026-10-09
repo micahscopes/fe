@@ -245,7 +245,7 @@ CEILINGS = {
     "crates/hir/src/analysis/ty/normalize.rs": 1,
     "crates/hir/src/analysis/ty/provider.rs": 2,
     "crates/hir/src/analysis/ty/trait_def.rs": 2,
-    "crates/hir/src/analysis/ty/trait_resolution/mod.rs": 2,
+    "crates/hir/src/analysis/ty/trait_resolution/mod.rs": 1,
     "crates/hir/src/analysis/ty/trait_resolution/table_solver.rs": 1,
     "crates/hir/src/analysis/ty/ty_check/const_requirements.rs": 2,
     "crates/hir/src/analysis/ty/ty_check/env.rs": 2,
