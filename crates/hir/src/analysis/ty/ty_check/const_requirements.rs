@@ -1884,6 +1884,55 @@ fn check_path_application<'db>(
     check_type_requirements(db, ty, scope, reported, selections, capture)
 }
 
+/// The scope the type checker checks `expr` in: its innermost enclosing
+/// block, as the checker's environment enters blocks.
+fn lexical_scope_of<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    expr: ExprId,
+) -> ScopeId<'db> {
+    use crate::visitor::{Visitor, VisitorCtxt, walk_expr};
+    struct Find<'db> {
+        body: Body<'db>,
+        target: ExprId,
+        found: Option<ScopeId<'db>>,
+    }
+    impl<'db> Visitor<'db> for Find<'db> {
+        fn visit_item(
+            &mut self,
+            _: &mut VisitorCtxt<'db, crate::span::item::LazyItemSpan<'db>>,
+            _: crate::hir_def::ItemKind<'db>,
+        ) {
+        }
+
+        fn visit_expr(
+            &mut self,
+            ctxt: &mut VisitorCtxt<'db, crate::span::expr::LazyExprSpan<'db>>,
+            expr: ExprId,
+            _: &Expr<'db>,
+        ) {
+            if self.found.is_some() || ctxt.body() != self.body {
+                return;
+            }
+            if expr == self.target {
+                self.found = Some(ctxt.scope());
+                return;
+            }
+            walk_expr(self, ctxt, expr);
+        }
+    }
+    let mut find = Find {
+        body,
+        target: expr,
+        found: None,
+    };
+    if let Partial::Present(data) = body.expr(db).data(db, body) {
+        let mut ctxt = VisitorCtxt::with_expr(db, body.scope(), body, body.expr(db));
+        find.visit_expr(&mut ctxt, body.expr(db), data);
+    }
+    find.found.unwrap_or(body.scope())
+}
+
 /// The anonymous constants a body writes in expression and pattern
 /// positions, with the type each position checks it against: array repeat
 /// lengths, explicit const arguments of calls, method calls and function
@@ -1947,13 +1996,18 @@ fn expression_const_bodies<'db>(
                 if receiver_ty.has_invalid(db) {
                     return None;
                 }
-                // Look the method up as the checker did: at the call's
-                // position, trying the receiver's capability fallbacks in order.
+                // Look the method up as the checker did: in the call's lexical
+                // scope (its quote scope, else its innermost block), at the
+                // call's position, trying the receiver's capability fallbacks
+                // in order.
+                let scope = body
+                    .quote_scope(db, expr)
+                    .unwrap_or_else(|| lexical_scope_of(db, body, expr));
                 let lookup = MethodLookup::at(
                     db,
-                    crate::semantic::context_at(db, body.scope(), Some((typed, expr))),
+                    crate::semantic::context_at(db, scope, Some((typed, expr))),
                 );
-                let candidates = super::receiver_lookup_candidates(db, body.scope(), receiver_ty);
+                let candidates = super::receiver_lookup_candidates(db, scope, receiver_ty);
                 let select = |ty| {
                     select_method_candidate(db, &Canonicalized::new(db, ty), *name, lookup, None)
                 };
@@ -3810,7 +3864,8 @@ const fn caller<T>(_ evidence: Evidence<Read<T>>) -> u256 {
     /// const arguments are found again from the receiver, as the checker
     /// found the method: through the receiver's capability fallbacks (a
     /// parameter is a view), and at the call's own position, where
-    /// `with (Named)` makes the named-only method visible.
+    /// `with (Named)` makes the named-only method visible, and in the call's
+    /// own block, where a block-local `use` brings the trait into scope.
     #[test]
     fn failed_call_const_arguments_find_the_method_again() {
         let source = "trait Tr { fn m<const A: usize, const B: usize>(self) -> usize }
@@ -3819,11 +3874,18 @@ impl Tr for S as Named { fn m<const A: usize, const B: usize>(self) -> usize { A
 struct P {}
 impl Tr for P { fn m<const A: usize, const B: usize>(self) -> usize { A + B } }
 fn plain(_ p: P) -> usize { p.m<{ true }, { 2 }>() }
-fn named(_ s: S) -> usize { with (Named) { s.m<{ true }, { 2 }>() } }";
+fn named(_ s: S) -> usize { with (Named) { s.m<{ true }, { 2 }>() } }
+mod inner { pub trait Hidden { fn h<const A: usize, const B: usize>(self) -> usize } }
+struct Q {}
+impl inner::Hidden for Q { fn h<const A: usize, const B: usize>(self) -> usize { A + B } }
+fn block_import(_ q: Q) -> usize {
+    use inner::Hidden
+    q.h<{ true }, { 2 }>()
+}";
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone("failed_call_const_arguments.fe".into(), source);
         let (top, _) = db.top_mod(file);
-        for name in ["plain", "named"] {
+        for name in ["plain", "named", "block_import"] {
             let function = top
                 .all_funcs(&db)
                 .iter()
