@@ -418,12 +418,33 @@ impl<'db> TraitSolveCx<'db> {
         db: &'db dyn HirAnalysisDb,
         inst: TraitInstId<'db>,
     ) -> Selection<ImplementorId<'db>> {
+        let result = self.select_impl_proof(db, inst);
+        match result {
+            GoalSatisfiability::Satisfied(solution) => {
+                Selection::Unique(solution.value.implementor)
+            }
+            GoalSatisfiability::NeedsConfirmation { solutions, .. } => {
+                Selection::Ambiguous(solutions.iter().map(|s| s.value.implementor).collect())
+            }
+            GoalSatisfiability::ContainsInvalid | GoalSatisfiability::UnSat(_) => {
+                Selection::NotFound
+            }
+            GoalSatisfiability::NormalizationFault => Selection::Ambiguous(IndexSet::default()),
+        }
+    }
+
+    /// Retain the proof and its conditions until the caller chooses its view.
+    pub(crate) fn select_impl_proof(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        inst: TraitInstId<'db>,
+    ) -> GoalSatisfiability<'db> {
         let scope = self.normalization_scope_for_trait_inst(db, inst);
         let inst = normalize_trait_inst_preserving_validity(db, inst, scope, self.assumptions);
         // An assumption proves a bound; it is not a second implementation.
         // Keep inference goals on the ordinary proof query: an assumption may
         // select a different substitution from the implementations in scope.
-        let result = if inst.args(db).iter().any(|ty| ty.has_var(db))
+        if inst.args(db).iter().any(|ty| ty.has_var(db))
             || inst
                 .assoc_type_bindings(db)
                 .values()
@@ -445,18 +466,6 @@ impl<'db> TraitSolveCx<'db> {
                 GoalSatisfiability::UnSat(_) => is_goal_satisfiable(db, self, inst),
                 result => result,
             }
-        };
-        match result {
-            GoalSatisfiability::Satisfied(solution) => {
-                Selection::Unique(solution.value.implementor)
-            }
-            GoalSatisfiability::NeedsConfirmation { solutions, .. } => {
-                Selection::Ambiguous(solutions.iter().map(|s| s.value.implementor).collect())
-            }
-            GoalSatisfiability::ContainsInvalid | GoalSatisfiability::UnSat(_) => {
-                Selection::NotFound
-            }
-            GoalSatisfiability::NormalizationFault => Selection::Ambiguous(IndexSet::default()),
         }
     }
 
@@ -3053,6 +3062,16 @@ impl<T> Grow for T where Wrap<T>: Grow {}
                     goal,
                 );
                 assert_eq!(result.is_ok(), expected, "{trait_name} for {name}");
+                let ordinary = super::super::trait_def::resolve_ordinary_impl_evidence(
+                    &db,
+                    TraitSolveCx::new(&db, top_mod.scope()),
+                    goal,
+                );
+                assert_eq!(
+                    ordinary.is_ok(),
+                    expected,
+                    "ordinary {trait_name} for {name}"
+                );
                 let GoalSatisfiability::Satisfied(solution) =
                     is_goal_satisfiable(&db, TraitSolveCx::new(&db, top_mod.scope()), goal)
                 else {

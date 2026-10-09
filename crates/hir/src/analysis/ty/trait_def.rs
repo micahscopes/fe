@@ -841,6 +841,17 @@ fn evidence_types_supported<'db>(db: &'db dyn HirAnalysisDb, value: impl TyVisit
         .intersects(TyFlags::HAS_INVALID | TyFlags::HAS_VAR | TyFlags::HAS_PROJECTION)
 }
 
+fn evidence_inputs_supported<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    candidate: ImplementorId<'db>,
+    goal: TraitInstId<'db>,
+) -> bool {
+    evidence_types_supported(db, goal)
+        && evidence_types_supported(db, context.assumptions())
+        && !matches!(candidate.origin(db), ImplementorOrigin::Assumption)
+}
+
 /// Proves an explicitly selected definition and reconstructs its application.
 ///
 /// Goals and context assumptions may contain rigid parameters, but no
@@ -853,10 +864,7 @@ pub fn prove_selected_impl_evidence<'db>(
     goal: TraitInstId<'db>,
 ) -> Result<SelectedImplEvidence<'db>, SelectedEvidenceError> {
     use super::trait_resolution::{TargetSolutionStatus, restricted_goal_query_result};
-    if !evidence_types_supported(db, goal)
-        || !evidence_types_supported(db, context.assumptions())
-        || matches!(candidate.origin(db), ImplementorOrigin::Assumption)
-    {
+    if !evidence_inputs_supported(db, context, candidate, goal) {
         return Err(SelectedEvidenceError::Unsupported);
     }
     let proof = restricted_goal_query_result(db, context, candidate, goal);
@@ -871,6 +879,19 @@ pub fn prove_selected_impl_evidence<'db>(
     let conditions = proof
         .impl_conditions
         .ok_or(SelectedEvidenceError::Incomplete)?;
+    checked_selected_impl_evidence(db, context, candidate, goal, conditions)
+}
+
+fn checked_selected_impl_evidence<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    candidate: ImplementorId<'db>,
+    goal: TraitInstId<'db>,
+    conditions: super::trait_resolution::ImplConditionsId<'db>,
+) -> Result<SelectedImplEvidence<'db>, SelectedEvidenceError> {
+    if !evidence_inputs_supported(db, context, candidate, goal) {
+        return Err(SelectedEvidenceError::Unsupported);
+    }
     let selected =
         complete_selected_impl(db, candidate).ok_or(SelectedEvidenceError::Unsupported)?;
     let instance =
@@ -908,10 +929,12 @@ pub(crate) fn resolve_ordinary_impl_evidence<'db>(
     context: TraitSolveCx<'db>,
     goal: TraitInstId<'db>,
 ) -> Result<SelectedImplEvidence<'db>, OrdinaryEvidenceError> {
-    let Selection::Unique(instance) = resolve_trait_impl_instance(db, context, goal) else {
+    let ImplSelection::Unique(instance, conditions) =
+        resolve_trait_impl_instance_query(db, context, goal)
+    else {
         return Err(OrdinaryEvidenceError::NotUnique);
     };
-    prove_selected_impl_evidence(db, context, instance.selected(), goal)
+    checked_selected_impl_evidence(db, context, instance.selected(), goal, conditions)
         .map_err(|_| OrdinaryEvidenceError::PrerequisitesNotProven)
 }
 
@@ -1106,7 +1129,7 @@ pub(crate) fn resolve_trait_impl_instance<'db>(
     inst: TraitInstId<'db>,
 ) -> Selection<ResolvedImplInstance<'db>> {
     match resolve_trait_impl_instance_query(db, solve_cx, inst) {
-        ImplSelection::Unique(resolved) => Selection::Unique(resolved),
+        ImplSelection::Unique(resolved, _) => Selection::Unique(resolved),
         ImplSelection::Ambiguous => Selection::Ambiguous(IndexSet::new()),
         ImplSelection::NotFound => Selection::NotFound,
     }
@@ -1115,7 +1138,10 @@ pub(crate) fn resolve_trait_impl_instance<'db>(
 /// An implementation selection, without candidates for an ambiguous one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 enum ImplSelection<'db> {
-    Unique(ResolvedImplInstance<'db>),
+    Unique(
+        ResolvedImplInstance<'db>,
+        super::trait_resolution::ImplConditionsId<'db>,
+    ),
     Ambiguous,
     NotFound,
 }
@@ -1130,16 +1156,22 @@ fn resolve_trait_impl_instance_query<'db>(
     let assumptions = solve_cx.assumptions();
     let norm_scope = solve_cx.normalization_scope_for_trait_inst(db, inst);
     let inst = normalize_trait_inst_preserving_validity(db, inst, norm_scope, assumptions);
-    match solve_cx.select_impl(db, inst) {
-        Selection::Unique(selected) => complete_selected_impl(db, selected)
+    match solve_cx.select_impl_proof(db, inst) {
+        GoalSatisfiability::Satisfied(proof) => complete_selected_impl(db, proof.value.implementor)
             .and_then(|selected| instantiate_selected_impl(db, selected, inst))
-            .map_or(ImplSelection::NotFound, ImplSelection::Unique),
+            .map_or(ImplSelection::NotFound, |resolved| {
+                ImplSelection::Unique(resolved, proof.value.impl_conditions)
+            }),
         // There is deliberately no resolved instance for a non-unique
         // selection. Re-unifying each candidate would both fabricate evidence
         // the caller must not consume and attempt to fold inference variables
         // owned by the caller through a fresh local table.
-        Selection::Ambiguous(_) => ImplSelection::Ambiguous,
-        Selection::NotFound => ImplSelection::NotFound,
+        GoalSatisfiability::NeedsConfirmation { .. } | GoalSatisfiability::NormalizationFault => {
+            ImplSelection::Ambiguous
+        }
+        GoalSatisfiability::ContainsInvalid | GoalSatisfiability::UnSat(_) => {
+            ImplSelection::NotFound
+        }
     }
 }
 
