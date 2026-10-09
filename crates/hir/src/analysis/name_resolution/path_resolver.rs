@@ -2391,7 +2391,7 @@ fn resolve_name_res_unexpanded<'db>(
                         ));
                     }
                     let args = args();
-                    let applied = alias.applied_types(db, &args);
+                    let applied = alias.applied_types(db, &args, minter);
                     PathRes::TyAlias(alias.clone(), alias.instantiate(db, &args, minter), applied)
                 }
 

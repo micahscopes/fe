@@ -3713,16 +3713,32 @@ impl<'db> TyAlias<'db> {
         &self,
         db: &'db dyn HirAnalysisDb,
         args: &[TyId<'db>],
+        minter: &LoweringContext<'db>,
     ) -> Vec<TyId<'db>> {
-        // Only uses that give every parameter are covered: completing a
-        // default here would evaluate the default's constants outside the
-        // owner that declares them.
-        if args.len() != self.params(db).len() || self.alias_to.skip_binder().has_invalid(db) {
+        if self.alias_to.skip_binder().has_invalid(db) {
+            return Vec::new();
+        }
+        // Parameters the use leaves out take their defaults exactly as the
+        // alias's own expansion at this use does (`instantiate_layout`): the
+        // default is the declaring alias's template, kept structurally, not
+        // evaluated here outside the alias that declares it.
+        let Ok(completed) = self.param_set.complete_args(
+            db,
+            &[],
+            args,
+            DefaultApplication::StructuralMetadata(minter),
+        ) else {
+            return Vec::new();
+        };
+        if completed.len() != self.params(db).len() {
             return Vec::new();
         }
         alias_applied_types(db, self.alias)
             .clone()
-            .instantiate(db, args)
+            .instantiate(db, &completed)
+            .into_iter()
+            .filter(|&ty| !super::layout_holes::ty_contains_const_hole(db, ty))
+            .collect()
     }
 
     pub(crate) fn instantiate(

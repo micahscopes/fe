@@ -1,0 +1,24 @@
+// A use that leaves an alias parameter to its default stands for the alias
+// with that default, so the default's family application is checked at the
+// use, as a use that writes the argument is.
+trait Foo {}
+impl Foo for u256 {}
+struct Other {}
+struct Wrap<T> {}
+
+recursive type fn Fam<X: Foo, const N: usize>() -> (*) {
+    match N {
+        0 => Wrap<X>
+        _ => Fam<X, {N - 1}>
+    }
+}
+
+type A<T = Other> = Fam<T, 0>
+type B<T = u256> = Fam<T, 0>
+
+struct Bare { f: A }
+struct Given { f: A<Other> }
+struct BareOk { f: B }
+struct GivenOk { f: A<u256> }
+fn local() { let _x: A = make() }
+fn make<T>() -> T { make() }

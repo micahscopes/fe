@@ -1,0 +1,22 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/alias_default_family_requirement_use.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_default_family_requirement_use.fe:19:18
+   │
+19 │ struct Bare { f: A }
+   │                  ^ `Other` doesn't implement `Foo`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_default_family_requirement_use.fe:20:19
+   │
+20 │ struct Given { f: A<Other> }
+   │                   ^^^^^^^^ `Other` doesn't implement `Foo`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ alias_default_family_requirement_use.fe:23:22
+   │
+23 │ fn local() { let _x: A = make() }
+   │                      ^ `Other` doesn't implement `Foo`
