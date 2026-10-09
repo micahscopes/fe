@@ -9,11 +9,16 @@ builds a context from parts rather than reading it from a position. Each is a
 site still to be given the context of its position. Every file has a main
 ceiling (zero unless listed), which only decreases, plus an EXPOSED allowance
 for pairs a migration made visible rather than added, each with its reason; so
-such sites can be removed but not added or moved to another file.
+such sites can be removed but not added or moved to another file. The
+tables themselves are checked against the integration base
+(PREMISES_GUARD_BASE, default `mb3`): main plus exposed may not rise unless
+the commit touches only this guard and says `guard-only:`.
 """
 from pathlib import Path
 import importlib.util
+import os
 import re
+import subprocess
 import sys
 
 sys.dont_write_bytecode = True
@@ -70,6 +75,58 @@ def exception_callers(sources: dict) -> dict:
     return found
 
 
+def tables(text: str) -> tuple[dict, dict]:
+    """The CEILINGS and EXPOSED tables of a version of this file."""
+
+    class Names(dict):
+        def __missing__(self, key):
+            return key
+
+    found = []
+    for name in ("CEILINGS", "EXPOSED"):
+        match = re.search(r"^" + name + r" = (\{.*?^\})", text, re.S | re.M)
+        found.append(eval(match[1], {}, Names()) if match else {})
+    return found[0], found[1]
+
+
+def budget(text: str) -> int:
+    ceilings, exposed = tables(text)
+    return sum(ceilings.values()) + sum(
+        value[0] if isinstance(value, tuple) else value for value in exposed.values()
+    )
+
+
+def base_check() -> int:
+    """The total (main plus exposed) may not rise against the integration
+    base, whatever this commit does to the tables. A guard-only commit that
+    says so in its message (`guard-only:`) may change them."""
+    base = os.environ.get("PREMISES_GUARD_BASE", "mb3")
+    git = ["git", "-C", str(ROOT)]
+    shown = subprocess.run(
+        git + ["show", f"{base}:.github/check_solver_premises_budget.py"],
+        capture_output=True,
+        text=True,
+    )
+    if shown.returncode != 0:
+        print(f"premises guard: no integration base {base!r}; base comparison skipped")
+        return 0
+    before = budget(shown.stdout)
+    after = budget((ROOT / ".github/check_solver_premises_budget.py").read_text())
+    if after <= before:
+        return 0
+    head = subprocess.run(
+        git + ["show", "--name-only", "--format=%B", "HEAD"], capture_output=True, text=True
+    ).stdout
+    files = [line for line in head.splitlines() if line.startswith("crates/")]
+    if "guard-only:" in head and not files:
+        return 0
+    print(
+        f"premises budget rose against {base}: {before} -> {after} (main + exposed)",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def main() -> int:
     cases = [
         ("SolverPremises::from_unpositioned_pair(scope, a)", False, (1, 0, 0)),
@@ -121,6 +178,7 @@ def main() -> int:
                 file=sys.stderr,
             )
             status = 1
+    status |= base_check()
     total = sum(by_file.values())
     main = sum(CEILINGS.values())
     exposed = sum(count for count, _ in EXPOSED.values())
