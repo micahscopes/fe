@@ -357,6 +357,19 @@ static bool can_follow_generic_path_expr(TSLexer *lexer) {
   return true;
 }
 
+// Both a generic key and a generic operand can start here. Only `=`
+// after the complete argument list makes this the key branch.
+static enum TokenType generic_symbol_after_args(TSLexer *lexer,
+                                                const bool *valid_symbols) {
+  if (!valid_symbols[KEY_GENERIC_OPEN]) return GENERIC_OPEN;
+  if (!valid_symbols[GENERIC_OPEN]) return KEY_GENERIC_OPEN;
+  while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
+         lexer->lookahead == '\r' || lexer->lookahead == '\n') {
+    advance(lexer);
+  }
+  return lexer->lookahead == '=' ? KEY_GENERIC_OPEN : GENERIC_OPEN;
+}
+
 static bool is_ident_char(int32_t c) {
   return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
          (c >= '0' && c <= '9');
@@ -447,7 +460,7 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
   // A with-key is a type path, even when an expression branch also exists.
   const bool key_generic = valid_symbols[KEY_GENERIC_OPEN];
   const bool generic_open = valid_symbols[GENERIC_OPEN] || key_generic;
-  const enum TokenType generic_symbol = key_generic ? KEY_GENERIC_OPEN : GENERIC_OPEN;
+  enum TokenType generic_symbol = key_generic ? KEY_GENERIC_OPEN : GENERIC_OPEN;
 
   // Disambiguate '<': generic open vs comparison less-than.
   // When both are valid, try generic first (lookahead for matching '>').
@@ -487,7 +500,8 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
           // the compiler's parser uses and require a qualified path after the
           // '<<'. Without this, `Wrapped<<M as Model>::Point>::new(p)` lexes a
           // shift and fails to parse even though the compiler accepts it.
-          if (scan_qualified_path_after_lshift(lexer)) {
+          if (!(key_generic && valid_symbols[GENERIC_OPEN]) &&
+              scan_qualified_path_after_lshift(lexer)) {
             lexer->result_symbol = generic_symbol;
             return true;
           }
@@ -512,7 +526,7 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
               advance(lexer);
               if (depth == 0) {
                 if (qualified_inner) {
-                  lexer->result_symbol = generic_symbol;
+                  lexer->result_symbol = generic_symbol_after_args(lexer, valid_symbols);
                   return true;
                 }
                 break;
@@ -642,7 +656,8 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
                   // In an expression both are valid, so apply the compiler's
                   // rule: what follows the '>' must be able to follow a path.
                   advance(lexer);
-                  is_generic = key_generic || !valid_symbols[COMPARISON_LT] ||
+                  generic_symbol = generic_symbol_after_args(lexer, valid_symbols);
+                  is_generic = generic_symbol == KEY_GENERIC_OPEN || !valid_symbols[COMPARISON_LT] ||
                                can_follow_generic_path_expr(lexer);
                   goto done_scanning;
                 }
