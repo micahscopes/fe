@@ -72,7 +72,15 @@ jobs:
       - name: Guard unpositioned solver premises budget
         env:
           PREMISES_GUARD_BASE: refs/premises-guard/base
-        run: python3 .github/check_solver_premises_budget.py
+        run: |
+          # A missing ref is an error. A base predating this guard has no
+          # tables to compare; initialize explicitly, retaining HEAD/parent checks.
+          git rev-parse --verify "${PREMISES_GUARD_BASE}^{commit}" >/dev/null
+          if ! git cat-file -e "${PREMISES_GUARD_BASE}:.github/check_solver_premises_budget.py" 2>/dev/null; then
+            echo "Integration base predates the premises guard; initializing its budget (HEAD/parent checks remain)."
+            export PREMISES_GUARD_SKIP_BASE=1
+          fi
+          python3 .github/check_solver_premises_budget.py
       - name: Guard owned trait-selection context budget
         run: python3 .github/check_owned_selection_budget.py
       - name: Guard callee choice fallback budget
