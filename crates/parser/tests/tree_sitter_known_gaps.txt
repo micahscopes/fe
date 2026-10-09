@@ -10,7 +10,6 @@ crates/fe/tests/fixtures/cli_output/single_files/pending/string_return_repack.fe
 crates/fe/tests/fixtures/crash_regressions/dependent_const_default_explicit_hole.fe
 crates/fe/tests/fixtures/crash_regressions/trait_constraints_cycle_recv_variant_acb16143.fe
 crates/fe/tests/fixtures/fe_test/conal_shapes_gat.fe
-crates/fe/tests/fixtures/fe_test/conal_step_min3.fe
 crates/fe/tests/fixtures/fe_test/deposit_contract.fe
 crates/fe/tests/fixtures/fe_test/enum_const_requirements.fe
 crates/fe/tests/fixtures/fe_test/generic_default_const_extents.fe
@@ -33,12 +32,10 @@ crates/hir/test_files/ty_check/debug_nested_assoc.fe
 crates/hir/test_files/ty_check/effect_trait_generic_instantiation.fe
 crates/hir/test_files/ty_check/path_generic.fe
 crates/hir/test_files/ty_check/record_init.fe
-crates/hir/tests/fixtures/associated_families/composed_projection_constraints.fe
 crates/hir/tests/fixtures/associated_families/gat_qualified_path_out.fe
 crates/hir/tests/fixtures/impl_const_requirements/fail/s5h_pattern_assoc.fe
 crates/hir/tests/fixtures/impl_const_requirements/pass/s5h_pattern_assoc.fe
 crates/uitest/fixtures/name_resolution/qualified_type_middle_segment.fe
-crates/uitest/fixtures/name_resolution/qualified_type_nested_errors.fe
 crates/uitest/fixtures/name_resolution/variant_and_module_generic_args.fe
 crates/uitest/fixtures/ty_check/abi_attr_on_non_struct.fe
 crates/uitest/fixtures/ty_check/const_arg_in_param_projection.fe

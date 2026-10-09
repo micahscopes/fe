@@ -176,6 +176,28 @@ fn format_report(results: &[SuiteResult]) -> String {
 }
 
 #[test]
+fn nested_qualified_arguments_in_generic_bounds_parse_without_spacing() {
+    let mut parser = new_parser();
+    for source in [
+        "fn f<T: Gate, U: Need<<Wrap<T> as Super>::Assoc>>() {}",
+        "fn f<T, U: Need<<Wrap<T> as Super>::Assoc>>() where T: Gate {}",
+        "fn f(x: u256, y: u256) { x << y }",
+        "fn f(x: u256, y: u256) { x < y << 1 }",
+    ] {
+        let (_, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(
+            errors.is_empty(),
+            "compiler parser rejected {source}: {errors:?}"
+        );
+        let errors = parse_errors(&mut parser, source);
+        assert!(
+            errors.is_empty(),
+            "tree-sitter rejected {source}: {errors:?}"
+        );
+    }
+}
+
+#[test]
 fn newline_else_keeps_the_branch_attached_without_joining_identifiers() {
     let mut parser = new_parser();
     for source in [

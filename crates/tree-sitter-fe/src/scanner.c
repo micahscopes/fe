@@ -624,7 +624,13 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
                 angle_depth++;
                 last_top_char = '<';
                 advance(lexer);
-                if (lexer->lookahead == '<') goto not_generic;
+                if (lexer->lookahead == '<') {
+                  // The enclosing list can contain a qualified first argument,
+                  // e.g. fn f<U: Need<<Wrap<T> as Trait>::Assoc>>().
+                  // Skip its balanced <...>:: prefix; a genuine shift has no
+                  // such prefix and still rules out the generic list.
+                  if (!scan_qualified_path_after_lshift(lexer)) goto not_generic;
+                }
               } else {
                 advance(lexer);
               }
