@@ -9,3 +9,5 @@ mod param_env;
 mod trait_resolution_conformance;
 mod trait_resolution_cross_ingot;
 mod trait_sig_const_generic;
+
+mod loop_descriptor_order;

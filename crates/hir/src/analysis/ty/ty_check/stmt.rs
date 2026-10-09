@@ -465,6 +465,7 @@ impl<'db> TyChecker<'db> {
     )> {
         let canonical_ty = Canonical::new(self.db, iterable_ty);
         let scope_ingot = self.env.scope().ingot(self.db);
+        let mut candidate = None;
         for ingot in [
             Some(scope_ingot),
             iterable_ty
@@ -490,12 +491,33 @@ impl<'db> TyChecker<'db> {
                     self.rollback_state(snapshot);
                     continue;
                 }
-                let trait_inst = trait_inst.fold_with(self.db, &mut self.table);
-                self.commit_state(snapshot);
-                return Some((impl_id, trait_inst));
+                // Header probing must not commit inference from the first impl.
+                self.rollback_state(snapshot);
+                if let Some(previous) = candidate {
+                    if previous != impl_id {
+                        return None;
+                    }
+                } else {
+                    candidate = Some(impl_id);
+                }
             }
         }
-        None
+        let impl_id = candidate?;
+        let snapshot = self.snapshot_state();
+        let trait_inst = self
+            .table
+            .instantiate_with_fresh_vars(impl_id.trait_inst(self.db));
+        if self
+            .table
+            .unify(trait_inst.self_ty(self.db), iterable_ty)
+            .is_err()
+        {
+            self.rollback_state(snapshot);
+            return None;
+        }
+        let trait_inst = trait_inst.fold_with(self.db, &mut self.table);
+        self.commit_state(snapshot);
+        Some((impl_id, trait_inst))
     }
 
     fn loop_seq_methods(
