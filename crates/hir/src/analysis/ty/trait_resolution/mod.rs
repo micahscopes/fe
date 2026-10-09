@@ -15,7 +15,7 @@ use crate::analysis::{
     ty::{
         trait_resolution::{
             constraint::ty_constraints,
-            table_solver::{TargetSolutionMatch, has_solution, solve},
+            table_solver::{TargetAnswer, TargetSolutionMatch, solve},
         },
         unify::UnificationTable,
     },
@@ -570,19 +570,21 @@ fn is_query_satisfiable<'db>(
     db: &'db dyn HirAnalysisDb,
     use_scope: ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
+    target: Option<TargetAnswer<'db>>,
     provisions: ProofProvisions<'db>,
 ) -> GoalSatisfiability<'db> {
     if query.flags(db).contains(TyFlags::HAS_INVALID) {
         return GoalSatisfiability::ContainsInvalid;
     };
 
-    solve(db, use_scope, query, provisions)
+    solve(db, use_scope, query, target, provisions)
 }
 
 fn is_query_satisfiable_cycle_initial<'db>(
     _db: &'db dyn HirAnalysisDb,
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
+    _target: Option<TargetAnswer<'db>>,
     _provisions: ProofProvisions<'db>,
 ) -> GoalSatisfiability<'db> {
     // A cycle can arise while collecting an impl whose constraints contain an associated-type
@@ -601,15 +603,12 @@ fn is_query_satisfiable_cycle_recover<'db>(
     _count: u32,
     _use_scope: ScopeId<'db>,
     _query: Canonical<TraitSolverQuery<'db>>,
+    _target: Option<TargetAnswer<'db>>,
     _provisions: ProofProvisions<'db>,
 ) -> salsa::CycleRecoveryAction<GoalSatisfiability<'db>> {
     salsa::CycleRecoveryAction::Iterate
 }
 
-#[salsa::tracked(
-    cycle_fn=query_has_solution_cycle_recover,
-    cycle_initial=query_has_solution_cycle_initial
-)]
 fn query_has_solution<'db>(
     db: &'db dyn HirAnalysisDb,
     use_scope: ScopeId<'db>,
@@ -618,22 +617,35 @@ fn query_has_solution<'db>(
     selected_candidate: Option<ImplementorId<'db>>,
     provisions: ProofProvisions<'db>,
 ) -> TargetSearchResult<'db> {
-    let (target, relation) = target;
-    if query.flags(db).contains(TyFlags::HAS_INVALID) {
-        return TargetSearchResult {
-            status: TargetSolutionStatus::NotFound,
-            impl_conditions: None,
-        };
+    let target = TargetAnswer::new(query, target.0, target.1, selected_candidate);
+    match is_query_satisfiable(db, use_scope, query, Some(target), provisions) {
+        GoalSatisfiability::NeedsConfirmation {
+            solutions,
+            completion: TraitSolveCompletion::TargetFound,
+        } => TargetSearchResult {
+            status: TargetSolutionStatus::Found,
+            impl_conditions: Some(
+                solutions
+                    .first()
+                    .expect("target result retains its proof answer")
+                    .value
+                    .impl_conditions,
+            ),
+        },
+        GoalSatisfiability::NormalizationFault => {
+            TargetSearchResult::without_conditions(TargetSolutionStatus::NormalizationFault)
+        }
+        GoalSatisfiability::NeedsConfirmation {
+            completion: TraitSolveCompletion::Saturated,
+            ..
+        } => TargetSearchResult::without_conditions(TargetSolutionStatus::NotFound),
+        GoalSatisfiability::NeedsConfirmation { .. } => {
+            TargetSearchResult::without_conditions(TargetSolutionStatus::Incomplete)
+        }
+        // Saturation without the requested witness means the target is absent,
+        // even if an ordinary answer for another instantiation was found.
+        _ => TargetSearchResult::without_conditions(TargetSolutionStatus::NotFound),
     }
-    has_solution(
-        db,
-        use_scope,
-        query,
-        target,
-        relation,
-        selected_candidate,
-        provisions,
-    )
 }
 
 pub(crate) fn restricted_goal_query_result<'db>(
@@ -653,34 +665,6 @@ pub(crate) fn restricted_goal_query_result<'db>(
         Some(candidate),
         solve_cx.provisions,
     )
-}
-
-fn query_has_solution_cycle_initial<'db>(
-    _db: &'db dyn HirAnalysisDb,
-    _use_scope: ScopeId<'db>,
-    _query: Canonical<TraitSolverQuery<'db>>,
-    _target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
-    _selected_candidate: Option<ImplementorId<'db>>,
-    _provisions: ProofProvisions<'db>,
-) -> TargetSearchResult<'db> {
-    TargetSearchResult {
-        status: TargetSolutionStatus::Incomplete,
-        impl_conditions: None,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn query_has_solution_cycle_recover<'db>(
-    _db: &'db dyn HirAnalysisDb,
-    _value: &TargetSearchResult<'db>,
-    _count: u32,
-    _use_scope: ScopeId<'db>,
-    _query: Canonical<TraitSolverQuery<'db>>,
-    _target: (Canonical<TraitInstId<'db>>, TargetSolutionMatch),
-    _selected_candidate: Option<ImplementorId<'db>>,
-    _provisions: ProofProvisions<'db>,
-) -> salsa::CycleRecoveryAction<TargetSearchResult<'db>> {
-    salsa::CycleRecoveryAction::Iterate
 }
 
 pub(crate) fn goal_query_has_solution<'db>(
@@ -734,6 +718,7 @@ pub fn is_goal_query_satisfiable<'db>(
         db,
         solve_cx.origin_scope(db),
         query.canonical(),
+        None,
         solve_cx.provisions,
     )
     .clone()
@@ -1417,6 +1402,8 @@ pub enum TraitSolveCompletion {
     PendingWorkLimit { limit: usize },
     /// Fe's bounded-type-growth guard stopped the search.
     MaximumTypeDepth,
+    /// A requested witness was found without enumerating the answer set.
+    TargetFound,
     /// Salsa is iterating a recursive query to a fixpoint.
     Cycle,
 }
@@ -2149,6 +2136,30 @@ impl<SelfT, T> Goal<T> for SelfT where SelfT: Accept<T>, SelfT: Choose<T> {}
         let expected = TraitInstId::new(&db, goal_trait, vec![subject, a], IndexMap::new());
 
         assert_eq!(Canonical::new(&db, actual), Canonical::new(&db, expected));
+    }
+
+    #[test]
+    fn target_search_saturated_ambiguity_does_not_imply_a_distinct_instance() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "target_search_saturated_ambiguity.fe".into(),
+            "trait Foo {}\nstruct First {}\nimpl Foo for First {}\nimpl Foo for First {}\n",
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let foo = named_trait(&db, top_mod, "Foo");
+        let first = named_struct_ty(&db, top_mod, "First");
+        let assumptions = PredicateListId::empty_list(&db);
+        let context = TraitSolveCx::new(&db, top_mod.scope()).with_assumptions(assumptions);
+        let goal = TraitInstId::new(&db, foo, vec![first], IndexMap::new());
+        let query = CanonicalGoalQuery::new(&db, goal, assumptions);
+        // As in the cutoff control, duplicate implementations test the solver
+        // independently of declaration admission. Both prove the same instance.
+        assert!(super::goal_query_has_no_distinct_solution(
+            &db,
+            context,
+            &query,
+            Canonical::new(&db, goal),
+        ));
     }
 
     #[test]

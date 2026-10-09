@@ -103,7 +103,7 @@ def main() -> int:
     }
     entrypoints = {
         "mod.rs": ("fn is_query_satisfiable<", "fn query_has_solution<"),
-        "table_solver.rs": ("fn solve<", "fn has_solution<", "impl<'db> ResolutionContext"),
+        "table_solver.rs": ("fn solve<", "impl<'db> ResolutionContext"),
     }
     errors = violations(solver_sources, other_sources)
     for path, names in entrypoints.items():
@@ -111,13 +111,19 @@ def main() -> int:
             if name not in solver_sources.get(path, ""):
                 errors.append(f"{path}: solver entry point changed: {name}")
     solver_adapter = solver_sources.get("table_solver.rs", "")
-    for name in ("solve", "has_solution"):
+    for name in ("solve",):
         if not guarded_entry(
             solver_adapter,
             f"pub(super) fn {name}<'db>(",
             "super::enter_proof_search()",
         ):
             errors.append(f"table_solver.rs: {name} lacks the proof-search guard")
+    if re.search(r"\bfn\s+has_solution\b", production(solver_adapter)):
+        errors.append("table_solver.rs: separate target solver reintroduced")
+    if len(re.findall(r"\bsolve_with_observer_and_options\s*\(", production(solver_adapter))) != 1:
+        errors.append("table_solver.rs: proof engine invocation must have one authority")
+    if re.search(r"#\[salsa::tracked(?:\([^]]*\))?\]\s*fn\s+query_has_solution", solver_sources.get("mod.rs", "")):
+        errors.append("mod.rs: target projection must read the shared cached proof query")
     discharge = other_sources.get("ty_check/const_requirements.rs", "")
     if not guarded_entry(
         discharge,

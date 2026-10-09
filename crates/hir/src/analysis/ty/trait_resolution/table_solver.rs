@@ -189,7 +189,7 @@ pub(crate) struct TargetSearchResult<'db> {
 }
 
 impl<'db> TargetSearchResult<'db> {
-    fn without_conditions(status: TargetSolutionStatus) -> Self {
+    pub(super) fn without_conditions(status: TargetSolutionStatus) -> Self {
         Self {
             status,
             impl_conditions: None,
@@ -235,11 +235,29 @@ struct PreparedQuery<'db> {
     normalized_goal: TraitInstId<'db>,
 }
 
-#[derive(Clone, Copy)]
-struct TargetAnswer<'db> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct TargetAnswer<'db> {
     root: Query<'db>,
     inst: Canonical<TraitInstId<'db>>,
     relation: TargetSolutionMatch,
+}
+
+impl<'db> TargetAnswer<'db> {
+    pub(super) fn new(
+        query: Canonical<TraitSolverQuery<'db>>,
+        inst: Canonical<TraitInstId<'db>>,
+        relation: TargetSolutionMatch,
+        selected_candidate: Option<ImplementorId<'db>>,
+    ) -> Self {
+        Self {
+            root: Query {
+                query,
+                selected_candidate,
+            },
+            inst,
+            relation,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -280,7 +298,7 @@ struct TraitResolutionContext<'db> {
     origin_ingot: crate::Ingot<'db>,
     prepared_queries: FxHashMap<Query<'db>, PreparedQuery<'db>>,
     target: Option<TargetAnswer<'db>>,
-    found_target_conditions: Cell<Option<ImplConditionsId<'db>>>,
+    found_target_answer: Cell<Option<GoalSolution<'db>>>,
     type_depth_budget: TypeDepthBudget,
     provisions: super::ProofProvisions<'db>,
 }
@@ -298,7 +316,7 @@ impl<'db> TraitResolutionContext<'db> {
             origin_ingot: use_scope.ingot(db),
             prepared_queries: FxHashMap::default(),
             target,
-            found_target_conditions: Cell::new(None),
+            found_target_answer: Cell::new(None),
             type_depth_budget: TypeDepthBudget::new(db, root, target),
             provisions,
         }
@@ -399,8 +417,7 @@ impl<'db> TraitResolutionContext<'db> {
                 TargetSolutionMatch::NotEqual => !equal,
             }
         }) {
-            self.found_target_conditions
-                .set(Some(answer.value.impl_conditions));
+            self.found_target_answer.set(Some(answer));
             Transition::Stop(StopReason::TargetFound)
         } else {
             Transition::Answer(answer)
@@ -958,9 +975,7 @@ fn map_completion(completion: Completion<StopReason>) -> TraitSolveCompletion {
         Completion::TableLimit { limit } => TraitSolveCompletion::TableLimit { limit },
         Completion::PendingWorkLimit { limit } => TraitSolveCompletion::PendingWorkLimit { limit },
         Completion::Adapter(StopReason::MaximumTypeDepth) => TraitSolveCompletion::MaximumTypeDepth,
-        Completion::Adapter(StopReason::TargetFound) => {
-            unreachable!("ordinary trait solving never installs a target")
-        }
+        Completion::Adapter(StopReason::TargetFound) => TraitSolveCompletion::TargetFound,
         Completion::Adapter(StopReason::NormalizationFault) => {
             unreachable!("normalization faults are handled before completion mapping")
         }
@@ -979,7 +994,7 @@ fn run_proof_query<'db, O: Observer<TraitResolutionContext<'db>>>(
     observer: &mut O,
 ) -> (
     tablesolve::SolveReport<TraitResolutionContext<'db>>,
-    Option<ImplConditionsId<'db>>,
+    Option<GoalSolution<'db>>,
 ) {
     let mut root_table = PersistentUnificationTable::new_proof(db);
     let root_goal = root.query.extract_identity(&mut root_table);
@@ -998,38 +1013,54 @@ fn run_proof_query<'db, O: Observer<TraitResolutionContext<'db>>>(
         Ok(report) => report,
         Err(never) => match never {},
     };
-    (report, context.found_target_conditions.get())
+    (report, context.found_target_answer.get())
 }
 
 pub(super) fn solve<'db>(
     db: &'db dyn HirAnalysisDb,
-    use_scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    use_scope: ScopeId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
+    target: Option<TargetAnswer<'db>>,
     provisions: super::ProofProvisions<'db>,
 ) -> GoalSatisfiability<'db> {
     let _proof_search = super::enter_proof_search();
     let mut observer = UnresolvedGoalObserver::default();
-    let config = Config {
-        limits: Limits {
-            max_root_answers: Some(TRAIT_SOLVER_ROOT_ANSWER_LIMIT),
-            ..Limits::default()
-        },
-        ..Config::default()
-    };
-    let (report, _) = run_proof_query(
-        db,
-        use_scope,
+    let root = target.map_or(
         Query {
             query,
             selected_candidate: None,
         },
-        None,
-        provisions,
-        config,
-        &mut observer,
+        |target| target.root,
     );
-    let root = report.root;
-    let solutions: IndexSet<_> = report.answers.into_iter().collect();
+    debug_assert_eq!(root.query, query);
+    let config = if target.is_some() {
+        // Fair scheduling prevents a recursive branch from starving the target.
+        Config {
+            scheduling: Scheduling::Fair,
+            ..Config::default()
+        }
+    } else {
+        Config {
+            limits: Limits {
+                max_root_answers: Some(TRAIT_SOLVER_ROOT_ANSWER_LIMIT),
+                ..Limits::default()
+            },
+            ..Config::default()
+        }
+    };
+    let (report, found_answer) = if target.is_some() {
+        run_proof_query(db, use_scope, root, target, provisions, config, &mut ())
+    } else {
+        run_proof_query(
+            db,
+            use_scope,
+            root,
+            target,
+            provisions,
+            config,
+            &mut observer,
+        )
+    };
     if matches!(
         report.completion,
         Completion::Adapter(StopReason::NormalizationFault)
@@ -1037,7 +1068,16 @@ pub(super) fn solve<'db>(
         return GoalSatisfiability::NormalizationFault;
     }
     let completion = map_completion(report.completion);
-
+    if completion == TraitSolveCompletion::TargetFound {
+        // A matching witness is known, but uniqueness has not been decided.
+        return GoalSatisfiability::NeedsConfirmation {
+            solutions: std::iter::once(found_answer.expect("target stop retains its proof answer"))
+                .collect(),
+            completion,
+        };
+    }
+    let root = report.root;
+    let solutions: IndexSet<_> = report.answers.into_iter().collect();
     match (completion, solutions.len()) {
         (TraitSolveCompletion::Saturated, 1) => {
             GoalSatisfiability::Satisfied(solutions.into_iter().next().unwrap())
@@ -1049,62 +1089,6 @@ pub(super) fn solve<'db>(
             solutions,
             completion,
         },
-    }
-}
-
-pub(super) fn has_solution<'db>(
-    db: &'db dyn HirAnalysisDb,
-    use_scope: crate::hir_def::scope_graph::ScopeId<'db>,
-    query: Canonical<TraitSolverQuery<'db>>,
-    target: Canonical<TraitInstId<'db>>,
-    relation: TargetSolutionMatch,
-    selected_candidate: Option<ImplementorId<'db>>,
-    provisions: super::ProofProvisions<'db>,
-) -> TargetSearchResult<'db> {
-    let _proof_search = super::enter_proof_search();
-    let root_key = Query {
-        query,
-        selected_candidate,
-    };
-    let target = TargetAnswer {
-        root: root_key,
-        inst: target,
-        relation,
-    };
-    // A target can occur after a non-regular recursive clause. Fair scheduling
-    // keeps that branch from starving later root clauses before the type-depth
-    // guard makes the search incomplete.
-    let config = Config {
-        scheduling: Scheduling::Fair,
-        ..Config::default()
-    };
-    let (report, found_conditions) = run_proof_query(
-        db,
-        use_scope,
-        root_key,
-        Some(target),
-        provisions,
-        config,
-        &mut (),
-    );
-    match report.completion {
-        Completion::Adapter(StopReason::TargetFound) => TargetSearchResult {
-            status: TargetSolutionStatus::Found,
-            impl_conditions: found_conditions,
-        },
-        Completion::Adapter(StopReason::NormalizationFault) => {
-            TargetSearchResult::without_conditions(TargetSolutionStatus::NormalizationFault)
-        }
-        Completion::Saturated => {
-            TargetSearchResult::without_conditions(TargetSolutionStatus::NotFound)
-        }
-        Completion::RootAnswerLimit { .. }
-        | Completion::StepLimit { .. }
-        | Completion::TableLimit { .. }
-        | Completion::PendingWorkLimit { .. }
-        | Completion::Adapter(StopReason::MaximumTypeDepth) => {
-            TargetSearchResult::without_conditions(TargetSolutionStatus::Incomplete)
-        }
     }
 }
 
@@ -1203,6 +1187,10 @@ mod tests {
 
     #[test]
     fn completion_mapping_preserves_engine_stop_reasons() {
+        assert_eq!(
+            map_completion(Completion::Adapter(StopReason::TargetFound)),
+            TraitSolveCompletion::TargetFound
+        );
         assert_eq!(
             map_completion(Completion::Saturated),
             TraitSolveCompletion::Saturated
