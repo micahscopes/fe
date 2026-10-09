@@ -1,0 +1,8 @@
+// Rejected: choosing `Open` for `S: Gate` narrows which impl answers `S: Gate`;
+// it does not prove `S: Foo`, whose only impl is named and not in force.
+trait Gate { const fn g() -> u256 }
+trait Foo { const fn v() -> u256 }
+struct S {}
+impl Gate for S as Open { const fn g() -> u256 { 2 } }
+impl Foo for S as Unused { const fn v() -> u256 { 5 } }
+const fn f() -> u256 { with (Open) { <S as Foo>::v() } }

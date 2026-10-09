@@ -1,0 +1,19 @@
+// A named choice reaches a bound two blanket impls down, both when the chain is
+// called directly in the block and when it is reached through a generic function.
+trait Foo { const fn v() -> u256 }
+trait Bar { const fn w() -> u256 }
+trait Baz { const fn z() -> u256 }
+struct S {}
+impl Foo for S as OnlyNamed { const fn v() -> u256 { 5 } }
+impl<T: Foo> Bar for T { const fn w() -> u256 { T::v() } }
+impl<T: Bar> Baz for T { const fn z() -> u256 { T::w() + 1 } }
+const DEEP: u256 = with (OnlyNamed) { <S as Baz>::z() }
+const fn via<T: Baz>() -> u256 { T::z() }
+const VIA: u256 = with (OnlyNamed) { via<S>() }
+fn at_run_time() -> u256 { with (OnlyNamed) { <S as Baz>::z() + via<S>() } }
+#[test]
+fn deep_is_6() { assert(DEEP == 6) }
+#[test]
+fn via_generic_is_6() { assert(VIA == 6) }
+#[test]
+fn run_time_is_12() { assert(at_run_time() == 12) }

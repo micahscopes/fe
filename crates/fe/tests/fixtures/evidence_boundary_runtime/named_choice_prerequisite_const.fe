@@ -1,0 +1,24 @@
+// c5 with associated constants: the selected impl's prerequisite is met by
+// another named choice in force at the same position.
+trait Gate { const G: u256 }
+trait Foo { const K: u256 }
+trait Bar { const W: u256 }
+struct S {}
+impl Gate for S as Open { const G: u256 = 2 }
+impl Foo for S as Gated where S: Gate { const K: u256 = 5 }
+impl<T: Foo> Bar for T { const W: u256 = T::K }
+const fn direct() -> u256 { with (Open, Gated) { <S as Foo>::K } }
+const fn blanket() -> u256 { with (Open, Gated) { <S as Bar>::W } }
+const fn nested() -> u256 { with (Open) { with (Gated) { <S as Foo>::K + <S as Bar>::W } } }
+fn at_run_time() -> u256 { with (Open) { with (Gated) { <S as Foo>::K + <S as Bar>::W } } }
+const D: u256 = direct()
+const B: u256 = blanket()
+const N: u256 = nested()
+#[test]
+fn direct_5() { assert(D == 5) }
+#[test]
+fn blanket_5() { assert(B == 5) }
+#[test]
+fn nested_10() { assert(N == 10) }
+#[test]
+fn run_time_10() { assert(at_run_time() == 10) }

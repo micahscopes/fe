@@ -4845,7 +4845,6 @@ fn evidence_selected_body_borrow_checked_with_ordinary_impl() {
 }
 
 #[test]
-#[ignore = "RD6: concrete evidence premises must retain supplied authority"]
 fn evidence_prove_named_only_dispatch_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("evidence_prove_named_only_dispatch.fe");
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -5285,21 +5284,69 @@ fn named_choice_blanket_bound_at_o0_and_o2() {
 }
 
 #[test]
-#[ignore = "H1d: actual evidence value must specialize and validate the named-only callee"]
 fn evidence_named_only_method_at_o0_and_o2() {
-    evidence_boundary_runtime_at_o0_and_o2("evidence_named_only_method_pending.fe");
+    evidence_boundary_runtime_at_o0_and_o2("evidence_named_only_method.fe");
 }
 
 #[test]
-#[ignore = "Dependent named choice reaches type checking but executable callee validation loses it (16-0009); tied to H1d"]
 fn named_choice_two_level_bound_at_o0_and_o2() {
-    evidence_boundary_runtime_at_o0_and_o2("named_choice_two_level_bound_pending.fe");
+    evidence_boundary_runtime_at_o0_and_o2("named_choice_two_level_bound.fe");
 }
 
 #[test]
-#[ignore = "C5: named candidate prerequisites must use the provisions at the same position, including revalidation"]
+fn evidence_two_level_bound_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_two_level_bound.fe");
+}
+
+#[test]
+fn evidence_two_level_bound_uses_the_operand_choice_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_two_level_two_named.fe");
+}
+
+#[test]
+fn evidence_two_level_bound_over_ordinary_impl_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_two_level_over_ordinary.fe");
+}
+
+#[test]
 fn named_choice_prerequisite_at_o0_and_o2() {
-    evidence_boundary_runtime_at_o0_and_o2("named_choice_prerequisite_pending.fe");
+    evidence_boundary_runtime_at_o0_and_o2("named_choice_prerequisite.fe");
+}
+
+#[test]
+fn evidence_prerequisite_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("evidence_prerequisite.fe");
+}
+
+#[test]
+fn named_choice_prerequisite_const_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("named_choice_prerequisite_const.fe");
+}
+
+/// Both spellings of a provision answer its own goal and nothing else: a named
+/// choice narrows which impl is used, its prerequisites still need proofs, and an
+/// ordinary premise on a concrete type is not a proof.
+#[test]
+fn one_provision_controls_are_rejected() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/one_provision_controls");
+    for (name, code) in [
+        ("wrong_choice_prerequisite_unmet.fe", "8-0101"),
+        ("wrong_choice_after_block.fe", "8-0101"),
+        ("named_choice_proves_nothing_else.fe", "6-0003"),
+        ("named_choice_proves_nothing_else_blanket.fe", "6-0003"),
+        ("evidence_proves_only_its_goal.fe", "6-0003"),
+        ("ordinary_premise_not_concrete_proof.fe", "6-0003"),
+    ] {
+        let fixture = root.join(name);
+        let (output, code_exit) =
+            run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+        assert_ne!(code_exit, 0, "{name} was accepted:\n{output}");
+        assert!(
+            output.contains(&format!("error[{code}]")),
+            "{name} lacks {code}:\n{output}"
+        );
+    }
 }
 
 #[test]

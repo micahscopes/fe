@@ -1,0 +1,31 @@
+// Opened evidence reaches a goal two blanket impls down; the operand's own
+// choice decides, never the provisional static callee.
+use core::obligations::{Evidence, prove}
+trait Foo { const fn v() -> u256 }
+trait Bar { const fn w() -> u256 }
+trait Baz { const fn z() -> u256 }
+struct S {}
+impl Foo for S as First { const fn v() -> u256 { 5 } }
+impl Foo for S as Second { const fn v() -> u256 { 7 } }
+impl<T: Foo> Bar for T { const fn w() -> u256 { T::v() } }
+impl<T: Bar> Baz for T { const fn z() -> u256 { T::w() + 1 } }
+const fn deep(_ e: Evidence<Foo<S>>) -> u256 { with (e) { <S as Baz>::z() } }
+const FIRST: u256 = deep(with (First) { prove<Foo<S>>() })
+const SECOND: u256 = deep(with (Second) { prove<Foo<S>>() })
+fn local_first() -> u256 { let e = with (First) { prove<Foo<S>>() }
+    with (e) { <S as Baz>::z() } }
+fn local_second() -> u256 { let e = with (Second) { prove<Foo<S>>() }
+    with (e) { <S as Baz>::z() } }
+fn named_second() -> u256 { with (Second) { <S as Baz>::z() } }
+#[test]
+fn const_first_6() { assert(FIRST == 6) }
+#[test]
+fn const_second_8() { assert(SECOND == 8) }
+#[test]
+fn local_first_6() { assert(local_first() == 6) }
+#[test]
+fn local_second_8() { assert(local_second() == 8) }
+#[test]
+fn named_second_8() { assert(named_second() == 8) }
+#[test]
+fn both_orders() { assert(local_second() * 10 + local_first() == 86) }

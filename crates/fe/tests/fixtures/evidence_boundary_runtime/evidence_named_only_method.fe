@@ -1,4 +1,4 @@
-// Pending H1d: proof-only repair reaches16-0009; actual evidence value must specialize and validate the callee.
+// H1d: a method of a trait whose only impl is named, called through opened evidence.
 // Found while baselining h1a (existed before this batch): a method of a trait
 // that has only a named impl for Subject, called directly in the block. Named
 // spelling versus evidence spelling of the same provision.

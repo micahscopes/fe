@@ -1,0 +1,8 @@
+// Rejected: evidence for `S: Gate` proves `S: Gate` only, not `S: Foo`.
+use core::obligations::{Evidence, prove}
+trait Gate { const fn g() -> u256 }
+trait Foo { const fn v() -> u256 }
+struct S {}
+impl Gate for S as Open { const fn g() -> u256 { 2 } }
+impl Foo for S as Unused { const fn v() -> u256 { 5 } }
+const fn f(_ e: Evidence<Gate<S>>) -> u256 { with (e) { <S as Foo>::v() } }

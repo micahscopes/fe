@@ -1,8 +1,6 @@
-// Pending c5: candidate validation and selected-application revalidation omit the provisions already open at this position. Named choices narrow candidates; they must not become proof assumptions.
-// The selected impl's prerequisite is met only by a second named choice in
-// force at the same position: `Gated` requires `S: Gate`, and `Gate` has only
-// the named impl `Open`. (Generic named impls cannot be selected yet, so the
-// prerequisite is written on the concrete impl.)
+// A selected impl's prerequisite is met by another named choice in force at
+// the same position: `Gated` requires `S: Gate`, and `Gate` has only the named
+// impl `Open`. Both orders of opening, in one `with` and nested.
 trait Gate { const fn g() -> u256 }
 trait Foo { const fn v() -> u256 }
 trait Bar { const fn w() -> u256 }
@@ -13,6 +11,7 @@ impl<T: Foo> Bar for T { const fn w() -> u256 { T::v() } }
 const fn direct() -> u256 { with (Open, Gated) { <S as Foo>::v() } }
 const fn blanket() -> u256 { with (Open, Gated) { <S as Bar>::w() } }
 const fn nested() -> u256 { with (Open) { with (Gated) { <S as Bar>::w() } } }
+fn at_run_time() -> u256 { with (Open) { with (Gated) { <S as Foo>::v() + <S as Bar>::w() } } }
 const D: u256 = direct()
 const B: u256 = blanket()
 const N: u256 = nested()
@@ -22,3 +21,5 @@ fn direct_5() { assert(D == 5) }
 fn blanket_5() { assert(B == 5) }
 #[test]
 fn nested_5() { assert(N == 5) }
+#[test]
+fn run_time_10() { assert(at_run_time() == 10) }

@@ -1,0 +1,10 @@
+// Rejected: `Open` is no longer in force when `Gated` is chosen.
+trait Gate { const fn g() -> u256 }
+trait Foo { const fn v() -> u256 }
+struct S {}
+impl Gate for S as Open { const fn g() -> u256 { 2 } }
+impl Foo for S as Gated where S: Gate { const fn v() -> u256 { 5 } }
+const fn f() -> u256 {
+    let a = with (Open) { <S as Gate>::g() }
+    a + with (Gated) { <S as Foo>::v() }
+}

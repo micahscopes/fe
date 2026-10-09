@@ -1,0 +1,7 @@
+// Rejected: `Gated` needs `S: Gate`, and nothing in force provides it.
+trait Gate { const fn g() -> u256 }
+trait Foo { const fn v() -> u256 }
+struct S {}
+impl Gate for S as Open { const fn g() -> u256 { 2 } }
+impl Foo for S as Gated where S: Gate { const fn v() -> u256 { 5 } }
+const fn f() -> u256 { with (Gated) { <S as Foo>::v() } }

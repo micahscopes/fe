@@ -1,0 +1,10 @@
+// Rejected: under `with (Open)`, a blanket impl needing `T: Foo` still needs a
+// proof of `S: Foo`; the choice for `S: Gate` is not one.
+trait Gate { const fn g() -> u256 }
+trait Foo { const fn v() -> u256 }
+trait Bar { const fn w() -> u256 }
+struct S {}
+impl Gate for S as Open { const fn g() -> u256 { 2 } }
+impl Foo for S as Unused { const fn v() -> u256 { 5 } }
+impl<T: Foo> Bar for T { const fn w() -> u256 { T::v() } }
+const fn f() -> u256 { with (Open) { <S as Bar>::w() } }

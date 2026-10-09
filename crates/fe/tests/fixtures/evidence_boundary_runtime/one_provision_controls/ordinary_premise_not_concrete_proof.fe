@@ -1,0 +1,6 @@
+// Rejected: an ordinary where-clause on a concrete type is not a proof of it;
+// only opened evidence or an impl answers a concrete goal.
+trait Foo { const fn v() -> u256 }
+struct S {}
+impl Foo for S as OnlyNamed { const fn v() -> u256 { 5 } }
+const fn f<T>() -> u256 where S: Foo { <S as Foo>::v() }

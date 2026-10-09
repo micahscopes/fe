@@ -1,0 +1,14 @@
+// Evidence spelling of named_choice_two_level_bound.fe: opened evidence for the
+// named-only `Foo` reaches a bound two blanket impls down.
+use core::obligations::{Evidence, prove}
+trait Foo { const fn v() -> u256 }
+trait Bar { const fn w() -> u256 }
+trait Baz { const fn z() -> u256 }
+struct S {}
+impl Foo for S as OnlyNamed { const fn v() -> u256 { 5 } }
+impl<T: Foo> Bar for T { const fn w() -> u256 { T::v() } }
+impl<T: Bar> Baz for T { const fn z() -> u256 { T::w() + 1 } }
+const fn deep(_ e: Evidence<Foo<S>>) -> u256 { with (e) { <S as Baz>::z() } }
+const DEEP: u256 = deep(with (OnlyNamed) { prove<Foo<S>>() })
+#[test]
+fn deep_is_6() { assert(DEEP == 6) }

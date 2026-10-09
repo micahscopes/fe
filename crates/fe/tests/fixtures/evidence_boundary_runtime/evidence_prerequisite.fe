@@ -1,0 +1,16 @@
+// Evidence spelling of named_choice_prerequisite.fe: the selected impl's
+// prerequisite is met by opened evidence in force at the same position.
+use core::obligations::{Evidence, prove}
+trait Gate { const fn g() -> u256 }
+trait Foo { const fn v() -> u256 }
+struct S {}
+impl Gate for S as Open { const fn g() -> u256 { 2 } }
+impl Foo for S as Gated where S: Gate { const fn v() -> u256 { 5 } }
+const fn direct(_ e: Evidence<Gate<S>>) -> u256 { with (e, Gated) { <S as Foo>::v() } }
+const fn nested(_ e: Evidence<Gate<S>>) -> u256 { with (e) { with (Gated) { <S as Foo>::v() } } }
+const D: u256 = direct(with (Open) { prove<Gate<S>>() })
+const N: u256 = nested(with (Open) { prove<Gate<S>>() })
+#[test]
+fn direct_5() { assert(D == 5) }
+#[test]
+fn nested_5() { assert(N == 5) }

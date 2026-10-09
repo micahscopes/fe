@@ -1,0 +1,23 @@
+// Opened evidence decides a goal two blanket impls down even where an ordinary
+// impl also answers it, at compile time and at run time.
+use core::obligations::{Evidence, prove}
+trait Foo { const fn v() -> u256 }
+trait Bar { const fn w() -> u256 }
+trait Baz { const fn z() -> u256 }
+struct S {}
+impl Foo for S { const fn v() -> u256 { 9 } }
+impl Foo for S as OnlyNamed { const fn v() -> u256 { 5 } }
+impl<T: Foo> Bar for T { const fn w() -> u256 { T::v() } }
+impl<T: Bar> Baz for T { const fn z() -> u256 { T::w() + 1 } }
+fn direct() -> u256 { let e = with (OnlyNamed) { prove<Foo<S>>() }
+    with (e) { <S as Foo>::v() } }
+fn chain() -> u256 { let e = with (OnlyNamed) { prove<Foo<S>>() }
+    with (e) { <S as Baz>::z() } }
+const fn cdeep(_ e: Evidence<Foo<S>>) -> u256 { with (e) { <S as Baz>::z() } }
+const CDEEP: u256 = cdeep(with (OnlyNamed) { prove<Foo<S>>() })
+#[test]
+fn direct_5() { assert(direct() == 5) }
+#[test]
+fn chain_6() { assert(chain() == 6) }
+#[test]
+fn const_chain_6() { assert(CDEEP == 6) }
