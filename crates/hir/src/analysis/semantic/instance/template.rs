@@ -109,9 +109,7 @@ impl<'db> GenericSubst<'db> {
 pub struct SelectedApplication<'db> {
     goal: TraitInstId<'db>,
     candidate: ImplementorId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
-    provisions: ProofProvisions<'db>,
+    context: TraitSolveCx<'db>,
 }
 
 impl<'db> SelectedApplication<'db> {
@@ -119,9 +117,7 @@ impl<'db> SelectedApplication<'db> {
         Self {
             goal: evidence.goal(),
             candidate: evidence.selected(),
-            scope: evidence.context().scope(),
-            assumptions: evidence.context().assumptions(),
-            provisions: evidence.context().provisions(),
+            context: evidence.context(),
         }
     }
 
@@ -133,10 +129,10 @@ impl<'db> SelectedApplication<'db> {
         self.goal
     }
     pub fn scope(self) -> ScopeId<'db> {
-        self.scope
+        self.context.scope()
     }
     pub fn assumptions(self) -> PredicateListId<'db> {
-        self.assumptions
+        self.context.assumptions()
     }
     pub fn origin(
         self,
@@ -162,19 +158,15 @@ impl<'db> SelectedApplication<'db> {
         }
         // The origin's premises and provisions are those the choice was made
         // with, so a prerequisite another provision met there is met again.
-        prove_selected_impl_evidence(
-            db,
-            TraitSolveCx::new(db, self.scope)
-                .with_assumptions(self.assumptions)
-                .with_provisions(self.provisions),
-            self.candidate,
-            self.goal,
-        )?;
+        prove_selected_impl_evidence(db, self.context, self.candidate, self.goal)?;
         // The choice carries how its prerequisites were met: the provisions
         // it was made under hold wherever it is used, unless the destination
         // provides the same goal itself.
-        let destination =
-            destination.with_provisions(self.provisions.within(db, destination.provisions()));
+        let destination = destination.with_provisions(
+            self.context
+                .provisions()
+                .within(db, destination.provisions()),
+        );
         prove_selected_impl_evidence(db, destination, self.candidate, goal)
     }
 }
@@ -203,8 +195,8 @@ impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for SelectedApplication
         visitor: &mut V,
     ) {
         self.goal.visit_with(visitor);
-        self.assumptions.visit_with(visitor);
-        self.provisions.visit_with(visitor);
+        self.context.assumptions().visit_with(visitor);
+        self.context.provisions().visit_with(visitor);
     }
 }
 
@@ -212,8 +204,10 @@ impl<'db> TyFoldable<'db> for SelectedApplication<'db> {
     fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
         Self {
             goal: self.goal.fold_with(db, folder),
-            assumptions: self.assumptions.fold_with(db, folder),
-            provisions: self.provisions.fold_with(db, folder),
+            context: self
+                .context
+                .with_assumptions(self.context.assumptions().fold_with(db, folder))
+                .with_provisions(self.context.provisions().fold_with(db, folder)),
             ..self
         }
     }
@@ -658,4 +652,26 @@ pub fn instantiate_typed_body<'db>(
             substitute_complete(db, template.body, mapping)
                 .expect("typed body must use its semantic substitution domain")
         })
+}
+
+#[cfg(test)]
+mod context_layout_tests {
+    use super::*;
+
+    #[allow(dead_code)]
+    struct PreviousSelectedApplication<'db> {
+        goal: TraitInstId<'db>,
+        candidate: ImplementorId<'db>,
+        scope: ScopeId<'db>,
+        assumptions: PredicateListId<'db>,
+        provisions: ProofProvisions<'db>,
+    }
+
+    #[test]
+    fn retained_application_context_does_not_grow() {
+        assert!(
+            std::mem::size_of::<SelectedApplication<'static>>()
+                <= std::mem::size_of::<PreviousSelectedApplication<'static>>()
+        );
+    }
 }

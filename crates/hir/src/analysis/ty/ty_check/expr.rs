@@ -3434,11 +3434,7 @@ impl<'db> TyChecker<'db> {
         trait_goal: TraitInstId<'db>,
     ) -> GoalSatisfiability<'db> {
         let solve_cx = self.trait_effect_solve_context(scope, assumptions);
-        let query = crate::analysis::ty::trait_resolution::CanonicalGoalQuery::new(
-            self.db,
-            trait_goal,
-            assumptions,
-        );
+        let query = solve_cx.goal_query(self.db, trait_goal);
         crate::analysis::ty::trait_resolution::is_goal_query_satisfiable(self.db, solve_cx, &query)
     }
 

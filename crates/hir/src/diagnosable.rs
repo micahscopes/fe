@@ -83,7 +83,7 @@ fn associated_family_parameter_diags<'db>(
                 .bounds()
                 .bound(bound_idx)
                 .trait_bound();
-            let AssocTypeOwner::Trait(trait_, family_idx) = owner else {
+            let AssocTypeOwner::Trait(trait_, _) = owner else {
                 out.push(
                     ty::diagnostics::ImplDiag::AssocTypeParamBoundInImpl {
                         primary: bound_span.into(),
@@ -111,14 +111,8 @@ fn associated_family_parameter_diags<'db>(
                 Some(trait_.self_param(db)),
             ) {
                 Ok(inst) => {
-                    let family = trait_
-                        .assoc_types(db)
-                        .nth(family_idx as usize)
-                        .expect("associated family belongs to trait");
-                    let solve_cx = ty::trait_resolution::TraitSolveCx::new(db, owner.scope())
-                        .with_assumptions(
-                            family.with_parameter_bounds(db, param_env(db, trait_.into())),
-                        );
+                    let solve_cx = crate::core::semantic::context_at(db, owner.scope(), None)
+                        .solver_context(db);
                     out.extend(written_bound_diags(
                         db,
                         subject,
@@ -568,9 +562,9 @@ impl<'db> Trait<'db> {
                 continue;
             };
             let subject = assoc.formal_subject(db);
-            let assumptions = assoc.with_parameter_bounds(db, param_env(db, self.into()));
-            let solve_cx = ty::trait_resolution::TraitSolveCx::new(db, assoc.scope())
-                .with_assumptions(assumptions);
+            let context = crate::core::semantic::context_at(db, assoc.scope(), None);
+            let assumptions = context.assumptions(db);
+            let solve_cx = context.solver_context(db);
             for bound in assoc.bounds(db) {
                 let span = assoc.span().bounds().bound(bound.index()).trait_bound();
                 let invalid = || -> TyDiagCollection<'db> {
@@ -613,7 +607,6 @@ impl<'db> Trait<'db> {
     /// Diagnostics for associated type defaults (bounds satisfaction), in the trait's context.
     pub fn diags_assoc_defaults(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
         let mut diags = Vec::new();
-        let assumptions = param_env(db, self.into());
         for assoc in self.assoc_types(db) {
             let Some(default_ty) = assoc.default_ty(db) else {
                 continue;
@@ -622,7 +615,8 @@ impl<'db> Trait<'db> {
                 // Reported once, at the parameter.
                 continue;
             }
-            let assumptions = assoc.with_parameter_bounds(db, assumptions);
+            let context = crate::core::semantic::context_at(db, assoc.scope(), None);
+            let assumptions = context.assumptions(db);
             let source_diags = ty::ty_error::collect_hir_ty_diags(
                 db,
                 assoc.default_hir_ty(db).expect("default type has source"),
@@ -648,8 +642,7 @@ impl<'db> Trait<'db> {
                 diags.push(diag);
                 continue;
             }
-            let solve_cx = ty::trait_resolution::TraitSolveCx::new(db, assoc.scope())
-                .with_assumptions(assumptions);
+            let solve_cx = context.solver_context(db);
             if let Some(diag) = ty::trait_resolution::check_ty_wf(db, solve_cx, default_ty)
                 .into_diag(assoc.span().ty().into())
             {
@@ -1332,7 +1325,8 @@ impl<'db> ImplTrait<'db> {
             return diags;
         };
         let trait_args = implementor.trait_(db).args(db);
-        let assumptions = param_env(db, self.into());
+        let context = crate::semantic::context_at(db, self.scope(), None);
+        let assumptions = context.assumptions(db);
 
         for assoc in implementor.assoc_type_views(db) {
             let Some(name) = assoc.name(db) else { continue };
@@ -1346,10 +1340,9 @@ impl<'db> ImplTrait<'db> {
                 let bound_inst = Binder::bind(implementor.trait_def(db).into(), bound_inst)
                     .instantiate(db, trait_args);
                 use ty::trait_resolution::{
-                    GoalSatisfiability, TraitSolveCx, bound_holds_for_every_argument,
-                    is_goal_satisfiable,
+                    GoalSatisfiability, bound_holds_for_every_argument, is_goal_satisfiable,
                 };
-                let solve_cx = TraitSolveCx::new(db, self.scope()).with_assumptions(assumptions);
+                let solve_cx = context.solver_context(db).with_assumptions(assumptions);
                 let failed = if matches!(
                     assoc.impl_ty().data(db),
                     ty::ty_def::TyData::TypeFamily { .. }

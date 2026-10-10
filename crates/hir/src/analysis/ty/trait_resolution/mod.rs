@@ -283,7 +283,6 @@ pub enum Selection<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub struct TraitSolveCx<'db> {
     scope: ScopeId<'db>,
-    origin_ingot: Ingot<'db>,
     assumptions: PredicateListId<'db>,
     provisions: ProofProvisions<'db>,
 }
@@ -300,7 +299,6 @@ impl<'db> TraitSolveCx<'db> {
     pub fn new(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> Self {
         Self {
             scope,
-            origin_ingot: scope.ingot(db),
             assumptions: PredicateListId::empty_list(db),
             provisions: ProofProvisions::none(db),
         }
@@ -474,7 +472,7 @@ impl<'db> TraitSolveCx<'db> {
         db: &'db dyn HirAnalysisDb,
         inst: TraitInstId<'db>,
     ) -> (Ingot<'db>, Option<Ingot<'db>>) {
-        Self::search_ingots_for_trait_inst_with_origin(db, self.origin_ingot, inst)
+        Self::search_ingots_for_trait_inst_with_origin(db, self.scope.ingot(db), inst)
     }
 
     pub(crate) fn search_ingots_for_trait_inst_with_origin(
@@ -508,7 +506,7 @@ impl<'db> TraitSolveCx<'db> {
         db: &'db dyn HirAnalysisDb,
         inst: TraitInstId<'db>,
     ) -> ScopeId<'db> {
-        Self::normalization_scope_for_trait_inst_with_origin(db, self.origin_ingot, inst)
+        Self::normalization_scope_for_trait_inst_with_origin(db, self.scope.ingot(db), inst)
     }
 
     pub(crate) fn normalization_scope_for_trait_inst_with_origin(
@@ -527,7 +525,7 @@ impl<'db> TraitSolveCx<'db> {
     // Type normalization uses the ingot context. The caller scope is retained
     // separately for const conditions and the solver's cache identity.
     pub(crate) fn origin_scope(self, db: &'db dyn HirAnalysisDb) -> ScopeId<'db> {
-        self.origin_ingot.root_mod(db).scope()
+        self.scope.ingot(db).root_mod(db).scope()
     }
 }
 
@@ -1757,6 +1755,66 @@ mod tests {
         hir_def::{Func, IdentId, TopLevelMod, Trait},
         test_db::{HirAnalysisTestDb, find_func},
     };
+
+    #[test]
+    fn captured_context_folds_premises_without_moving_its_origin() {
+        use crate::analysis::ty::fold::{TyFoldable, TyFolder};
+
+        struct Replace<'db> {
+            from: TyId<'db>,
+            to: TyId<'db>,
+        }
+        impl<'db> TyFolder<'db> for Replace<'db> {
+            fn fold_ty(
+                &mut self,
+                _db: &'db dyn crate::analysis::HirAnalysisDb,
+                ty: TyId<'db>,
+            ) -> TyId<'db> {
+                if ty == self.from { self.to } else { ty }
+            }
+            fn fold_scope(
+                &mut self,
+                _scope: crate::hir_def::scope_graph::ScopeId<'db>,
+            ) -> crate::hir_def::scope_graph::ScopeId<'db> {
+                panic!("captured proof origin must not move during substitution")
+            }
+        }
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "captured_context_fold.fe".into(),
+            "trait Foo {}\nstruct First {}\nstruct Second {}\nimpl Foo for First {}\n",
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let first = named_struct_ty(&db, top_mod, "First");
+        let second = named_struct_ty(&db, top_mod, "Second");
+        let goal = TraitInstId::new(
+            &db,
+            named_trait(&db, top_mod, "Foo"),
+            vec![first],
+            IndexMap::new(),
+        );
+        let context = TraitSolveCx::new(&db, top_mod.scope())
+            .with_assumptions(PredicateListId::new(&db, vec![goal]));
+        let candidate = crate::analysis::ty::trait_def::impls_for_trait_def(
+            &db,
+            top_mod.scope().ingot(&db),
+            goal.def(&db),
+        )[0];
+        let proof = prove_selected_impl_evidence(&db, context, candidate, goal)
+            .expect("selected implementation supplies the retained context");
+        let application = crate::analysis::semantic::SelectedApplication::from_evidence(&proof);
+        let folded = application.fold_with(
+            &db,
+            &mut Replace {
+                from: first,
+                to: second,
+            },
+        );
+        assert_eq!(folded.scope(), context.scope());
+        assert_eq!(folded.goal().args(&db), &[second]);
+        assert_eq!(folded.assumptions().list(&db)[0].args(&db), &[second]);
+    }
 
     fn named_trait<'db>(
         db: &'db HirAnalysisTestDb,
