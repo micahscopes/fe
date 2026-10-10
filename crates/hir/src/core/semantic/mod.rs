@@ -343,6 +343,30 @@ pub(crate) fn header_context_at<'db>(
     Chain::<()>::new(db, premises).context(db, scope)
 }
 
+/// Unelaborated declaration predicates. No caller or effect-provider predicates
+/// are allowed to influence name resolution within a default.
+pub(crate) fn generic_default_context_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: GenericParamOwner<'db>,
+) -> ImplEnv<'db> {
+    let declared = collect_candidate_constraints(db, owner).instantiate_identity();
+    let trait_ = match owner {
+        GenericParamOwner::Trait(trait_) => Some(trait_),
+        GenericParamOwner::Func(func) => match func.scope().parent_item(db) {
+            Some(ItemKind::Trait(trait_)) => Some(trait_),
+            _ => None,
+        },
+        _ => None,
+    };
+    let premises = trait_.map_or(declared, |trait_| {
+        declared.merge(
+            db,
+            PredicateListId::new(db, vec![trait_self_predicate(db, trait_)]),
+        )
+    });
+    Chain::<()>::new(db, premises).context(db, owner.scope())
+}
+
 /// Callable input formation keeps declaration-only source numbering before
 /// discovered layout/effect slots exist. Completed lowering retains its
 /// existing declaration premises; neither stage reads the completed body.

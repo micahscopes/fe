@@ -13,7 +13,7 @@ use super::{
     diagnostics::{TyDiagCollection, TyLowerDiag},
     layout_holes::rewrite_structural_holes,
     subst::substitute_complete,
-    trait_resolution::{PredicateListId, constraint::collect_candidate_constraints},
+    trait_resolution::PredicateListId,
     ty_check::check_generic_default_body_types,
     ty_def::{InvalidCause, Kind, TyData, TyId, TyParam},
     ty_error::{collect_hir_ty_diags_deferred, emit_invalid_ty_error, first_invalid_ty_cause},
@@ -30,36 +30,12 @@ use crate::{
         name_resolution::{EarlyNameQueryId, NameResKind, QueryDirective, resolve_query},
     },
     hir_def::{
-        ConstGenericArgValue, GenericParam, GenericParamOwner, IdentId, ItemKind, Partial, PathId,
+        ConstGenericArgValue, GenericParam, GenericParamOwner, IdentId, Partial, PathId,
         scope_graph::ScopeId,
     },
-    semantic::trait_self_predicate,
     span::path::LazyPathSpan,
     visitor::{Visitor, VisitorCtxt, walk_path},
 };
-
-/// Unelaborated declaration predicates. No caller or effect-provider predicates
-/// are allowed to influence name resolution within a default.
-pub(crate) fn default_assumptions<'db>(
-    db: &'db dyn HirAnalysisDb,
-    owner: GenericParamOwner<'db>,
-) -> PredicateListId<'db> {
-    let declared = collect_candidate_constraints(db, owner).instantiate_identity();
-    let trait_ = match owner {
-        GenericParamOwner::Trait(trait_) => Some(trait_),
-        GenericParamOwner::Func(func) => match func.scope().parent_item(db) {
-            Some(ItemKind::Trait(trait_)) => Some(trait_),
-            _ => None,
-        },
-        _ => None,
-    };
-    trait_.map_or(declared, |trait_| {
-        declared.merge(
-            db,
-            PredicateListId::new(db, vec![trait_self_predicate(db, trait_)]),
-        )
-    })
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
 pub(crate) enum GenericDefault<'db> {
@@ -143,7 +119,7 @@ pub(crate) fn generic_default<'db>(
                 db,
                 hir_ty,
                 owner.scope(),
-                default_assumptions(db, owner),
+                crate::semantic::generic_default_context_at(db, owner).assumptions(db),
                 &minter,
             );
             let set = collect_generic_params(db, owner);
@@ -274,10 +250,7 @@ pub(crate) fn type_default_diags<'db>(
             db,
             hir_ty,
             span.clone(),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                owner.scope(),
-                default_assumptions(db, owner),
-            ),
+            crate::semantic::generic_default_context_at(db, owner).premises(db),
         );
         if errors.is_empty()
             && let Err(error) = generic_default(db, owner, view.idx)
