@@ -69,6 +69,8 @@ jobs:
         run: python3 .github/check_rendered_diagnostics.py
       - name: Report direct trait solver constructions
         run: python3 .github/check_trait_solver_setup_budget.py
+      - name: Guard context construction and edit authority
+        run: python3 .github/check_context_authority.py
       - name: Guard context edits and report loose premises
         env:
           PREMISES_GUARD_BASE: refs/premises-guard/base

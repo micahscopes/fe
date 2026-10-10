@@ -96,6 +96,19 @@ pub(crate) struct Frame<'db, Data = ()> {
 }
 
 impl<'db> Frame<'db> {
+    /// Capture named applications whose source has already accepted them.
+    /// Transport preserves authored order; goal lookup chooses the last slot.
+    pub(crate) fn from_named_applications(applications: Vec<SelectedApplication<'db>>) -> Self {
+        Self::from_records(applications.into_iter().map(Provision::Named).collect())
+    }
+
+    pub(super) fn named_applications(&self) -> impl Iterator<Item = SelectedApplication<'db>> + '_ {
+        self.provisions.iter().map(|provision| match provision {
+            Provision::Named(application) => *application,
+            _ => unreachable!("a named frame contains only accepted named applications"),
+        })
+    }
+
     /// Reading accepted opening records does not validate or decide again.
     fn from_records(provisions: Vec<Provision<'db>>) -> Self {
         Self {

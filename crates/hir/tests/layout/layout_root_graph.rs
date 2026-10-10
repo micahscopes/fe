@@ -3,7 +3,7 @@ use fe_hir::{
     analysis::{
         initialize_analysis_pass,
         semantic::{
-            EffectProviderSubst, GenericSubst, ImplEnv, NExpr, NStatementKind, SemanticInstanceKey,
+            EffectProviderSubst, GenericSubst, NExpr, NStatementKind, SemanticInstanceKey,
             get_or_build_semantic_instance, identity_semantic_instance_key,
             normalize_semantic_body,
         },
@@ -2286,7 +2286,8 @@ fn concrete(map: StorageMap<u256, u256, 7>) {}
         BodyOwner::Func(func),
         GenericSubst::for_owner(&db, func.into(), vec![root]),
         EffectProviderSubst::empty(&db),
-        ImplEnv::empty(&db, func.scope()),
+        fe_hir::analysis::semantic::identity_semantic_instance_key(&db, BodyOwner::Func(func))
+            .impl_env(&db),
     );
     let specialized = key.layout_bundle_signature(&db);
     assert!(matches!(
@@ -2570,7 +2571,11 @@ fn consume_outer<const WRAPPER: u256, const TARGET: u256>(
         BodyOwner::Func(consume_independent),
         GenericSubst::for_owner(&db, consume_independent.into(), vec![params[1], params[1]]),
         EffectProviderSubst::empty(&db),
-        ImplEnv::empty(&db, consume_independent.scope()),
+        fe_hir::analysis::semantic::identity_semantic_instance_key(
+            &db,
+            BodyOwner::Func(consume_independent),
+        )
+        .impl_env(&db),
     )
     .layout_bundle_signature(&db)
     .inputs
@@ -2609,7 +2614,11 @@ fn consume_outer<const WRAPPER: u256, const TARGET: u256>(
         BodyOwner::Func(consume_outer),
         GenericSubst::for_owner(&db, consume_outer.into(), vec![params[1], params[1]]),
         EffectProviderSubst::empty(&db),
-        ImplEnv::empty(&db, consume_outer.scope()),
+        fe_hir::analysis::semantic::identity_semantic_instance_key(
+            &db,
+            BodyOwner::Func(consume_outer),
+        )
+        .impl_env(&db),
     )
     .layout_bundle_signature(&db)
     .inputs

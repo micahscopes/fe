@@ -610,6 +610,18 @@ pub(crate) fn call_selections_at<'db>(
         .collect()
 }
 
+/// A condition on a recorded call sees precisely the named applications that
+/// the call can transport, frozen before generic specialization.
+pub(crate) fn call_condition_context_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    typed: &crate::analysis::ty::ty_check::TypedBody<'db>,
+    expr: crate::hir_def::ExprId,
+) -> crate::analysis::semantic::ImplEnv<'db> {
+    context_at(db, scope, Some((typed, expr)))
+        .with_selections(db, call_selections_at(db, typed, expr))
+}
+
 /// Whether proving `requirements` can read `selection`; see
 /// [`requirements_reach_goal`].
 pub(crate) fn requirements_reach_selection<'db>(

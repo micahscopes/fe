@@ -3001,7 +3001,7 @@ mod tests {
     use driver::DriverDataBase;
     use hir::{
         analysis::semantic::{
-            EffectProviderSubst, GenericSubst, ImplEnv, NEffectArg, NPlace, NPlaceBase, NRootKind,
+            EffectProviderSubst, GenericSubst, NEffectArg, NPlace, NPlaceBase, NRootKind,
             NStatementKind, NTerminatorKind, SemanticCalleeRef, SemanticInstance,
             SemanticInstanceKey, SemanticNormalizationFailure, get_or_build_semantic_instance,
             owner_effect_bindings, resolved_provider_binding_for_instance_effect,
@@ -3009,7 +3009,6 @@ mod tests {
         },
         analysis::ty::{
             trait_def::TraitInstId,
-            trait_resolution::PredicateListId,
             ty_check::{BodyOwner, LocalBinding},
         },
     };
@@ -3138,17 +3137,28 @@ fn caller(_ x: Slot<7>) { <bool as Has>::take(x) }
         let caller = semantic_instance_for_named_func(&db, top_mod, "caller");
         let mut body = RuntimeSemanticBody::admitted(&db, caller).expect("missing caller body");
         let trait_inst = TraitInstId::new_simple(&db, trait_, vec![TyId::bool(&db)]);
+        // Keep the actual call's accepted contribution while substituting
+        // the bodyless declaration target below.
+        let call_context = body
+            .normalized
+            .blocks
+            .iter()
+            .flat_map(|block| &block.statements)
+            .find_map(|statement| match &statement.kind {
+                NStatementKind::Define {
+                    expr: NExpr::Call { callee, .. },
+                    ..
+                } => Some(callee.key.impl_env(&db)),
+                _ => None,
+            })
+            .expect("source call was not normalized");
+        assert!(call_context.witnesses(&db).contains(&trait_inst));
         let callee_key = SemanticInstanceKey::new(
             &db,
             BodyOwner::Func(declaration),
             GenericSubst::for_owner(&db, declaration.into(), trait_inst.args(&db).to_vec()),
             EffectProviderSubst::empty(&db),
-            ImplEnv::new(
-                &db,
-                declaration.scope(),
-                PredicateListId::empty_list(&db),
-                vec![trait_inst],
-            ),
+            call_context,
         );
         let mut replaced = false;
         for block in &mut body.normalized.blocks {

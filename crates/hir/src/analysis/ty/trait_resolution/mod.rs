@@ -2843,20 +2843,26 @@ impl Produce for Subject {
             vec![subject],
             IndexMap::new(),
         );
-        let a = ImplEnv::new_with_selections(
+        let a = ImplEnv::test_fixture(
             &db,
-            top_mod.scope(),
-            assumptions,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                top_mod.scope(),
+                assumptions,
+            ),
             Vec::new(),
             vec![selection],
+            Vec::new(),
         );
         // Scope and premises differ; the search reads neither.
-        let b = ImplEnv::new_with_selections(
+        let b = ImplEnv::test_fixture(
             &db,
-            top_mod.all_funcs(&db)[0].scope(),
-            PredicateListId::new(&db, vec![marker]),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                top_mod.all_funcs(&db)[0].scope(),
+                PredicateListId::new(&db, vec![marker]),
+            ),
             Vec::new(),
             vec![selection],
+            Vec::new(),
         );
         assert_ne!(a, b);
         assert_eq!(a.proof_provisions(&db), b.proof_provisions(&db));
@@ -2872,10 +2878,22 @@ impl Produce for Subject {
         .unwrap();
         let other_selection = SelectedApplication::from_evidence(&other_evidence);
         assert_ne!(selection, other_selection);
-        let c = b.with_selections(&db, vec![other_selection]);
+        let c = b.within_named_frame(
+            &db,
+            crate::semantic::Frame::from_named_applications(vec![other_selection]),
+        );
         assert_eq!(a.proof_provisions(&db), c.proof_provisions(&db));
         // Opened evidence is read: it answers its own goal.
-        let opened = ImplEnv::new(&db, top_mod.scope(), assumptions, vec![marker]);
+        let opened = ImplEnv::test_fixture(
+            &db,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                top_mod.scope(),
+                assumptions,
+            ),
+            vec![marker],
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(
             opened.proof_provisions(&db).entries(&db),
             &vec![(marker, None)]
@@ -2883,11 +2901,24 @@ impl Produce for Subject {
         // Ordinary positions, whatever their scope and premises, share the
         // empty projection, and so the same proof query keys as a context
         // built without any position.
-        let ordinary = ImplEnv::new(&db, top_mod.scope(), assumptions, Vec::new());
-        let other_ordinary = ImplEnv::new(
+        let ordinary = ImplEnv::test_fixture(
             &db,
-            top_mod.all_funcs(&db)[0].scope(),
-            PredicateListId::new(&db, vec![marker]),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                top_mod.scope(),
+                assumptions,
+            ),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let other_ordinary = ImplEnv::test_fixture(
+            &db,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                top_mod.all_funcs(&db)[0].scope(),
+                PredicateListId::new(&db, vec![marker]),
+            ),
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
         );
         let empty = TraitSolveCx::new(&db, top_mod.scope()).provisions();

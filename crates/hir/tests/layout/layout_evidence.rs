@@ -7,7 +7,7 @@ use fe_hir::{
     analysis::{
         initialize_analysis_pass,
         semantic::{
-            EffectProviderSubst, GenericSubst, ImplEnv, LayoutEvidenceBase, LayoutEvidenceBody,
+            EffectProviderSubst, GenericSubst, LayoutEvidenceBase, LayoutEvidenceBody,
             LayoutEvidenceComponentValue, LayoutEvidenceError, LayoutEvidenceExpr,
             LayoutEvidenceOperand, LayoutEvidenceVerifyError, NExpr, NStatementKind,
             NormalizedArtifacts, SExpr, SStmtKind, SemanticInstanceKey,
@@ -315,7 +315,8 @@ fn first<const FIRST: u256, const SECOND: u256>(
         BodyOwner::Func(func),
         GenericSubst::for_owner(&db, func.into(), vec![params[1], params[1]]),
         EffectProviderSubst::empty(&db),
-        ImplEnv::empty(&db, func.scope()),
+        fe_hir::analysis::semantic::identity_semantic_instance_key(&db, BodyOwner::Func(func))
+            .impl_env(&db),
     );
     let instance = get_or_build_semantic_instance(&db, key);
     let evidence = layout_evidence_body(&db, instance).expect("layoutization failed");
@@ -362,7 +363,11 @@ fn forward<const ROOT: u256>(value: Rooted<ROOT>) -> Rooted<ROOT> {
             BodyOwner::Func(convert),
             GenericSubst::for_owner(&db, convert.into(), vec![params[1], params[1]]),
             EffectProviderSubst::empty(&db),
-            ImplEnv::empty(&db, convert.scope()),
+            fe_hir::analysis::semantic::identity_semantic_instance_key(
+                &db,
+                BodyOwner::Func(convert),
+            )
+            .impl_env(&db),
         ),
     );
     let signature = convert.key(&db).layout_bundle_signature(&db);
@@ -423,7 +428,11 @@ fn discard<const FIRST: u256, const SECOND: u256>(
             BodyOwner::Func(discard),
             GenericSubst::for_owner(&db, discard.into(), vec![params[1], params[1]]),
             EffectProviderSubst::empty(&db),
-            ImplEnv::empty(&db, discard.scope()),
+            fe_hir::analysis::semantic::identity_semantic_instance_key(
+                &db,
+                BodyOwner::Func(discard),
+            )
+            .impl_env(&db),
         ),
     );
     layout_evidence_body(&db, instance).expect("layoutization must retain formal call identity");

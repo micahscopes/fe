@@ -77,7 +77,7 @@ OWNED_MODULES = (
     "crates/hir/src/analysis/ty/trait_resolution/",
     "crates/hir/src/core/semantic/",
 )
-EDIT_CEILING = 5
+EDIT_CEILING = 0
 EDIT_NAMES = "with_assumptions|with_provisions|with_selections|with_witnesses|with_call_choices"
 
 

@@ -1302,9 +1302,10 @@ fn inferred_body_with_selections<'db>(
             // This key carries lexical inputs before inference builds the
             // owner's premise frame. Reading completed item premises here
             // can re-enter inference through effect and condition checking.
-            crate::semantic::Chain::<()>::new(db, PredicateListId::empty_list(db))
-                .context(db, owner.scope())
-                .with_selections(db, selections.to_vec()),
+            crate::analysis::semantic::ImplEnv::root_caller(db, owner).within_named_frame(
+                db,
+                crate::semantic::Frame::from_named_applications(selections.to_vec()),
+            ),
         ),
     )
 }

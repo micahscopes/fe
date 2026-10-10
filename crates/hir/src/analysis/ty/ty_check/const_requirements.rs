@@ -138,7 +138,10 @@ pub(super) fn selection_context<'db>(
     scope: ScopeId<'db>,
     selections: Vec<SelectedApplication<'db>>,
 ) -> ImplEnv<'db> {
-    crate::semantic::context_at(db, scope, None).with_selections(db, selections)
+    crate::semantic::context_at(db, scope, None).within_named_frame(
+        db,
+        crate::semantic::Frame::from_named_applications(selections),
+    )
 }
 
 impl<'db> ConstConditionUse<'db> {
@@ -1580,7 +1583,6 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
             .filter(|_| args.iter().any(|ty| ty.has_param(db)));
         // Conditions must see the same lexical implementation choices as
         // the resolved call, including choices introduced by `with`.
-        let selections = crate::semantic::call_selections_at(db, self.typed, expr);
         for &predicate in predicates
             .iter()
             .filter(|&&predicate| checked_at_uses(db, predicate))
@@ -1590,8 +1592,9 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 predicate,
                 args: args.to_vec(),
                 caller: premise_owner,
-                context: crate::semantic::context_at(db, self.scope, Some((self.typed, expr)))
-                    .with_selections(db, selections.to_vec()),
+                context: crate::semantic::call_condition_context_at(
+                    db, self.scope, self.typed, expr,
+                ),
                 use_span: Some(expr.span(self.body).into()),
                 discharge: None,
             };
@@ -2464,7 +2467,10 @@ fn condition_instance_key<'db>(
         EffectProviderSubst::empty(db),
         // The instance substitutes the checked body's premises once. Only
         // lexical choices belong here; owner premises are not caller inputs.
-        ImplEnv::root_caller(db, owner).with_selections(db, selections),
+        ImplEnv::root_caller(db, owner).within_named_frame(
+            db,
+            crate::semantic::Frame::from_named_applications(selections),
+        ),
     )
 }
 
@@ -3189,7 +3195,7 @@ mod recording_tests {
             super::BodyOwner::Func(caller),
             GenericSubst::for_owner(&db, caller.into(), vec![super::TyId::u8(&db)]),
             EffectProviderSubst::empty(&db),
-            ImplEnv::empty(&db, caller.scope()),
+            ImplEnv::root_caller(&db, super::BodyOwner::Func(caller)),
         );
         let typed = key.typed_body(&db);
         let body = typed.body().expect("instantiated body");
@@ -3312,9 +3318,13 @@ fn caller() {
         assert_eq!(openings.len(), 2);
         // A transported sequence retains authored choices and their order. The
         // shared goal reader alone chooses the innermost answer, in either order.
-        let transport = crate::analysis::semantic::ImplEnv::empty(&db, caller.scope());
+        let transport =
+            crate::analysis::semantic::ImplEnv::root_caller(&db, super::BodyOwner::Func(caller));
         for ordered in [openings.clone(), openings.iter().rev().copied().collect()] {
-            let transported = transport.with_selections(&db, ordered.clone());
+            let transported = transport.within_named_frame(
+                &db,
+                crate::semantic::Frame::from_named_applications(ordered.clone()),
+            );
             assert_eq!(
                 transported.selections(&db),
                 &ordered,
@@ -4490,10 +4500,12 @@ fn use_it() -> u256 { read<7>() }";
                 (slot, typed.decisions().choice_ref(&choice.site()).unwrap())
             })
             .collect::<Vec<_>>();
-        let env = crate::analysis::semantic::ImplEnv::new_with_choices(
+        let env = crate::analysis::semantic::ImplEnv::test_fixture(
             &db,
-            from_scope,
-            typed.assumptions(),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                from_scope,
+                typed.assumptions(),
+            ),
             Vec::new(),
             Vec::new(),
             bound_choices.clone(),

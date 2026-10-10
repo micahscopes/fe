@@ -47,8 +47,7 @@ use crate::{
     },
     core::semantic::{EffectEnvView, EffectRequirementKey, ProviderBinding},
     hir_def::{
-        CallableDef, Const, Func, GenericParamOwner, HirIngot, params::FuncParamMode,
-        scope_graph::ScopeId,
+        CallableDef, Const, Func, GenericParamOwner, params::FuncParamMode, scope_graph::ScopeId,
     },
 };
 use common::indexmap::IndexSet;
@@ -1019,50 +1018,18 @@ fn semantic_callee_key_with_context<'db>(
             }
         }
     }
-    let mut witnesses: IndexSet<_> = if context_independent {
-        IndexSet::new()
-    } else {
-        // Evidence opened at the call answers the callee's dependent goals
-        // too; evaluation passes the operand's own choice in its place.
-        impl_env.witnesses(db).iter().copied().collect()
-    };
-    if let Some(witness) = callable.trait_inst().filter(|_| nominal_witness_required) {
-        witnesses.insert(witness);
-    }
-    if let Some((resolved, _)) = selected_trait_method {
-        witnesses.insert(resolved.trait_inst());
-    }
-    let normalization_scope = if context_independent {
-        // Library paths and impl selection resolve per ingot, and a body can
-        // reach impls only its caller's ingot sees, such as `Encode<Sol>` for a
-        // panic payload. Keep that ingot, not the module.
-        impl_env
-            .normalization_scope(db)
-            .ingot(db)
-            .root_mod(db)
-            .scope()
-    } else if selected_impl {
-        owner.scope()
-    } else {
-        impl_env.normalization_scope(db)
-    };
-    let impl_env = ImplEnv::new_with_choices(
+    let impl_env = impl_env.callee_caller(
         db,
-        normalization_scope,
-        if context_independent {
-            PredicateListId::empty_list(db)
-        } else {
-            assumptions
-        },
-        witnesses.into_iter().collect::<Vec<_>>(),
-        Vec::new(),
-        if body_func == nominal_func {
-            source_choice.bounds
-        } else {
-            Vec::new()
-        },
-    )
-    .with_selections(db, retained_selections);
+        owner,
+        callable,
+        body_func,
+        selected_trait_method.map(|(resolved, _)| resolved),
+        context_independent,
+        nominal_witness_required,
+        retained_selections,
+        source_choice.bounds,
+    );
+    let normalization_scope = impl_env.normalization_scope(db);
 
     if matches!(provider_resolution_mode, ProviderResolutionMode::Final)
         && let Some((resolved, nominal_inst)) = selected_trait_method
@@ -1499,12 +1466,15 @@ fn destination() {}
         // Alternative retains how Open met its prerequisite at the source.
         // Even a valid retained choice is not itself a predicate premise.
         let destination = function("destination");
-        let caller = ImplEnv::new_with_selections(
+        let caller = ImplEnv::test_fixture(
             &db,
-            destination.scope(),
-            PredicateListId::empty_list(&db),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                destination.scope(),
+                PredicateListId::empty_list(&db),
+            ),
             Vec::new(),
             vec![selection],
+            Vec::new(),
         );
         let key = SemanticInstanceKey::new(
             &db,

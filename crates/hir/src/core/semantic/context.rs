@@ -180,8 +180,7 @@ impl<'db> ImplEnv<'db> {
         self.0.bound_choices(db)
     }
 
-    // Transitional consumers are migrated before this becomes owner-private.
-    pub(crate) fn new_with_choices(
+    pub(super) fn new_with_choices(
         db: &'db dyn HirAnalysisDb,
         scope: ScopeId<'db>,
         assumptions: PredicateListId<'db>,
@@ -409,7 +408,7 @@ impl<'db> ImplEnv<'db> {
         )
     }
 
-    pub fn new_with_selections(
+    pub(super) fn new_with_selections(
         db: &'db dyn HirAnalysisDb,
         scope: ScopeId<'db>,
         assumptions: PredicateListId<'db>,
@@ -419,7 +418,7 @@ impl<'db> ImplEnv<'db> {
         Self::new_with_choices(db, scope, assumptions, witnesses, selections, Vec::new())
     }
 
-    pub fn new(
+    pub(super) fn new(
         db: &'db dyn HirAnalysisDb,
         scope: ScopeId<'db>,
         assumptions: PredicateListId<'db>,
@@ -435,13 +434,28 @@ impl<'db> ImplEnv<'db> {
         db: &'db dyn HirAnalysisDb,
         application: SelectedApplication<'db>,
     ) -> Self {
+        self.within_named_frame(db, super::Frame::from_named_applications(vec![application]))
+    }
+
+    /// Enter an accepted named frame. Other visible slots remain in force;
+    /// a new slot shadows the preceding frame without becoming a premise.
+    pub(crate) fn within_named_frame(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        frame: super::Frame<'db>,
+    ) -> Self {
+        let incoming = frame.named_applications().collect::<Vec<_>>();
         let mut selections = self.selections(db).clone();
-        selections.retain(|previous| !previous.matches(db, application.goal()));
-        selections.push(application);
+        selections.retain(|previous| {
+            !incoming
+                .iter()
+                .any(|application| previous.matches(db, application.goal()))
+        });
+        selections.extend(incoming);
         self.with_selections(db, selections)
     }
 
-    pub fn with_selections(
+    pub(super) fn with_selections(
         self,
         db: &'db dyn HirAnalysisDb,
         selections: Vec<SelectedApplication<'db>>,
@@ -450,7 +464,7 @@ impl<'db> ImplEnv<'db> {
     }
 
     /// Transport actual call choices without rebuilding the position's premises.
-    pub(crate) fn with_call_choices(
+    pub(super) fn with_call_choices(
         self,
         db: &'db dyn HirAnalysisDb,
         selections: Vec<SelectedApplication<'db>>,
@@ -651,13 +665,99 @@ impl<'db> ImplEnv<'db> {
         ))
     }
 
+    /// Project a checked callee transition from its source position. Context
+    /// independence has already been proved against the accepted answers;
+    /// witnesses and normalization origin follow the actual body transition.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn callee_caller(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        owner: BodyOwner<'db>,
+        callable: &crate::analysis::ty::ty_check::Callable<'db>,
+        body_function: crate::hir_def::Func<'db>,
+        selected: Option<crate::analysis::ty::trait_def::ResolvedImplInstance<'db>>,
+        independent: bool,
+        nominal_witness_required: bool,
+        selections: Vec<SelectedApplication<'db>>,
+        bounds: Vec<(usize, TraitChoiceId<'db>)>,
+    ) -> Self {
+        use crate::{
+            analysis::ty::trait_def::ImplementorOrigin,
+            hir_def::{CallableDef, HirIngot},
+        };
+        let CallableDef::Func(nominal_function) = callable.callable_def() else {
+            unreachable!("a checked function callee must have a function definition");
+        };
+        let selected_impl = selected.is_some_and(|resolved| {
+            !matches!(
+                resolved.selected().origin(db),
+                ImplementorOrigin::Assumption
+            )
+        });
+        let mut witnesses: indexmap::IndexSet<_> = if independent {
+            indexmap::IndexSet::new()
+        } else {
+            self.witnesses(db).iter().copied().collect()
+        };
+        if let Some(witness) = callable.trait_inst().filter(|_| nominal_witness_required) {
+            witnesses.insert(witness);
+        }
+        if let Some(resolved) = selected {
+            witnesses.insert(resolved.trait_inst());
+        }
+        let normalization_scope = if independent {
+            // Retain the caller's ingot visibility for context-free bodies.
+            self.normalization_scope(db).ingot(db).root_mod(db).scope()
+        } else if selected_impl {
+            owner.scope()
+        } else {
+            self.normalization_scope(db)
+        };
+        Self::new_with_choices(
+            db,
+            normalization_scope,
+            if independent {
+                PredicateListId::empty_list(db)
+            } else {
+                self.assumptions(db)
+            },
+            witnesses.into_iter().collect(),
+            selections,
+            if body_function == nominal_function {
+                bounds
+            } else {
+                Vec::new()
+            },
+        )
+    }
+
+    /// Unit controls vary context identities deliberately. This fixture
+    /// constructor is absent from the compiler's production API.
+    #[cfg(test)]
+    pub(crate) fn test_fixture(
+        db: &'db dyn HirAnalysisDb,
+        premises: SolverPremises<'db>,
+        witnesses: Vec<TraitInstId<'db>>,
+        selections: Vec<SelectedApplication<'db>>,
+        bounds: Vec<(usize, TraitChoiceId<'db>)>,
+    ) -> Self {
+        Self::new_with_choices(
+            db,
+            premises.scope(),
+            premises.assumptions(),
+            witnesses,
+            selections,
+            bounds,
+        )
+    }
+
     /// Caller contribution for an independently evaluated body. The body's
     /// own premises are added by its instance context, not supplied as callers.
     pub(crate) fn root_caller(db: &'db dyn HirAnalysisDb, owner: BodyOwner<'db>) -> Self {
         Self::empty(db, owner.scope())
     }
 
-    pub fn empty(db: &'db dyn HirAnalysisDb, normalization_scope: ScopeId<'db>) -> Self {
+    pub(super) fn empty(db: &'db dyn HirAnalysisDb, normalization_scope: ScopeId<'db>) -> Self {
         Self::new(
             db,
             normalization_scope,

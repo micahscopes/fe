@@ -5113,7 +5113,11 @@ fn impl_sum_semantic_body_uses_self_binding_directly() {
             BodyOwner::Func(method),
             GenericSubst::for_owner(&db, method.into(), resolved.body_args().to_vec()),
             fe_hir::analysis::semantic::EffectProviderSubst::empty(&db),
-            fe_hir::analysis::semantic::ImplEnv::empty(&db, impl_trait.scope()),
+            fe_hir::analysis::semantic::identity_semantic_instance_key(
+                &db,
+                BodyOwner::Func(method),
+            )
+            .impl_env(&db),
         ),
     );
     let body = instance.body(&db);

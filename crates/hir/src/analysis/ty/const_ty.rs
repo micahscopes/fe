@@ -3833,11 +3833,15 @@ mod tests {
         let body = caller.body(&db).expect("caller body");
         let premises = crate::semantic::param_env(&db, caller.into());
         let witness = premises.list(&db)[0];
-        let context = ImplEnv::new(
+        let context = ImplEnv::test_fixture(
             &db,
-            caller.scope(),
-            PredicateListId::empty_list(&db),
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                caller.scope(),
+                PredicateListId::empty_list(&db),
+            ),
             vec![witness],
+            Vec::new(),
+            Vec::new(),
         );
         let actual = selected_const_body_assumptions(&db, body, Some(context));
         assert!(

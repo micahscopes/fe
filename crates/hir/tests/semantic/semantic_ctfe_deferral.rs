@@ -7,10 +7,10 @@ use fe_hir::{
     analysis::{
         semantic::{
             ConstDesc, ConstRepr, CtfeConfig, CtfeError, EffectProviderSubst, EvalFailure,
-            EvalOutcome, GenericSubst, ImplEnv, SExpr, SStmtKind, SemConstId, SemConstScalar,
-            SemConstValue, SemOrigin, SemanticInstanceKey, array_const,
-            const_computation_for_instance, describe_const_computation, eval_body_owner_const,
-            force_const_computation, force_const_description, get_or_build_semantic_instance,
+            EvalOutcome, GenericSubst, SExpr, SStmtKind, SemConstId, SemConstScalar, SemConstValue,
+            SemOrigin, SemanticInstanceKey, array_const, const_computation_for_instance,
+            describe_const_computation, eval_body_owner_const, force_const_computation,
+            force_const_description, get_or_build_semantic_instance,
             identity_semantic_instance_key, int_const, reify_runtime_const,
             reify_runtime_const_for_ty, sem_const_ty, specialize_const_computation,
             specialize_const_description, tuple_const,
@@ -235,7 +235,7 @@ fn invocation<'db>(
             owner,
             GenericSubst::for_body_owner(db, owner, generic_args),
             EffectProviderSubst::empty(db),
-            ImplEnv::empty(db, owner.scope()),
+            fe_hir::analysis::semantic::identity_semantic_instance_key(db, owner).impl_env(db),
         ),
         args,
         parameter_owner: owner.scope(),
