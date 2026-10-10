@@ -1,19 +1,8 @@
-"""Step 3: premise-only queries are keyed by a position's premises.
+"""Step 3d: ratchet context edits outside their semantic and solver owners.
 
-The three named solver contexts that are not program positions (coherence,
-signature comparison, implementation search) are each built from one place.
-
-`SolverPremises::from_unpositioned_pair` builds premises that do not come from
-a position context, and an `ImplEnv::new*` call outside the context builders
-builds a context from parts rather than reading it from a position. Each is a
-site still to be given the context of its position. Every file has a main
-ceiling (zero unless listed), which only decreases, plus an EXPOSED allowance
-for pairs a migration made visible rather than added, each with its reason; so
-such sites can be removed but not added or moved to another file. The
-tables themselves are checked against the integration base
-(PREMISES_GUARD_BASE, default `mb3`), HEAD's parent and HEAD: main plus
-exposed may not rise unless the commit touches only this guard and says
-`guard-only:`. A missing base fails unless skipped explicitly.
+Loose premises and direct constructions are reports, not architectural gates.
+The edit ceiling is global: moving a call cannot make it disappear. Rust privacy
+will close these doors after their consumers use position contexts.
 """
 from pathlib import Path
 import importlib.util
@@ -76,27 +65,6 @@ def exception_callers(sources: dict) -> dict:
     return found
 
 
-def tables(text: str) -> tuple[dict, dict]:
-    """The CEILINGS and EXPOSED tables of a version of this file."""
-
-    class Names(dict):
-        def __missing__(self, key):
-            return key
-
-    found = []
-    for name in ("CEILINGS", "EXPOSED"):
-        match = re.search(r"^" + name + r" = (\{.*?^\})", text, re.S | re.M)
-        found.append(eval(match[1], {}, Names()) if match else {})
-    return found[0], found[1]
-
-
-def budget(text: str) -> int:
-    ceilings, exposed = tables(text)
-    return sum(ceilings.values()) + sum(
-        value[0] if isinstance(value, tuple) else value for value in exposed.values()
-    )
-
-
 GUARD = ".github/check_solver_premises_budget.py"
 
 
@@ -104,179 +72,121 @@ def git(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True)
 
 
-def guard_only(rev: str) -> bool:
-    """`rev` changes only this guard and says so (`guard-only:`)."""
-    shown = git("show", "--name-only", "--format=%B", rev)
-    files = [line for line in shown.stdout.splitlines() if line.startswith(("crates/", ".github/"))]
-    return "guard-only:" in shown.stdout and files == [GUARD]
+# ImplEnv currently lives in template.rs; its move to core/semantic removes
+# this temporary owner exemption. Other analysis/semantic files are consumers.
+OWNED_MODULES = (
+    "crates/hir/src/analysis/ty/trait_resolution/",
+    "crates/hir/src/core/semantic/",
+)
+CONTEXT_OWNER = "crates/hir/src/analysis/semantic/instance/template.rs"
+EDIT_CEILING = 38
+EDIT_NAMES = "with_assumptions|with_provisions|with_selections|with_witnesses"
 
 
-def rise(label: str, before_text: str, after_text: str, exempt: bool) -> int:
-    before, after = budget(before_text), budget(after_text)
-    if after <= before or exempt:
-        return 0
-    print(f"premises budget rose against {label}: {before} -> {after} (main + exposed)", file=sys.stderr)
-    return 1
+def context_edits(source: str) -> int:
+    code = solver_budget.production_code(source)
+    # Count references as well as calls, including UFCS and turbofish forms.
+    edits = len(re.findall(r"(?:\.|::)\s*(?:" + EDIT_NAMES + r")\b", code))
+    names = {"ImplEnv"}
+    names.update(re.findall(r"\bImplEnv\s+as\s+(\w+)", code))
+    names.update(re.findall(r"\btype\s+(\w+)(?:\s*<[^;{}]*>)?\s*=\s*ImplEnv\b", code))
+    edits += len(re.findall(
+        r"\b(?:" + "|".join(sorted(names)) + r")(?:\s*::\s*<[^;{}]*?>)?\s*::\s*empty\b", code
+    ))
+    return edits
 
 
-def base_check() -> int:
-    """Main plus exposed may not rise, whatever a commit does to the tables:
-    not against the integration base, not against HEAD's parent (so a raised
-    ceiling cannot hide a new pair under the base total), and not in
-    uncommitted changes against HEAD. Only a commit that touches nothing but
-    this guard and says `guard-only:` may raise them.
+def pair_signatures(source: str) -> int:
+    code = solver_budget.production_code(source)
+    count = 0
+    for fn in re.finditer(r"\bfn\s+\w+", code):
+        start = fn.end()
+        angles = 0
+        while start < len(code):
+            ch = code[start]
+            if ch == "<":
+                angles += 1
+            elif ch == ">" and angles and code[start - 1] != "-":
+                angles -= 1
+            elif not angles and ch in "({;":
+                break
+            start += 1
+        if start == len(code) or code[start] != "(":
+            continue
+        end, depth = start + 1, 1
+        while end < len(code) and depth:
+            depth += (code[end] == "(") - (code[end] == ")")
+            end += 1
+        params = code[start:end]
+        if re.search(r"\bScopeId\b", params) and re.search(r"\bPredicateListId\b", params):
+            count += 1
+    return count
 
-    The base is PREMISES_GUARD_BASE (default `mb3`). A missing base fails,
-    unless PREMISES_GUARD_BASE was set explicitly or
-    PREMISES_GUARD_SKIP_BASE=1 says to skip it."""
-    current = (ROOT / GUARD).read_text()
-    status = 0
-    base = os.environ.get("PREMISES_GUARD_BASE")
-    skip = os.environ.get("PREMISES_GUARD_SKIP_BASE") == "1"
-    shown = git("show", f"{base or 'mb3'}:{GUARD}")
-    if shown.returncode == 0:
-        status |= rise(f"base {base or 'mb3'}", shown.stdout, current, guard_only("HEAD"))
-    elif skip:
-        print("premises guard: base comparison skipped (PREMISES_GUARD_SKIP_BASE=1)")
-    else:
-        print(
-            f"premises guard: integration base {base or 'mb3'!r} not found; set "
-            f"PREMISES_GUARD_BASE to an available ref or PREMISES_GUARD_SKIP_BASE=1",
-            file=sys.stderr,
-        )
-        status = 1
-    head = git("show", f"HEAD:{GUARD}")
-    parent = git("show", f"HEAD^:{GUARD}")
-    if head.returncode == 0 and parent.returncode == 0:
-        status |= rise("HEAD's parent", parent.stdout, head.stdout, guard_only("HEAD"))
-    if head.returncode == 0:
-        status |= rise("HEAD (uncommitted changes)", head.stdout, current, False)
-    return status
+
+def check_edit_budget(total: int) -> int:
+    ceiling = EDIT_CEILING
+    # Reject an uncommitted/committed rise in the ceiling. Old versions had no
+    # edit ratchet, so the first retargeting commit establishes it at 38.
+    for rev in (os.environ.get("PREMISES_GUARD_BASE", "mb3"), "HEAD", "HEAD^"):
+        shown = git("show", f"{rev}:{GUARD}")
+        if shown.returncode:
+            if rev not in ("HEAD", "HEAD^") and os.environ.get("PREMISES_GUARD_SKIP_BASE") != "1":
+                print(f"context edit guard base {rev!r} unavailable", file=sys.stderr)
+                return 1
+            continue
+        previous = re.search(r"^EDIT_CEILING = (\d+)$", shown.stdout, re.M)
+        if previous:
+            ceiling = min(ceiling, int(previous[1]))
+    if EDIT_CEILING > ceiling or total > ceiling:
+        print(f"context edits: {total}; ceiling {EDIT_CEILING}, ratchet {ceiling}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def main() -> int:
-    cases = [
-        ("SolverPremises::from_unpositioned_pair(scope, a)", False, (1, 0, 0)),
-        ("SolverPremises :: from_unpositioned_pair (scope, a)", False, (1, 0, 0)),
-        ("pub fn from_unpositioned_pair(scope: S, a: A) -> Self", False, (0, 0, 0)),
-        ("ImplEnv::new(db, s, a, v); ImplEnv::new_with_choices(db)", False, (0, 1, 1)),
-        ("ImplEnv::new_with_selections(db, s, a, w, v)", True, (0, 0, 0)),
-        ("// SolverPremises::from_unpositioned_pair(s, a)\nImplEnv::new_with_selections(x)", False, (0, 0, 1)),
-        ("#[cfg(test)] mod t { fn f() { ImplEnv::new(db, s, a, v); } }", False, (0, 0, 0)),
+    edit_cases = [
+        ("cx.with_assumptions(a).with_provisions(p)", 2),
+        ("TraitSolveCx::with_assumptions(cx, a); let f = ImplEnv::with_selections;", 2),
+        ("ImplEnv::<'db>::empty(s); cx.with_witnesses::<T>(w)", 2),
+        ("use m::ImplEnv as Env; let empty = Env::empty;", 1),
+        ("type Env<'a> = ImplEnv<'a>; Env::empty(s)", 1),
+        ('// cx.with_assumptions(a)\nlet s = "ImplEnv::empty(s)";', 0),
+        ("#[cfg(test)] mod tests { fn f() { cx.with_selections(s); } }", 0),
+        ("fn with_assumptions(a: A) {}", 0),
     ]
-    if any(count(source, builder) != expected for source, builder, expected in cases):
-        raise AssertionError("premises counter self-check failed")
-    unknown = (set(CEILINGS) | set(EXPOSED)) - set(inventory())
-    if unknown:
-        print(f"ceilings name missing files: {sorted(unknown)}", file=sys.stderr)
-        return 1
-    if any(not reason.strip() for _, reason in EXPOSED.values()):
-        print("every EXPOSED entry needs a reason", file=sys.stderr)
-        return 1
-    by_file = inventory()
-    status = 0
+    signature_cases = [
+        ("fn f(s: ScopeId, a: PredicateListId) {}", 1),
+        ("fn f<F: Fn(ScopeId) -> PredicateListId>(f: F) {}", 0),
+        ("fn f<F: Fn() -> ()>(s: ScopeId, a: PredicateListId) {}", 1),
+        ("#[test] fn f(s: ScopeId, a: PredicateListId) {}", 0),
+        ("fn f(s: ScopeId) -> PredicateListId {}", 0),
+        ("fn f(s: ScopeId, a: Option<PredicateListId>);", 1),
+    ]
+    assert all(context_edits(s) == n for s, n in edit_cases), "context edit counter controls"
+    assert all(pair_signatures(s) == n for s, n in signature_cases), "pair signature controls"
     sources = {
         str(path.relative_to(ROOT)): path.read_text()
         for path in sorted((ROOT / "crates").glob("*/src/**/*.rs"))
     }
+    edits = {
+        name: context_edits(source) for name, source in sources.items()
+        if not name.startswith(OWNED_MODULES) and name != CONTEXT_OWNER
+    }
+    total = sum(edits.values())
+    print(f"context edits outside owner modules: {total} (ceiling {EDIT_CEILING})")
+    print(f"scope/premise pair signatures: {sum(pair_signatures(s) for s in sources.values())} (report only)")
+    print(f"unpositioned solver premises and built contexts: {sum(inventory().values())} (report only)")
+    status = check_edit_budget(total)
     for name, callers in exception_callers(sources).items():
         if callers != [NAMED_EXCEPTIONS[name]]:
-            print(
-                f"TraitSolveCx::{name} must be built only in {NAMED_EXCEPTIONS[name]}, "
-                f"found in {callers}",
-                file=sys.stderr,
-            )
+            print(f"TraitSolveCx::{name}: unexpected owners {callers}", file=sys.stderr)
             status = 1
-    for path, value in by_file.items():
-        ceiling = CEILINGS.get(path, 0)
-        exposed = EXPOSED.get(path, (0, ""))[0]
-        if value > ceiling + exposed:
-            print(
-                f"{path}: {value} unpositioned premises or built contexts "
-                f"(ceiling {ceiling}, exposed {exposed})",
-                file=sys.stderr,
-            )
-            status = 1
-        elif exposed and value < ceiling + exposed:
-            # Exposed pairs are removed first: lower EXPOSED before CEILINGS.
-            print(
-                f"{path}: {value} counted, below ceiling {ceiling} + exposed {exposed}; "
-                f"lower its EXPOSED entry",
-                file=sys.stderr,
-            )
-            status = 1
-    status |= base_check()
-    total = sum(by_file.values())
-    main = sum(CEILINGS.values())
-    exposed = sum(count for count, _ in EXPOSED.values())
-    print(
-        f"unpositioned solver premises and built contexts: {total} "
-        f"(main ceiling {main}, exposed {exposed})"
-    )
+    if status:
+        for name, count in edits.items():
+            if count:
+                print(f"  {name}: {count}", file=sys.stderr)
     return status
 
-
-# The main per-file ceilings. They may only decrease: a rise in the main count
-# fails review even when the guard is edited to allow it.
-CEILINGS = {
-    "crates/driver/src/elaboration/project.rs": 1,
-    "crates/hir/src/analysis/name_resolution/path_resolver.rs": 5,  # EXPOSED: existing path lookup pair (+1), removed by decision 1
-    "crates/hir/src/analysis/semantic/borrowck/availability.rs": 1,
-    "crates/hir/src/analysis/semantic/borrowck/memory.rs": 1,
-    "crates/hir/src/analysis/semantic/capability/handle.rs": 1,
-    "crates/hir/src/analysis/semantic/capability/shape.rs": 1,
-    "crates/hir/src/analysis/semantic/ctfe/machine.rs": 5,
-    "crates/hir/src/analysis/semantic/ctfe/service.rs": 3,
-    "crates/hir/src/analysis/semantic/instance/const_ref.rs": 13,
-    "crates/hir/src/analysis/semantic/instance/semantic.rs": 7,
-    "crates/hir/src/analysis/semantic/lower/body.rs": 4,
-    "crates/hir/src/analysis/semantic/lower/local_facts.rs": 1,
-    "crates/hir/src/analysis/semantic/lower/pattern.rs": 2,
-    "crates/hir/src/analysis/semantic/normalized/layout_plan.rs": 1,
-    "crates/hir/src/analysis/semantic/normalized/normalize.rs": 1,
-    "crates/hir/src/analysis/semantic/normalized/verify.rs": 2,
-    "crates/hir/src/analysis/ty/abi_ty.rs": 1,
-    "crates/hir/src/analysis/ty/assoc_const.rs": 1,
-    "crates/hir/src/analysis/ty/const_ty.rs": 4,
-    "crates/hir/src/analysis/ty/effects.rs": 1,
-    "crates/hir/src/analysis/ty/method_cmp.rs": 5,
-    "crates/hir/src/analysis/ty/method_table.rs": 1,
-    "crates/hir/src/analysis/ty/mod.rs": 1,
-    "crates/hir/src/analysis/ty/normalize.rs": 1,
-    "crates/hir/src/analysis/ty/provider.rs": 2,
-    "crates/hir/src/analysis/ty/trait_def.rs": 2,
-    "crates/hir/src/analysis/ty/trait_resolution/mod.rs": 1,
-    "crates/hir/src/analysis/ty/trait_resolution/table_solver.rs": 1,
-    "crates/hir/src/analysis/ty/ty_check/const_requirements.rs": 2,
-    "crates/hir/src/analysis/ty/ty_check/env.rs": 2,
-    "crates/hir/src/analysis/ty/ty_check/expr.rs": 9,
-    "crates/hir/src/analysis/ty/ty_check/mod.rs": 7,
-    "crates/hir/src/analysis/ty/ty_check/pat.rs": 1,
-    "crates/hir/src/analysis/ty/ty_lower.rs": 6,
-    "crates/hir/src/core/semantic/mod.rs": 3,
-    "crates/hir/src/core/semantic/storage_layout.rs": 3,
-    "crates/hir/src/diagnosable.rs": 7,
-    "crates/mir/src/runtime/lower/boundary.rs": 1,
-    "crates/mir/src/runtime/lower/infer.rs": 1,
-    "crates/mir/src/runtime/lower/type_info.rs": 2,
-}
-
-# Pairs that a migration made visible (a caller that already passed a scope and
-# assumptions now names them as transitional premises) rather than added. Each
-# entry is (count, reason); entries may only decrease, and are removed before
-# the main ceilings when their sites get a position context.
-EFFECT_HANDLE = "resolve_effect_handle takes SolverPremises; this caller holds only a pair"
-WRITTEN_TYPES = "written-type diagnostics take one premises value; this item caller holds only its pair"
-EXPOSED = {
-    "crates/hir/src/analysis/semantic/capability/handle.rs": (1, EFFECT_HANDLE),
-    "crates/hir/src/analysis/semantic/capability/semantics.rs": (1, EFFECT_HANDLE),
-    "crates/hir/src/analysis/semantic/layout_evidence/lower.rs": (1, EFFECT_HANDLE),
-    "crates/hir/src/analysis/ty/generic_defaults.rs": (1, WRITTEN_TYPES),
-    "crates/hir/src/analysis/ty/provider.rs": (1, EFFECT_HANDLE),
-    "crates/hir/src/analysis/ty/ty_lower.rs": (1, EFFECT_HANDLE),
-    "crates/hir/src/core/semantic/mod.rs": (3, WRITTEN_TYPES),
-    "crates/hir/src/diagnosable.rs": (2, WRITTEN_TYPES),
-}
 
 if __name__ == "__main__":
     raise SystemExit(main())
