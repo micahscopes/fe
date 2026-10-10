@@ -21,6 +21,7 @@
 //!   method(s) here.
 
 mod context;
+pub(crate) mod header;
 pub(crate) use context::{
     ContextAuthority, associated_type_bound_context, captured_assoc_const_context,
     instance_position_context, provisional_opened_method,

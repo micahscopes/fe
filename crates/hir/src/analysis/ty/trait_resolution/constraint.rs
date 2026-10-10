@@ -1,19 +1,18 @@
 use crate::core::hir_def::{
-    GenericParam, GenericParamOwner, GenericParamView, ItemKind, Trait, TraitRefId, TypeBound,
-    WhereClauseOwner, scope_graph::ScopeId, types::TypeId as HirTypeId,
+    GenericParamOwner, ItemKind, Trait, WhereClauseOwner, scope_graph::ScopeId,
 };
+use crate::semantic::header::collect_decl_constraint_pairs_impl;
 use crate::{
     hir_def::{CallableDef, Func},
     semantic::trait_self_predicate,
 };
 use common::indexmap::{IndexMap, IndexSet};
-use either::Either;
 
 use crate::analysis::{
     HirAnalysisDb,
     ty::{
         binder::Binder,
-        const_ty::{ConstBodyLowering, HoleAnchor, LoweringContext},
+        const_ty::ConstBodyLowering,
         corelib::resolve_core_trait,
         effects::{
             EffectKeyCanonMode, EffectKeyKind, canonical_effect_identity_for_binding,
@@ -21,13 +20,10 @@ use crate::analysis::{
         },
         layout_holes::{collect_layout_hole_tys_in_order, ty_contains_const_hole},
         trait_def::TraitInstId,
-        trait_lower::{lower_impl_trait, lower_trait_ref, lower_trait_ref_with_minter},
+        trait_lower::lower_impl_trait,
         trait_resolution::PredicateListId,
         ty_def::{TyBase, TyData, TyId, TyVarSort},
-        ty_lower::{
-            collect_generic_params, collect_source_generic_params, lower_hir_ty,
-            lower_hir_ty_with_minter,
-        },
+        ty_lower::{collect_generic_params, lower_hir_ty},
         unify::InferenceKey,
     },
 };
@@ -578,113 +574,6 @@ fn decl_constraint_pairs_cycle_recover<'db>(
     salsa::CycleRecoveryAction::Iterate
 }
 
-fn collect_decl_constraint_pairs_impl<'db>(
-    db: &'db dyn HirAnalysisDb,
-    owner: GenericParamOwner<'db>,
-    initial: &[(TraitInstId<'db>, PredicateSource<'db>)],
-    const_bodies: ConstBodyLowering,
-    source_params: Option<GenericParamOwner<'db>>,
-) -> Vec<(TraitInstId<'db>, PredicateSource<'db>)> {
-    let mut deferred: Vec<Deferred<'db>> = Vec::new();
-    let owner_scope = owner.scope();
-
-    // Generic parameter bounds
-    let param_set = if source_params == Some(owner) {
-        collect_source_generic_params(db, owner)
-    } else {
-        collect_generic_params(db, owner)
-    };
-    let params = owner.params(db);
-    for (idx, GenericParamView { param, .. }) in params.enumerate() {
-        let GenericParam::Type(hir_param) = param else {
-            continue;
-        };
-        let Some(ty) = param_set.param_by_original_idx(db, idx) else {
-            continue;
-        };
-        for (bound_idx, bound) in hir_param.bounds.iter().enumerate() {
-            if let TypeBound::Trait(trait_ref) = bound
-                && !super::super::ty_lower::is_core_constraint_bound(db, owner_scope, *trait_ref)
-            {
-                deferred.push(Deferred {
-                    bound_ty: Either::Right(ty),
-                    trait_ref: *trait_ref,
-                    scope: owner_scope,
-                    source: PredicateSource::GenericParamBound {
-                        owner,
-                        param_idx: idx,
-                        bound_idx,
-                    },
-                });
-            }
-        }
-    }
-
-    // Where-clause predicates (directly over HIR)
-    //
-    // We intentionally operate on the raw where-clause HIR here rather than the
-    // semantic view helpers to avoid re-entering constraint collection via
-    // `constraints_for`. This keeps the fixed-point iteration semantics
-    // identical to the legacy implementation while the semantic layer remains
-    // the main traversal API for other callers.
-    if let Some(w_owner) = owner.where_clause_owner() {
-        let where_clause = w_owner.where_clause(db);
-        for (pred_idx, pred) in where_clause.type_predicates(db) {
-            let Some(hir_ty) = pred.ty.to_opt() else {
-                continue;
-            };
-
-            // Filter out super-trait constraints on `Self`; those are handled
-            // in `collect_super_traits`.
-            if hir_ty.is_self_ty(db) && matches!(owner, GenericParamOwner::Trait(_)) {
-                continue;
-            }
-
-            for (bound_idx, bound) in pred.bounds.iter().enumerate() {
-                if let TypeBound::Trait(trait_ref) = *bound
-                    && !super::super::ty_lower::is_core_constraint_bound(db, owner_scope, trait_ref)
-                {
-                    deferred.push(Deferred {
-                        bound_ty: Either::Left(hir_ty),
-                        trait_ref,
-                        scope: owner_scope,
-                        source: PredicateSource::WherePredicateBound {
-                            owner: w_owner,
-                            pred_idx,
-                            bound_idx,
-                        },
-                    });
-                }
-            }
-        }
-    }
-
-    let mut all_predicates: IndexMap<TraitInstId<'db>, PredicateSource<'db>> =
-        initial.iter().copied().collect();
-
-    // fixed-point iteration over deferred predicates
-    while !deferred.is_empty() {
-        let assumptions =
-            PredicateListId::new(db, all_predicates.keys().copied().collect::<Vec<_>>());
-
-        let before = deferred.len();
-        deferred.retain(|p| {
-            match try_resolve_type_bound(db, p, assumptions, const_bodies, source_params) {
-                Some(inst) => {
-                    all_predicates.entry(inst).or_insert(p.source);
-                    false
-                }
-                None => true,
-            }
-        });
-        if deferred.len() == before {
-            break;
-        }
-    }
-
-    all_predicates.into_iter().collect()
-}
-
 fn collect_constraints_cycle_initial<'db>(
     db: &'db dyn HirAnalysisDb,
     owner: GenericParamOwner<'db>,
@@ -729,13 +618,6 @@ pub(crate) fn collect_candidate_constraints<'db>(
     )
 }
 
-struct Deferred<'db> {
-    bound_ty: Either<HirTypeId<'db>, TyId<'db>>,
-    trait_ref: TraitRefId<'db>,
-    scope: ScopeId<'db>,
-    source: PredicateSource<'db>,
-}
-
 /// What `Self` denotes in bounds written at `scope`: the nearest enclosing
 /// trait's `Self` parameter, if any.
 ///
@@ -761,65 +643,6 @@ pub(crate) fn enclosing_trait_self_ty<'db>(
         item = current.scope().parent_item(db);
     }
     None
-}
-
-fn try_resolve_type_bound<'db>(
-    db: &'db dyn HirAnalysisDb,
-    deferred: &Deferred<'db>,
-    assumptions: PredicateListId<'db>,
-    const_bodies: ConstBodyLowering,
-    source_params: Option<GenericParamOwner<'db>>,
-) -> Option<TraitInstId<'db>> {
-    let ty = match deferred.bound_ty {
-        Either::Left(hir_ty) => {
-            let ty = match const_bodies {
-                ConstBodyLowering::Eager => lower_hir_ty(db, hir_ty, deferred.scope, assumptions),
-                ConstBodyLowering::Deferred => {
-                    let minter = LoweringContext::deferred(HoleAnchor::TemplateTy {
-                        ty: hir_ty,
-                        scope: deferred.scope,
-                        assumptions,
-                    })
-                    .with_source_params(source_params);
-                    lower_hir_ty_with_minter(db, hir_ty, deferred.scope, assumptions, &minter)
-                }
-            };
-            if ty.has_invalid(db) {
-                return None;
-            }
-            ty
-        }
-        Either::Right(ty) => ty,
-    };
-
-    match const_bodies {
-        ConstBodyLowering::Eager => lower_trait_ref(
-            db,
-            ty,
-            deferred.trait_ref,
-            deferred.scope,
-            assumptions,
-            enclosing_trait_self_ty(db, deferred.scope),
-        ),
-        ConstBodyLowering::Deferred => {
-            let minter = LoweringContext::deferred(HoleAnchor::TemplatePath {
-                path: deferred.trait_ref.path(db).to_opt()?,
-                scope: deferred.scope,
-                assumptions,
-            })
-            .with_source_params(source_params);
-            lower_trait_ref_with_minter(
-                db,
-                ty,
-                deferred.trait_ref,
-                deferred.scope,
-                assumptions,
-                enclosing_trait_self_ty(db, deferred.scope),
-                &minter,
-            )
-        }
-    }
-    .ok()
 }
 
 #[cfg(test)]
