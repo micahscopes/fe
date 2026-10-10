@@ -105,7 +105,6 @@ enum TraitCandidateCheck<'db> {
 /// candidates are proved in.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MethodLookup<'db> {
-    scope: ScopeId<'db>,
     proof_queries: ProofQueries<'db>,
 }
 
@@ -118,11 +117,7 @@ impl<'db> MethodLookup<'db> {
         db: &'db dyn HirAnalysisDb,
         context: crate::analysis::semantic::ImplEnv<'db>,
     ) -> Self {
-        let premises = context.lookup_premises(db);
-        Self {
-            scope: premises.scope(),
-            proof_queries: premises.queries(db),
-        }
+        Self::from_path_premises(db, context.lookup_premises(db))
     }
 
     /// Path resolution still receives its scope and premises from its caller
@@ -133,9 +128,12 @@ impl<'db> MethodLookup<'db> {
         premises: crate::analysis::semantic::SolverPremises<'db>,
     ) -> Self {
         Self {
-            scope: premises.scope(),
             proof_queries: premises.queries(db),
         }
+    }
+
+    fn scope(self) -> ScopeId<'db> {
+        self.proof_queries.scope()
     }
 
     fn assumptions(self) -> PredicateListId<'db> {
@@ -192,8 +190,7 @@ fn assemble_method_candidates<'db>(
         db,
         receiver,
         method_name,
-        scope: lookup.scope,
-        assumptions: lookup.assumptions(),
+        lookup,
         trait_,
         candidates: AssembledCandidates::default(),
     }
@@ -206,10 +203,7 @@ struct CandidateAssembler<'db, 'a> {
     receiver: &'a Canonicalized<'db, TyId<'db>>,
     /// The name of the method being called.
     method_name: IdentId<'db>,
-    /// The scope that candidates are being assembled in.
-    scope: ScopeId<'db>,
-    /// The assumptions for the type bound in the current scope.
-    assumptions: PredicateListId<'db>,
+    lookup: MethodLookup<'db>,
     trait_: Option<Trait<'db>>,
     candidates: AssembledCandidates<'db>,
 }
@@ -236,15 +230,15 @@ impl<'db, 'a> CandidateAssembler<'db, 'a> {
             .receiver
             .original()
             .ingot(self.db)
-            .unwrap_or_else(|| self.scope.ingot(self.db));
+            .unwrap_or_else(|| self.lookup.scope().ingot(self.db));
         for method in probe_method(
             self.db,
             ingot,
             MethodProbe {
                 receiver: self.receiver.original(),
-                assumptions: self.assumptions,
+                assumptions: self.lookup.assumptions(),
             },
-            self.scope,
+            self.lookup.scope(),
             self.method_name,
         ) {
             self.candidates.insert_inherent_method(method);
@@ -252,7 +246,7 @@ impl<'db, 'a> CandidateAssembler<'db, 'a> {
     }
 
     fn assemble_trait_method_candidates(&mut self) {
-        let scope_ingot = self.scope.ingot(self.db);
+        let scope_ingot = self.lookup.scope().ingot(self.db);
 
         // Discovery does not grant these bounds. check_inst sends each
         // candidate through the solver, including the family rule's premises.
@@ -292,7 +286,7 @@ impl<'db, 'a> CandidateAssembler<'db, 'a> {
 
         self.receiver.with_materialized(self.db, |cx| {
             let receiver = cx.query();
-            for &pred in self.assumptions.list(self.db) {
+            for &pred in self.lookup.assumptions().list(self.db) {
                 let snapshot = cx.snapshot();
                 // `*`-kind receivers need a fully applied self type before
                 // bound unification, otherwise abstract constructors can never
@@ -353,12 +347,9 @@ impl<'db, 'a> CandidateAssembler<'db, 'a> {
 struct MethodSelector<'db, 'a> {
     db: &'db dyn HirAnalysisDb,
     receiver: &'a Canonicalized<'db, TyId<'db>>,
-    /// Visibility and trait availability are judged from this lookup scope.
-    scope: ScopeId<'db>,
+    /// Visibility and proof use the same immutable lookup view.
+    lookup: MethodLookup<'db>,
     candidates: AssembledCandidates<'db>,
-    /// The lookup's solver context. Every candidate check proves its goals in
-    /// this same context.
-    proof_queries: ProofQueries<'db>,
 }
 
 impl<'db, 'a> MethodSelector<'db, 'a> {
@@ -371,9 +362,8 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
         Self {
             db,
             receiver,
-            scope: lookup.scope,
+            lookup,
             candidates,
-            proof_queries: lookup.proof_queries,
         }
     }
 
@@ -708,8 +698,11 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
             return false;
         }
 
-        let proof_queries = self.proof_queries;
-        let query = self.proof_queries.goal_query(self.db, candidate_inst);
+        let proof_queries = self.lookup.proof_queries;
+        let query = self
+            .lookup
+            .proof_queries
+            .goal_query(self.db, candidate_inst);
         let confirmed = Canonical::new(self.db, confirmed_inst);
         let mut table = UnificationTable::new(self.db);
         match proof_queries.query_result(self.db, &query) {
@@ -768,12 +761,12 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
             return TraitCandidateCheck::Rejected;
         }
 
-        let proof_queries = self.proof_queries;
+        let proof_queries = self.lookup.proof_queries;
         let mut needs_confirmation = false;
         let mut unsatisfied = false;
         for &constraint in implementor.constraints(self.db).list(self.db) {
             let constraint = constraint.fold_with(self.db, &mut table);
-            let query = self.proof_queries.goal_query(self.db, constraint);
+            let query = self.lookup.proof_queries.goal_query(self.db, constraint);
             match proof_queries.query_result(self.db, &query) {
                 GoalSatisfiability::Satisfied(solution) => {
                     // A unique solution can bind impl parameters that the self
@@ -826,7 +819,7 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
         // unconstrained method. The refined goal still needs independent proof.
         let mut bindings = inst.assoc_type_bindings(self.db).clone();
         let mut consistent = true;
-        for &premise in self.proof_queries.assumptions().list(self.db) {
+        for &premise in self.lookup.proof_queries.assumptions().list(self.db) {
             if premise.def(self.db) != inst.def(self.db)
                 || premise.args(self.db) != inst.args(self.db)
             {
@@ -874,14 +867,14 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
         // whose signatures don't mention those args (e.g. `AbiDecoder<A>::read_word`).
         let receiver_is_ty_param = receiver_is_ty_param_like(self.db, self.receiver.original());
 
-        let query = self.proof_queries.goal_query(self.db, inst);
+        let query = self.lookup.proof_queries.goal_query(self.db, inst);
         let inst = if receiver_is_ty_param {
             inst
         } else {
             table.instantiate_with_fresh_vars(inst)
         };
 
-        match self.proof_queries.query_result(self.db, &query) {
+        match self.lookup.proof_queries.query_result(self.db, &query) {
             GoalSatisfiability::Satisfied(solution) => {
                 // Map back the solution to the current context.
                 let solution = query.extract_solution(&mut table, solution).inst;
@@ -915,7 +908,7 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
     }
 
     fn is_inherent_method_visible(&self, def: CallableDef) -> bool {
-        is_scope_visible_from(self.db, def.scope(), self.scope)
+        is_scope_visible_from(self.db, def.scope(), self.lookup.scope())
     }
 
     fn available_traits(&self) -> IndexSet<Trait<'db>> {
@@ -929,12 +922,12 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
             }
         };
 
-        for &trait_ in available_traits_in_scope(self.db, self.scope) {
+        for &trait_ in available_traits_in_scope(self.db, self.lookup.scope()) {
             let trait_def = trait_;
             insert_trait(trait_def);
         }
 
-        for pred in self.proof_queries.assumptions().list(self.db) {
+        for pred in self.lookup.proof_queries.assumptions().list(self.db) {
             let trait_def = pred.def(self.db);
             insert_trait(trait_def)
         }
