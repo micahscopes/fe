@@ -1161,30 +1161,18 @@ impl<'db> TyCheckEnv<'db> {
                         .map(|ty| ty.fold_with(self.db, &mut prober));
                 }
             });
-        let assumptions = self.assumptions().fold_with(self.db, &mut prober);
+        let premises = self
+            .position_context()
+            .premises(self.db)
+            .fold_with(self.db, &mut prober);
+        let assumptions = premises.assumptions();
         let pattern_store = self.pattern_store.fold_with(self.db, &mut prober);
-        let scope = prober.scope;
         let implicit_moves = self
             .implicit_moves
             .iter()
             .filter_map(|(expr, ty)| {
-                let ty = normalize_ty(
-                    self.db,
-                    ty.fold_with(self.db, &mut prober),
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        scope,
-                        assumptions,
-                    ),
-                );
-                (!ty_is_copy(
-                    self.db,
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        scope,
-                        assumptions,
-                    ),
-                    ty,
-                ))
-                .then_some(*expr)
+                let ty = normalize_ty(self.db, ty.fold_with(self.db, &mut prober), premises);
+                (!ty_is_copy(self.db, premises, ty)).then_some(*expr)
             })
             .collect();
 

@@ -540,10 +540,7 @@ impl<'db> TyChecker<'db> {
                     let ty = self.table.instantiate_to_term(instantiated);
                     let cref = ConstRef::TraitConst(
                         AssocConstUse::new(
-                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                                self.env.scope(),
-                                self.env.assumptions(),
-                            ),
+                            self.env.position_context().premises(self.db),
                             inst,
                             name,
                         )
