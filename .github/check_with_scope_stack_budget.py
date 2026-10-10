@@ -104,8 +104,8 @@ def premise_boundary(env, semantic, provisions):
         raise ValueError('record context restored a separate premise builder')
 
 
-def selection_transport_boundary(template):
-    code = goal_lookup.solver_budget.production_code(template)
+def selection_transport_boundary(context):
+    code = goal_lookup.solver_budget.production_code(context)
     methods = goal_lookup.bodies(code, 'with_selections')
     if len(methods) != 1:
         raise ValueError('expected one selection transport method')
@@ -114,8 +114,8 @@ def selection_transport_boundary(template):
         raise ValueError('selection transport must not normalize accepted source choices')
 
 
-def context_fold_boundary(template, folds):
-    env = goal_lookup.bodies(template[template.index("TyFoldable<'db> for ImplEnv"):], 'super_fold_with')[0]
+def context_fold_boundary(context, folds):
+    env = goal_lookup.bodies(context[context.index("TyFoldable<'db> for ImplEnv"):], 'super_fold_with')[0]
     key = goal_lookup.bodies(folds[folds.index("TyFoldable<'db> for SemanticInstanceKey"):], 'super_fold_with')[0]
     if 'folder.fold_scope(self.normalization_scope(db))' not in env or 'self.bound_choices(db)' not in env:
         raise ValueError('context folding must retain bound slots and apply scope substitution')
@@ -139,14 +139,14 @@ if __name__ == '__main__':
     effects = (ROOT / 'crates/hir/src/analysis/ty/ty_check/effect_env.rs').read_text()
     semantic = (ROOT / 'crates/hir/src/core/semantic/mod.rs').read_text()
     provisions = (ROOT / 'crates/hir/src/core/semantic/provision.rs').read_text()
-    template = (ROOT / 'crates/hir/src/analysis/semantic/instance/template.rs').read_text()
+    context = (ROOT / 'crates/hir/src/core/semantic/context.rs').read_text()
     folds = (ROOT / 'crates/hir/src/analysis/ty/fold.rs').read_text()
     try:
         stacks = inventory(source)
         ownership(env, effects)
         premise_boundary(env, semantic, provisions)
-        selection_transport_boundary(template)
-        context_fold_boundary(template, folds)
+        selection_transport_boundary(context)
+        context_fold_boundary(context, folds)
         evidence_source_boundary(provisions)
     except ValueError as error:
         sys.exit(str(error))
@@ -188,7 +188,7 @@ if __name__ == '__main__':
         except ValueError:
             continue
         sys.exit('duplicate-premise-builder mutation escaped the guard')
-    transport_source = goal_lookup.solver_budget.production_code(template)
+    transport_source = goal_lookup.solver_budget.production_code(context)
     transport_body = goal_lookup.bodies(transport_source, 'with_selections')[0]
     for mutation in ['selections.sort_by_key(|s| s.goal());', 'selections.dedup();', 'let by_goal = IndexMap::new();']:
         mutant = transport_source.replace(transport_body, '{' + mutation + transport_body[1:], 1)
@@ -198,13 +198,13 @@ if __name__ == '__main__':
         except ValueError:
             continue
         sys.exit('selection-renormalization mutation escaped the guard')
-    env_fold_start = template.index("TyFoldable<'db> for ImplEnv")
+    env_fold_start = context.index("TyFoldable<'db> for ImplEnv")
     for mutant_template, mutant_folds in [
-        (template.replace('folder.fold_scope(self.normalization_scope(db))', 'self.normalization_scope(db)', 1), folds),
-        (template[:env_fold_start] + template[env_fold_start:].replace('self.bound_choices(db)', 'Vec::new()', 1), folds),
-        (template, folds.replace('self.impl_env(db).fold_with(db, folder)', 'ImplEnv::empty(db, owner.scope())', 1)),
+        (context.replace('folder.fold_scope(self.normalization_scope(db))', 'self.normalization_scope(db)', 1), folds),
+        (context[:env_fold_start] + context[env_fold_start:].replace('self.bound_choices(db)', 'Vec::new()', 1), folds),
+        (context, folds.replace('self.impl_env(db).fold_with(db, folder)', 'ImplEnv::empty(db, owner.scope())', 1)),
     ]:
-        assert mutant_template != template or mutant_folds != folds
+        assert mutant_template != context or mutant_folds != folds
         try:
             context_fold_boundary(mutant_template, mutant_folds)
         except ValueError:

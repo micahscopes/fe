@@ -57,7 +57,7 @@ def inventory(sources):
 if __name__ == '__main__':
     paths = {
         'semantic': 'crates/hir/src/core/semantic/mod.rs',
-        'impl': 'crates/hir/src/analysis/semantic/instance/template.rs',
+        'impl': 'crates/hir/src/core/semantic/context.rs',
         'env': 'crates/hir/src/analysis/ty/ty_check/env.rs',
         'chain': 'crates/hir/src/core/semantic/provision.rs',
         'const': 'crates/hir/src/analysis/ty/const_ty.rs',
