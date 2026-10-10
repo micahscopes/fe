@@ -1201,11 +1201,26 @@ pub(super) struct QuoteMemberHole<'db> {
     pub(super) field: crate::hir_def::QuoteFieldGrant<'db>,
 }
 
+/// How a type splice inside a fragment is rebuilt in the destination, decided
+/// once from the fragment's own frozen values and the generation target.
+pub(super) enum QuoteFragmentTypeHole<'db> {
+    /// The authored type of a field of a target with no generic parameters.
+    Authored(TypeId<'db>),
+    /// The checked field type of a generic target, rebuilt from the
+    /// destination's own binders.
+    Frozen(crate::core::meta::FrozenQuoteSignatureType),
+}
+
+/// One entry per splice slot of a fragment; only type-position slots are present.
+pub(super) type QuoteFragmentTypeHoles<'db> =
+    Vec<Option<Result<QuoteFragmentTypeHole<'db>, QuoteConstructionFault>>>;
+
 pub(super) struct QuoteFragmentSource<'db> {
     pub(super) template: Body<'db>,
     pub(super) root: QuoteFragmentRoot,
     pub(super) open_names: Vec<IdentId<'db>>,
     pub(super) member_holes: Vec<QuoteMemberHole<'db>>,
+    pub(super) type_holes: QuoteFragmentTypeHoles<'db>,
     pub(super) rooted_funcs: Vec<(ExprId, PathId<'db>)>,
     pub(super) qualified_paths: Vec<(ExprId, PathId<'db>)>,
     pub(super) selected_methods: Vec<(ExprId, Func<'db>)>,

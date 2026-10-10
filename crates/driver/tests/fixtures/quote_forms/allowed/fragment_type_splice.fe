@@ -1,0 +1,23 @@
+// A type splice inside an expression fragment that is spliced into another
+// quote: a call type argument, a nested fragment and a local annotation.
+mod author {
+    use core::meta::{Code, Expr, Item, Record, field, field_type}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let ty = field_type(field(record, 0))
+        let width: Code<Expr> = quote { core::abi::abi_field_head_size<${ty}>() }
+        let twice: Code<Expr> = quote { ${width} + ${width} }
+        let copy: Code<Expr> = quote(value) {
+            {
+                let held: ${ty} = value
+                held
+            }
+        }
+        quote {
+            pub fn first_width() -> u256 { ${width} }
+            pub fn twice_width() -> u256 { ${twice} }
+            pub fn copied(value: u256) -> u256 { ${copy} }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T { first: u256 }

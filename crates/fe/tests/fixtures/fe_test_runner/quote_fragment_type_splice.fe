@@ -1,0 +1,90 @@
+// A type splice inside an expression fragment: a call type argument built by a
+// fold, a nested fragment and a local annotation, on a plain and on a generic
+// struct and on the payload of a plain and of a generic enum variant.
+trait FieldBytes {
+    fn field_bytes() -> u256
+}
+
+trait Copied {
+    fn copied(_ value: u256) -> u256
+}
+
+mod author {
+    use core::meta::{Code, Expr, Item, Record, field, field_count, field_type, variant}
+    pub const fn bytes(record: Record) -> Code<Item> {
+        let mut total: Code<Expr> = quote { 0 }
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let ty = field_type(field(record, i))
+            total = quote { ${total} * 100 + core::size_of<${ty}>() }
+            i += 1
+        }
+        quote {
+            impl ingot::FieldBytes for ${record} {
+                fn field_bytes() -> u256 { ${total} }
+            }
+        }
+    }
+    pub const fn payload_bytes(record: Record) -> Code<Item> {
+        let payload = variant(record, 0)
+        let mut total: Code<Expr> = quote { 0 }
+        let mut i: usize = 0
+        while i < field_count(payload) {
+            let ty = field_type(field(payload, i))
+            total = quote { ${total} * 100 + core::size_of<${ty}>() }
+            i += 1
+        }
+        quote {
+            impl ingot::FieldBytes for ${record} {
+                fn field_bytes() -> u256 { ${total} }
+            }
+        }
+    }
+    pub const fn copied(record: Record) -> Code<Item> {
+        let first = field_type(field(record, 0))
+        let held: Code<Expr> = quote(value) {
+            {
+                let held: ${first} = value
+                held
+            }
+        }
+        let twice: Code<Expr> = quote(value) { ${held} + ${held} }
+        quote {
+            impl ingot::Copied for ${record} {
+                fn copied(_ value: u256) -> u256 { ${twice} }
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::bytes)]
+#[generate(ingot::author::copied)]
+struct Plain { a: u256, b: u256, c: u256 }
+
+#[generate(ingot::author::bytes)]
+struct Pair<A, B> { first: A, second: B }
+
+#[generate(ingot::author::payload_bytes)]
+enum Choice { First(u8, u64), Second }
+
+#[generate(ingot::author::payload_bytes)]
+enum Either<A, B> { First(A, B), Second }
+
+#[test]
+fn plain_target() {
+    let word = core::size_of<u256>()
+    assert!(Plain::field_bytes() == (word * 100 + word) * 100 + word)
+    assert!(Plain::copied(21) == 42)
+}
+
+#[test]
+fn generic_target_uses_the_destination_parameters() {
+    assert!(Pair<u256, u8>::field_bytes() == core::size_of<u256>() * 100 + core::size_of<u8>())
+    assert!(Pair<u8, u256>::field_bytes() == core::size_of<u8>() * 100 + core::size_of<u256>())
+}
+
+#[test]
+fn enum_payload_targets() {
+    assert!(Choice::field_bytes() == core::size_of<u8>() * 100 + core::size_of<u64>())
+    assert!(Either<u64, u8>::field_bytes() == core::size_of<u64>() * 100 + core::size_of<u8>())
+}

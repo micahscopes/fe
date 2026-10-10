@@ -3072,6 +3072,16 @@ fn unsupported_quoted_forms_are_reported_at_the_form(fixture: Fixture<&str>) {
     test_utils::snap_test!(rendered, &snapshot_path);
 }
 
+#[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_fragment_types", glob: "*.fe")]
+fn fragment_type_splices_outside_field_types_are_refused(fixture: Fixture<&str>) {
+    let snapshot_path = fixture.path().to_owned();
+    let authored = field_authority_fixture_db(fixture);
+    let Err(error) = prepare(&authored) else {
+        panic!("a whole-record type splice in a fragment must be refused");
+    };
+    test_utils::snap_test!(error.render(&authored), &snapshot_path);
+}
+
 #[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/quote_alias_arguments/allowed", glob: "*.fe")]
 fn quoted_alias_constructor_preserves_arguments(fixture: Fixture<&str>) {
     let url = Url::from_file_path(fixture.path()).unwrap();

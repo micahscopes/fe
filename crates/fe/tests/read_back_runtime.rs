@@ -135,6 +135,14 @@ fn generic_enum_binders_execute_at_o0_and_o2(fixture: Fixture<&str>) {
 
 #[dir_test(
     dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
+    glob: "quote_fragment_type_splice.fe",
+)]
+fn fragment_type_splices_execute_at_o0_and_o2(fixture: Fixture<&str>) {
+    execute_quoted_fixture_with_count(fixture, 3);
+}
+
+#[dir_test(
+    dir: "$CARGO_MANIFEST_DIR/tests/fixtures/fe_test_runner",
     glob: "quote_enum_eq.fe",
 )]
 fn enum_arm_fold_executes_at_o0_and_o2(fixture: Fixture<&str>) {

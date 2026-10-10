@@ -1,0 +1,13 @@
+// A type splice in a fragment accepts a field type of the target. A splice of
+// the whole record in type position still needs a checked target context.
+mod author {
+    use core::meta::{Code, Expr, Item, Record}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let frag: Code<Expr> = quote { core::size_of<${record}>() }
+        quote {
+            fn bytes() -> u256 { ${frag} }
+        }
+    }
+}
+#[generate(ingot::author::emit)]
+struct T { a: u8 }

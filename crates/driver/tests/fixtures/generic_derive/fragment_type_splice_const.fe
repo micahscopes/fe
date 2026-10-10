@@ -1,0 +1,30 @@
+// A type splice inside an expression fragment that initializes an associated
+// constant of an impl for a generic target.
+trait FieldBytes {
+    const FIELD_BYTES: u256
+}
+
+mod author {
+    use core::meta::{Code, Expr, Item, Record, field, field_count, field_type}
+    pub const fn emit(record: Record) -> Code<Item> {
+        let mut total: Code<Expr> = quote { 0 }
+        let mut i: usize = 0
+        while i < field_count(record) {
+            let ty = field_type(field(record, i))
+            total = quote { ${total} + core::size_of<${ty}>() }
+            i += 1
+        }
+        quote {
+            impl ingot::FieldBytes for ${record} {
+                const FIELD_BYTES: u256 = ${total}
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::emit)]
+struct Pair<A, B> { first: A, second: B }
+
+pub fn bytes() -> u256 {
+    <Pair<u8, u64> as FieldBytes>::FIELD_BYTES
+}

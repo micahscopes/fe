@@ -1,0 +1,13 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/fe_test_runner/quote_fragment_type_splice.fe
+---
+=== STDOUT ===
+PASS  [<time>] plain_target
+PASS  [<time>] generic_target_uses_the_destination_parameters
+PASS  [<time>] enum_payload_targets
+
+test result: ok. 3 passed; 0 failed
+
+=== EXIT CODE: 0 ===

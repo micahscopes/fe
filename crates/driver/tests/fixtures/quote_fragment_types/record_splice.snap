@@ -1,0 +1,13 @@
+---
+source: crates/driver/tests/read_back.rs
+expression: error.render(&authored)
+input_file: tests/fixtures/quote_fragment_types/record_splice.fe
+---
+error[19-0004]: invalid generated declaration: quoted type splice needs a checked target context
+   ┌─ record_splice.fe:8:34
+   │
+ 8 │             fn bytes() -> u256 { ${frag} }
+   │                                  ^^^^^^^ invalid generated declaration: quoted type splice needs a checked target context
+   ·
+12 │ #[generate(ingot::author::emit)]
+   │ -------------------------------- generated here

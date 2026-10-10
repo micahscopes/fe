@@ -9,8 +9,8 @@ use super::{
     FileLowerCtxt, base_scope_graph_impl,
     hir_builder::{
         GeneratedFunctionSpec, GeneratedImplSpec, HirBuilder, QuoteBodyBindings, QuoteBudget,
-        QuoteFragmentSource, QuoteMemberHole, QuoteMethodCall, copy_owner_bound,
-        quote_hir_primitive,
+        QuoteFragmentSource, QuoteFragmentTypeHole, QuoteFragmentTypeHoles, QuoteMemberHole,
+        QuoteMethodCall, copy_owner_bound, quote_hir_primitive,
     },
     top_mod_ast,
 };
@@ -297,27 +297,66 @@ fn quoted_type_hole<'db>(
             item: MetaItem::FieldType,
             ..
         } => {
-            let (variant_index, index) = target.field_coordinate(value, true)?;
-            if !generic_names.is_empty() {
-                let frozen = field_type
-                    .as_ref()
-                    .ok_or(QuoteConstructionFault::GenericFieldTypeNeedsCheckedReification)?;
-                return QuoteTypeReifier {
-                    paths: QuotePathContext::new(db, builder.top_mod().ingot(db)),
-                    budget: &builder.ctxt().quote_budget,
-                    depth,
-                    owner_names: generic_names,
-                    generic_names: &[],
-                }
-                .reify(frozen, &mut |_, _| {
-                    Err(QuoteConstructionFault::TypeSpliceNeedsACheckedTargetContext.into())
-                });
-            }
-            target
-                .field_hir_type(variant_index, index)
-                .ok_or_else(|| QuoteConstructionFault::FieldTypeIsMissing.into())
+            let hole = classify_field_type_hole(
+                target,
+                value,
+                field_type.as_ref(),
+                !generic_names.is_empty(),
+            )?;
+            rebuild_field_type_hole(
+                QuotePathContext::new(db, builder.top_mod().ingot(db)),
+                &builder.ctxt().quote_budget,
+                depth,
+                generic_names,
+                &hole,
+            )
         }
         _ => Err(QuoteConstructionFault::TypeLacksTargetAuthority.into()),
+    }
+}
+
+/// A type splice of a field type, decided against the generation target: a
+/// target without generic parameters reuses the authored field type, a generic
+/// target rebuilds the checked field type from the destination's own binders.
+fn classify_field_type_hole<'db>(
+    target: &TargetContext<'_, 'db>,
+    value: &FrozenMetaValue,
+    field_type: Option<&FrozenQuoteSignatureType>,
+    generic: bool,
+) -> Result<QuoteFragmentTypeHole<'db>, QuoteConstructionFault> {
+    let (variant_index, index) = target.field_coordinate(value, true)?;
+    if generic {
+        field_type
+            .cloned()
+            .map(QuoteFragmentTypeHole::Frozen)
+            .ok_or(QuoteConstructionFault::GenericFieldTypeNeedsCheckedReification)
+    } else {
+        target
+            .field_hir_type(variant_index, index)
+            .map(QuoteFragmentTypeHole::Authored)
+            .ok_or(QuoteConstructionFault::FieldTypeIsMissing)
+    }
+}
+
+fn rebuild_field_type_hole<'db>(
+    paths: QuotePathContext<'db>,
+    budget: &QuoteBudget,
+    depth: usize,
+    owner_names: &[IdentId<'db>],
+    hole: &QuoteFragmentTypeHole<'db>,
+) -> Result<TypeId<'db>, QuoteConstructionError> {
+    match hole {
+        QuoteFragmentTypeHole::Authored(ty) => Ok(*ty),
+        QuoteFragmentTypeHole::Frozen(frozen) => QuoteTypeReifier {
+            paths,
+            budget,
+            depth,
+            owner_names,
+            generic_names: &[],
+        }
+        .reify(frozen, &mut |_, _| {
+            Err(QuoteConstructionFault::TypeSpliceNeedsACheckedTargetContext.into())
+        }),
     }
 }
 
@@ -747,6 +786,48 @@ fn quoted_member_holes<'db>(
         .collect()
 }
 
+/// Classify each type splice of a fragment against the generation target, as
+/// `quoted_type_hole` does for the quote that is generated directly.
+fn quoted_fragment_type_holes<'db>(
+    quote: &Quote<'db>,
+    node: &FrozenCodeNode,
+    target: &TargetContext<'_, 'db>,
+) -> QuoteFragmentTypeHoles<'db> {
+    let generic = !target
+        .owner
+        .generic_owner()
+        .params_list(target.db)
+        .data(target.db)
+        .is_empty();
+    quote
+        .holes
+        .iter()
+        .zip(&node.holes)
+        .map(|(hole, frozen)| {
+            if hole.position != QuoteHolePosition::Type {
+                return None;
+            }
+            Some(match frozen {
+                FrozenCodeHole::Value(value, field_type)
+                    if matches!(
+                        value.as_ref(),
+                        FrozenMetaValue::Structural {
+                            item: MetaItem::FieldType,
+                            ..
+                        }
+                    ) =>
+                {
+                    classify_field_type_hole(target, value, field_type.as_ref(), generic)
+                }
+                FrozenCodeHole::Value(..) => {
+                    Err(QuoteConstructionFault::TypeSpliceNeedsACheckedTargetContext)
+                }
+                FrozenCodeHole::Code(..) => Err(QuoteConstructionFault::TypeHoleIsMissing),
+            })
+        })
+        .collect()
+}
+
 fn quoted_fragment_sources<'db>(
     db: &'db dyn HirDb,
     code: &FrozenCode,
@@ -770,7 +851,9 @@ fn quoted_fragment_sources<'db>(
             let body = owner
                 .body(db)
                 .ok_or(QuoteConstructionFault::QuoteOwnerBodyIsMissing)?;
-            let (template, root, open_names, member_holes, has_block_items) = match key.source {
+            let (template, root, open_names, member_holes, type_holes, has_block_items) = match key
+                .source
+            {
                 FrozenTemplateSource::Quote => {
                     let Partial::Present(Expr::Quote(quote)) = &body.exprs(db)[key.expr] else {
                         return Err(QuoteConstructionFault::QuoteSiteNoLongerNamesAQuote.into());
@@ -792,6 +875,7 @@ fn quoted_fragment_sources<'db>(
                     };
                     budget.charge_many(quote.open.len() + quote.holes.len() + arms)?;
                     let member_holes = quoted_member_holes(quote, node, target, Some(body))?;
+                    let type_holes = quoted_fragment_type_holes(quote, node, target);
                     (
                         quote.template,
                         match &quote.fragment {
@@ -805,6 +889,7 @@ fn quoted_fragment_sources<'db>(
                         },
                         quote.open.clone(),
                         member_holes,
+                        type_holes,
                         !quote.block_items.is_empty(),
                     )
                 }
@@ -837,6 +922,7 @@ fn quoted_fragment_sources<'db>(
                             splices: None,
                         },
                         open_names,
+                        Vec::new(),
                         Vec::new(),
                         false,
                     )
@@ -889,6 +975,7 @@ fn quoted_fragment_sources<'db>(
                 root,
                 open_names,
                 member_holes,
+                type_holes,
                 rooted_funcs,
                 qualified_paths,
                 selected_methods,
@@ -1047,8 +1134,13 @@ pub(super) fn reify_quote_fragment_types<'db>(
     function_names: &[IdentId<'db>],
 ) -> Result<QuoteExprTypes<'db>, QuoteConstructionError> {
     let db = paths.db;
+    let mut hole = |slot: u32, depth: usize| match source.type_holes.get(slot as usize) {
+        Some(Some(Ok(hole))) => rebuild_field_type_hole(paths, budget, depth, owner_names, hole),
+        Some(Some(Err(fault))) => Err((*fault).into()),
+        _ => Err(QuoteConstructionFault::TypeSpliceIsNotATypeHole.into()),
+    };
     let mut reify = |ty: &FrozenQuoteSignatureType| {
-        quoted_signature_type_with_owner(paths, budget, ty, owner_names, function_names)
+        quoted_signature_type_with_holes(paths, budget, ty, owner_names, function_names, &mut hole)
     };
     let rooted_paths = source
         .rooted_funcs
@@ -2311,6 +2403,7 @@ fn quoted_impl_const<'db>(
                     holes: &emit.node.holes,
                     cast_types: emit.cast_types,
                     fragments: Some((emit.code, emit.fragment_sources)),
+                    owner_generic_bindings: generic_names,
                     rooted_funcs: &rooted_paths,
                     ..Default::default()
                 },
