@@ -1394,7 +1394,6 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     caller,
                     callable,
                     &[],
-                    self.assumptions,
                     false,
                     SemOrigin::Expr(expr),
                 ),

@@ -3812,7 +3812,6 @@ impl<'db> RmirEmitter<'db> {
         let key = self.current_semantic_key();
         let impl_env = key.impl_env(self.db);
         let scope = impl_env.normalization_scope(self.db);
-        let assumptions = impl_env.assumptions(self.db);
         self.assert_panic_payload_encodable(impl_env, value_ty);
         let func_path = if panic_payload_is_error_variant(self.db, impl_env, value_ty) {
             "std::evm::revert_error"
@@ -3821,9 +3820,14 @@ impl<'db> RmirEmitter<'db> {
         };
         let func = resolve_lib_func_path(self.db, scope, func_path)
             .unwrap_or_else(|| panic!("missing {func_path}"));
-        let semantic_key =
-            generated_callee_key(self.db, scope, assumptions, func, None, &[value_ty])
-                .unwrap_or_else(|error| panic!("{}", generated_call_error(self.db, func, error)));
+        let semantic_key = generated_callee_key(
+            self.db,
+            get_or_build_semantic_instance(self.db, key).context_at(self.db, self.current_origin),
+            func,
+            None,
+            &[value_ty],
+        )
+        .unwrap_or_else(|error| panic!("{}", generated_call_error(self.db, func, error)));
         runtime_instance_for_semantic(
             self.db,
             get_or_build_semantic_instance(self.db, semantic_key),
@@ -5207,8 +5211,8 @@ impl<'db> RmirEmitter<'db> {
             .expect("EffectHandle declares raw");
         let key = generated_callee_key(
             self.db,
-            scope,
-            self.env.assumptions,
+            get_or_build_semantic_instance(self.db, self.current_semantic_key())
+                .context_at(self.db, self.current_origin),
             func,
             Some(TraitChoiceId::for_resolved_implementation(
                 self.db,

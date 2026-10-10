@@ -333,44 +333,28 @@ pub(crate) fn semantic_callee_key_with_effect_providers<'db>(
     origin: SemOrigin<'db>,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
     let caller = SemanticInstance::new(db, caller_key);
-    let lexical_selections = match origin {
-        SemOrigin::Expr(expr) => crate::core::semantic::call_selections_at(
-            db,
-            &crate::analysis::ty::ty_check::infer_body(db, caller_key.owner(db)).1,
-            expr,
-        ),
-        _ => Vec::new(),
-    };
-    let opened_provisions = match origin {
-        SemOrigin::Expr(expr) => crate::semantic::instance_call_evidence_at(db, caller_key, expr),
-        _ => Vec::new(),
+    let has_local_openings = match origin {
+        SemOrigin::Expr(expr) => {
+            !crate::semantic::instance_call_evidence_at(db, caller_key, expr).is_empty()
+        }
+        _ => false,
     };
     let opened_symbolic = match origin {
         SemOrigin::Expr(expr) => crate::semantic::instance_opened_call_at(db, caller_key, expr)
             .is_some_and(|(_, goal)| !is_ground(collect_flags(db, goal))),
         _ => false,
     };
-    semantic_callee_key_with_assumptions(
+    semantic_callee_key_with_context(
         db,
         Some(caller),
-        caller_key.impl_env(db),
+        caller.context_at(db, origin),
         callable,
-        &lexical_selections,
-        &opened_provisions,
         opened_symbolic,
+        has_local_openings,
         effect_args,
         effect_providers,
-        caller.assumptions(db),
         ProviderResolutionMode::Final,
-        inherit_trait_selection,
-        source_trait_choices(
-            db,
-            caller_key,
-            callable,
-            inherit_trait_selection,
-            origin,
-            caller.assumptions(db),
-        )?,
+        source_trait_choices(db, caller_key, callable, inherit_trait_selection, origin)?,
     )
 }
 
@@ -379,48 +363,32 @@ pub(crate) fn provisional_semantic_callee_key<'db>(
     caller_key: SemanticInstanceKey<'db>,
     callable: &Callable<'db>,
     effect_args: &[ResolvedEffectArg<'db>],
-    assumptions: PredicateListId<'db>,
     inherit_trait_selection: bool,
     origin: SemOrigin<'db>,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
-    let lexical_selections = match origin {
-        SemOrigin::Expr(expr) => crate::core::semantic::call_selections_at(
-            db,
-            &crate::analysis::ty::ty_check::infer_body(db, caller_key.owner(db)).1,
-            expr,
-        ),
-        _ => Vec::new(),
-    };
-    let opened_provisions = match origin {
-        SemOrigin::Expr(expr) => crate::semantic::instance_call_evidence_at(db, caller_key, expr),
-        _ => Vec::new(),
+    let caller = SemanticInstance::new(db, caller_key);
+    let has_local_openings = match origin {
+        SemOrigin::Expr(expr) => {
+            !crate::semantic::instance_call_evidence_at(db, caller_key, expr).is_empty()
+        }
+        _ => false,
     };
     let opened_symbolic = match origin {
         SemOrigin::Expr(expr) => crate::semantic::instance_opened_call_at(db, caller_key, expr)
             .is_some_and(|(_, goal)| !is_ground(collect_flags(db, goal))),
         _ => false,
     };
-    semantic_callee_key_with_assumptions(
+    semantic_callee_key_with_context(
         db,
-        Some(SemanticInstance::new(db, caller_key)),
-        caller_key.impl_env(db),
+        Some(caller),
+        caller.context_at(db, origin),
         callable,
-        &lexical_selections,
-        &opened_provisions,
         opened_symbolic,
+        has_local_openings,
         effect_args,
         callable.effect_providers(),
-        assumptions,
         ProviderResolutionMode::Provisional,
-        inherit_trait_selection,
-        source_trait_choices(
-            db,
-            caller_key,
-            callable,
-            inherit_trait_selection,
-            origin,
-            assumptions,
-        )?,
+        source_trait_choices(db, caller_key, callable, inherit_trait_selection, origin)?,
     )
 }
 
@@ -431,8 +399,7 @@ pub(crate) fn provisional_semantic_callee_key<'db>(
 /// concrete body and cannot carry hidden layout or effect-provider slots.
 pub fn generated_callee_key<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    context: ImplEnv<'db>,
     func: Func<'db>,
     trait_choice: Option<TraitChoiceId<'db>>,
     own_args: &[TyId<'db>],
@@ -460,19 +427,16 @@ pub fn generated_callee_key<'db>(
         inherited.iter().chain(own_args).copied().collect(),
         trait_inst,
     );
-    let callee = semantic_callee_key_with_assumptions(
+    let callee = semantic_callee_key_with_context(
         db,
         None,
-        ImplEnv::new(db, scope, assumptions, Vec::new()),
+        context,
         &callable,
-        &[],
-        &[],
+        false,
         false,
         &[],
         &[],
-        assumptions,
         ProviderResolutionMode::Final,
-        false,
         CalleeChoices {
             method: trait_choice.map_or(TraitCallChoice::NotTrait, TraitCallChoice::Recorded),
             bounds: Vec::new(),
@@ -502,7 +466,6 @@ fn source_trait_choices<'db>(
     callable: &Callable<'db>,
     inherit_trait_selection: bool,
     origin: SemOrigin<'db>,
-    assumptions: PredicateListId<'db>,
 ) -> Result<CalleeChoices<'db>, MethodArgMapError<'db>> {
     let bounds = match origin {
         SemOrigin::Expr(expr) => {
@@ -525,14 +488,7 @@ fn source_trait_choices<'db>(
         _ => Vec::new(),
     };
     Ok(CalleeChoices {
-        method: source_method_choice(
-            db,
-            caller,
-            callable,
-            inherit_trait_selection,
-            origin,
-            assumptions,
-        )?,
+        method: source_method_choice(db, caller, callable, inherit_trait_selection, origin)?,
         bounds,
     })
 }
@@ -573,7 +529,6 @@ fn source_method_choice<'db>(
     callable: &Callable<'db>,
     inherit_trait_selection: bool,
     origin: SemOrigin<'db>,
-    assumptions: PredicateListId<'db>,
 ) -> Result<TraitCallChoice<'db>, MethodArgMapError<'db>> {
     if callable.trait_inst().is_none() {
         return Ok(TraitCallChoice::NotTrait);
@@ -622,22 +577,9 @@ fn source_method_choice<'db>(
                     },
                     _ => unreachable!(),
                 };
-                let caller_env = caller.impl_env(db);
-                let position = crate::core::semantic::context_at(
-                    db,
-                    caller_env.normalization_scope(db),
-                    Some((typed, expr)),
-                );
-                let mut selections = caller_env.selections(db).clone();
-                selections.extend_from_slice(position.selections(db));
-                let position = position
-                    .with_selections(db, selections)
-                    .with_witnesses(db, caller_env.witnesses(db).clone());
-                // The caller's checked effect/transport premises also survive
-                // specialization; witness goals alone are not proof premises.
-                let context = position
-                    .solver_context(db)
-                    .with_assumptions(position.assumptions(db).merge(db, assumptions));
+                let position =
+                    SemanticInstance::new(db, caller).context_at(db, SemOrigin::Expr(expr));
+                let context = position.solver_context(db);
                 let goal = record.data(db).goal();
                 let answer = if let Some(selection) = position.selection_for(db, goal) {
                     let proof = selection
@@ -696,33 +638,22 @@ pub(crate) fn recorded_method_instance<'db>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn semantic_callee_key_with_assumptions<'db>(
+fn semantic_callee_key_with_context<'db>(
     db: &'db dyn HirAnalysisDb,
     caller: Option<SemanticInstance<'db>>,
     impl_env: ImplEnv<'db>,
     callable: &Callable<'db>,
-    lexical_selections: &[crate::analysis::semantic::SelectedApplication<'db>],
-    opened_provisions: &[(crate::hir_def::ExprId, TraitInstId<'db>)],
     opened_symbolic: bool,
+    has_local_openings: bool,
     effect_args: &[ResolvedEffectArg<'db>],
     effect_providers: &[EffectProviderSpecialization<'db>],
-    assumptions: PredicateListId<'db>,
     provider_resolution_mode: ProviderResolutionMode,
-    inherit_trait_selection: bool,
     mut source_choice: CalleeChoices<'db>,
 ) -> Result<Option<SemanticCallCallee<'db>>, MethodArgMapError<'db>> {
     let CallableDef::Func(nominal_func) = callable.callable_def() else {
         return Ok(None);
     };
-    let impl_env = impl_env.with_selections(
-        db,
-        impl_env
-            .selections(db)
-            .iter()
-            .copied()
-            .chain(lexical_selections.iter().copied())
-            .collect(),
-    );
+    let assumptions = impl_env.assumptions(db);
     let mut requirements = callable.selection_requirements(db).list(db).to_vec();
     let method_choice = match &source_choice.method {
         TraitCallChoice::Recorded(choice) => Some(*choice),
@@ -746,8 +677,7 @@ fn semantic_callee_key_with_assumptions<'db>(
         .filter(|selection| {
             // The source view has already frozen lexical applicability,
             // including bounds of the recorded impl before specialization.
-            lexical_selections.contains(selection)
-                || crate::core::semantic::requirements_reach_selection(db, requirements, *selection)
+            crate::core::semantic::requirements_reach_selection(db, requirements, *selection)
         })
         .collect::<Vec<_>>();
     let mut selected_trait_method: Option<(ResolvedImplInstance<'db>, TraitInstId<'db>)> = None;
@@ -769,30 +699,7 @@ fn semantic_callee_key_with_assumptions<'db>(
         && let Some(inst) = callable.trait_inst()
         && let Some(name) = nominal_func.name(db).to_opt()
         && let Selection::Unique(method) = {
-            let selection_env = if inherit_trait_selection {
-                impl_env
-            } else {
-                ImplEnv::new_with_selections(
-                    db,
-                    callable.callable_def.scope(),
-                    PredicateListId::empty_list(db),
-                    Vec::new(),
-                    lexical_selections.to_vec(),
-                )
-            };
-            // The method is resolved, and its impl's prerequisites proved,
-            // under the provisions this call sees, including evidence opened
-            // around it.
-            let context = TraitSolveCx::new(db, impl_env.normalization_scope(db))
-                .with_assumptions(assumptions)
-                .with_provisions(
-                    selection_env
-                        .with_witnesses(
-                            db,
-                            opened_provisions.iter().map(|&(_, goal)| goal).collect(),
-                        )
-                        .proof_provisions(db),
-                );
+            let context = impl_env.solver_context(db);
             match source_choice.method {
                 // Opened evidence answered this call and no implementation
                 // could. As where an implementation answers it, the static
@@ -802,16 +709,14 @@ fn semantic_callee_key_with_assumptions<'db>(
                     if matches!(
                         choice.data(db).answer_origin(db),
                         ImplementorOrigin::Assumption
-                    ) && (opened_provisions.iter().any(|&(_, opened)| {
-                        opened.def(db) == inst.def(db) && opened.args(db) == inst.args(db)
-                    }) || (!inst
+                    ) && !inst
                         .args(db)
                         .iter()
                         .any(|ty| ty.has_param(db) || ty.has_var(db))
                         && matches!(
-                            selection_env.provision_for(db, inst),
+                            impl_env.provision_for(db, inst),
                             Some(crate::semantic::Provision::Bound(_))
-                        ))) =>
+                        ) =>
                 {
                     super::template::provisional_opened_method(db, context, inst, name)
                 }
@@ -1049,7 +954,7 @@ fn semantic_callee_key_with_assumptions<'db>(
                 }
                 match independent_context.prove(db, bound) {
                     GoalSatisfiability::Satisfied(solution) => {
-                        if opened_provisions.is_empty()
+                        if !has_local_openings
                             && !retained_selections
                                 .iter()
                                 .any(|selection| selection.matches(db, bound))
@@ -1119,12 +1024,7 @@ fn semantic_callee_key_with_assumptions<'db>(
     } else {
         // Evidence opened at the call answers the callee's dependent goals
         // too; evaluation passes the operand's own choice in its place.
-        impl_env
-            .witnesses(db)
-            .iter()
-            .copied()
-            .chain(opened_provisions.iter().map(|&(_, goal)| goal))
-            .collect()
+        impl_env.witnesses(db).iter().copied().collect()
     };
     if let Some(witness) = callable.trait_inst().filter(|_| nominal_witness_required) {
         witnesses.insert(witness);
@@ -1556,8 +1456,7 @@ fn selected() -> u256 { with (Alternative) { <S as Read>::read() } }
         let nominal = accepted.goal().def(&db).method_defs(&db)[&name];
         let generated = super::generated_callee_key(
             &db,
-            function.scope(),
-            crate::analysis::ty::trait_resolution::PredicateListId::empty_list(&db),
+            crate::core::semantic::context_at(&db, function.scope(), None),
             nominal,
             Some(record),
             &[],
@@ -1567,6 +1466,91 @@ fn selected() -> u256 { with (Alternative) { <S as Read>::read() } }
             generated.owner(&db),
             crate::analysis::ty::ty_check::BodyOwner::Func(recorded.body().expect("selected body")),
             "generation must not substitute ordinary lookup's different implementation"
+        );
+    }
+
+    #[test]
+    fn instance_named_choice_is_not_a_premise_at_its_destination() {
+        use crate::analysis::{
+            semantic::{
+                EffectProviderSubst, GenericSubst, ImplEnv, SemOrigin, SemanticInstanceKey,
+            },
+            ty::{
+                trait_resolution::PredicateListId,
+                ty_check::{BodyOwner, TraitChoiceVia, check_func_body},
+            },
+        };
+        let mut db = HirAnalysisTestDb::default();
+        let source = "trait Gate {}
+trait Read { fn read() -> u256 }
+struct S {}
+impl Gate for S as Open {}
+impl Read for S as Alternative where S: Gate { fn read() -> u256 { 2 } }
+fn selected() -> u256 { with (Open, Alternative) { <S as Read>::read() } }
+fn destination() {}
+";
+        let file = db.new_stand_alone("instance_choice_premises.fe".into(), source);
+        let (top, _) = db.top_mod(file);
+        let function = |name: &str| {
+            top.all_funcs(&db)
+                .iter()
+                .copied()
+                .find(|func| {
+                    func.name(&db)
+                        .to_opt()
+                        .is_some_and(|ident| ident.data(&db) == name)
+                })
+                .unwrap()
+        };
+        let (diagnostics, typed) = check_func_body(&db, function("selected"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let accepted = typed
+            .trait_choices(&db)
+            .find(|choice| {
+                choice
+                    .goal()
+                    .def(&db)
+                    .name(&db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(&db) == "Read")
+            })
+            .expect("selected Read call");
+        let choice = typed.decisions().choice_ref(&accepted.site()).unwrap();
+        let TraitChoiceVia::Selected(selection) = choice.data(&db).via() else {
+            panic!("the named call retains its selection");
+        };
+        // Alternative retains how Open met its prerequisite at the source.
+        // Even a valid retained choice is not itself a predicate premise.
+        let destination = function("destination");
+        let caller = ImplEnv::new_with_selections(
+            &db,
+            destination.scope(),
+            PredicateListId::empty_list(&db),
+            Vec::new(),
+            vec![selection],
+        );
+        let key = SemanticInstanceKey::new(
+            &db,
+            BodyOwner::Func(destination),
+            GenericSubst::for_owner(&db, destination.into(), Vec::new()),
+            EffectProviderSubst::empty(&db),
+            caller,
+        );
+        let position = crate::analysis::semantic::get_or_build_semantic_instance(&db, key)
+            .context_at(&db, SemOrigin::Synthetic);
+        assert_eq!(position.selections(&db).as_slice(), &[selection]);
+        assert!(
+            !position
+                .assumptions(&db)
+                .list(&db)
+                .contains(&selection.goal()),
+            "a named choice must not establish a proof premise"
+        );
+        assert!(
+            selection
+                .revalidate(&db, position.solver_context(&db), selection.goal())
+                .is_ok(),
+            "captured source provisions still validate the retained choice"
         );
     }
 

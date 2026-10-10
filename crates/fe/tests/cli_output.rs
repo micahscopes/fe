@@ -4873,6 +4873,11 @@ fn associated_length_array_returns_at_o0_and_o2() {
 }
 
 #[test]
+fn evidence_generic_instance_condition_and_dispatch_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("generic_instance_condition_and_dispatch.fe");
+}
+
+#[test]
 fn effect_provider_outer_prerequisite_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("effect_provider_outer_prerequisite.fe");
 }

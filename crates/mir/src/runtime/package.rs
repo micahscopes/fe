@@ -1591,8 +1591,7 @@ fn resolve_decode_runtime_args_instance<'db>(
         })?;
     let key = generated_callee_key(
         db,
-        scope,
-        PredicateListId::empty_list(db),
+        hir::semantic::context_at(db, scope, None),
         func,
         None,
         &[host_ty, sol_abi_ty(db, scope)?, msg_ty],
@@ -1640,8 +1639,7 @@ pub(crate) fn resolve_trait_runtime_instance<'db>(
     let choice = TraitChoiceId::for_resolved_implementation(db, implementation.resolved());
     let key = generated_callee_key(
         db,
-        scope,
-        PredicateListId::empty_list(db),
+        hir::semantic::context_at(db, scope, None),
         func,
         Some(choice),
         &own_args,

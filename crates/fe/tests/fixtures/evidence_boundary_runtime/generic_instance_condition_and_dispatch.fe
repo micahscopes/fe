@@ -1,0 +1,43 @@
+trait Compute { const OK: bool const ID: u256 }
+struct Subject {}
+impl Compute for Subject { const OK: bool = false const ID: u256 = 0 }
+impl Compute for Subject as Relaxed { const OK: bool = true const ID: u256 = 11 }
+impl Compute for Subject as Inner { const OK: bool = true const ID: u256 = 33 }
+trait Value { const fn value() -> u256 }
+struct Gate<T> {}
+impl<T: Compute> Value for Gate<T> where T::OK {
+    const fn value() -> u256 { T::ID }
+}
+const fn concrete<U>() -> u256 {
+    with (Relaxed) { <Gate<Subject> as Value>::value() }
+}
+const fn generic<T: Compute>() -> u256 where T::OK {
+    // This concrete Inner choice cannot start capturing the rigid T after
+    // specialization. The caller's accepted T answer remains Relaxed.
+    with (Inner) { <Gate<T> as Value>::value() }
+}
+const CONCRETE: u256 = concrete<u8>()
+const GENERIC: u256 = with (Relaxed) { generic<Subject>() }
+#[test]
+fn conditions_and_bodies_agree_in_generic_instances() {
+    assert(CONCRETE == 11)
+    assert(GENERIC == 11)
+    assert(concrete<u8>() == 11)
+    with (Relaxed) { assert(generic<Subject>() == 11) }
+}
+
+// A concrete receiver still transports choices for method-owned parameters.
+trait OwnValue { const fn own_value() -> u256 }
+impl OwnValue for Subject { const fn own_value() -> u256 { 1 } }
+impl OwnValue for Subject as OwnAlternative { const fn own_value() -> u256 { 2 } }
+trait Runner { const fn run<U: OwnValue>() -> u256 }
+impl Runner for bool {
+    const fn run<U: OwnValue>() -> u256 { <U as OwnValue>::own_value() }
+}
+const fn own_generic<T: OwnValue>() -> u256 { <bool as Runner>::run<T>() }
+const OWN: u256 = with (OwnAlternative) { own_generic<Subject>() }
+#[test]
+fn concrete_receiver_keeps_the_method_parameters_choice() {
+    assert(OWN == 2)
+    with (OwnAlternative) { assert(own_generic<Subject>() == 2) }
+}

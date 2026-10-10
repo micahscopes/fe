@@ -518,32 +518,6 @@ impl<'db> ImplEnv<'db> {
         })
     }
 
-    /// This context with `goals` also answered by opened evidence; existing
-    /// witnesses and choices are kept.
-    pub(crate) fn with_witnesses(
-        self,
-        db: &'db dyn HirAnalysisDb,
-        goals: Vec<TraitInstId<'db>>,
-    ) -> Self {
-        if goals.iter().all(|goal| self.witnesses(db).contains(goal)) {
-            return self;
-        }
-        let mut witnesses = self.witnesses(db).clone();
-        witnesses.extend(
-            goals
-                .into_iter()
-                .filter(|goal| !self.witnesses(db).contains(goal)),
-        );
-        Self::new_with_choices(
-            db,
-            self.normalization_scope(db),
-            self.assumptions(db),
-            witnesses,
-            self.selections(db).clone(),
-            self.bound_choices(db).clone(),
-        )
-    }
-
     /// Read the transported declaration view. A bound witness retains a goal;
     /// lexical evidence operands are captured from their source record before
     /// transport, and must never be reconstructed from this goal-only view.

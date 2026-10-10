@@ -297,7 +297,7 @@ pub(crate) fn body_assumptions_at<'db>(
 /// Read the item premises and retained lexical selections at a source position.
 /// A position outside a body has only its canonical item context. Body choices
 /// are read from the existing decision record, never solved again here.
-pub(crate) fn context_at<'db>(
+pub fn context_at<'db>(
     db: &'db dyn HirAnalysisDb,
     scope: ScopeId<'db>,
     position: Option<(

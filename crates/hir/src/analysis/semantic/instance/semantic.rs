@@ -370,7 +370,6 @@ fn provisional_call_sites<'db>(
             instance,
             callable,
             typed_body.call_effect_args(expr).unwrap_or(&[]),
-            assumptions,
             CallSiteContext {
                 origin: SemOrigin::Expr(expr),
                 inherit_trait_selection: matches!(template.semantic_expr_lowering(expr),
@@ -400,7 +399,6 @@ fn provisional_for_loop_call_sites<'db>(
             diagnostic: None,
         };
     };
-    let assumptions = semantic_instance_base_assumptions_for_key(db, instance.key(db));
     let mut sites = vec![None; body.stmts(db).len()];
     let mut diagnostic = None;
     for (stmt, _) in body.stmts(db).iter() {
@@ -414,7 +412,6 @@ fn provisional_for_loop_call_sites<'db>(
                 instance,
                 &seq.len_callable,
                 &seq.len_effect_args,
-                assumptions,
                 CallSiteContext {
                     origin,
                     inherit_trait_selection: template.for_loop_seq(stmt).is_some_and(|seq| {
@@ -428,7 +425,6 @@ fn provisional_for_loop_call_sites<'db>(
                 instance,
                 &seq.get_callable,
                 &seq.get_effect_args,
-                assumptions,
                 CallSiteContext {
                     origin,
                     inherit_trait_selection: template.for_loop_seq(stmt).is_some_and(|seq| {
@@ -456,7 +452,6 @@ fn provisional_call_site<'db>(
     instance: SemanticInstance<'db>,
     callable: &Callable<'db>,
     nominal_effect_args: &[ResolvedEffectArg<'db>],
-    assumptions: PredicateListId<'db>,
     context: CallSiteContext<'db>,
     diagnostic: &mut Option<SemanticDiagnosticId<'db>>,
 ) -> CallSiteLowering<'db> {
@@ -472,7 +467,6 @@ fn provisional_call_site<'db>(
         instance.key(db),
         callable,
         nominal_effect_args,
-        assumptions,
         inherit_trait_selection,
         origin,
     )
@@ -1028,12 +1022,89 @@ fn specialize_provider_address_space<'db>(
 
 #[salsa::tracked]
 impl<'db> SemanticInstance<'db> {
+    /// The checked position in this instance, with the caller's transported
+    /// provisions. Applicability is frozen before substitution: specializing
+    /// a rigid parameter must not make an unrelated lexical choice visible.
+    #[salsa::tracked]
+    pub fn context_at(self, db: &'db dyn HirAnalysisDb, origin: SemOrigin<'db>) -> ImplEnv<'db> {
+        let key = self.key(db);
+        let typed = key.typed_body(db);
+        let expr = match origin {
+            SemOrigin::Expr(expr) => Some(expr),
+            SemOrigin::Stmt(stmt) => match stmt
+                .data(db, typed.body().expect("a statement position has a body"))
+                .borrowed()
+                .to_opt()
+            {
+                Some(
+                    crate::hir_def::Stmt::For(_, iter, _, _)
+                    | crate::hir_def::Stmt::Expr(iter)
+                    | crate::hir_def::Stmt::While(_, iter),
+                ) => Some(*iter),
+                Some(
+                    crate::hir_def::Stmt::Let(_, _, value) | crate::hir_def::Stmt::Return(value),
+                ) => *value,
+                _ => None,
+            },
+            SemOrigin::Body(_) | SemOrigin::Synthetic => None,
+        };
+        let caller = key.impl_env(db);
+        let template = &infer_body(db, key.owner(db)).1;
+        let source_call = expr.and_then(|expr| template.semantic_expr_lowering(expr));
+        let mut selections = caller.selections(db).clone();
+        let mut witnesses = caller.witnesses(db).clone();
+        if let Some(expr) = expr {
+            let lexical = if matches!(source_call, Some(SemanticExprLowering::Call { .. })) {
+                crate::core::semantic::call_selections_at(db, template, expr)
+            } else {
+                template.selections_for_expr(db, expr).to_vec()
+            };
+            let lexical = instantiate_checked(db, key.owner(db), lexical, key.subst(db))
+                .expect("position choices use their instance substitution domain");
+            selections.extend(lexical);
+            if matches!(source_call, Some(SemanticExprLowering::Call { .. })) {
+                let opened = crate::semantic::instance_call_evidence_at(db, key, expr);
+                // The checked source opening shadows an inherited named
+                // choice for the same goal, before either becomes proof input.
+                selections.retain(|selection| {
+                    !opened.iter().any(|&(_, goal)| selection.matches(db, goal))
+                });
+                witnesses.extend(opened.into_iter().map(|(_, goal)| goal));
+            } else {
+                let position = crate::core::semantic::context_at(
+                    db,
+                    key.owner(db).scope(),
+                    Some((typed, expr)),
+                );
+                witnesses.extend(position.witnesses(db).iter().copied());
+            }
+        }
+        let assumptions = instantiated_effect_env(db, self).map_or_else(
+            || semantic_instance_base_assumptions_for_key(db, key),
+            |env| env.assumptions(db),
+        );
+        let witnesses = witnesses
+            .into_iter()
+            .collect::<IndexSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut predicates: IndexSet<_> = assumptions.list(db).iter().copied().collect();
+        predicates.extend(witnesses.iter().copied());
+        ImplEnv::new_with_choices(
+            db,
+            caller.normalization_scope(db),
+            PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>())
+                .extend_all_bounds(db),
+            witnesses,
+            selections,
+            caller.bound_choices(db).clone(),
+        )
+    }
+
     #[salsa::tracked]
     pub fn assumptions(self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
-        instantiated_effect_env(db, self).map_or_else(
-            || semantic_instance_base_assumptions_for_key(db, self.key(db)),
-            |env| env.assumptions(db),
-        )
+        self.context_at(db, SemOrigin::Body(self.key(db).owner(db)))
+            .assumptions(db)
     }
 
     #[salsa::tracked(
@@ -2087,12 +2158,6 @@ pub(crate) fn semantic_instance_base_assumptions_for_key<'db>(
     let mut predicates: IndexSet<_> = assumptions.list(db).iter().copied().collect();
     predicates.extend(impl_env.assumptions(db).list(db).iter().copied());
     predicates.extend(impl_env.witnesses(db).iter().copied());
-    predicates.extend(
-        impl_env
-            .selections(db)
-            .iter()
-            .map(|selection| selection.goal()),
-    );
     PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>()).extend_all_bounds(db)
 }
 
@@ -2668,7 +2733,6 @@ mod tests {
             instance,
             &callable,
             &[],
-            instance.assumptions(db),
             CallSiteContext {
                 origin: SemOrigin::Expr(expr),
                 inherit_trait_selection: matches!(typed_body.semantic_expr_lowering(expr),
