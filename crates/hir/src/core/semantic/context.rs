@@ -141,7 +141,7 @@ mod storage {
         pub normalization_scope: ScopeId<'db>,
         pub assumptions: PredicateListId<'db>,
         #[return_ref]
-        pub witnesses: Vec<TraitInstId<'db>>,
+        pub openings: Vec<crate::semantic::Provision<'db>>,
         #[return_ref]
         pub selections: Vec<SelectedApplication<'db>>,
         /// Arguments to the owner's declared bound slots refer to accepted records.
@@ -167,8 +167,19 @@ impl<'db> ImplEnv<'db> {
     pub fn assumptions(self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
         self.0.assumptions(db)
     }
-    pub fn witnesses(self, db: &'db dyn HirAnalysisDb) -> &'db Vec<TraitInstId<'db>> {
-        self.0.witnesses(db)
+    pub fn witnesses(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> impl ExactSizeIterator<Item = TraitInstId<'db>> + DoubleEndedIterator {
+        self.openings(db).iter().map(|provision| provision.goal())
+    }
+    /// Source evidence retains its operand; transported declaration witnesses
+    /// are Bound entries. The goal view above is only a projection.
+    pub(crate) fn openings(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> &'db Vec<crate::semantic::Provision<'db>> {
+        self.0.openings(db)
     }
     pub fn selections(self, db: &'db dyn HirAnalysisDb) -> &'db Vec<SelectedApplication<'db>> {
         self.0.selections(db)
@@ -188,11 +199,32 @@ impl<'db> ImplEnv<'db> {
         selections: Vec<SelectedApplication<'db>>,
         bound_choices: Vec<(usize, TraitChoiceId<'db>)>,
     ) -> Self {
+        Self::new_with_openings(
+            db,
+            scope,
+            assumptions,
+            witnesses
+                .into_iter()
+                .map(crate::semantic::Provision::Bound)
+                .collect(),
+            selections,
+            bound_choices,
+        )
+    }
+
+    pub(super) fn new_with_openings(
+        db: &'db dyn HirAnalysisDb,
+        scope: ScopeId<'db>,
+        assumptions: PredicateListId<'db>,
+        openings: Vec<crate::semantic::Provision<'db>>,
+        selections: Vec<SelectedApplication<'db>>,
+        bound_choices: Vec<(usize, TraitChoiceId<'db>)>,
+    ) -> Self {
         Self(storage::ImplEnv::new(
             db,
             scope,
             assumptions,
-            witnesses,
+            openings,
             selections,
             bound_choices,
         ))
@@ -305,8 +337,6 @@ impl<'db> ImplEnv<'db> {
         let mut entries: Vec<(TraitInstId<'db>, Option<ImplementorId<'db>>)> = Vec::new();
         let goals = self
             .witnesses(db)
-            .iter()
-            .copied()
             .chain(self.selections(db).iter().map(|selection| selection.goal()));
         for goal in goals {
             let entry = match self.provision_for(db, goal) {
@@ -358,7 +388,7 @@ impl<'db> ImplEnv<'db> {
         ty: TyId<'db>,
         lookup: impl Fn(TraitInstId<'db>) -> Option<crate::semantic::Provision<'db>>,
     ) -> TyId<'db> {
-        if self.selections(db).is_empty() && self.witnesses(db).is_empty() {
+        if self.selections(db).is_empty() && self.witnesses(db).len() == 0 {
             return ty;
         }
         use crate::analysis::ty::ty_def::TyData;
@@ -475,11 +505,11 @@ impl<'db> ImplEnv<'db> {
         }
         // Visibility is established by the source chain. Transport preserves
         // its order; substitution must not merge accepted authored choices.
-        Self::new_with_choices(
+        Self::new_with_openings(
             db,
             self.normalization_scope(db),
             self.assumptions(db),
-            self.witnesses(db).clone(),
+            self.openings(db).clone(),
             selections,
             bound_choices,
         )
@@ -501,10 +531,10 @@ impl<'db> ImplEnv<'db> {
                 && crate::core::semantic::requirements_reach_goal(db, ingot, requirements, provided)
         };
         let witnesses = self
-            .witnesses(db)
+            .openings(db)
             .iter()
             .copied()
-            .filter(|provided| reached(*provided))
+            .filter(|provided| reached(provided.goal()))
             .collect::<Vec<_>>();
         let selections = self
             .selections(db)
@@ -513,19 +543,20 @@ impl<'db> ImplEnv<'db> {
             .filter(|selection| reached(selection.goal()))
             .collect::<Vec<_>>();
         (!witnesses.is_empty() || !selections.is_empty()).then(|| {
-            Self::new_with_selections(
+            Self::new_with_openings(
                 db,
                 premises.scope(),
                 premises.assumptions(),
                 witnesses,
                 selections,
+                Vec::new(),
             )
         })
     }
 
-    /// Read the transported declaration view. A bound witness retains a goal;
-    /// lexical evidence operands are captured from their source record before
-    /// transport, and must never be reconstructed from this goal-only view.
+    /// Read the provision held by this context. Source evidence retains its
+    /// recorded operand; transported declaration witnesses retain only a goal.
+    /// A missing source operand must never be reconstructed from that goal.
     pub(crate) fn provision_for(
         self,
         db: &'db dyn HirAnalysisDb,
@@ -535,10 +566,9 @@ impl<'db> ImplEnv<'db> {
         crate::core::semantic::lookup_trait_goal(
             db,
             goal,
-            self.witnesses(db)
+            self.openings(db)
                 .iter()
                 .copied()
-                .map(Provision::Bound)
                 .chain(self.selections(db).iter().copied().map(Provision::Named)),
             |provision| provision.goal(),
         )
@@ -574,7 +604,26 @@ impl<'db> ImplEnv<'db> {
                 *choice = TraitChoiceId::for_selected_application(db, supplied);
             }
         }
-        self.with_call_choices(db, selections, bounds)
+        let openings = self
+            .openings(db)
+            .iter()
+            .copied()
+            .map(|provision| {
+                if application.matches(db, provision.goal()) {
+                    crate::semantic::Provision::Bound(provision.goal())
+                } else {
+                    provision
+                }
+            })
+            .collect();
+        Self::new_with_openings(
+            db,
+            self.normalization_scope(db),
+            self.assumptions(db),
+            openings,
+            selections,
+            bounds,
+        )
     }
 
     /// A constant opened through a checked operand uses that proof's
@@ -590,7 +639,11 @@ impl<'db> ImplEnv<'db> {
             use_.origin_scope(),
             proof.context().assumptions(),
             vec![proof.goal()],
-            vec![application],
+            use_.dependent_context()
+                .into_iter()
+                .flat_map(|context| context.selections(db).iter().copied())
+                .chain([application])
+                .collect(),
         )
     }
 
@@ -618,15 +671,15 @@ impl<'db> ImplEnv<'db> {
         use_: crate::analysis::ty::assoc_const::AssocConstUse<'db>,
         selection: Option<SelectedApplication<'db>>,
     ) -> Self {
-        Self::new_with_selections(
+        Self::new_with_openings(
             db,
             use_.origin_scope(),
             use_.assumptions(),
             use_.dependent_context()
-                .map(|context| context.witnesses(db).clone())
+                .map(|context| context.openings(db).clone())
                 .unwrap_or_default()
                 .into_iter()
-                .chain([use_.inst()])
+                .chain([crate::semantic::Provision::Bound(use_.inst())])
                 .collect(),
             use_.dependent_context()
                 .map(|context| context.selections(db).clone())
@@ -634,6 +687,7 @@ impl<'db> ImplEnv<'db> {
                 .into_iter()
                 .chain(selection)
                 .collect(),
+            Vec::new(),
         )
     }
 
@@ -655,11 +709,11 @@ impl<'db> ImplEnv<'db> {
     ) -> Option<Self> {
         let context = lowering.selection_context()?;
         let premises = context.assumptions(db);
-        Some(Self::new_with_choices(
+        Some(Self::new_with_openings(
             db,
             destination,
             premises,
-            context.witnesses(db).clone(),
+            context.openings(db).clone(),
             context.selections(db).clone(),
             context.bound_choices(db).clone(),
         ))
@@ -697,7 +751,7 @@ impl<'db> ImplEnv<'db> {
         let mut witnesses: indexmap::IndexSet<_> = if independent {
             indexmap::IndexSet::new()
         } else {
-            self.witnesses(db).iter().copied().collect()
+            self.witnesses(db).collect()
         };
         if let Some(witness) = callable.trait_inst().filter(|_| nominal_witness_required) {
             witnesses.insert(witness);
@@ -773,7 +827,7 @@ impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for ImplEnv<'db> {
         visitor: &mut V,
     ) {
         self.assumptions(visitor.db()).visit_with(visitor);
-        self.witnesses(visitor.db()).visit_with(visitor);
+        self.openings(visitor.db()).visit_with(visitor);
         self.selections(visitor.db()).visit_with(visitor);
         for (_, choice) in self.bound_choices(visitor.db()) {
             choice.visit_with(visitor);
@@ -783,11 +837,11 @@ impl<'db> crate::analysis::ty::visitor::TyVisitable<'db> for ImplEnv<'db> {
 
 impl<'db> TyFoldable<'db> for ImplEnv<'db> {
     fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
-        Self::new_with_choices(
+        Self::new_with_openings(
             db,
             folder.fold_scope(self.normalization_scope(db)),
             self.assumptions(db).fold_with(db, folder),
-            self.witnesses(db).clone().fold_with(db, folder),
+            self.openings(db).clone().fold_with(db, folder),
             self.selections(db).clone().fold_with(db, folder),
             self.bound_choices(db)
                 .iter()
@@ -858,7 +912,7 @@ pub(crate) fn instance_position_context<'db>(
     let template = &infer_body(db, key.owner(db)).1;
     let source_call = expr.and_then(|expr| template.semantic_expr_lowering(expr));
     let mut selections = caller.selections(db).clone();
-    let mut witnesses = caller.witnesses(db).clone();
+    let mut witnesses = caller.openings(db).clone();
     if let Some(expr) = expr {
         let lexical = if matches!(source_call, Some(SemanticExprLowering::Call { .. })) {
             crate::core::semantic::call_selections_at(db, template, expr)
@@ -874,11 +928,21 @@ pub(crate) fn instance_position_context<'db>(
             // choice for the same goal, before either becomes proof input.
             selections
                 .retain(|selection| !opened.iter().any(|&(_, goal)| selection.matches(db, goal)));
-            witnesses.extend(opened.into_iter().map(|(_, goal)| goal));
+            witnesses.extend(
+                opened
+                    .into_iter()
+                    .map(|(_, goal)| crate::semantic::Provision::Bound(goal)),
+            );
         } else {
             let position =
                 crate::core::semantic::context_at(db, key.owner(db).scope(), Some((typed, expr)));
-            witnesses.extend(position.witnesses(db).iter().copied());
+            selections.retain(|selection| {
+                !position
+                    .openings(db)
+                    .iter()
+                    .any(|opening| selection.matches(db, opening.goal()))
+            });
+            witnesses.extend(position.openings(db).iter().copied());
         }
     }
     let assumptions = instantiated_effect_env(db, instance).map_or_else(
@@ -891,8 +955,8 @@ pub(crate) fn instance_position_context<'db>(
         .into_iter()
         .collect::<Vec<_>>();
     let mut predicates: IndexSet<_> = assumptions.list(db).iter().copied().collect();
-    predicates.extend(witnesses.iter().copied());
-    ImplEnv::new_with_choices(
+    predicates.extend(witnesses.iter().map(|provision| provision.goal()));
+    ImplEnv::new_with_openings(
         db,
         caller.normalization_scope(db),
         PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>()).extend_all_bounds(db),

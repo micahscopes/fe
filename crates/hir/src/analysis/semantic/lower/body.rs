@@ -802,11 +802,10 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                 db: &'db dyn HirAnalysisDb,
                 use_: crate::analysis::ty::assoc_const::AssocConstUse<'db>,
             ) -> crate::analysis::ty::assoc_const::AssocConstUse<'db> {
-                if let Some(provision) = use_.provision()
-                    && provision.evidence_operand().is_some()
-                    && !self.0.contains(&provision)
-                {
-                    self.0.push(provision);
+                for provision in use_.opened_provisions(db) {
+                    if !self.0.contains(&provision) {
+                        self.0.push(provision);
+                    }
                 }
                 use_.super_fold_with(db, self)
             }
@@ -847,21 +846,42 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     .answer_origin(self.db),
                 crate::analysis::ty::trait_def::ImplementorOrigin::Assumption
             );
-        if let ConstRef::TraitConst(assoc) = const_ref
-            && let Some((value, _)) = assoc.provision().and_then(|p| p.evidence_operand())
-        {
-            let Some(WithBindingSource::Value(witness)) = self.with_binding_sources.get(&value)
-            else {
-                panic!("opened constant must retain its lexical evidence value");
-            };
-            return self.emit_expr_with_origin(
-                SemOrigin::Expr(expr),
-                ty,
-                SExpr::OpenedConst {
-                    assoc,
-                    witness: *witness,
-                },
+        if let ConstRef::TraitConst(assoc) = const_ref {
+            let assoc = assoc.with_dependent_provisions(
+                self.db,
+                self.instance.context_at(self.db, SemOrigin::Expr(expr)),
             );
+            let provisions = assoc
+                .opened_provisions(self.db)
+                .map(|provision| {
+                    let (value, _) = provision
+                        .evidence_operand()
+                        .expect("captured opening has an operand");
+                    let Some(WithBindingSource::Value(witness)) =
+                        self.with_binding_sources.get(&value)
+                    else {
+                        panic!("opened constant must retain its lexical evidence value");
+                    };
+                    (provision, *witness)
+                })
+                .collect::<Vec<_>>();
+            if !provisions.is_empty() {
+                let witness = assoc.provision().and_then(|own| {
+                    provisions
+                        .iter()
+                        .find(|(provision, _)| *provision == own)
+                        .map(|(_, witness)| *witness)
+                });
+                return self.emit_expr_with_origin(
+                    SemOrigin::Expr(expr),
+                    ty,
+                    SExpr::OpenedConst {
+                        assoc,
+                        witness,
+                        provisions: provisions.into_boxed_slice(),
+                    },
+                );
+            }
         }
         if let Some(const_ref) = resolve_semantic_const_ref_in_instance(
             self.db,

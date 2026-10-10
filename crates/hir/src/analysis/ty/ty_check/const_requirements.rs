@@ -3472,11 +3472,25 @@ const fn caller<T>(_ first: Evidence<Compute<T>>, _ second: Evidence<Inspect<T>>
             };
             let context = crate::semantic::context_at(&db, body.scope(), Some((typed, expr)));
             assert_eq!(
-                context.witnesses(&db).as_slice(),
+                context.witnesses(&db).collect::<Vec<_>>().as_slice(),
                 expected,
                 "transported evidence at {}",
                 name.data(&db)
             );
+            for &goal in expected {
+                let source = typed
+                    .with_choices()
+                    .find_map(|choice| {
+                        let provision = choice.outcome().ok()?;
+                        (provision.goal() == goal).then_some(provision)
+                    })
+                    .expect("position evidence came from a recorded opening");
+                assert_eq!(
+                    context.provision_for(&db, goal),
+                    Some(source),
+                    "context preserves the source evidence operand"
+                );
+            }
             let mut premises = canonical.list(&db).to_vec();
             premises.extend_from_slice(expected);
             let expected =

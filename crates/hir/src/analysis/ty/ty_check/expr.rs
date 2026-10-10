@@ -5031,7 +5031,7 @@ impl<'db> TyChecker<'db> {
                         }
                         let context = self.env.selection_context();
                         let field_ty = if !context.selections(self.db).is_empty()
-                            || !context.witnesses(self.db).is_empty()
+                            || context.witnesses(self.db).len() != 0
                         {
                             let source = instantiate_adt_field_source_for_concrete_demand(
                                 self.db,

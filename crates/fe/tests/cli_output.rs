@@ -4883,6 +4883,41 @@ fn inherent_const_outer_prerequisite_at_o0_and_o2() {
 }
 
 #[test]
+fn derived_constant_opened_prerequisites_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("derived_constant_opened_prerequisites.fe");
+}
+
+#[test]
+fn derived_constant_generic_prerequisites_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("derived_constant_generic_prerequisites.fe");
+}
+
+#[test]
+fn derived_constant_array_lengths_follow_prerequisites() {
+    evidence_boundary_runtime_at_o0_and_o2("derived_constant_named_array_correct.fe");
+    // A concrete literal against an opened-evidence symbolic length remains
+    // pending, matching the pre-existing direct-evidence limitation.
+
+    for name in [
+        "derived_constant_named_array_wrong.fe",
+        "derived_constant_evidence_array_wrong.fe",
+    ] {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/evidence_boundary_runtime")
+            .join(name);
+        let (output, code) = run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+        assert_ne!(code, 0, "wrong derived array length was accepted: {output}");
+        assert!(
+            output.contains("error[8-0000]")
+                && output.contains("type mismatch")
+                && !output.contains("error[16-")
+                && !output.contains("panicked"),
+            "wrong length must report a type mismatch: {output}"
+        );
+    }
+}
+
+#[test]
 fn deferred_method_keeps_its_inner_effect_provider_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("deferred_method_effect_provider.fe");
 }

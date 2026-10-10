@@ -3152,7 +3152,7 @@ fn caller(_ x: Slot<7>) { <bool as Has>::take(x) }
                 _ => None,
             })
             .expect("source call was not normalized");
-        assert!(call_context.witnesses(&db).contains(&trait_inst));
+        assert!(call_context.witnesses(&db).any(|goal| goal == trait_inst));
         let callee_key = SemanticInstanceKey::new(
             &db,
             BodyOwner::Func(declaration),

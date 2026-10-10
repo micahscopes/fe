@@ -1005,10 +1005,7 @@ fn const_expr_is_fully_ground<'db>(db: &'db dyn HirAnalysisDb, expr: ConstExprId
         | ConstExpr::Cast { expr, .. }
         | ConstExpr::Field { value: expr, .. } => ty_is_fully_ground(db, *expr),
         ConstExpr::TraitConst(assoc) => {
-            assoc
-                .provision()
-                .and_then(|p| p.evidence_operand())
-                .is_none()
+            assoc.opened_provisions(db).next().is_none()
                 && trait_inst_is_fully_ground(db, assoc.inst())
         }
         ConstExpr::InherentConst(use_) => ty_is_fully_ground(db, use_.receiver_ty()),
@@ -2663,7 +2660,7 @@ fn selected_const_body_assumptions<'db>(
     crate::semantic::lookup_assumptions(
         db,
         env.assumptions(db),
-        env.witnesses(db).iter().copied(),
+        env.witnesses(db),
         env.selections(db).iter().copied(),
     )
 }
@@ -2678,12 +2675,13 @@ fn assoc_const_use_for_body<'db>(
 ) -> AssocConstUse<'db> {
     let scope = impl_env.map_or(body.scope(), |env| env.normalization_scope(db));
     let assumptions = impl_env.map_or(assumptions, |env| env.assumptions(db));
-    AssocConstUse::new(
+    let use_ = AssocConstUse::new(
         crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
         inst,
         name,
     )
-    .with_provision(impl_env.and_then(|env| env.provision_for(db, inst)))
+    .with_provision(impl_env.and_then(|env| env.provision_for(db, inst)));
+    impl_env.map_or(use_, |context| use_.with_dependent_provisions(db, context))
 }
 
 pub(crate) fn assumptions_for_body<'db>(
@@ -2715,10 +2713,7 @@ pub(crate) fn const_ty_from_assoc_const_use<'db>(
     db: &'db dyn HirAnalysisDb,
     assoc: AssocConstUse<'db>,
 ) -> Option<ConstTyId<'db>> {
-    if assoc
-        .provision()
-        .is_some_and(|provision| provision.evidence_operand().is_some())
-    {
+    if assoc.opened_provisions(db).next().is_some() {
         // The opened operand owns this choice. Until its witness is known,
         // preserve the constant description instead of choosing the ordinary impl.
         return None;
@@ -3278,12 +3273,12 @@ impl<'db> ConstTyId<'db> {
                 db,
                 TraitInstId::new(db, inst.def(db), args, inst.assoc_type_bindings(db).clone()),
             );
-            let provision = lookup(inst)?;
-            if matches!(provision, crate::semantic::Provision::Bound(_)) {
+            let assoc = AssocConstUse::new(context.premises(db), inst, name)
+                .with_provision(lookup(inst))
+                .with_dependent_provisions(db, context);
+            if assoc.provision().is_none() && assoc.dependent_context().is_none() {
                 return None;
             }
-            let assoc = AssocConstUse::new(context.premises(db), inst, name)
-                .with_provision(Some(provision));
             let declared_ty = inst
                 .def(db)
                 .const_(db, name)?

@@ -380,12 +380,15 @@ impl<'db, Data> Chain<'db, Data> {
         db: &'db dyn HirAnalysisDb,
         scope: crate::hir_def::scope_graph::ScopeId<'db>,
     ) -> crate::analysis::semantic::ImplEnv<'db> {
-        crate::analysis::semantic::ImplEnv::new_with_selections(
+        crate::analysis::semantic::ImplEnv::new_with_openings(
             db,
             scope,
             self.evidence_assumptions(db),
-            self.opened_evidence(db).map(|(_, goal)| goal).collect(),
+            self.visible(db)
+                .filter(|provision| provision.evidence_operand().is_some())
+                .collect(),
             self.selections(db).collect(),
+            Vec::new(),
         )
     }
 

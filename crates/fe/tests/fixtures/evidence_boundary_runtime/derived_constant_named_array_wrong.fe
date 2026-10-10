@@ -1,0 +1,19 @@
+// Layout twin, named spelling: a one-element array against a derived length
+// that is 2 under `Wide`. Expected: REJECT.
+use core::obligations::{Evidence, prove}
+trait Width { const N: usize }
+trait Derived { const M: usize }
+struct Subject {}
+struct Wrap<T> {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+impl<T: Width> Derived for Wrap<T> { const M: usize = T::N }
+const fn f() -> u256 {
+    with (Wide) {
+        let y: [u256; <Wrap<Subject> as Derived>::M] = [5]
+        y[0]
+    }
+}
+const F: u256 = f()
+#[test]
+fn value_5() { assert(F == 5) }

@@ -487,7 +487,8 @@ pub enum SExpr<'db> {
     Const(SConst<'db>),
     OpenedConst {
         assoc: crate::analysis::ty::assoc_const::AssocConstUse<'db>,
-        witness: SOperand,
+        witness: Option<SOperand>,
+        provisions: Box<[(crate::semantic::Provision<'db>, SOperand)]>,
     },
     Unary {
         op: UnOp,

@@ -1164,7 +1164,11 @@ impl<'db> Callable<'db> {
             // before semantic call validation can turn it into an internal error.
             if matches!(
                 context.provision_for(db, goal),
-                Some(crate::semantic::Provision::Bound(_))
+                Some(
+                    crate::semantic::Provision::Bound(_)
+                        | crate::semantic::Provision::EvidenceLocal(..)
+                        | crate::semantic::Provision::EvidenceParameter(..)
+                )
             ) && !goal
                 .args(db)
                 .iter()

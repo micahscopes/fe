@@ -511,6 +511,9 @@ pub(crate) fn lower_const_body_path<'db>(
                         name,
                     )
                     .with_provision(minter.provision_for(db, inst));
+                    let assoc = minter.selection_context().map_or(assoc, |context| {
+                        assoc.with_dependent_provisions(db, context)
+                    });
                     super::const_ty::abstract_const_ty_from_assoc_const_use(db, assoc, expected_ty)
                 } else {
                     ConstTyId::invalid(db, InvalidCause::Other)
@@ -672,6 +675,9 @@ pub(crate) fn lower_type_position_path<'db>(
                     name,
                 )
                 .with_provision(minter.provision_for(db, inst));
+                let assoc = minter.selection_context().map_or(assoc, |context| {
+                    assoc.with_dependent_provisions(db, context)
+                });
                 if let Some(const_ty) = super::const_ty::const_ty_or_abstract_from_assoc_const_use(
                     db,
                     assoc,

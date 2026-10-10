@@ -2083,7 +2083,7 @@ pub(crate) fn semantic_instance_base_assumptions_for_key<'db>(
     let impl_env = key.impl_env(db);
     let mut predicates: IndexSet<_> = assumptions.list(db).iter().copied().collect();
     predicates.extend(impl_env.assumptions(db).list(db).iter().copied());
-    predicates.extend(impl_env.witnesses(db).iter().copied());
+    predicates.extend(impl_env.witnesses(db));
     PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>()).extend_all_bounds(db)
 }
 

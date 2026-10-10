@@ -3038,7 +3038,9 @@ pub(crate) fn expr_used_locals(expr: &SExpr<'_>) -> Vec<SLocalId> {
             locals.push(base.value);
             locals.push(index.value);
         }
-        SExpr::OpenedConst { witness, .. } => locals.push(witness.value),
+        SExpr::OpenedConst { provisions, .. } => {
+            locals.extend(provisions.iter().map(|(_, witness)| witness.value))
+        }
         SExpr::Call {
             args,
             effect_args,

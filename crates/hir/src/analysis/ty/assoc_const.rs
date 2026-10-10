@@ -60,6 +60,41 @@ impl<'db> AssocConstUse<'db> {
         self.dependent
     }
 
+    /// Evidence still owned by this read, including reached prerequisites.
+    pub(crate) fn opened_provisions(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> impl Iterator<Item = crate::semantic::Provision<'db>> {
+        self.provision
+            .into_iter()
+            .chain(
+                self.dependent
+                    .into_iter()
+                    .flat_map(move |context| context.openings(db).iter().copied()),
+            )
+            .filter(|provision| provision.evidence_operand().is_some())
+    }
+
+    /// Replace only the prerequisite operand whose proof was checked by CTFE.
+    pub(crate) fn open_prerequisite(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        provision: crate::semantic::Provision<'db>,
+        application: SelectedApplication<'db>,
+        proof: &super::trait_def::SelectedImplEvidence<'db>,
+    ) -> Self {
+        let Some(context) = self
+            .dependent
+            .filter(|context| context.openings(db).contains(&provision))
+        else {
+            return self;
+        };
+        Self {
+            dependent: Some(context.open_application(db, application, proof)),
+            ..self
+        }
+    }
+
     pub fn premises(self) -> crate::analysis::semantic::SolverPremises<'db> {
         self.premises
     }

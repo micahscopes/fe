@@ -1137,10 +1137,11 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         }
         use crate::analysis::ty::fold::{TyFoldable, TyFolder};
         struct Opened<'a, 'db> {
-            selections: &'a FxHashMap<
+            selections: &'a [(
                 crate::semantic::Provision<'db>,
                 crate::analysis::semantic::SelectedApplication<'db>,
-            >,
+                crate::analysis::ty::trait_def::SelectedImplEvidence<'db>,
+            )],
         }
         impl<'db> TyFolder<'db> for Opened<'_, 'db> {
             fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
@@ -1152,19 +1153,25 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 use_: crate::analysis::ty::assoc_const::AssocConstUse<'db>,
             ) -> crate::analysis::ty::assoc_const::AssocConstUse<'db> {
                 let use_ = use_.super_fold_with(db, self);
-                match use_
-                    .provision()
-                    .and_then(|provision| self.selections.get(&provision))
-                {
-                    Some(selection) => use_.with_selection(Some(*selection)),
+                let mut use_ = use_;
+                for (provision, selection, proof) in self.selections {
+                    use_ = use_.open_prerequisite(db, *provision, *selection, proof);
+                }
+                match use_.provision().and_then(|provision| {
+                    self.selections
+                        .iter()
+                        .find(|(opening, _, _)| *opening == provision)
+                }) {
+                    Some((_, selection, _)) => use_.with_selection(Some(*selection)),
                     None => use_,
                 }
             }
         }
-        let mut selections = FxHashMap::default();
+        let mut selections = Vec::with_capacity(provisions.len());
         for &(provision, witness) in provisions {
-            let (selection, _) = self.opened_proof(frame_idx, witness, provision.goal(), origin)?;
-            selections.insert(provision, selection);
+            let (selection, proof) =
+                self.opened_proof(frame_idx, witness, provision.goal(), origin)?;
+            selections.push((provision, selection, proof));
         }
         let ty = TyId::const_ty(self.db, term).fold_with(
             self.db,
@@ -1535,7 +1542,29 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             .normalized_ty(self.db, result_ty);
         // Keep the large value-operation frame off recursive call paths.
         match expr {
-            SExpr::OpenedConst { assoc, witness } => {
+            SExpr::OpenedConst {
+                assoc,
+                witness,
+                provisions,
+            } => {
+                let term = crate::analysis::ty::const_ty::abstract_const_ty_from_assoc_const_use(
+                    self.db, assoc, result_ty,
+                );
+                let term = self.opened_const_term(frame_idx, term, &provisions, origin)?;
+                let ConstTyData::Abstract(term, _) = term.data(self.db) else {
+                    unreachable!("opening preserves an associated constant description");
+                };
+                let crate::analysis::ty::const_expr::ConstExpr::TraitConst(assoc) =
+                    term.data(self.db)
+                else {
+                    unreachable!("opening preserves an associated constant description");
+                };
+                let assoc = *assoc;
+                let Some(witness) = witness else {
+                    let cref = crate::analysis::semantic::instance::resolve_semantic_const_ref_in_instance(self.db, None, crate::analysis::ty::ty_check::ConstRef::TraitConst(assoc), result_ty, origin, false).ok_or(CtfeError::NotConstEvaluable { origin })?;
+                    let value = self.eval_const_ref_value(cref)?;
+                    return self.load_sem_const(value, origin);
+                };
                 let goal = assoc.inst();
                 let (selection, proof) = self.opened_proof(frame_idx, witness, goal, origin)?;
                 let (body, ty, subst) =

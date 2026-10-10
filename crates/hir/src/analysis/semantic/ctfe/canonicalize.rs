@@ -267,8 +267,11 @@ fn collect_local_roots(body: &SemanticBody<'_>) -> LocalRoots {
                         SExpr::Forward(value)
                         | SExpr::UseValue(value)
                         | SExpr::Cast { value, .. }
-                        | SExpr::ExtractEnumField { value, .. }
-                        | SExpr::OpenedConst { witness: value, .. } => vec![value.value],
+                        | SExpr::ExtractEnumField { value, .. } => vec![value.value],
+                        SExpr::OpenedConst { provisions, .. } => provisions
+                            .iter()
+                            .map(|(_, witness)| witness.value)
+                            .collect(),
                         SExpr::ArrayRepeat {
                             value, provisions, ..
                         } => {

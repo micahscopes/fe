@@ -714,7 +714,11 @@ fn semantic_callee_key_with_context<'db>(
                         .any(|ty| ty.has_param(db) || ty.has_var(db))
                         && matches!(
                             impl_env.provision_for(db, inst),
-                            Some(crate::semantic::Provision::Bound(_))
+                            Some(
+                                crate::semantic::Provision::Bound(_)
+                                    | crate::semantic::Provision::EvidenceLocal(..)
+                                    | crate::semantic::Provision::EvidenceParameter(..)
+                            )
                         ) =>
                 {
                     crate::core::semantic::provisional_opened_method(db, context, inst, name)
@@ -1039,7 +1043,7 @@ fn semantic_callee_key_with_context<'db>(
                 .instantiate(db, &subst_args);
         let mut predicates: IndexSet<_> =
             impl_env.assumptions(db).list(db).iter().copied().collect();
-        predicates.extend(impl_env.witnesses(db).iter().copied());
+        predicates.extend(impl_env.witnesses(db));
         predicates.extend(body_constraints.list(db).iter().copied());
         let evidence = PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>())
             .extend_all_bounds(db);
@@ -1250,6 +1254,17 @@ pub(crate) fn resolve_semantic_const_ref_in_instance<'db>(
     origin: SemOrigin<'db>,
     inherit_trait_selection: bool,
 ) -> Option<SemanticConstRef<'db>> {
+    // The constant's own accepted answer and its prerequisite choices are
+    // distinct: an ordinary blanket constant still reads the caller's bounds.
+    let const_ref = match (const_ref, caller_key) {
+        (ConstRef::TraitConst(assoc), Some(caller)) => {
+            ConstRef::TraitConst(assoc.with_dependent_provisions(
+                db,
+                SemanticInstance::new(db, caller).context_at(db, origin),
+            ))
+        }
+        (const_ref, _) => const_ref,
+    };
     let caller_key = caller_key.filter(|_| inherit_trait_selection);
     let instance = match const_ref {
         ConstRef::Const(const_) => semantic_const_key_for_const(db, const_),
@@ -1294,10 +1309,7 @@ fn semantic_const_key_for_assoc_const<'db>(
     caller_key: Option<SemanticInstanceKey<'db>>,
     assoc: AssocConstUse<'db>,
 ) -> Option<SemanticInstanceKey<'db>> {
-    if assoc
-        .provision()
-        .is_some_and(|p| p.evidence_operand().is_some())
-    {
+    if assoc.opened_provisions(db).next().is_some() {
         // The lexical operand, not an ordinary lookup, decides this read.
         return None;
     }

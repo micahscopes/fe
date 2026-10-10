@@ -1,0 +1,31 @@
+// F3 reduction (NAMED spelling only): the caller's named choice answers a
+// generic function's bound; the body reads a derived constant, a derived
+// method, and the direct constant. All three must see the caller's choice (2).
+trait Width { const N: usize }
+trait Derived { const M: usize }
+trait DerivedFn { const fn m() -> usize }
+struct Subject {}
+struct Wrap<T> {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+impl<T: Width> Derived for Wrap<T> { const M: usize = T::N }
+impl<T: Width> DerivedFn for Wrap<T> { const fn m() -> usize { T::N } }
+fn direct<T: Width>() -> usize { T::N }
+fn derived_method<T: Width>() -> usize { <Wrap<T> as DerivedFn>::m() }
+fn derived_const<T: Width>() -> usize { <Wrap<T> as Derived>::M }
+const fn derived_const_ct<T: Width>() -> usize { <Wrap<T> as Derived>::M }
+const fn derived_method_ct<T: Width>() -> usize { <Wrap<T> as DerivedFn>::m() }
+const CT_CONST: usize = with (Wide) { derived_const_ct<Subject>() }
+const CT_METHOD: usize = with (Wide) { derived_method_ct<Subject>() }
+#[test]
+fn runtime_direct_wide_2() { assert(with (Wide) { direct<Subject>() } == 2) }
+#[test]
+fn runtime_derived_method_wide_2() { assert(with (Wide) { derived_method<Subject>() } == 2) }
+#[test]
+fn runtime_derived_const_wide_2() { assert(with (Wide) { derived_const<Subject>() } == 2) }
+#[test]
+fn const_derived_method_wide_2() { assert(CT_METHOD == 2) }
+#[test]
+fn const_derived_const_wide_2() { assert(CT_CONST == 2) }
+#[test]
+fn ordinary_derived_const_1() { assert(derived_const<Subject>() == 1) }

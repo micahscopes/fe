@@ -3837,7 +3837,7 @@ impl<'db> TyChecker<'db> {
         star_kind_required: bool,
     ) -> TyId<'db> {
         let context = self.env.selection_context();
-        let ty = if !context.witnesses(self.db).is_empty() {
+        let ty = if context.witnesses(self.db).len() != 0 {
             // Keep written constant paths until their full lexical provision
             // has been captured; eager lowering would select an ordinary impl.
             let assumptions = self.env.method_lookup_assumptions();

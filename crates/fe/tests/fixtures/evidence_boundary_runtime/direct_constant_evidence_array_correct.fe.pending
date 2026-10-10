@@ -1,0 +1,21 @@
+// Pending control: direct evidence symbolic lengths also reject concrete literals on accepted c31.
+// Layout twin, evidence spelling: a two-element array against a derived length
+// that is 2 under evidence carrying `Wide`. Expected: ACCEPT, value 6.
+use core::obligations::{Evidence, prove}
+trait Width { const N: usize }
+trait Derived { const M: usize }
+struct Subject {}
+struct Wrap<T> {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+impl<T: Width> Derived for Wrap<T> { const M: usize = T::N }
+const fn f() -> u256 {
+    let e = with (Wide) { prove<Width<Subject>>() }
+    with (e) {
+        let y: [u256; <Subject as Width>::N] = [5, 6]
+        y[1]
+    }
+}
+const F: u256 = f()
+#[test]
+fn value_6() { assert(F == 6) }

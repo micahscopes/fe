@@ -274,7 +274,7 @@ fn impl_env_identity<'db>(
     mode: IdentityMode,
 ) -> String {
     let assumptions = trait_list_identity(db, env.assumptions(db).list(db).iter().copied(), mode);
-    let witnesses = trait_list_identity(db, env.witnesses(db).iter().copied(), mode);
+    let witnesses = trait_list_identity(db, env.witnesses(db), mode);
     // Name the ingot as well as the module in the normalization scope.
     let mut identity = format!(
         "scope${}${}$assumptions${assumptions}$witnesses${witnesses}",

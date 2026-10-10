@@ -1,0 +1,83 @@
+// Controls around p1r_a, one test per shape. Every expected value is the
+// named choice's (2) unless the test name says otherwise.
+use core::obligations::{Evidence, prove}
+trait Width {
+    const N: usize
+    const fn n() -> usize
+}
+trait Derived { const M: usize }
+trait DerivedFn { const fn m() -> usize }
+trait DerivedViaFn { const K: usize }
+struct Subject {}
+struct Wrap<T> {}
+impl Width for Subject {
+    const N: usize = 1
+    const fn n() -> usize { 1 }
+}
+impl Width for Subject as Wide {
+    const N: usize = 2
+    const fn n() -> usize { 2 }
+}
+impl<T: Width> Derived for Wrap<T> { const M: usize = T::N }
+impl<T: Width> DerivedFn for Wrap<T> { const fn m() -> usize { T::N } }
+impl<T: Width> DerivedViaFn for Wrap<T> { const K: usize = T::n() }
+
+// Direct read of the evidence's own goal.
+const fn direct_evidence() -> usize {
+    let e = with (Wide) { prove<Width<Subject>>() }
+    with (e) { <Subject as Width>::N }
+}
+// Derived method whose body reads the constant.
+const fn method_evidence() -> usize {
+    let e = with (Wide) { prove<Width<Subject>>() }
+    with (e) { <Wrap<Subject> as DerivedFn>::m() }
+}
+const fn method_named() -> usize { with (Wide) { <Wrap<Subject> as DerivedFn>::m() } }
+// Derived constant whose initializer calls the method.
+const fn const_via_fn_evidence() -> usize {
+    let e = with (Wide) { prove<Width<Subject>>() }
+    with (e) { <Wrap<Subject> as DerivedViaFn>::K }
+}
+const fn const_via_fn_named() -> usize { with (Wide) { <Wrap<Subject> as DerivedViaFn>::K } }
+// Derived constant, named spelling and the inline-evidence spelling.
+const fn const_named() -> usize { with (Wide) { <Wrap<Subject> as Derived>::M } }
+const fn const_inline_evidence() -> usize {
+    with (Wide) { with (prove<Width<Subject>>()) { <Wrap<Subject> as Derived>::M } }
+}
+// Evidence carrying the ordinary choice under an outer named choice: inner wins.
+const fn ordinary_evidence_under_named() -> usize {
+    let e = prove<Width<Subject>>()
+    with (Wide) { with (e) { <Wrap<Subject> as Derived>::M } }
+}
+const DIRECT: usize = direct_evidence()
+const METHOD_E: usize = method_evidence()
+const METHOD_N: usize = method_named()
+const VIAFN_E: usize = const_via_fn_evidence()
+const VIAFN_N: usize = const_via_fn_named()
+const CONST_N: usize = const_named()
+const CONST_INLINE: usize = const_inline_evidence()
+const ORD_UNDER_NAMED: usize = ordinary_evidence_under_named()
+#[test]
+fn direct_evidence_2() { assert(DIRECT == 2) }
+#[test]
+fn method_evidence_2() { assert(METHOD_E == 2) }
+#[test]
+fn method_named_2() { assert(METHOD_N == 2) }
+#[test]
+fn const_via_fn_evidence_2() { assert(VIAFN_E == 2) }
+#[test]
+fn const_via_fn_named_2() { assert(VIAFN_N == 2) }
+#[test]
+fn const_named_2() { assert(CONST_N == 2) }
+#[test]
+fn const_inline_evidence_2() { assert(CONST_INLINE == 2) }
+#[test]
+fn ordinary_evidence_under_named_1() { assert(ORD_UNDER_NAMED == 1) }
+
+const fn local_derived() -> usize {
+    let e = with (Wide) { prove<Width<Subject>>() }
+    with (e) { <Wrap<Subject> as Derived>::M }
+}
+const LOCAL_DERIVED: usize = local_derived()
+#[test]
+fn local_derived_2() { assert(LOCAL_DERIVED == 2) }

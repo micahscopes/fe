@@ -1428,10 +1428,7 @@ fn force_const_computation_in_context<'db>(
         ConstEntry::Resolved(key) => cx.execute_body(db, key, args, origin),
         ConstEntry::Associated(use_) => {
             let Some(const_ty) = const_ty_from_assoc_const_use(db, use_) else {
-                let dependent = use_
-                    .provision()
-                    .and_then(|p| p.evidence_operand())
-                    .is_some()
+                let dependent = use_.opened_provisions(db).next().is_some()
                     || use_
                         .inst()
                         .args(db)
