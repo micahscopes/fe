@@ -2166,14 +2166,8 @@ impl<'db> TyChecker<'db> {
                         }
                     }
                     ResolvedEffectKey::Type(schema) => {
-                        let given = normalize_ty(
-                            self.db,
-                            schema.carrier,
-                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                                contract.scope(),
-                                assumptions,
-                            ),
-                        );
+                        let given =
+                            normalize_ty(self.db, schema.carrier, context.premises(self.db));
                         if !given.is_zero_sized(self.db) {
                             self.push_diag(BodyDiag::ContractRootEffectTypeNotZeroSized {
                                 owner,
@@ -2379,48 +2373,27 @@ impl<'db> TyChecker<'db> {
     }
 
     pub(super) fn normalize_trait_goal(&mut self, goal: TraitInstId<'db>) -> TraitInstId<'db> {
-        self.normalize_trait_goal_with_assumptions(goal, self.env.assumptions())
+        self.normalize_trait_goal_in_context(goal, self.env.position_context())
     }
 
-    fn normalize_trait_goal_with_assumptions(
+    fn normalize_trait_goal_in_context(
         &mut self,
         goal: TraitInstId<'db>,
-        assumptions: PredicateListId<'db>,
+        context: ImplEnv<'db>,
     ) -> TraitInstId<'db> {
         let db = self.db;
-        let scope = self.env.scope();
+        let premises = context.premises(db);
         let goal = goal.fold_with(db, &mut self.table);
         let args: Vec<_> = goal
             .args(db)
             .iter()
             .copied()
-            .map(|ty| {
-                normalize_ty(
-                    db,
-                    ty,
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        scope,
-                        assumptions,
-                    ),
-                )
-            })
+            .map(|ty| normalize_ty(db, ty, premises))
             .collect();
         let assoc_type_bindings: IndexMap<_, _> = goal
             .assoc_type_bindings(db)
             .iter()
-            .map(|(&name, &ty)| {
-                (
-                    name,
-                    normalize_ty(
-                        db,
-                        ty,
-                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                            scope,
-                            assumptions,
-                        ),
-                    ),
-                )
-            })
+            .map(|(&name, &ty)| (name, normalize_ty(db, ty, premises)))
             .collect();
         TraitInstId::new(db, goal.def(db), args, assoc_type_bindings)
     }
@@ -2729,7 +2702,6 @@ impl<'db> TyChecker<'db> {
         // checker happens to be when it is processed.
         let context = obligation.context.fold_with(db, &mut self.table);
         let scope = context.normalization_scope(db);
-        let assumptions = context.assumptions(db);
 
         if self.has_dead_inference_keys(&obligation.goal) {
             return TraitObligationOutcome::Discharged;
@@ -2747,7 +2719,7 @@ impl<'db> TyChecker<'db> {
             obligation.goal = obligation.goal.fold_with(db, &mut prober);
         }
 
-        obligation.goal = self.normalize_trait_goal_with_assumptions(obligation.goal, assumptions);
+        obligation.goal = self.normalize_trait_goal_in_context(obligation.goal, context);
         let goal = obligation.goal;
         let flags = collect_flags(db, goal);
         if flags.contains(TyFlags::HAS_INVALID) || self.has_dead_inference_keys(&goal) {
@@ -2760,7 +2732,7 @@ impl<'db> TyChecker<'db> {
             let snapshot = self.table.snapshot();
             let mut directly_selected = None;
             for &required in requirements.list(db) {
-                let required = self.normalize_trait_goal_with_assumptions(required, assumptions);
+                let required = self.normalize_trait_goal_in_context(required, context);
                 let Some(selection) = obligation.context.selection_for(db, required) else {
                     continue;
                 };
@@ -2805,7 +2777,7 @@ impl<'db> TyChecker<'db> {
             }
             // Selected parent equalities may have constrained the root goal,
             // but proving those parents does not establish the root impl.
-            obligation.goal = self.normalize_trait_goal_with_assumptions(goal, assumptions);
+            obligation.goal = self.normalize_trait_goal_in_context(goal, context);
         }
         let goal = obligation.goal;
         let query = solve_cx.goal_query(db, goal);
@@ -2954,7 +2926,6 @@ impl<'db> TyChecker<'db> {
         let db = self.db;
         let scope = obligation.context.normalization_scope(db);
         let goal = obligation.goal;
-        let assumptions = obligation.context.assumptions(db);
         if goal.self_ty(db).has_var(db) {
             let outcome = if final_pass {
                 // Don't invent the self type at the end either; leave it alone
@@ -2991,7 +2962,7 @@ impl<'db> TyChecker<'db> {
         ) {
             self.env.register_const_obligation(pending);
         }
-        let answered_goal = self.normalize_trait_goal_with_assumptions(goal, assumptions);
+        let answered_goal = self.normalize_trait_goal_in_context(goal, obligation.context);
         self.env.record_trait_choice(
             env::DecisionSite {
                 origin: obligation.origin,
