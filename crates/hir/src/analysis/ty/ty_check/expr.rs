@@ -422,10 +422,7 @@ impl<'db> TyChecker<'db> {
         let expected = normalize_ty(
             self.db,
             expected,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.env.scope(),
-                self.env.assumptions(),
-            ),
+            self.env.position_context().premises(self.db),
         );
 
         self.env.enter_expr(expr);
@@ -480,10 +477,7 @@ impl<'db> TyChecker<'db> {
         actual.ty = normalize_ty(
             self.db,
             actual.ty,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.env.scope(),
-                self.env.assumptions(),
-            ),
+            self.env.position_context().premises(self.db),
         );
         if let Some(coerced) =
             self.try_coerce_capability_for_expr_to_expected(expr, actual.ty, expected)
@@ -746,18 +740,12 @@ impl<'db> TyChecker<'db> {
         let mut from = normalize_ty(
             self.db,
             inner_prop.ty,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.env.scope(),
-                self.env.assumptions(),
-            ),
+            self.env.position_context().premises(self.db),
         );
         let to = normalize_ty(
             self.db,
             target_ty,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.env.scope(),
-                self.env.assumptions(),
-            ),
+            self.env.position_context().premises(self.db),
         );
 
         // Casts operate on values, so for Copy capabilities treat the source as
@@ -2937,10 +2925,7 @@ impl<'db> TyChecker<'db> {
         let target_ty = normalize_ty(
             self.db,
             target_ty,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.env.scope(),
-                self.env.assumptions(),
-            ),
+            self.env.position_context().premises(self.db),
         );
         match provider_semantics(self.db, self.env.scope(), self.env.assumptions(), target_ty)
             .evidence
@@ -4744,10 +4729,7 @@ impl<'db> TyChecker<'db> {
                         expr,
                         ConstRef::TraitConst(
                             AssocConstUse::new(
-                                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                                    self.env.scope(),
-                                    self.env.assumptions(),
-                                ),
+                                self.env.position_context().premises(self.db),
                                 inst,
                                 name,
                             )
