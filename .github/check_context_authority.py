@@ -20,6 +20,7 @@ spec.loader.exec_module(budget)
 SEMANTIC = "crates/hir/src/core/semantic/"
 SOLVER = "crates/hir/src/analysis/ty/trait_resolution/"
 CONTEXT = SEMANTIC + "context.rs"
+CHAIN = SEMANTIC + "provision.rs"
 SOLVER_CONTEXT = SOLVER + "mod.rs"
 
 
@@ -71,6 +72,13 @@ def violations(sources: dict[str, str]) -> list[str]:
     for method in ["new", "with_assumptions", "with_provisions"]:
         if method_visibility(cx, method) != [""]:
             errors.append(f"TraitSolveCx::{method} must remain private to the solver")
+    chain = impl_methods(sources.get(CHAIN, ""), "Chain")
+    for method in ["new", "complete_root"]:
+        if method_visibility(chain, method) != ["pub(super)"]:
+            errors.append(f"Chain::{method} must remain private to the semantic owner")
+    frame = impl_methods(sources.get(CHAIN, ""), "Frame")
+    if not re.search(r"if\s+matches!\s*\(\s*provision\s*,\s*Provision::Bound\s*\(\s*_\s*\)\s*\)\s*\{\s*return\s+Err\(\(\)\)\s*;", frame):
+        errors.append("item premises cannot enter through lexical frame insertion")
     env = impl_methods(owner, "ImplEnv")
     for method in ["new", "new_with_selections", "new_with_choices", "empty", "with_selections", "with_call_choices"]:
         if method_visibility(env, method) != ["pub(super)"]:
@@ -95,10 +103,11 @@ def violations(sources: dict[str, str]) -> list[str]:
         for name, methods in [
             ("TraitSolveCx", "new|at_position|without_caller_premises|transported_destination|fold_at_captured_origin|with_assumptions|with_provisions"),
             ("ImplEnv", "new|new_with_selections|new_with_choices|empty|with_selections|with_call_choices"),
+            ("Chain", "new|complete_root"),
         ]:
             for method in raw_references(code, name, methods):
                 errors.append(f"{path}: raw {name}::{method} outside its owner")
-        if re.search(r"(?:\.|::)\s*(?:with_assumptions|with_provisions|with_selections|with_call_choices)\b", code):
+        if re.search(r"(?:\.|::)\s*(?:with_assumptions|with_provisions|with_selections|with_call_choices|complete_root)\b", code):
             errors.append(f"{path}: raw context editor outside its owner")
     return errors
 

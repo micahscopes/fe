@@ -133,6 +133,13 @@ def evidence_source_boundary(provisions):
             raise ValueError('source classification must reuse the operand and goal fields')
 
 
+def mutate_context_projection(source, before, after):
+    code = goal_lookup.solver_budget.production_code(source)
+    body = goal_lookup.bodies(code, 'context')[0]
+    assert before in body, 'projection mutation must target the actual reader'
+    return code.replace(body, body.replace(before, after, 1), 1)
+
+
 if __name__ == '__main__':
     source = (ROOT / 'crates/hir/src/analysis/ty/ty_check/expr.rs').read_text()
     env = (ROOT / 'crates/hir/src/analysis/ty/ty_check/env.rs').read_text()
@@ -175,8 +182,8 @@ if __name__ == '__main__':
         (env.replace('self.provisions.evidence_assumptions', 'self.assumptions.list(self.db); self.provisions.evidence_assumptions', 1), semantic, provisions),
         (env.replace('self.provisions.method_lookup_assumptions', 'self.assumptions.list(self.db); self.provisions.method_lookup_assumptions', 1), semantic, provisions),
         (env, semantic.replace('provision::recorded_chain_at(db, typed, expr).context', 'assumptions.list(db); provision::recorded_chain_at(db, typed, expr).context', 1), provisions),
-        (env, semantic, provisions.replace('self.evidence_assumptions(db)', 'PredicateListId::empty_list(db)', 1)),
-        (env, semantic, provisions.replace('self.selections(db).collect()', 'Vec::new()', 1)),
+        (env, semantic, mutate_context_projection(provisions, 'self.evidence_assumptions(db)', 'PredicateListId::empty_list(db)')),
+        (env, semantic, mutate_context_projection(provisions, 'self.selections(db).collect()', 'Vec::new()')),
         (env.replace('self.provisions.context(self.db, self.owner_scope)', 'selection_context(self.db, self.owner_scope, Vec::new())', 1), semantic, provisions),
         (env, semantic, provisions.replace('typed.assumptions(),', 'PredicateListId::empty_list(db),', 1)),
         (env, semantic, provisions.replace('Chain::new(db, assumptions)', 'Chain::new(db, PredicateListId::empty_list(db))', 1)),

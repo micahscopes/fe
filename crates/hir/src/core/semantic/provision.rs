@@ -125,6 +125,10 @@ impl<'db, Data> Frame<'db, Data> {
         db: &'db dyn HirAnalysisDb,
         provision: Provision<'db>,
     ) -> Result<(), ()> {
+        // Item premises belong to their declaration root, never an opening.
+        if matches!(provision, Provision::Bound(_)) {
+            return Err(());
+        }
         if super::lookup_trait_goal(
             db,
             provision.goal(),
@@ -148,8 +152,31 @@ pub(crate) struct Chain<'db, Data = ()> {
     frames: Vec<Frame<'db, Data>>,
 }
 
+fn body_root_predicates<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: crate::analysis::ty::ty_check::BodyOwner<'db>,
+) -> PredicateListId<'db> {
+    use crate::analysis::ty::ty_check::BodyOwner;
+    match owner {
+        BodyOwner::Func(func) => super::func_body_assumptions(db, func),
+        BodyOwner::AnonConstBody { .. } | BodyOwner::Const(_) => {
+            super::body_assumptions_at(db, owner.scope())
+        }
+        _ => PredicateListId::empty_list(db),
+    }
+}
+
 impl<'db, Data: Default> Chain<'db, Data> {
-    pub fn new(db: &'db dyn HirAnalysisDb, root_assumptions: PredicateListId<'db>) -> Self {
+    /// The inference root has the body's declared premises before effects
+    /// are registered. Its caller cannot supply a replacement premise list.
+    pub(crate) fn for_body(
+        db: &'db dyn HirAnalysisDb,
+        owner: crate::analysis::ty::ty_check::BodyOwner<'db>,
+    ) -> Self {
+        Self::new(db, body_root_predicates(db, owner).extend_all_bounds(db))
+    }
+
+    pub(super) fn new(db: &'db dyn HirAnalysisDb, root_assumptions: PredicateListId<'db>) -> Self {
         Self {
             frames: vec![Frame {
                 provisions: root_assumptions
@@ -180,7 +207,11 @@ impl<'db, Data> Chain<'db, Data> {
     }
 
     /// Effect registration completes the item root before any lexical opening.
-    pub fn complete_root(&mut self, db: &'db dyn HirAnalysisDb, assumptions: PredicateListId<'db>) {
+    pub(super) fn complete_root(
+        &mut self,
+        db: &'db dyn HirAnalysisDb,
+        assumptions: PredicateListId<'db>,
+    ) {
         assert_eq!(
             self.frames.len(),
             1,
@@ -189,6 +220,60 @@ impl<'db, Data> Chain<'db, Data> {
         let root = &mut self.frames[0].provisions;
         root.retain(|p| !matches!(p, Provision::Bound(_)));
         root.extend(assumptions.list(db).iter().copied().map(Provision::Bound));
+    }
+
+    /// Complete the root from the effect bindings actually registered by
+    /// this checker, preserving the body's declared premise stage.
+    pub(crate) fn complete_checker_effects(
+        mut self,
+        db: &'db dyn HirAnalysisDb,
+        checker: &crate::analysis::ty::ty_check::env::TyCheckEnv<'db>,
+    ) -> Self {
+        let mut predicates = body_root_predicates(db, checker.owner()).list(db).to_vec();
+        predicates.extend(checker.registered_effect_bounds().iter().copied());
+        self.complete_root(
+            db,
+            PredicateListId::new(db, predicates).extend_all_bounds(db),
+        );
+        self
+    }
+
+    /// Specialize the root's effect premise to the accepted forwarder's
+    /// persistent body-local layout variables.
+    pub(crate) fn refine_effect_forwarder(
+        mut self,
+        db: &'db dyn HirAnalysisDb,
+        checker: &crate::analysis::ty::ty_check::env::TyCheckEnv<'db>,
+        forwarder: &crate::analysis::ty::effects::EffectForwarder<
+            'db,
+            crate::analysis::ty::ty_check::env::ProvidedEffect<'db>,
+        >,
+    ) -> Self {
+        use crate::analysis::ty::{effects::ForwardedEffectKey, ty_check::BodyOwner};
+        let (BodyOwner::Func(func), ForwardedEffectKey::Trait(key)) =
+            (checker.owner(), &forwarder.key)
+        else {
+            return self;
+        };
+        let provider = forwarder.provider.ty;
+        let goal = TraitInstId::new(
+            db,
+            key.def,
+            std::iter::once(provider)
+                .chain(key.args_no_self.iter().copied())
+                .collect::<Vec<_>>(),
+            key.assoc_bindings
+                .iter()
+                .copied()
+                .collect::<common::indexmap::IndexMap<_, _>>(),
+        );
+        let predicates = self.evidence_assumptions(db).list(db).iter().copied().map(|old| {
+            if old.def(db) == key.def && old.self_ty(db) == provider
+                && crate::analysis::ty::trait_resolution::constraint::is_trait_effect_provider_constraint(db, func, old)
+            { goal } else { old }
+        }).collect::<Vec<_>>();
+        self.complete_root(db, PredicateListId::new(db, predicates));
+        self
     }
 
     /// Enter a lexical frame. This is the sole frame-push operation.
@@ -498,4 +583,33 @@ pub(crate) fn recorded_chain_from_openings<'db>(
         chain.within(Frame::from_records(provisions));
     }
     chain
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::{Chain, Frame, Provision};
+    use crate::{analysis::ty::ty_check::BodyOwner, test_db::HirAnalysisTestDb};
+
+    #[test]
+    fn item_premises_cannot_be_inserted_as_lexical_openings() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "root_authority.fe".into(),
+            "trait Mark {}\nfn caller<T: Mark>() {}\n",
+        );
+        let (top, _) = db.top_mod(file);
+        db.assert_no_diags(top);
+        let function = top.all_funcs(&db)[0];
+        let chain = Chain::<()>::for_body(&db, BodyOwner::Func(function));
+        let goal = chain.evidence_assumptions(&db).list(&db)[0];
+        let mut frame: Frame<'_> = Frame::default();
+        assert!(
+            frame.insert(&db, Provision::Bound(goal)).is_err(),
+            "item bounds come only from their owning declaration"
+        );
+        assert!(
+            chain.evidence_assumptions(&db).list(&db).contains(&goal),
+            "the declared item premise remains available"
+        );
+    }
 }

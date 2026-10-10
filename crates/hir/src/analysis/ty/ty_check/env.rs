@@ -117,25 +117,8 @@ impl<'db> TyCheckEnv<'db> {
 
         let owner_scope = owner.scope();
 
-        // Compute base assumptions (without effect-derived bounds) up-front
-        let (base_preds, base_assumptions) = match owner {
-            BodyOwner::Func(func) => {
-                // Trait methods implicitly assume `Self: Trait` in their bodies so
-                // default method calls resolve against the trait being implemented.
-                let preds = crate::semantic::func_body_assumptions(db, func);
-                let assumptions = preds.extend_all_bounds(db);
-                (preds, assumptions)
-            }
-            BodyOwner::AnonConstBody { .. } | BodyOwner::Const(_) => {
-                let preds = crate::semantic::body_assumptions_at(db, owner_scope);
-                let assumptions = preds.extend_all_bounds(db);
-                (preds, assumptions)
-            }
-            _ => {
-                let empty = PredicateListId::empty_list(db);
-                (empty, empty)
-            }
-        };
+        let provisions = Chain::for_body(db, owner);
+        let base_assumptions = provisions.evidence_assumptions(db);
 
         let mut env = Self {
             db,
@@ -157,7 +140,7 @@ impl<'db> TyCheckEnv<'db> {
             decisions: Decisions::default(),
             effect_bounds: ThinVec::new(),
             base_assumptions,
-            provisions: Chain::new(db, base_assumptions),
+            provisions,
             var_env: vec![BlockEnv::new(owner_scope, 0)],
             pending_vars: FxHashMap::default(),
             loop_stack: Vec::new(),
@@ -245,11 +228,7 @@ impl<'db> TyCheckEnv<'db> {
 
         env.register_effect_bindings(base_assumptions);
 
-        // Finalize assumptions by merging in effect-derived bounds
-        let mut preds = base_preds.list(db).to_vec();
-        preds.extend(env.effect_bounds.iter().copied());
-        env.provisions
-            .complete_root(db, PredicateListId::new(db, preds).extend_all_bounds(db));
+        env.provisions = env.provisions.clone().complete_checker_effects(db, &env);
 
         Ok(env)
     }
@@ -738,7 +717,11 @@ impl<'db> TyCheckEnv<'db> {
         self.body
     }
 
-    pub(super) fn owner(&self) -> BodyOwner<'db> {
+    pub(crate) fn registered_effect_bounds(&self) -> &[TraitInstId<'db>] {
+        &self.effect_bounds
+    }
+
+    pub(crate) fn owner(&self) -> BodyOwner<'db> {
         self.owner
     }
 
@@ -1349,35 +1332,11 @@ impl<'db> TyChecker<'db> {
                 && let Some(forwarder) =
                     seed_forwarder_from_requirement(self, &req, provided, func.scope(), assumptions)
             {
-                if let crate::analysis::ty::effects::ForwardedEffectKey::Trait(key) = &forwarder.key
-                {
-                    // The premise and forwarder share the persistent body-local
-                    // layout variables, so one specialization updates both views.
-                    let goal = TraitInstId::new(
-                        self.db,
-                        key.def,
-                        std::iter::once(provided.ty)
-                            .chain(key.args_no_self.iter().copied())
-                            .collect::<Vec<_>>(),
-                        key.assoc_bindings
-                            .iter()
-                            .copied()
-                            .collect::<common::indexmap::IndexMap<_, _>>(),
-                    );
-                    let premises = self.env.assumptions().list(self.db).iter().copied().map(|old| {
-                        if old.def(self.db) == key.def
-                            && old.self_ty(self.db) == provided.ty
-                            && crate::analysis::ty::trait_resolution::constraint::is_trait_effect_provider_constraint(self.db, func, old)
-                        {
-                            goal
-                        } else {
-                            old
-                        }
-                    }).collect::<Vec<_>>();
-                    self.env
-                        .provisions
-                        .complete_root(self.db, PredicateListId::new(self.db, premises));
-                }
+                self.env.provisions = self
+                    .env
+                    .provisions
+                    .clone()
+                    .refine_effect_forwarder(self.db, &self.env, &forwarder);
                 self.env
                     .effect_env_mut()
                     .insert_forwarder(self.db, forwarder);
