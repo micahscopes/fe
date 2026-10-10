@@ -4382,8 +4382,7 @@ impl<'db> TyChecker<'db> {
             body: self.body(),
             site: BodyHoleSite::Expr(expr),
         };
-        let minter = LoweringContext::new(anchor)
-            .with_context(self.env.selection_context(), self.env.assumptions());
+        let minter = LoweringContext::new(anchor).with_context(self.env.selection_context());
         let unify_generic_args = |tc: &mut Self, callable: &mut Callable<'db>| {
             callable.unify_generic_args(tc, generic_args, anchor, generic_args_span.clone())
         };
@@ -4834,7 +4833,7 @@ impl<'db> TyChecker<'db> {
             body: self.body(),
             site: BodyHoleSite::Expr(expr),
         })
-        .with_context(self.env.selection_context(), self.env.assumptions());
+        .with_context(self.env.selection_context());
         // `Self` refers to the generated impl, while field visibility still
         // uses the provider authority below. Issued fields also authorize their
         // declaring record's path; their identities are checked by feed_label.

@@ -3908,7 +3908,7 @@ impl<'db> TyChecker<'db> {
                 scope: self.env.scope(),
                 assumptions: lookup_assumptions,
             })
-            .with_context(context, self.env.assumptions());
+            .with_context(context);
             super::ty_lower::lower_hir_ty_with_minter(
                 self.db,
                 hir_ty,

@@ -654,7 +654,7 @@ impl<'db> ImplEnv<'db> {
         destination: ScopeId<'db>,
     ) -> Option<Self> {
         let context = lowering.selection_context()?;
-        let premises = lowering.captured_const_premises()?;
+        let premises = context.assumptions(db);
         Some(Self::new_with_choices(
             db,
             destination,

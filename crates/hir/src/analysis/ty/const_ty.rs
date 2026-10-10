@@ -466,7 +466,6 @@ pub(crate) struct LoweringContext<'db> {
     holes: HoleMinter<'db>,
     const_bodies: ConstBodyLowering,
     selection_context: Option<ImplEnv<'db>>,
-    selected_const_assumptions: Option<PredicateListId<'db>>,
     source_params: Option<GenericParamOwner<'db>>,
     default_capture: Option<(GenericParamOwner<'db>, SourceParamIndex)>,
     /// Every path segment this lowering resolved, in resolution order, when
@@ -497,7 +496,6 @@ impl<'db> LoweringContext<'db> {
             holes: HoleMinter::new(anchor),
             const_bodies,
             selection_context: None,
-            selected_const_assumptions: None,
             source_params: None,
             default_capture: None,
             resolutions: None,
@@ -505,13 +503,8 @@ impl<'db> LoweringContext<'db> {
         }
     }
 
-    pub(crate) fn with_context(
-        mut self,
-        context: ImplEnv<'db>,
-        assumptions: PredicateListId<'db>,
-    ) -> Self {
+    pub(crate) fn with_context(mut self, context: ImplEnv<'db>) -> Self {
         self.selection_context = Some(context);
-        self.selected_const_assumptions = Some(assumptions);
         self
     }
 
@@ -519,12 +512,13 @@ impl<'db> LoweringContext<'db> {
         self.selection_context
     }
 
-    pub(crate) fn captured_const_premises(&self) -> Option<PredicateListId<'db>> {
-        self.selected_const_assumptions
-    }
-
-    pub(crate) fn const_assumptions(&self, default: PredicateListId<'db>) -> PredicateListId<'db> {
-        self.selected_const_assumptions.unwrap_or(default)
+    pub(crate) fn const_assumptions(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        default: PredicateListId<'db>,
+    ) -> PredicateListId<'db> {
+        self.selection_context
+            .map_or(default, |context| context.assumptions(db))
     }
 
     pub(crate) fn provision_for(

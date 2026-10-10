@@ -507,7 +507,7 @@ pub(crate) fn lower_const_body_path<'db>(
                     let assoc = AssocConstUse::new(
                         crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
                             scope,
-                            minter.const_assumptions(assumptions),
+                            minter.const_assumptions(db, assumptions),
                         ),
                         inst,
                         name,
@@ -668,7 +668,7 @@ pub(crate) fn lower_type_position_path<'db>(
                 let assoc = AssocConstUse::new(
                     crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
                         scope,
-                        minter.const_assumptions(assumptions),
+                        minter.const_assumptions(db, assumptions),
                     ),
                     inst,
                     name,

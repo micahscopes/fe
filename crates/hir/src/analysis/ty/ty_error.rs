@@ -152,7 +152,6 @@ pub(crate) fn collect_application_requirement_errors<'db>(
 ) -> Vec<TyDiagCollection<'db>> {
     let mut visitor = ApplicationRequirementVisitor {
         db,
-        assumptions: context.assumptions(db),
         context,
         diags: Vec::new(),
     };
@@ -322,7 +321,6 @@ pub(crate) fn written_type_uses<'db>(
 
 struct ApplicationRequirementVisitor<'db> {
     db: &'db dyn HirAnalysisDb,
-    assumptions: PredicateListId<'db>,
     context: crate::analysis::semantic::ImplEnv<'db>,
     diags: Vec<TyDiagCollection<'db>>,
 }
@@ -347,18 +345,18 @@ impl<'db> Visitor<'db> for ApplicationRequirementVisitor<'db> {
             HoleAnchor::TemplatePath {
                 path,
                 scope,
-                assumptions: self.assumptions,
+                assumptions: self.context.assumptions(self.db),
             },
             ConstBodyLowering::Eager,
         )
-        .with_context(self.context, self.assumptions);
+        .with_context(self.context);
         // Resolution errors are reported by lowering; only uses that resolved
         // are checked here.
         let _ = resolve_path_with_observer_and_minter(
             self.db,
             path,
             scope,
-            self.assumptions,
+            self.context.assumptions(self.db),
             false,
             &mut collect,
             &context,

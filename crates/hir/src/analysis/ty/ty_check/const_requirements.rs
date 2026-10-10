@@ -2917,7 +2917,7 @@ fn written_type_check_query<'db>(
                         scope: written.scope,
                         assumptions,
                     })
-                    .with_context(context, assumptions)
+                    .with_context(context)
                     .recording_resolutions();
                     let ty = super::super::ty_lower::lower_hir_ty_with_minter(
                         db,
@@ -4518,7 +4518,16 @@ fn use_it() -> u256 { read<7>() }";
                 param_idx: 0,
             },
         )
-        .with_context(env, PredicateListId::empty_list(&db));
+        .with_context(crate::analysis::semantic::ImplEnv::test_fixture(
+            &db,
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                from_scope,
+                PredicateListId::empty_list(&db),
+            ),
+            Vec::new(),
+            Vec::new(),
+            bound_choices.clone(),
+        ));
         let transported = lowering.const_impl_env(&db, to_scope).unwrap();
         assert_eq!(transported.normalization_scope(&db), to_scope);
         assert_eq!(
