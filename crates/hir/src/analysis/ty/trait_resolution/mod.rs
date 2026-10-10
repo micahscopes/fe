@@ -450,14 +450,7 @@ impl<'db> TraitSolveCx<'db> {
         {
             is_goal_satisfiable(db, self, inst)
         } else {
-            let query = CanonicalGoalQuery::from_query(
-                db,
-                TraitSolverQuery {
-                    goal: inst,
-                    assumptions: self.assumptions.extend_all_bounds(db),
-                    require_impl: true,
-                },
-            );
+            let query = self.implementation_goal_query(db, inst);
             match is_goal_query_satisfiable(db, self, &query) {
                 // A bound with no provable implementation can still be supplied
                 // by the caller. Incomplete searches cannot establish this.
@@ -465,6 +458,33 @@ impl<'db> TraitSolveCx<'db> {
                 result => result,
             }
         }
+    }
+
+    /// Specialize a known root effect provider from an implementation, rather
+    /// than from the effect bound whose layout holes are being established.
+    /// Prerequisites still use this position's premises and provisions.
+    pub(crate) fn provider_implementation_proof(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+    ) -> GoalSatisfiability<'db> {
+        let query = self.implementation_goal_query(db, goal);
+        is_goal_query_satisfiable(db, self, &query)
+    }
+
+    fn implementation_goal_query(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+    ) -> CanonicalGoalQuery<'db> {
+        CanonicalGoalQuery::from_query(
+            db,
+            TraitSolverQuery {
+                goal,
+                assumptions: self.assumptions.extend_all_bounds(db),
+                require_impl: true,
+            },
+        )
     }
 
     pub(crate) fn search_ingots_for_trait_inst(

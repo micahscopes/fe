@@ -1,0 +1,15 @@
+trait Gate {}
+struct Console {}
+impl Gate for Console as Open {}
+trait Logger { fn log(self) -> u256 }
+impl Logger for Console where Console: Gate {
+    fn log(self) -> u256 { 7 }
+}
+fn consume() -> u256 uses (logger: Logger) { logger.log() }
+fn selected() -> u256 {
+    with (Open) {
+        with (Console {}) { consume() }
+    }
+}
+#[test]
+fn provider_uses_outer_choice() { assert(selected() == 7) }

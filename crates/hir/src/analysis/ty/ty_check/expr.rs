@@ -66,7 +66,7 @@ use crate::analysis::ty::{
         provider_semantics_for_specialized_call,
     },
     trait_def::{TraitInstId, named_impls_for_member},
-    trait_resolution::{GoalSatisfiability, PredicateListId, TraitGoalSolution, TraitSolveCx},
+    trait_resolution::{GoalSatisfiability, PredicateListId, TraitGoalSolution},
     ty_check::callable::{Callable, EffectProviderProvenance, EffectProviderSpecialization},
     ty_def::{CapabilityKind, PrimTy, TyBase, TyData, prim_int_bits},
     unify::UnificationTable,
@@ -2907,47 +2907,6 @@ impl<'db> TyChecker<'db> {
             args,
             instantiated.assoc_type_bindings(self.db).clone(),
         );
-        if let Some(provision) = self
-            .env
-            .provision_for_goal(trait_goal)
-            .filter(|p| !matches!(p, Provision::Bound(_)))
-        {
-            let goal = match provision {
-                Provision::EvidenceLocal(_, goal) | Provision::EvidenceParameter(_, goal) => goal,
-                Provision::Named(selection) => selection
-                    .revalidate(
-                        self.db,
-                        self.trait_effect_solve_context(self.env.scope(), self.env.assumptions()),
-                        trait_goal,
-                    )
-                    .and_then(|proof| proof.goal_with_associated_bindings())
-                    .ok()?,
-                Provision::Bound(_) => unreachable!("bound lookup uses ordinary solving"),
-            };
-            let StoredEffectKey::Trait(witness) = finalize_stored_effect_key(
-                self.db,
-                StoredEffectKey::Trait(StoredTraitKey {
-                    def: goal.def(self.db),
-                    args_no_self: goal.args(self.db)[1..].iter().copied().collect(),
-                    assoc_bindings: goal.assoc_ty_bindings(self.db).into_iter().collect(),
-                    family: query.family,
-                }),
-                self.env.scope(),
-                self.env.assumptions(),
-            )?
-            else {
-                unreachable!("a finalized trait witness retains its key kind")
-            };
-            return Some(EffectEvidence::UnkeyedTrait {
-                provider,
-                commit: EffectCommitPlan {
-                    key_match: Some(KeyMatchCommit::WitnessTrait { query, witness }),
-                    ..Default::default()
-                },
-                arg_style: EffectArgStyle::Value,
-                layout_view: EffectArgLayoutView::Direct,
-            });
-        }
         let GoalSatisfiability::Satisfied(solution) =
             self.trait_effect_goal_satisfiability(trait_goal)
         else {
@@ -3412,28 +3371,7 @@ impl<'db> TyChecker<'db> {
         &self,
         trait_goal: TraitInstId<'db>,
     ) -> GoalSatisfiability<'db> {
-        self.trait_effect_goal_satisfiability_in_scope(
-            self.env.scope(),
-            self.env.assumptions(),
-            trait_goal,
-        )
-    }
-
-    fn trait_effect_solve_context(
-        &self,
-        scope: crate::hir_def::scope_graph::ScopeId<'db>,
-        assumptions: PredicateListId<'db>,
-    ) -> TraitSolveCx<'db> {
-        TraitSolveCx::new(self.db, scope).with_assumptions(assumptions)
-    }
-
-    pub(super) fn trait_effect_goal_satisfiability_in_scope(
-        &self,
-        scope: crate::hir_def::scope_graph::ScopeId<'db>,
-        assumptions: PredicateListId<'db>,
-        trait_goal: TraitInstId<'db>,
-    ) -> GoalSatisfiability<'db> {
-        let solve_cx = self.trait_effect_solve_context(scope, assumptions);
+        let solve_cx = self.env.solver_context();
         let query = solve_cx.goal_query(self.db, trait_goal);
         crate::analysis::ty::trait_resolution::is_goal_query_satisfiable(self.db, solve_cx, &query)
     }
@@ -3603,7 +3541,7 @@ impl<'db> TyChecker<'db> {
             IndexMap::new(),
         );
         let GoalSatisfiability::Satisfied(handle_solution) =
-            self.trait_effect_goal_satisfiability_in_scope(scope, assumptions, effect_handle_inst)
+            self.trait_effect_goal_satisfiability(effect_handle_inst)
         else {
             return None;
         };
@@ -3631,7 +3569,7 @@ impl<'db> TyChecker<'db> {
                 IndexMap::new(),
             );
             let GoalSatisfiability::Satisfied(effect_ref_solution) =
-                self.trait_effect_goal_satisfiability_in_scope(scope, assumptions, effect_ref_inst)
+                self.trait_effect_goal_satisfiability(effect_ref_inst)
             else {
                 return None;
             };
@@ -3647,12 +3585,8 @@ impl<'db> TyChecker<'db> {
                     vec![provided_ty, target_ty],
                     IndexMap::new(),
                 );
-                let GoalSatisfiability::Satisfied(effect_ref_mut_solution) = self
-                    .trait_effect_goal_satisfiability_in_scope(
-                        scope,
-                        assumptions,
-                        effect_ref_mut_inst,
-                    )
+                let GoalSatisfiability::Satisfied(effect_ref_mut_solution) =
+                    self.trait_effect_goal_satisfiability(effect_ref_mut_inst)
                 else {
                     return None;
                 };
@@ -3985,27 +3919,14 @@ impl<'db> TyChecker<'db> {
                     args,
                     instantiated.assoc_type_bindings(self.db).clone(),
                 );
-                let solved_inst = if let Some(provision) = self
-                    .env
-                    .provision_for_goal(trait_goal)
-                    .filter(|p| !matches!(p, Provision::Bound(_)))
-                {
-                    match provision {
-                        Provision::EvidenceLocal(_, goal)
-                        | Provision::EvidenceParameter(_, goal) => Some(goal),
-                        Provision::Named(selection) => selection
-                            .revalidate(
-                                self.db,
-                                self.trait_effect_solve_context(scope, assumptions),
-                                trait_goal,
-                            )
-                            .and_then(|proof| proof.goal_with_associated_bindings())
-                            .ok(),
-                        Provision::Bound(_) => unreachable!("bound lookup uses ordinary solving"),
-                    }
-                } else if let GoalSatisfiability::Satisfied(solution) =
-                    self.trait_effect_goal_satisfiability_in_scope(scope, assumptions, trait_goal)
-                {
+                let proof = if matches!(mode, WitnessBuildMode::SeededRequirement) {
+                    self.env
+                        .solver_context()
+                        .provider_implementation_proof(self.db, trait_goal)
+                } else {
+                    self.trait_effect_goal_satisfiability(trait_goal)
+                };
+                let solved_inst = if let GoalSatisfiability::Satisfied(solution) = proof {
                     let canonical_goal = Canonicalized::new(self.db, trait_goal);
                     let solved = canonical_goal.extract_solution(&mut table, solution);
                     Some(
