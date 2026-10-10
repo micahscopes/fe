@@ -759,10 +759,11 @@ fn lower_hir_ty_cycle_recover<'db>(
 
 fn lower_const_ty_ty<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
     ty: HirTyId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> TyId<'db> {
+    let scope = premises.scope();
+    let assumptions = premises.assumptions();
     // Generated HIR retains built-in identity directly; authored types use paths.
     let ty = match ty.data(db) {
         HirTyKind::Primitive(primitive) => TyId::new(db, TyData::TyBase(TyBase::from(*primitive))),
@@ -779,11 +780,7 @@ fn lower_const_ty_ty<'db>(
         _ => return TyId::invalid(db, InvalidCause::InvalidConstParamTy),
     };
 
-    let ty = normalize_ty(
-        db,
-        ty,
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
-    );
+    let ty = normalize_ty(db, ty, premises);
 
     if ty.has_invalid(db)
         || ty.is_integral(db)
@@ -4847,8 +4844,8 @@ impl<'db> TyParamPrecursor<'db> {
         let Variant::Const(Some(ty)) = self.variant else {
             return None;
         };
-        let assumptions = generic_param_owner_assumptions(db, scope);
-        Some(lower_const_ty_ty(db, scope, ty, assumptions))
+        let context = crate::semantic::header_context_at(db, scope);
+        Some(lower_const_ty_ty(db, ty, context.premises(db)))
     }
 }
 

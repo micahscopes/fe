@@ -18,7 +18,6 @@ use crate::analysis::ty::normalize::normalize_ty;
 use crate::analysis::ty::trait_lower::lower_impl_trait;
 use crate::analysis::ty::ty_def::{InvalidCause, Kind, TyId};
 use crate::analysis::ty::ty_error::{collect_ty_lower_errors, emit_invalid_ty_error};
-use crate::analysis::ty::ty_lower::generic_param_owner_assumptions;
 use crate::hir_def::{
     Contract, Enum, EnumVariant, FieldParent, Func, GenericParam, GenericParamOwner,
     GenericParamView, IdentId, Impl, ImplTrait, ItemKind, Partial, PathId, Struct, Trait,
@@ -1786,10 +1785,7 @@ impl<'db> GenericParamOwner<'db> {
                 db,
                 hir_ty,
                 span.clone(),
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    self.scope(),
-                    generic_param_owner_assumptions(db, self.scope()),
-                ),
+                crate::semantic::header_context_at(db, self.scope()).premises(db),
             );
             if !source_diags.is_empty() {
                 out.append(&mut source_diags);
