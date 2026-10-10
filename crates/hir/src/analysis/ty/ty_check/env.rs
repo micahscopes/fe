@@ -630,6 +630,25 @@ impl<'db> TyCheckEnv<'db> {
         self.provisions.context(self.db, self.scope())
     }
 
+    /// Retain the lexical inputs of a call that inference must revisit later.
+    pub(super) fn capture_position(&self) -> CapturedCheckerPosition<'db> {
+        CapturedCheckerPosition {
+            provisions: self.provisions.clone(),
+            blocks: self.var_env.clone(),
+        }
+    }
+
+    /// Revisit a captured position without rebuilding its proof or effect frames.
+    pub(super) fn exchange_position(
+        &mut self,
+        position: CapturedCheckerPosition<'db>,
+    ) -> CapturedCheckerPosition<'db> {
+        CapturedCheckerPosition {
+            provisions: std::mem::replace(&mut self.provisions, position.provisions),
+            blocks: std::mem::replace(&mut self.var_env, position.blocks),
+        }
+    }
+
     /// Read the accepted opening records at an already checked source position.
     pub(super) fn recorded_position_chain(&self, expr: ExprId) -> crate::semantic::Chain<'db> {
         let root = self
@@ -1437,6 +1456,7 @@ impl<'db> TyChecker<'db> {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct BlockEnv<'db> {
     pub(super) scope: ScopeId<'db>,
     pub(super) vars: FxHashMap<IdentId<'db>, LocalBinding<'db>>,
@@ -1829,8 +1849,34 @@ impl<'db> TyFolder<'db> for Prober<'db, '_> {
         }
     }
 }
+/// One retained checker position: lexical scopes and the unified provision chain.
+/// The chain includes value-provider frames, which a proof-only ImplEnv omits.
+#[derive(Clone)]
+pub(super) struct CapturedCheckerPosition<'db> {
+    provisions: keyed_effect_env::EffectEnv<'db>,
+    blocks: Vec<BlockEnv<'db>>,
+}
+
+impl<'db> CapturedCheckerPosition<'db> {
+    pub(super) fn scope(&self) -> ScopeId<'db> {
+        self.blocks
+            .last()
+            .expect("a checker position has an item scope")
+            .scope
+    }
+}
+
+impl std::fmt::Debug for CapturedCheckerPosition<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CapturedCheckerPosition")
+            .field("scope", &self.scope())
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct PendingMethod<'db> {
+    pub position: CapturedCheckerPosition<'db>,
     pub expr: crate::core::hir_def::ExprId,
     pub recv_ty: TyId<'db>,
     pub method_name: crate::core::hir_def::IdentId<'db>,

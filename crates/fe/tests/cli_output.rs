@@ -4883,6 +4883,11 @@ fn inherent_const_outer_prerequisite_at_o0_and_o2() {
 }
 
 #[test]
+fn deferred_method_keeps_its_inner_effect_provider_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("deferred_method_effect_provider.fe");
+}
+
+#[test]
 fn effect_provider_outer_prerequisite_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("effect_provider_outer_prerequisite.fe");
 }

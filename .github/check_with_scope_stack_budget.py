@@ -50,8 +50,22 @@ def ownership(env, effects):
     owners = re.findall(
         r"(?m)^\s*\w+\s*:\s*(?:keyed_effect_env::EffectEnv|Chain)\s*<", env
     )
-    if len(owners) != 1:
-        raise ValueError('the checker must own exactly one context chain')
+    # Deferred work retains a snapshot of the same chain, not a second stack.
+    snapshots = re.findall(
+        r"struct\s+CapturedCheckerPosition[^{}]*\{([^{}]*)\}", env
+    )
+    if len(snapshots) != 1 or not re.search(
+        r"provisions:\s*keyed_effect_env::EffectEnv\s*<", snapshots[0]
+    ):
+        raise ValueError('deferred positions must retain the unified chain')
+    capture = goal_lookup.bodies(env, 'capture_position')
+    exchange = goal_lookup.bodies(env, 'exchange_position')
+    if len(capture) != 1 or 'self.provisions.clone()' not in capture[0]:
+        raise ValueError('deferred positions must capture the existing chain')
+    if len(exchange) != 1 or 'std::mem::replace(&mut self.provisions, position.provisions)' not in exchange[0]:
+        raise ValueError('deferred positions must exchange the existing chain')
+    if len(owners) != 2:
+        raise ValueError('the checker must own one context chain and its retained snapshot')
     if not re.search(r'type\s+EffectEnv\s*<[^>]+>\s*=\s*crate::core::semantic::Chain\s*<', effects):
         raise ValueError('effect matching must read the semantic chain')
     if re.search(r'\bstruct\s+EffectEnv\b|\bframes\s*:\s*Vec\s*<', effects):

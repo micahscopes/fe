@@ -4201,6 +4201,7 @@ impl<'db> TyChecker<'db> {
                         .collect();
 
                     self.env.register_pending_method(super::env::PendingMethod {
+                        position: self.env.capture_position(),
                         expr,
                         recv_ty: selected_receiver_ty,
                         method_name,

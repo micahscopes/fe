@@ -1,0 +1,32 @@
+struct Counter { value: u8 }
+trait Small { fn get(self) -> u8 uses (counter: Counter) }
+trait Wide { fn get(self) -> u16 }
+struct Subject {}
+impl Small for Subject {
+    fn get(self) -> u8 uses (counter: Counter) { counter.value }
+}
+impl Wide for Subject { fn get(self) -> u16 { 99 } }
+fn delayed() -> u8 uses (counter: Counter) {
+    let value = with (Counter { value: 7 }) { Subject {}.get() }
+    let narrow: u8 = value
+    narrow
+}
+#[test]
+fn deferred_call_keeps_the_inner_provider() {
+    let got = with (Counter { value: 1 }) { delayed() }
+    assert(got == 7)
+}
+
+fn roundtrip() -> (u8, u8) uses (counter: Counter) {
+    let selected = with (Counter { value: 7 }) { Subject {}.get() }
+    let selected_narrow: u8 = selected
+    let outside = Subject {}.get()
+    let outside_narrow: u8 = outside
+    (selected_narrow, outside_narrow)
+}
+#[test]
+fn deferred_calls_restore_the_outside_provider() {
+    let (inside, outside) = with (Counter { value: 1 }) { roundtrip() }
+    assert(inside == 7)
+    assert(outside == 1)
+}
