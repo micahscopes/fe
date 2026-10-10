@@ -3376,54 +3376,29 @@ impl<'db> TyChecker<'db> {
         &mut self,
         resolution: ProviderTargetResolution<'db>,
     ) -> TyId<'db> {
-        self.commit_provider_target_resolution_in_scope(
-            resolution,
-            self.env.scope(),
-            self.env.assumptions(),
-        )
-    }
-
-    pub(super) fn commit_provider_target_resolution_in_scope(
-        &mut self,
-        resolution: ProviderTargetResolution<'db>,
-        scope: ScopeId<'db>,
-        assumptions: PredicateListId<'db>,
-    ) -> TyId<'db> {
-        let mut target_ty = self.renormalize_effect_provider_target_ty_in_scope(
-            resolution.target_seed_ty,
-            scope,
-            assumptions,
-        );
+        let mut target_ty = self.renormalize_effect_provider_target_ty(resolution.target_seed_ty);
         if let Some((handle_goal, handle_solution)) = resolution.handle_proof {
             self.commit_trait_goal_solution(handle_goal, handle_solution);
-            target_ty =
-                self.renormalize_effect_provider_target_ty_in_scope(target_ty, scope, assumptions);
+            target_ty = self.renormalize_effect_provider_target_ty(target_ty);
         }
         if let Some((effect_ref_goal, effect_ref_solution)) = resolution.effect_ref_proof {
             self.commit_trait_goal_solution(effect_ref_goal, effect_ref_solution);
-            target_ty =
-                self.renormalize_effect_provider_target_ty_in_scope(target_ty, scope, assumptions);
+            target_ty = self.renormalize_effect_provider_target_ty(target_ty);
         }
         if let Some((effect_ref_mut_goal, effect_ref_mut_solution)) =
             resolution.effect_ref_mut_proof
         {
             self.commit_trait_goal_solution(effect_ref_mut_goal, effect_ref_mut_solution);
-            target_ty =
-                self.renormalize_effect_provider_target_ty_in_scope(target_ty, scope, assumptions);
+            target_ty = self.renormalize_effect_provider_target_ty(target_ty);
         }
         target_ty
     }
 
-    fn renormalize_effect_provider_target_ty_in_scope(
-        &mut self,
-        target_ty: TyId<'db>,
-        scope: ScopeId<'db>,
-        assumptions: PredicateListId<'db>,
-    ) -> TyId<'db> {
+    fn renormalize_effect_provider_target_ty(&mut self, target_ty: TyId<'db>) -> TyId<'db> {
         normalize_ty(
             self.db,
             self.table.fold_ty(self.db, target_ty),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+            self.env.position_context().premises(self.db),
         )
         .fold_with(self.db, &mut self.table)
     }
@@ -3432,21 +3407,6 @@ impl<'db> TyChecker<'db> {
         &mut self,
         pattern: TypePatternKey<'db>,
         provided: ProvidedEffect<'db>,
-    ) -> Option<TypeEffectBindingMatch<'db>> {
-        self.select_type_effect_binding_match_in_scope(
-            pattern,
-            provided,
-            self.env.scope(),
-            self.env.assumptions(),
-        )
-    }
-
-    pub(super) fn select_type_effect_binding_match_in_scope(
-        &mut self,
-        pattern: TypePatternKey<'db>,
-        provided: ProvidedEffect<'db>,
-        scope: ScopeId<'db>,
-        assumptions: PredicateListId<'db>,
     ) -> Option<TypeEffectBindingMatch<'db>> {
         let can_commit_key_relation = |this: &mut Self, given: TyId<'db>| {
             let snapshot = this.snapshot_state();
@@ -3478,7 +3438,7 @@ impl<'db> TyChecker<'db> {
             return Some(TypeEffectBindingMatch::Direct { given: direct_ty });
         }
 
-        self.effect_provider_target_resolution_in_scope(provided.ty, false, scope, assumptions)
+        self.effect_provider_target_resolution(provided.ty, false)
             .and_then(|resolution| {
                 matches_key(self, resolution.target_ty)
                     .then_some(TypeEffectBindingMatch::Provider { resolution })
@@ -3490,21 +3450,7 @@ impl<'db> TyChecker<'db> {
         provided_ty: TyId<'db>,
         required_mut: bool,
     ) -> Option<ProviderTargetResolution<'db>> {
-        self.effect_provider_target_resolution_in_scope(
-            provided_ty,
-            required_mut,
-            self.env.scope(),
-            self.env.assumptions(),
-        )
-    }
-
-    fn effect_provider_target_resolution_in_scope(
-        &mut self,
-        provided_ty: TyId<'db>,
-        required_mut: bool,
-        scope: ScopeId<'db>,
-        assumptions: PredicateListId<'db>,
-    ) -> Option<ProviderTargetResolution<'db>> {
+        let scope = self.env.position_context().normalization_scope(self.db);
         if let Some((kind, inner_ty)) = provided_ty.as_capability(self.db) {
             if required_mut && !matches!(kind, CapabilityKind::Mut) {
                 return None;
@@ -3539,10 +3485,7 @@ impl<'db> TyChecker<'db> {
             let mut target_ty = normalize_ty(
                 self.db,
                 target_assoc,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    scope,
-                    assumptions,
-                ),
+                self.env.position_context().premises(self.db),
             )
             .fold_with(self.db, &mut self.table);
             let mut provided_ty = self.table.fold_ty(self.db, provided_ty);
@@ -3560,8 +3503,7 @@ impl<'db> TyChecker<'db> {
             };
             self.commit_trait_goal_solution(effect_ref_inst, effect_ref_solution);
             provided_ty = self.table.fold_ty(self.db, provided_ty);
-            target_ty =
-                self.renormalize_effect_provider_target_ty_in_scope(target_ty, scope, assumptions);
+            target_ty = self.renormalize_effect_provider_target_ty(target_ty);
 
             let effect_ref_mut_proof = if required_mut {
                 let effect_ref_mut_inst = TraitInstId::new(
@@ -3576,11 +3518,7 @@ impl<'db> TyChecker<'db> {
                     return None;
                 };
                 self.commit_trait_goal_solution(effect_ref_mut_inst, effect_ref_mut_solution);
-                target_ty = self.renormalize_effect_provider_target_ty_in_scope(
-                    target_ty,
-                    scope,
-                    assumptions,
-                );
+                target_ty = self.renormalize_effect_provider_target_ty(target_ty);
                 Some((effect_ref_mut_inst, effect_ref_mut_solution))
             } else {
                 None
