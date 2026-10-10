@@ -322,6 +322,26 @@ pub fn context_at<'db>(
     Chain::<()>::new(db, premises).context(db, scope)
 }
 
+/// Header formation reads declared bounds before implicit trait Self and
+/// effect-provider bounds are available. Keep the unelaborated declaration
+/// stage: proof queries elaborate it, without reading completed body output.
+pub(crate) fn header_context_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+) -> crate::analysis::semantic::ImplEnv<'db> {
+    use crate::analysis::ty::trait_resolution::constraint::{
+        collect_func_decl_premises, decl_premises,
+    };
+    let premises = match enclosing_item(db, scope) {
+        ItemKind::Func(func) => collect_func_decl_premises(db, func.into()),
+        item => GenericParamOwner::from_item_opt(item).map_or_else(
+            || PredicateListId::empty_list(db),
+            |owner| decl_premises(db, owner),
+        ),
+    };
+    Chain::<()>::new(db, premises).context(db, scope)
+}
+
 /// Declaration-phase premises at a position, for readers that run while a
 /// function's effect-provider bounds are still being computed. Asking for the
 /// completed premises there would re-enter the query that builds them, so a
@@ -672,10 +692,7 @@ pub(crate) fn header_constraints_for<'db>(
     db: &'db dyn HirAnalysisDb,
     item: ItemKind<'db>,
 ) -> PredicateListId<'db> {
-    match item {
-        ItemKind::Trait(trait_) => collect_constraints(db, trait_.into()).instantiate_identity(),
-        _ => constraints_for(db, item),
-    }
+    header_context_at(db, item.scope()).assumptions(db)
 }
 
 type CallableInputLayoutArgs<'db> =
@@ -6328,6 +6345,41 @@ mod item_context_tests {
             .iter()
             .map(|inst| inst.pretty_print(db, true))
             .collect()
+    }
+
+    #[test]
+    fn header_context_keeps_declared_bounds_without_self_or_effect_premises() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "header_context_stage.fe".into(),
+            "trait Leaf {}\ntrait Root<T: Leaf> {}\ntrait Provider {}\nfn factory<T: Leaf>() uses (io: Provider) {}\n",
+        );
+        let (module, _) = db.top_mod(file);
+        let root = trait_named(&db, module, "Root");
+        let factory = module
+            .children_non_nested(&db)
+            .find_map(|item| match item {
+                ItemKind::Func(func) => Some(func),
+                _ => None,
+            })
+            .expect("fixture function");
+        for (scope, implicit) in [(root.scope(), "Root"), (factory.scope(), "Provider")] {
+            let header = premise_names(&db, header_context_at(&db, scope));
+            let body = premise_names(&db, context_at(&db, scope, None));
+            assert!(
+                header.iter().any(|name| name.contains("Leaf")),
+                "declared bound: {header:?}"
+            );
+            assert!(
+                !header.iter().any(|name| name.contains(implicit)),
+                "no implicit Self or effect premise: {header:?}"
+            );
+            assert!(
+                body.iter().any(|name| name.contains(implicit)),
+                "body stage: {body:?}"
+            );
+        }
+        assert!(format_diagnostics(&db, &db.run_on_top_mod(module)).is_empty());
     }
 
     /// An associated type's own parameter bounds hold at its scope. In an impl
