@@ -2929,10 +2929,7 @@ fn written_type_check_query<'db>(
                     let ty = crate::analysis::ty::normalize::normalize_from_assumptions(
                         db,
                         ty,
-                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                            written.scope,
-                            assumptions,
-                        ),
+                        context.premises(db),
                     );
                     contextual = WrittenType {
                         lowered: (!ty.has_invalid(db)).then_some(ty),
