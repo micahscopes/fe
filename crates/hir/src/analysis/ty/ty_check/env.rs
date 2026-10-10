@@ -630,6 +630,23 @@ impl<'db> TyCheckEnv<'db> {
         self.provisions.context(self.db, self.scope())
     }
 
+    /// The call's signature chooses which live provisions its types may read.
+    pub(super) fn normalize_callee_type<F: TyFolder<'db>>(
+        &self,
+        callable: &super::Callable<'db>,
+        ty: TyId<'db>,
+        folder: &mut F,
+    ) -> TyId<'db> {
+        self.provisions.normalize_callee_type(
+            self.db,
+            self.owner_scope,
+            self.scope(),
+            callable,
+            ty,
+            folder,
+        )
+    }
+
     /// Retain the lexical inputs of a call that inference must revisit later.
     pub(super) fn capture_position(&self) -> CapturedCheckerPosition<'db> {
         CapturedCheckerPosition {

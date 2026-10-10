@@ -1902,45 +1902,8 @@ impl<'db> TyChecker<'db> {
         callable: &Callable<'db>,
         ty: TyId<'db>,
     ) -> TyId<'db> {
-        let requirements = callable
-            .selection_requirements(self.db)
-            .fold_with(self.db, &mut self.table);
-        let provisions = requirements
-            .list(self.db)
-            .iter()
-            .filter_map(|&goal| self.env.provision_for_goal(goal))
-            .collect::<Vec<_>>();
-        let assumptions = crate::semantic::lookup_assumptions(
-            self.db,
-            self.env.assumptions(),
-            provisions
-                .iter()
-                .filter_map(|p| p.evidence_operand().map(|(_, goal)| goal)),
-            provisions.iter().filter_map(|p| match p {
-                crate::semantic::Provision::Named(selection) => Some(*selection),
-                _ => None,
-            }),
-        );
-        let context = self.env.selection_context();
-        let ty = ty.fold_with(self.db, &mut self.table);
-        // A callee receives the provisions required by its signature, rather than
-        // every choice visible at the call site.
-        let ty = context.contextualize_const_types_with(self.db, ty, |goal| {
-            crate::semantic::lookup_trait_goal(
-                self.db,
-                goal,
-                provisions.iter().copied(),
-                |provision| provision.goal(),
-            )
-        });
-        normalize_ty(
-            self.db,
-            ty,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.env.scope(),
-                assumptions,
-            ),
-        )
+        self.env
+            .normalize_callee_type(callable, ty, &mut self.table)
     }
 
     fn normalize_callable_return(&mut self, callable: &Callable<'db>) -> TyId<'db> {

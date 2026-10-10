@@ -389,6 +389,44 @@ impl<'db, Data> Chain<'db, Data> {
         )
     }
 
+    /// Normalize signature types using only the live provisions required by
+    /// that call. Evidence keeps its source operand; an unrelated named choice
+    /// is not transported into the callee. Constants retain the body origin,
+    /// while ordinary normalization reads the call's actual lexical position.
+    pub(crate) fn normalize_callee_type<F: crate::analysis::ty::fold::TyFolder<'db>>(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        body_scope: crate::hir_def::scope_graph::ScopeId<'db>,
+        position_scope: crate::hir_def::scope_graph::ScopeId<'db>,
+        callable: &crate::analysis::ty::ty_check::Callable<'db>,
+        ty: crate::analysis::ty::ty_def::TyId<'db>,
+        folder: &mut F,
+    ) -> crate::analysis::ty::ty_def::TyId<'db> {
+        use crate::analysis::ty::fold::TyFoldable;
+        let requirements = callable.selection_requirements(db).fold_with(db, folder);
+        let provisions = requirements
+            .list(db)
+            .iter()
+            .filter_map(|&goal| self.lookup(db, goal))
+            .collect::<Vec<_>>();
+        let constant_origin = self.context(db, body_scope);
+        let ty = ty.fold_with(db, folder);
+        let ty = constant_origin.contextualize_const_types_with(db, ty, |goal| {
+            super::lookup_trait_goal(db, goal, provisions.iter().copied(), |p| p.goal())
+        });
+        let selections = provisions
+            .iter()
+            .filter_map(|p| match p {
+                Provision::Named(selection) => Some(*selection),
+                _ => None,
+            })
+            .collect();
+        let lookup = self
+            .context(db, position_scope)
+            .with_selections(db, selections);
+        crate::analysis::ty::normalize::normalize_ty(db, ty, lookup.lookup_premises(db))
+    }
+
     /// Evidence establishes premises; named choices remain separate authority.
     pub fn evidence_assumptions(&self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
         let base = self.root_assumptions(db);
