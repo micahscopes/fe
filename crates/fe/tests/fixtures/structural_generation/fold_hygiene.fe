@@ -1,0 +1,50 @@
+// The code a step quotes keeps the meaning it has where the step is written.
+// The destination below defines names that the library's steps and this
+// provider also mention, and none of them captures the generated code.
+mod author {
+    use core::meta::{Code, Item, Record}
+    use std::derive::{AbiHeadSize, AbiIsDynamic, fold_fields}
+
+    pub const fn abi_size(record: Record) -> Code<Item> {
+        let head = fold_fields<AbiHeadSize>(record)
+        let dynamic = fold_fields<AbiIsDynamic>(record)
+        quote {
+            impl core::abi::AbiSize for ${record} {
+                const HEAD_SIZE: u256 = ${head}
+                const IS_DYNAMIC: bool = ${dynamic}
+            }
+        }
+    }
+}
+
+mod destination {
+    // The step quotes `ingot::derive::abi_is_dynamic` and
+    // `core::abi::abi_field_head_size`: `ingot` and `derive` mean other items here.
+    pub mod derive {
+        pub fn abi_is_dynamic<T>() -> bool { true }
+    }
+    pub trait AbiSize {
+        const HEAD_SIZE: u256
+    }
+    pub fn abi_field_head_size<T>() -> u256 { 999 }
+    pub fn abi_is_dynamic<T>() -> bool { true }
+
+    #[generate(ingot::author::abi_size)]
+    pub struct Guarded { a: u256, b: u64 }
+}
+
+#[test]
+fn destination_names_do_not_capture_generated_code() {
+    assert!(<destination::Guarded as core::abi::AbiSize>::HEAD_SIZE == 64)
+    assert!(!<destination::Guarded as core::abi::AbiSize>::IS_DYNAMIC)
+}
+
+msg GuardMessage {
+    #[selector = 0x12345678]
+    Value -> u256,
+}
+pub contract GuardContract {
+    recv GuardMessage {
+        Value -> u256 { return <destination::Guarded as core::abi::AbiSize>::HEAD_SIZE }
+    }
+}

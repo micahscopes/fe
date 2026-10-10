@@ -1,0 +1,163 @@
+// `std::derive::fold_fields` builds one fragment from a record's fields in
+// declaration order: the empty record gives the unit, a struct or a chosen enum
+// payload gives one step per field, and the ABI steps sum or combine the fields'
+// head sizes and dynamic-ness. A step may also use an open name, here the
+// `other` of an equality deriver.
+use core::ops::Eq
+
+trait Digits {
+    fn digits() -> u256
+}
+
+mod author {
+    use core::meta::{Code, Expr, Field, Item, Record, field_type, variant}
+    use std::derive::{AbiHeadSize, AbiIsDynamic, FieldStep, fold_fields}
+
+    // Not commutative: the byte sizes of the fields as base-100 digits, first
+    // field most significant.
+    pub struct SizeDigits {}
+    impl FieldStep for SizeDigits {
+        const fn unit() -> Code<Expr> {
+            quote { 0 }
+        }
+        const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+            let ty = field_type(field)
+            quote { ${acc} * 100 + core::size_of<${ty}>() }
+        }
+    }
+    pub const fn digits(record: Record) -> Code<Item> {
+        let value = fold_fields<SizeDigits>(record)
+        quote {
+            impl ingot::Digits for ${record} {
+                fn digits() -> u256 { ${value} }
+            }
+        }
+    }
+    pub const fn line_digits(record: Record) -> Code<Item> {
+        let value = fold_fields<SizeDigits>(variant(record, 1))
+        quote {
+            impl ingot::Digits for ${record} {
+                fn digits() -> u256 { ${value} }
+            }
+        }
+    }
+    pub struct AllEqual {}
+    impl FieldStep for AllEqual {
+        const fn unit() -> Code<Expr> {
+            quote { true }
+        }
+        const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+            quote(other) { ${acc} && self.${field} == other.${field} }
+        }
+    }
+    pub const fn derive_eq(record: Record) -> Code<Item> {
+        let all = fold_fields<AllEqual>(record)
+        quote {
+            impl core::ops::Eq for ${record} {
+                fn eq(self, _ other: Self) -> bool { ${all} }
+            }
+        }
+    }
+    pub const fn abi_size(record: Record) -> Code<Item> {
+        let head = fold_fields<AbiHeadSize>(record)
+        let dynamic = fold_fields<AbiIsDynamic>(record)
+        quote {
+            impl core::abi::AbiSize for ${record} {
+                const HEAD_SIZE: u256 = ${head}
+                const IS_DYNAMIC: bool = ${dynamic}
+            }
+        }
+    }
+}
+
+#[generate(ingot::author::digits)]
+#[generate(ingot::author::abi_size)]
+struct Empty {}
+
+#[generate(ingot::author::digits)]
+struct Forward { a: u8, b: u16, c: u64 }
+
+#[generate(ingot::author::digits)]
+struct Backward { c: u64, b: u16, a: u8 }
+
+#[generate(ingot::author::line_digits)]
+enum Shape {
+    Dot,
+    Line(u8, u64),
+}
+
+#[generate(ingot::author::derive_eq)]
+struct Point { x: u256, y: u256, ready: bool }
+
+#[generate(ingot::author::derive_eq)]
+struct Nothing {}
+
+#[generate(ingot::author::abi_size)]
+struct Packet { nonce: u256, ready: bool, code: u64 }
+
+#[generate(ingot::author::abi_size)]
+struct Labeled { id: u256, label: std::abi::DynString }
+
+#[generate(ingot::author::digits)]
+struct Pair<A, B> { first: A, second: B }
+
+fn digits_of(_ a: u256, _ b: u256, _ c: u256) -> u256 {
+    (a * 100 + b) * 100 + c
+}
+
+#[test]
+fn empty_record_is_the_unit() {
+    assert!(Empty::digits() == 0)
+    assert!(<Empty as core::abi::AbiSize>::HEAD_SIZE == 0)
+    assert!(!<Empty as core::abi::AbiSize>::IS_DYNAMIC)
+}
+
+#[test]
+fn fields_fold_in_declaration_order() {
+    let forward = digits_of(core::size_of<u8>(), core::size_of<u16>(), core::size_of<u64>())
+    let backward = digits_of(core::size_of<u64>(), core::size_of<u16>(), core::size_of<u8>())
+    assert!(forward != backward)
+    assert!(Forward::digits() == forward)
+    assert!(Backward::digits() == backward)
+}
+
+#[test]
+fn a_chosen_enum_payload_folds_like_a_struct() {
+    assert!(Shape::digits() == core::size_of<u8>() * 100 + core::size_of<u64>())
+}
+
+#[test]
+fn abi_steps_sum_heads_and_combine_dynamic_parts() {
+    assert!(<Packet as core::abi::AbiSize>::HEAD_SIZE == 96)
+    assert!(!<Packet as core::abi::AbiSize>::IS_DYNAMIC)
+    assert!(<Labeled as core::abi::AbiSize>::HEAD_SIZE == 64)
+    assert!(<Labeled as core::abi::AbiSize>::IS_DYNAMIC)
+}
+
+#[test]
+fn a_step_can_use_an_open_name() {
+    let a = Point { x: 1, y: 2, ready: true }
+    let same = Point { x: 1, y: 2, ready: true }
+    let other = Point { x: 1, y: 3, ready: true }
+    assert!(a == same)
+    assert!(!(a == other))
+    let n = Nothing {}
+    let m = Nothing {}
+    assert!(n == m)
+}
+
+#[test]
+fn folds_follow_generic_field_types() {
+    assert!(Pair<u8, u64>::digits() == core::size_of<u8>() * 100 + core::size_of<u64>())
+    assert!(Pair<u64, u8>::digits() == core::size_of<u64>() * 100 + core::size_of<u8>())
+}
+
+msg ShapeMessage {
+    #[selector = 0x12345678]
+    Value -> u256,
+}
+pub contract ShapeContract {
+    recv ShapeMessage {
+        Value -> u256 { return Forward::digits() }
+    }
+}

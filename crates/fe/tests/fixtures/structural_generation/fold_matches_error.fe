@@ -1,0 +1,92 @@
+// A fold-derived `AbiSize` agrees with the one the `#[error]` desugaring
+// generates for the same field list.
+mod author {
+    use core::meta::{Code, Item, Record}
+    use std::derive::{AbiHeadSize, AbiIsDynamic, fold_fields}
+
+    pub const fn abi_size(record: Record) -> Code<Item> {
+        let head = fold_fields<AbiHeadSize>(record)
+        let dynamic = fold_fields<AbiIsDynamic>(record)
+        quote {
+            impl core::abi::AbiSize for ${record} {
+                const HEAD_SIZE: u256 = ${head}
+                const IS_DYNAMIC: bool = ${dynamic}
+            }
+        }
+    }
+}
+
+use core::abi::AbiSize
+use std::abi::{Bytes, DynString}
+use std::evm::Address
+
+#[error]
+struct NoFieldsError {}
+#[generate(ingot::author::abi_size)]
+struct NoFieldsFold {}
+
+#[error]
+struct ScalarsError { code: u256, flag: bool, small: u8 }
+#[generate(ingot::author::abi_size)]
+struct ScalarsFold { code: u256, flag: bool, small: u8 }
+
+#[error]
+struct TextError { code: u256, text: DynString }
+#[generate(ingot::author::abi_size)]
+struct TextFold { code: u256, text: DynString }
+
+#[error]
+struct TextFirstError { text: DynString, code: u256, data: Bytes }
+#[generate(ingot::author::abi_size)]
+struct TextFirstFold { text: DynString, code: u256, data: Bytes }
+
+#[error]
+struct AddressedError { who: Address, amount: u256, text: DynString }
+#[generate(ingot::author::abi_size)]
+struct AddressedFold { who: Address, amount: u256, text: DynString }
+
+#[error]
+struct WideError { a: u256, b: u256, c: u256, d: u256, e: u256, f: u256, g: u256, h: u256, i: u256 }
+#[generate(ingot::author::abi_size)]
+struct WideFold { a: u256, b: u256, c: u256, d: u256, e: u256, f: u256, g: u256, h: u256, i: u256 }
+
+#[test]
+fn fold_and_error_desugaring_agree_on_head_size() {
+    assert!(<NoFieldsFold as AbiSize>::HEAD_SIZE == <NoFieldsError as AbiSize>::HEAD_SIZE)
+    assert!(<ScalarsFold as AbiSize>::HEAD_SIZE == <ScalarsError as AbiSize>::HEAD_SIZE)
+    assert!(<TextFold as AbiSize>::HEAD_SIZE == <TextError as AbiSize>::HEAD_SIZE)
+    assert!(<TextFirstFold as AbiSize>::HEAD_SIZE == <TextFirstError as AbiSize>::HEAD_SIZE)
+    assert!(<AddressedFold as AbiSize>::HEAD_SIZE == <AddressedError as AbiSize>::HEAD_SIZE)
+    assert!(<WideFold as AbiSize>::HEAD_SIZE == <WideError as AbiSize>::HEAD_SIZE)
+}
+
+#[test]
+fn fold_and_error_desugaring_agree_on_dynamic_parts() {
+    assert!(<NoFieldsFold as AbiSize>::IS_DYNAMIC == <NoFieldsError as AbiSize>::IS_DYNAMIC)
+    assert!(<ScalarsFold as AbiSize>::IS_DYNAMIC == <ScalarsError as AbiSize>::IS_DYNAMIC)
+    assert!(<TextFold as AbiSize>::IS_DYNAMIC == <TextError as AbiSize>::IS_DYNAMIC)
+    assert!(<TextFirstFold as AbiSize>::IS_DYNAMIC == <TextFirstError as AbiSize>::IS_DYNAMIC)
+    assert!(<AddressedFold as AbiSize>::IS_DYNAMIC == <AddressedError as AbiSize>::IS_DYNAMIC)
+    assert!(<WideFold as AbiSize>::IS_DYNAMIC == <WideError as AbiSize>::IS_DYNAMIC)
+}
+
+#[test]
+fn the_compared_sizes_are_not_all_equal() {
+    assert!(<NoFieldsFold as AbiSize>::HEAD_SIZE == 0)
+    assert!(<ScalarsFold as AbiSize>::HEAD_SIZE == 96)
+    assert!(<TextFold as AbiSize>::HEAD_SIZE == 64)
+    assert!(<TextFirstFold as AbiSize>::HEAD_SIZE == 96)
+    assert!(<WideFold as AbiSize>::HEAD_SIZE == 288)
+    assert!(<TextFold as AbiSize>::IS_DYNAMIC)
+    assert!(!<ScalarsFold as AbiSize>::IS_DYNAMIC)
+}
+
+msg MatchMessage {
+    #[selector = 0x12345678]
+    Value -> u256,
+}
+pub contract MatchContract {
+    recv MatchMessage {
+        Value -> u256 { return <ScalarsFold as AbiSize>::HEAD_SIZE }
+    }
+}

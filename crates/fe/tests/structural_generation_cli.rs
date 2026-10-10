@@ -2,6 +2,10 @@ use std::{fs, path::Path, process::Command};
 
 const SOURCE: &str = include_str!("fixtures/structural_generation/accessors.fe");
 const ABI_SOURCE: &str = include_str!("fixtures/structural_generation/abi.fe");
+const FOLD_SHAPE_SOURCE: &str = include_str!("fixtures/structural_generation/fold_shape.fe");
+const FOLD_HYGIENE_SOURCE: &str = include_str!("fixtures/structural_generation/fold_hygiene.fe");
+const FOLD_MATCHES_ERROR_SOURCE: &str =
+    include_str!("fixtures/structural_generation/fold_matches_error.fe");
 
 fn succeeds(root: &Path, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_fe"))
@@ -38,6 +42,44 @@ fn structural_abi_uses_normal_check_build_and_exact_payload_execution() {
             "single_payload",
             "heterogeneous_payload",
             "reordered_payload",
+        ],
+    );
+}
+
+#[test]
+fn std_fold_follows_the_record_shape_in_projects() {
+    exercise_project(
+        FOLD_SHAPE_SOURCE,
+        "ShapeContract",
+        &[
+            "empty_record_is_the_unit",
+            "fields_fold_in_declaration_order",
+            "a_chosen_enum_payload_folds_like_a_struct",
+            "abi_steps_sum_heads_and_combine_dynamic_parts",
+            "a_step_can_use_an_open_name",
+            "folds_follow_generic_field_types",
+        ],
+    );
+}
+
+#[test]
+fn std_fold_is_hygienic_in_projects() {
+    exercise_project(
+        FOLD_HYGIENE_SOURCE,
+        "GuardContract",
+        &["destination_names_do_not_capture_generated_code"],
+    );
+}
+
+#[test]
+fn std_fold_agrees_with_the_error_desugaring() {
+    exercise_project(
+        FOLD_MATCHES_ERROR_SOURCE,
+        "MatchContract",
+        &[
+            "fold_and_error_desugaring_agree_on_head_size",
+            "fold_and_error_desugaring_agree_on_dynamic_parts",
+            "the_compared_sizes_are_not_all_equal",
         ],
     );
 }
