@@ -158,13 +158,7 @@ impl<'db> AssocConstUse<'db> {
     }
 
     pub fn solve_cx(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
-        match self.dependent {
-            Some(dependent) => self
-                .premises
-                .solver_context(db)
-                .with_provisions(dependent.proof_provisions(db)),
-            None => self.premises.solver_context(db),
-        }
+        crate::core::semantic::captured_assoc_const_context(db, self)
     }
 }
 

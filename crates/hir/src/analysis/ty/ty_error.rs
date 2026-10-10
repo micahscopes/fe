@@ -170,8 +170,7 @@ fn application_requirement_diags<'db>(
     type_uses: Vec<(PathId<'db>, TyId<'db>)>,
     context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> Vec<TyDiagCollection<'db>> {
-    use super::trait_resolution::check_type_application_requirements;
-    let solve_cx = premises.solver_context(db);
+    let queries = premises.queries(db);
     type_uses
         .into_iter()
         .filter_map(|(used_path, ty)| {
@@ -179,7 +178,8 @@ fn application_requirement_diags<'db>(
                 .clone()
                 .segment(used_path.segment_index(db))
                 .into();
-            check_type_application_requirements(db, solve_cx, ty, context)
+            queries
+                .application_requirements(db, ty, context)
                 .into_diag(span.clone())
                 .or_else(|| projection_const_fault(db, premises, ty, span))
         })

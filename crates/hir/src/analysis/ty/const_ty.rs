@@ -519,6 +519,10 @@ impl<'db> LoweringContext<'db> {
         self.selection_context
     }
 
+    pub(crate) fn captured_const_premises(&self) -> Option<PredicateListId<'db>> {
+        self.selected_const_assumptions
+    }
+
     pub(crate) fn const_assumptions(&self, default: PredicateListId<'db>) -> PredicateListId<'db> {
         self.selected_const_assumptions.unwrap_or(default)
     }
@@ -536,16 +540,7 @@ impl<'db> LoweringContext<'db> {
         db: &'db dyn HirAnalysisDb,
         scope: ScopeId<'db>,
     ) -> Option<ImplEnv<'db>> {
-        let context = self.selection_context?;
-        let assumptions = self.selected_const_assumptions?;
-        Some(ImplEnv::new_with_choices(
-            db,
-            scope,
-            assumptions,
-            context.witnesses(db).to_vec(),
-            context.selections(db).to_vec(),
-            context.bound_choices(db).to_vec(),
-        ))
+        ImplEnv::lowered_const_caller(db, self, scope)
     }
 
     /// Makes this lowering keep every path segment it resolves, with the
@@ -2468,7 +2463,7 @@ pub(crate) fn evaluate_const_ty<'db>(
         owner,
         capture.generic_subst(db),
         EffectProviderSubst::empty(db),
-        impl_env.unwrap_or_else(|| ImplEnv::empty(db, owner.scope())),
+        impl_env.unwrap_or_else(|| ImplEnv::root_caller(db, owner)),
     );
     let request = const_computation_for_instance(db, key, Vec::new());
     let evaluated = match describe_const_computation(db, request, CtfeConfig::default()) {
@@ -2740,27 +2735,7 @@ pub(crate) fn const_ty_from_assoc_const_use<'db>(
             .ok()?;
         let const_ty =
             const_ty_from_resolved_trait_const(db, proof.resolved_instance(), assoc.name())?;
-        let dependent = assoc.dependent_context();
-        let impl_env = ImplEnv::new(
-            db,
-            assoc.origin_scope(),
-            assoc.assumptions(),
-            dependent
-                .map(|env| env.witnesses(db).clone())
-                .unwrap_or_default()
-                .into_iter()
-                .chain([assoc.inst()])
-                .collect(),
-        )
-        .with_selections(
-            db,
-            dependent
-                .map(|env| env.selections(db).clone())
-                .unwrap_or_default()
-                .into_iter()
-                .chain([selection])
-                .collect(),
-        );
+        let impl_env = ImplEnv::associated_const_caller(db, assoc, Some(selection));
         Some(const_ty.with_impl_env(db, impl_env))
     } else {
         let const_ty =

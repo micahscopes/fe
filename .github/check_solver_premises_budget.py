@@ -25,7 +25,7 @@ BUILT_CONTEXT = re.compile(r"\bImplEnv\s*::\s*new_with_(?:selections|choices)\s*
 # The position context reader and the context type itself build contexts.
 CONTEXT_BUILDERS = {
     "crates/hir/src/core/semantic/provision.rs",
-    "crates/hir/src/analysis/semantic/instance/template.rs",
+    "crates/hir/src/core/semantic/context.rs",
 }
 
 
@@ -71,15 +71,14 @@ def git(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True)
 
 
-# ImplEnv currently lives in template.rs; its move to core/semantic removes
-# this temporary owner exemption. Other analysis/semantic files are consumers.
+# Context creation/editing belongs to these two modules. All analysis/semantic
+# instance and CTFE files are consumers, without a template-owner exemption.
 OWNED_MODULES = (
     "crates/hir/src/analysis/ty/trait_resolution/",
     "crates/hir/src/core/semantic/",
 )
-CONTEXT_OWNER = "crates/hir/src/analysis/semantic/instance/template.rs"
-EDIT_CEILING = 24
-EDIT_NAMES = "with_assumptions|with_provisions|with_selections|with_witnesses"
+EDIT_CEILING = 5
+EDIT_NAMES = "with_assumptions|with_provisions|with_selections|with_witnesses|with_call_choices"
 
 
 def context_edits(source: str) -> int:
@@ -169,7 +168,7 @@ def main() -> int:
     }
     edits = {
         name: context_edits(source) for name, source in sources.items()
-        if not name.startswith(OWNED_MODULES) and name != CONTEXT_OWNER
+        if not name.startswith(OWNED_MODULES)
     }
     total = sum(edits.values())
     print(f"context edits outside owner modules: {total} (ceiling {EDIT_CEILING})")

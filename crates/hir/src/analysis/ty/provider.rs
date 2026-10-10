@@ -11,10 +11,7 @@ use crate::{
         ty::{
             corelib::resolve_lib_type_path,
             normalize::normalize_ty,
-            trait_def::{
-                ImplementorId, ImplementorOrigin, ResolvedImplInstance, TraitInstId,
-                resolve_trait_impl_instance,
-            },
+            trait_def::{ImplementorId, ImplementorOrigin, ResolvedImplInstance, TraitInstId},
             trait_resolution::{PredicateListId, Selection},
             ty_check::EffectParamSite,
             ty_def::{CapabilityKind, TyBase, TyData, TyId},
@@ -207,16 +204,16 @@ fn resolve_effect_handle_query<'db>(
         return EffectHandleResolution::NotHandle;
     };
     let inst = TraitInstId::new(db, effect_handle, vec![provider_ty], IndexMap::new());
-    let solve_cx = premises.solver_context(db);
+    let queries = premises.queries(db);
     if provider_ty.has_var(db) {
-        return match solve_cx.select_impl(db, inst) {
+        return match queries.selected_implementation(db, inst) {
             Selection::NotFound => EffectHandleResolution::NotHandle,
             Selection::Unique(_) | Selection::Ambiguous(_) => {
                 EffectHandleResolution::Invalid(ProviderLayoutFailure::Ambiguous)
             }
         };
     }
-    let resolved = match resolve_trait_impl_instance(db, solve_cx, inst) {
+    let resolved = match queries.resolved_instance(db, inst) {
         Selection::Unique(resolved) => resolved,
         Selection::Ambiguous(_) => {
             return EffectHandleResolution::Invalid(ProviderLayoutFailure::Ambiguous);
@@ -358,8 +355,8 @@ pub fn resolve_static_slot_layout<'db>(
         return StaticSlotLayoutResolution::NotStaticSlot;
     };
     let inst = TraitInstId::new(db, static_slot, vec![owner_ty], IndexMap::new());
-    let solve_cx = premises.solver_context(db);
-    let resolved = match resolve_trait_impl_instance(db, solve_cx, inst) {
+    let queries = premises.queries(db);
+    let resolved = match queries.resolved_instance(db, inst) {
         Selection::Unique(resolved)
             if !matches!(
                 resolved.selected().origin(db),

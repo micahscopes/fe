@@ -35,8 +35,6 @@ use super::{
     visitor::{TyVisitable, TyVisitor, walk_const_ty},
 };
 
-pub(super) mod induction;
-
 pub(super) fn in_definition<'db>(db: &'db dyn HirAnalysisDb, mut scope: ScopeId<'db>) -> bool {
     loop {
         if matches!(scope.item(), ItemKind::TypeFn(_)) {

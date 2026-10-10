@@ -17,12 +17,14 @@ pub use semantic::{
 };
 pub(crate) use semantic::{CallSiteProviderRefinement, SemanticBodyAdmissionError};
 pub(crate) use semantic::{
-    provisional_provider_binding_for_instance_effect, provisional_provider_idx_for_requirement,
-    resolved_effect_binding_ty_for_instance_effect, semantic_instance_base_assumptions_for_key,
+    instantiate_checked, provisional_provider_binding_for_instance_effect,
+    provisional_provider_idx_for_requirement, resolved_effect_binding_ty_for_instance_effect,
+    semantic_instance_base_assumptions_for_key,
 };
 pub use template::{
-    EffectProviderSubst, GenericSubst, ImplEnv, SelectedApplication, SolverPremises,
-    TypedBodyTemplate, instantiate_typed_body, typed_body_template,
+    EffectProviderSubst, GenericSubst, TypedBodyTemplate, instantiate_typed_body,
+    typed_body_template,
 };
 
-pub(crate) use template::provisional_opened_method;
+pub(crate) use crate::core::semantic::provisional_opened_method;
+pub use crate::core::semantic::{ImplEnv, SelectedApplication, SolverPremises};

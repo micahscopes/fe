@@ -6,7 +6,7 @@ use fe_hir::Ingot;
 use fe_hir::analysis::ty::ty_check::ReturnProvenance;
 use fe_hir::analysis::ty::{
     corelib::{resolve_core_trait, resolve_lib_func_path, resolve_lib_type_path},
-    trait_resolution::{GoalSatisfiability, TraitSolveCx, is_goal_satisfiable},
+    trait_resolution::{GoalSatisfiability, is_goal_satisfiable},
     ty_check::check_func_body,
 };
 use fe_hir::hir_def::{Expr, HirIngot, ItemKind, LitKind, Partial, Pat, attr::Attr};
@@ -188,7 +188,7 @@ pub fn root(values: [bool; 5]) {
     let inst = callable
         .trait_inst()
         .expect("encode should be a trait method");
-    let solve_cx = TraitSolveCx::new(&db, func.scope());
+    let solve_cx = fe_hir::semantic::context_at(&db, func.scope(), None).solver_context(&db);
 
     match is_goal_satisfiable(&db, solve_cx, inst) {
         GoalSatisfiability::Satisfied(_) => {}
@@ -215,7 +215,7 @@ fn solver_proves_core_abi_traits_for_u256_and_sol() {
     );
 
     let scope = top_mod.scope();
-    let solve_cx = TraitSolveCx::new(&db, scope);
+    let solve_cx = fe_hir::semantic::context_at(&db, scope, None).solver_context(&db);
     let encode_trait = resolve_core_trait(&db, scope, &["abi", "Encode"]).unwrap();
     let decode_trait = resolve_core_trait(&db, scope, &["abi", "Decode"]).unwrap();
     let abi_trait = resolve_core_trait(&db, scope, &["abi", "Abi"]).unwrap();

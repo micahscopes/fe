@@ -1483,21 +1483,17 @@ pub(crate) fn impls_for_trait_inst_with_possible_constraints<'db>(
     inst: Canonical<TraitInstId<'db>>,
     premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> Vec<ImplementorId<'db>> {
-    impls_for_ty_with_constraint_mode(
-        db,
-        ingot,
-        ImplConstraintQuery::TraitInstance(inst),
-        premises.solver_context(db),
-        true,
-    )
+    premises
+        .queries(db)
+        .possible_implementations(db, ingot, inst)
 }
 
-enum ImplConstraintQuery<'db> {
+pub(in crate::analysis::ty) enum ImplConstraintQuery<'db> {
     SelfType(Canonical<TyId<'db>>),
     TraitInstance(Canonical<TraitInstId<'db>>),
 }
 
-fn impls_for_ty_with_constraint_mode<'db>(
+pub(in crate::analysis::ty) fn impls_for_ty_with_constraint_mode<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
     query: ImplConstraintQuery<'db>,
@@ -2194,7 +2190,7 @@ mod tests {
     use common::indexmap::IndexMap;
 
     use super::{TraitInstId, impls_for_trait_def, resolve_trait_impl_instance};
-    use crate::analysis::ty::trait_resolution::{Selection, TraitSolveCx};
+    use crate::analysis::ty::trait_resolution::Selection;
     use crate::hir_def::{IdentId, ItemKind};
     use crate::test_db::HirAnalysisTestDb;
 
@@ -2273,9 +2269,11 @@ fn probe(value: own Wrapper<u16>) {}
             .ty(&db);
         let projected_arg = self_ty.generic_args(&db)[0];
         let inst = TraitInstId::new(&db, trait_, vec![self_ty, projected_arg], IndexMap::new());
-        let Selection::Unique(resolved) =
-            resolve_trait_impl_instance(&db, TraitSolveCx::new(&db, func.scope()), inst)
-        else {
+        let Selection::Unique(resolved) = resolve_trait_impl_instance(
+            &db,
+            crate::semantic::context_at(&db, func.scope(), None).solver_context(&db),
+            inst,
+        ) else {
             panic!("expected one concrete Projects implementation");
         };
         let output = IdentId::new(&db, "Output");

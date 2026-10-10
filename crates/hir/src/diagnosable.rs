@@ -1325,16 +1325,9 @@ impl<'db> ImplTrait<'db> {
             return diags;
         };
         let trait_args = implementor.trait_(db).args(db);
-        let context = crate::semantic::context_at(db, self.scope(), None);
-        let assumptions = context.assumptions(db);
-
         for assoc in implementor.assoc_type_views(db) {
             let Some(name) = assoc.name(db) else { continue };
-            let guards = assoc.parameter_bounds(db);
-            let mut predicates = assumptions.list(db).to_vec();
-            predicates.extend_from_slice(guards.list(db));
-            let assumptions =
-                ty::trait_resolution::PredicateListId::new(db, predicates).extend_all_bounds(db);
+            let solve_cx = crate::core::semantic::associated_type_bound_context(db, assoc);
 
             for bound_inst in assoc.bounds(db) {
                 let bound_inst = Binder::bind(implementor.trait_def(db).into(), bound_inst)
@@ -1342,7 +1335,6 @@ impl<'db> ImplTrait<'db> {
                 use ty::trait_resolution::{
                     GoalSatisfiability, bound_holds_for_every_argument, is_goal_satisfiable,
                 };
-                let solve_cx = context.solver_context(db).with_assumptions(assumptions);
                 let failed = if matches!(
                     assoc.impl_ty().data(db),
                     ty::ty_def::TyData::TypeFamily { .. }

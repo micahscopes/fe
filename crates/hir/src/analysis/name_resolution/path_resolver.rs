@@ -2018,9 +2018,13 @@ fn find_associated_type_in_mode<'db>(
     // through `T::Item`.
     let scope = premises.scope();
     let assumptions = premises.assumptions().extend_all_bounds(db);
-    let solve_cx = context.map_or_else(
-        || premises.solver_context(db),
-        |context| context.solver_context(db),
+    let queries = context.map_or_else(
+        || premises.queries(db),
+        |context| {
+            crate::analysis::ty::trait_resolution::ProofQueries::from_context(
+                context.solver_context(db),
+            )
+        },
     );
 
     // Qualified type: `<A as T>::B`. Always construct the associated type projection
@@ -2077,7 +2081,7 @@ fn find_associated_type_in_mode<'db>(
         for &bound in bounds.list(db) {
             if bound.def(db).assoc_ty(db, name).is_some()
                 && matches!(
-                    is_goal_satisfiable(db, solve_cx, bound),
+                    queries.goal_result(db, bound),
                     GoalSatisfiability::Satisfied(_)
                 )
             {
@@ -2122,9 +2126,7 @@ fn find_associated_type_in_mode<'db>(
         // traits on external types and external traits on local types are both visible.
         if !matches!(original_ty.data(db), TyData::TyParam(_)) {
             for ingot in search_ingots.into_iter().flatten() {
-                for impl_ in
-                    impls_for_ty_with_satisfied_constraints(db, ingot, canonical_ty, solve_cx)
-                {
+                for impl_ in queries.satisfied_implementations(db, ingot, canonical_ty) {
                     let impl_ = match const_bodies {
                         ConstBodyLowering::Eager => {
                             let Some(impl_) = complete_impl_assoc_ty(db, impl_, name) else {
@@ -2224,7 +2226,7 @@ fn find_associated_type_in_mode<'db>(
         for selection in context.selections(db) {
             let goal = selection.goal();
             if goal.self_ty(db) == original_ty
-                && let Ok(evidence) = selection.revalidate(db, solve_cx, goal)
+                && let Ok(evidence) = selection.revalidate(db, context.solver_context(db), goal)
                 && let Some(associated) =
                     evidence.resolved_instance().instantiated_assoc_ty(db, name)
             {

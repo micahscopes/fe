@@ -158,7 +158,7 @@ pub(in crate::analysis::ty) fn discharge<'db>(
             return false;
         }
     }
-    let checked = super::check_definition_templates(db, *def);
+    let checked = crate::analysis::ty::type_fn::check_definition_templates(db, *def);
     let Some(arms) = &checked.arms else {
         return false;
     };
@@ -312,7 +312,7 @@ struct Guarded<T: Mark> {}
         );
         let (top, _) = db.top_mod(file);
         let trait_ = top.all_traits(&db)[0];
-        let cx = TraitSolveCx::new(&db, top.scope());
+        let cx = crate::semantic::context_at(&db, top.scope(), None).solver_context(&db);
         for (name, expected) in [("Yes", true), ("Ambiguous", false), ("Cycle", false)] {
             let adt = top
                 .all_structs(&db)

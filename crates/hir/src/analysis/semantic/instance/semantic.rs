@@ -1022,83 +1022,9 @@ fn specialize_provider_address_space<'db>(
 
 #[salsa::tracked]
 impl<'db> SemanticInstance<'db> {
-    /// The checked position in this instance, with the caller's transported
-    /// provisions. Applicability is frozen before substitution: specializing
-    /// a rigid parameter must not make an unrelated lexical choice visible.
-    #[salsa::tracked]
+    /// The semantic owner computes this instance position once.
     pub fn context_at(self, db: &'db dyn HirAnalysisDb, origin: SemOrigin<'db>) -> ImplEnv<'db> {
-        let key = self.key(db);
-        let typed = key.typed_body(db);
-        let expr = match origin {
-            SemOrigin::Expr(expr) => Some(expr),
-            SemOrigin::Stmt(stmt) => match stmt
-                .data(db, typed.body().expect("a statement position has a body"))
-                .borrowed()
-                .to_opt()
-            {
-                Some(
-                    crate::hir_def::Stmt::For(_, iter, _, _)
-                    | crate::hir_def::Stmt::Expr(iter)
-                    | crate::hir_def::Stmt::While(_, iter),
-                ) => Some(*iter),
-                Some(
-                    crate::hir_def::Stmt::Let(_, _, value) | crate::hir_def::Stmt::Return(value),
-                ) => *value,
-                _ => None,
-            },
-            SemOrigin::Body(_) | SemOrigin::Synthetic => None,
-        };
-        let caller = key.impl_env(db);
-        let template = &infer_body(db, key.owner(db)).1;
-        let source_call = expr.and_then(|expr| template.semantic_expr_lowering(expr));
-        let mut selections = caller.selections(db).clone();
-        let mut witnesses = caller.witnesses(db).clone();
-        if let Some(expr) = expr {
-            let lexical = if matches!(source_call, Some(SemanticExprLowering::Call { .. })) {
-                crate::core::semantic::call_selections_at(db, template, expr)
-            } else {
-                template.selections_for_expr(db, expr).to_vec()
-            };
-            let lexical = instantiate_checked(db, key.owner(db), lexical, key.subst(db))
-                .expect("position choices use their instance substitution domain");
-            selections.extend(lexical);
-            if matches!(source_call, Some(SemanticExprLowering::Call { .. })) {
-                let opened = crate::semantic::instance_call_evidence_at(db, key, expr);
-                // The checked source opening shadows an inherited named
-                // choice for the same goal, before either becomes proof input.
-                selections.retain(|selection| {
-                    !opened.iter().any(|&(_, goal)| selection.matches(db, goal))
-                });
-                witnesses.extend(opened.into_iter().map(|(_, goal)| goal));
-            } else {
-                let position = crate::core::semantic::context_at(
-                    db,
-                    key.owner(db).scope(),
-                    Some((typed, expr)),
-                );
-                witnesses.extend(position.witnesses(db).iter().copied());
-            }
-        }
-        let assumptions = instantiated_effect_env(db, self).map_or_else(
-            || semantic_instance_base_assumptions_for_key(db, key),
-            |env| env.assumptions(db),
-        );
-        let witnesses = witnesses
-            .into_iter()
-            .collect::<IndexSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut predicates: IndexSet<_> = assumptions.list(db).iter().copied().collect();
-        predicates.extend(witnesses.iter().copied());
-        ImplEnv::new_with_choices(
-            db,
-            caller.normalization_scope(db),
-            PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>())
-                .extend_all_bounds(db),
-            witnesses,
-            selections,
-            caller.bound_choices(db).clone(),
-        )
+        crate::core::semantic::instance_position_context(db, self, origin)
     }
 
     #[salsa::tracked]
@@ -1939,7 +1865,7 @@ pub fn root_semantic_instance_key<'db>(
             | BodyOwner::ContractRecvArm { .. } => GenericSubst::none(db),
         },
         EffectProviderSubst::new(db, effect_providers),
-        ImplEnv::empty(db, owner.scope()),
+        ImplEnv::root_caller(db, owner),
     );
     validate_instantiated_effect_env_key(db, key)
         .map_err(RootSemanticInstanceError::UnclosedEffectEnv)?;
@@ -1955,7 +1881,7 @@ pub fn identity_semantic_instance_key<'db>(
         owner,
         GenericSubst::for_body_owner(db, owner, Vec::new()),
         EffectProviderSubst::empty(db),
-        ImplEnv::empty(db, owner.scope()),
+        ImplEnv::root_caller(db, owner),
     )
 }
 
@@ -2556,7 +2482,7 @@ fn instantiate_normalized_trait_inst<'db>(
     ))
 }
 
-fn instantiate_checked<'db, T>(
+pub(crate) fn instantiate_checked<'db, T>(
     db: &'db dyn HirAnalysisDb,
     owner: BodyOwner<'db>,
     value: T,

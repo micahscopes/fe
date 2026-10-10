@@ -8,8 +8,7 @@ use fe_hir::{
     analysis::ty::{
         trait_def::TraitInstId,
         trait_resolution::{
-            CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitSolveCx,
-            is_goal_query_satisfiable,
+            CanonicalGoalQuery, GoalSatisfiability, PredicateListId, is_goal_query_satisfiable,
         },
         ty_def::{Kind, TyVarSort},
         unify::{InferenceKey, UnificationTableBase},
@@ -189,7 +188,7 @@ fn test_types(_ subject: Subject) {}
     let external = choose_impl.args(&db)[1];
 
     let assumptions = PredicateListId::empty_list(&db);
-    let solve_cx = TraitSolveCx::new(&db, test_types.scope()).with_assumptions(assumptions);
+    let solve_cx = fe_hir::semantic::context_at(&db, test_types.scope(), None).solver_context(&db);
     let direct_choose =
         TraitInstId::new(&db, choose_trait, vec![subject, external], IndexMap::new());
     let direct_choose_result =

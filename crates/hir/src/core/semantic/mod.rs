@@ -20,6 +20,12 @@
 //!   `item.rs` and replace call sites by adding only the minimal semantic
 //!   method(s) here.
 
+mod context;
+pub(crate) use context::{
+    ContextAuthority, associated_type_bound_context, captured_assoc_const_context,
+    instance_position_context, provisional_opened_method,
+};
+pub use context::{ImplEnv, SelectedApplication, SolverPremises};
 mod context_independence;
 pub(crate) use context_independence::WithoutCallerPremises;
 pub mod index;
@@ -6430,15 +6436,27 @@ impl Lift for Base {
             let assumptions = param_env(&db, def.into());
             let arm = def.arms(&db)[0].ty.to_opt().expect("base arm");
             let ty = lower_hir_ty(&db, arm, def.scope(), assumptions);
-            let old = TraitSolveCx::new(&db, def.scope()).with_assumptions(assumptions);
+            let old = TraitSolveCx::at_position(
+                &db,
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    def.scope(),
+                    assumptions,
+                ),
+                crate::analysis::ty::trait_resolution::ProofProvisions::none(&db),
+                context::context_authority(),
+            );
             assert_eq!(
                 check_ty_wf(&db, old, ty).is_wf(),
                 expected,
                 "existing computed-item authority: {name}"
             );
             let context = context_at(&db, def.scope(), None);
-            let shared = TraitSolveCx::new(&db, context.normalization_scope(&db))
-                .with_assumptions(context.assumptions(&db));
+            let shared = TraitSolveCx::at_position(
+                &db,
+                context.premises(&db),
+                crate::analysis::ty::trait_resolution::ProofProvisions::none(&db),
+                self::context::context_authority(),
+            );
             assert_eq!(
                 check_ty_wf(&db, shared, ty).is_wf(),
                 expected,

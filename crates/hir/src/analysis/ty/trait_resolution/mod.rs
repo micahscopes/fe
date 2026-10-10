@@ -31,6 +31,7 @@ use salsa::Update;
 use std::cell::Cell;
 
 pub(crate) mod constraint;
+mod induction;
 mod table_solver;
 
 pub(crate) use table_solver::TargetSearchResult;
@@ -289,14 +290,18 @@ pub struct TraitSolveCx<'db> {
 
 impl<'db> TraitSolveCx<'db> {
     /// The sole solver construction from a position's premise projection.
-    pub fn at_position(
+    pub(crate) fn at_position(
         db: &'db dyn HirAnalysisDb,
         premises: crate::analysis::semantic::SolverPremises<'db>,
+        provisions: ProofProvisions<'db>,
+        _authority: crate::core::semantic::ContextAuthority,
     ) -> Self {
-        Self::new(db, premises.scope()).with_assumptions(premises.assumptions())
+        Self::new(db, premises.scope())
+            .with_assumptions(premises.assumptions())
+            .with_provisions(provisions)
     }
 
-    pub fn new(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> Self {
+    fn new(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> Self {
         Self {
             scope,
             assumptions: PredicateListId::empty_list(db),
@@ -304,10 +309,20 @@ impl<'db> TraitSolveCx<'db> {
         }
     }
 
+    /// The semantic independence view asks what holds without caller premises.
+    /// Its owner keeps this prover private and exposes only that question.
+    pub(crate) fn without_caller_premises(
+        db: &'db dyn HirAnalysisDb,
+        scope: ScopeId<'db>,
+        _authority: crate::core::semantic::ContextAuthority,
+    ) -> Self {
+        Self::new(db, scope)
+    }
+
     /// Every proof made with this context sees the same provisions: a named
     /// choice restricts its goal to the chosen impl, whose prerequisites are
     /// still proved; opened evidence answers its own goal.
-    pub(crate) fn with_provisions(self, provisions: ProofProvisions<'db>) -> Self {
+    fn with_provisions(self, provisions: ProofProvisions<'db>) -> Self {
         Self { provisions, ..self }
     }
 
@@ -315,11 +330,34 @@ impl<'db> TraitSolveCx<'db> {
         self.provisions
     }
 
-    pub fn with_assumptions(self, assumptions: PredicateListId<'db>) -> Self {
+    fn with_assumptions(self, assumptions: PredicateListId<'db>) -> Self {
         Self {
             assumptions,
             ..self
         }
+    }
+
+    /// Retain an accepted choice's source provisions unless shadowed at its
+    /// destination. The destination's scope and premises stay fixed.
+    pub(crate) fn transported_destination(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        origin: Self,
+        _authority: crate::core::semantic::ContextAuthority,
+    ) -> Self {
+        self.with_provisions(origin.provisions.within(db, self.provisions))
+    }
+
+    /// Substitute a captured context without changing its source position.
+    pub(crate) fn fold_at_captured_origin<F: crate::analysis::ty::fold::TyFolder<'db>>(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        folder: &mut F,
+        _authority: crate::core::semantic::ContextAuthority,
+    ) -> Self {
+        use crate::analysis::ty::fold::TyFoldable;
+        self.with_assumptions(self.assumptions.fold_with(db, folder))
+            .with_provisions(self.provisions.fold_with(db, folder))
     }
 
     /// Coherence: whether two implementations of a trait can overlap. This is
@@ -724,6 +762,138 @@ pub fn is_goal_query_satisfiable<'db>(
         solve_cx.provisions,
     )
     .clone()
+}
+
+/// Read-only proof questions. A consumer receives answers, never the prover
+/// behind this view, and cannot replace its scope, premises or provisions.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProofQueries<'db>(TraitSolveCx<'db>);
+
+impl<'db> ProofQueries<'db> {
+    pub(crate) fn from_premises(
+        db: &'db dyn HirAnalysisDb,
+        premises: crate::analysis::semantic::SolverPremises<'db>,
+    ) -> Self {
+        Self(TraitSolveCx::new(db, premises.scope()).with_assumptions(premises.assumptions()))
+    }
+    pub(crate) fn from_context(context: TraitSolveCx<'db>) -> Self {
+        Self(context)
+    }
+    pub(crate) fn assumptions(self) -> PredicateListId<'db> {
+        self.0.assumptions()
+    }
+    pub(crate) fn goal_query(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+    ) -> CanonicalGoalQuery<'db> {
+        self.0.goal_query(db, goal)
+    }
+    pub(crate) fn query_result(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        query: &CanonicalGoalQuery<'db>,
+    ) -> GoalSatisfiability<'db> {
+        assert_eq!(
+            query.raw.assumptions,
+            self.assumptions().extend_all_bounds(db),
+            "proof query must retain its view's premises"
+        );
+        is_goal_query_satisfiable(db, self.0, query)
+    }
+    pub(crate) fn query_has_solution(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        query: &CanonicalGoalQuery<'db>,
+        target: Canonical<TraitInstId<'db>>,
+    ) -> bool {
+        assert_eq!(
+            query.raw.assumptions,
+            self.assumptions().extend_all_bounds(db),
+            "proof query must retain its view's premises"
+        );
+        goal_query_has_solution(db, self.0, query, target)
+    }
+    pub(crate) fn goal_result(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+    ) -> GoalSatisfiability<'db> {
+        is_goal_satisfiable(db, self.0, goal)
+    }
+    pub(crate) fn selected_implementation(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+    ) -> Selection<super::trait_def::ImplementorId<'db>> {
+        self.0.select_impl(db, goal)
+    }
+    pub(crate) fn resolved_instance(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+    ) -> Selection<super::trait_def::ResolvedImplInstance<'db>> {
+        super::trait_def::resolve_trait_impl_instance(db, self.0, goal)
+    }
+    pub(crate) fn search_ingots_for_trait_inst(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+    ) -> (Ingot<'db>, Option<Ingot<'db>>) {
+        self.0.search_ingots_for_trait_inst(db, goal)
+    }
+    pub(crate) fn possible_implementations(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        ingot: Ingot<'db>,
+        inst: Canonical<TraitInstId<'db>>,
+    ) -> Vec<super::trait_def::ImplementorId<'db>> {
+        super::trait_def::impls_for_ty_with_constraint_mode(
+            db,
+            ingot,
+            super::trait_def::ImplConstraintQuery::TraitInstance(inst),
+            self.0,
+            true,
+        )
+    }
+    pub(crate) fn satisfied_implementations(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        ingot: Ingot<'db>,
+        ty: Canonical<TyId<'db>>,
+    ) -> Vec<super::trait_def::ImplementorId<'db>> {
+        super::trait_def::impls_for_ty_with_satisfied_constraints(db, ingot, ty, self.0)
+    }
+    pub(crate) fn application_requirements(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        ty: TyId<'db>,
+        context: Option<crate::analysis::semantic::ImplEnv<'db>>,
+    ) -> WellFormedness<'db> {
+        check_type_application_requirements(db, self.0, ty, context)
+    }
+    pub(crate) fn copy_membership(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        inst: TraitInstId<'db>,
+    ) -> bool {
+        super::copy_goal_has_possible_impl(db, self.0, inst)
+            && matches!(
+                is_goal_satisfiable(db, self.0, inst),
+                GoalSatisfiability::Satisfied(_)
+            )
+    }
+}
+
+/// A premise-only structural proof (RD108); it never chooses runtime dispatch
+/// or imports named provisions, and exposes no context construction or edit.
+pub fn is_goal_satisfiable_under_premises<'db>(
+    db: &'db dyn HirAnalysisDb,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
+    goal: TraitInstId<'db>,
+) -> GoalSatisfiability<'db> {
+    let context = TraitSolveCx::new(db, premises.scope()).with_assumptions(premises.assumptions());
+    is_goal_satisfiable(db, context, goal)
 }
 
 pub fn is_goal_satisfiable<'db>(
@@ -1181,7 +1351,7 @@ fn ill_formed_unless_by_induction<'db>(
     query: &CanonicalGoalQuery<'db>,
     subgoal: Option<Solution<TraitInstId<'db>>>,
 ) -> Option<WellFormedness<'db>> {
-    if super::type_fn::induction::discharge(db, solve_cx, goal) {
+    if induction::discharge(db, solve_cx, goal) {
         return None;
     }
     let mut table = UnificationTable::new(db);

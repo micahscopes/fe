@@ -963,7 +963,7 @@ fn force_const_term_operand_impl<'db>(
                 owner,
                 capture.generic_subst(db),
                 EffectProviderSubst::empty(db),
-                selected_env.unwrap_or_else(|| ImplEnv::empty(db, owner.scope())),
+                selected_env.unwrap_or_else(|| ImplEnv::root_caller(db, owner)),
             );
             let request = const_computation_for_instance(db, key, Vec::new());
             cx.force_computation(db, request)

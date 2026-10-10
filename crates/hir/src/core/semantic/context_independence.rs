@@ -21,7 +21,11 @@ impl<'db> WithoutCallerPremises<'db> {
     /// The callee owner's scope with no premises.
     pub(crate) fn at(db: &'db dyn HirAnalysisDb, owner: ScopeId<'db>) -> Self {
         Self {
-            solve_cx: TraitSolveCx::new(db, owner),
+            solve_cx: TraitSolveCx::without_caller_premises(
+                db,
+                owner,
+                super::context::context_authority(),
+            ),
         }
     }
 

@@ -10,7 +10,7 @@ use fe_hir::analysis::semantic::{
 };
 use fe_hir::analysis::ty::effects::{EffectKeyKind, place_effect_provider_param_index_map};
 use fe_hir::analysis::ty::trait_def::resolve_trait_method_instance;
-use fe_hir::analysis::ty::trait_resolution::{Selection, TraitSolveCx};
+use fe_hir::analysis::ty::trait_resolution::Selection;
 use fe_hir::analysis::ty::ty_check::{
     BodyOwner, EffectArg, EffectArgLayoutView, EffectPassMode, TypedBody,
     check_contract_recv_arm_body, check_func_body,
@@ -4853,7 +4853,7 @@ fn impl_trait_method_typed_body_instantiation_substitutes_self() {
         .expect("missing impl trait instance");
     let Selection::Unique(resolved) = resolve_trait_method_instance(
         &db,
-        TraitSolveCx::new(&db, impl_trait.scope()),
+        fe_hir::semantic::context_at(&db, impl_trait.scope(), None).solver_context(&db),
         inst,
         method.name(&db).to_opt().expect("missing method name"),
     ) else {
@@ -4895,7 +4895,7 @@ fn impl_trait_method_self_paths_preserve_binding_ty_after_instantiation() {
         .expect("missing impl trait instance");
     let Selection::Unique(resolved) = resolve_trait_method_instance(
         &db,
-        TraitSolveCx::new(&db, impl_trait.scope()),
+        fe_hir::semantic::context_at(&db, impl_trait.scope(), None).solver_context(&db),
         inst,
         method.name(&db).to_opt().expect("missing method name"),
     ) else {
@@ -5100,7 +5100,7 @@ fn impl_sum_semantic_body_uses_self_binding_directly() {
         .expect("missing impl trait instance");
     let Selection::Unique(resolved) = resolve_trait_method_instance(
         &db,
-        TraitSolveCx::new(&db, impl_trait.scope()),
+        fe_hir::semantic::context_at(&db, impl_trait.scope(), None).solver_context(&db),
         inst,
         method.name(&db).to_opt().expect("missing method name"),
     ) else {

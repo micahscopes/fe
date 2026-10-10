@@ -142,17 +142,10 @@ fn ty_is_copy_query<'db>(
     {
         return true;
     }
-    let solve_cx = premises.solver_context(db);
-    if !copy_goal_has_possible_impl(db, solve_cx, inst) {
-        return false;
-    }
-    matches!(
-        is_goal_satisfiable(db, solve_cx, inst),
-        GoalSatisfiability::Satisfied(_)
-    )
+    premises.queries(db).copy_membership(db, inst)
 }
 
-fn copy_goal_has_possible_impl<'db>(
+pub(super) fn copy_goal_has_possible_impl<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
     inst: trait_def::TraitInstId<'db>,
@@ -481,7 +474,8 @@ pub(crate) fn abi_struct_field_checks<'db>(
         else {
             continue;
         };
-        let solve_cx = TraitSolveCx::new(db, scope);
+        let context = crate::semantic::context_at(db, scope, None);
+        let solve_cx = context.solver_context(db);
         let unsat = |trait_, args| {
             matches!(
                 is_goal_satisfiable(
@@ -492,7 +486,7 @@ pub(crate) fn abi_struct_field_checks<'db>(
                 GoalSatisfiability::UnSat(_) | GoalSatisfiability::NeedsConfirmation { .. }
             )
         };
-        let assumptions = crate::semantic::constraints_for(db, struct_.into());
+        let assumptions = context.assumptions(db);
         let mut reported_at_source = false;
         let mut sol_compatible = true;
         for (field_idx, field) in fields.iter().enumerate() {
@@ -1013,8 +1007,8 @@ mod tests {
     use common::indexmap::IndexMap;
 
     use super::{
-        PredicateListId, TraitSolveCx, adt_def::AdtRef, copy_goal_has_possible_impl,
-        corelib::resolve_core_trait, trait_def::TraitInstId, ty_def::TyId, ty_is_copy,
+        PredicateListId, adt_def::AdtRef, copy_goal_has_possible_impl, corelib::resolve_core_trait,
+        trait_def::TraitInstId, ty_def::TyId, ty_is_copy,
     };
     use crate::{hir_def::ItemKind, test_db::HirAnalysisTestDb};
 
@@ -1057,7 +1051,7 @@ struct Plain {
         let plain = named_struct_ty(&db, top_mod, "Plain");
         let copy_plain = TraitInstId::new(&db, copy_trait, vec![plain], IndexMap::new());
         let assumptions = PredicateListId::empty_list(&db);
-        let solve_cx = TraitSolveCx::new(&db, top_mod.scope()).with_assumptions(assumptions);
+        let solve_cx = crate::semantic::context_at(&db, top_mod.scope(), None).solver_context(&db);
 
         assert!(!copy_goal_has_possible_impl(&db, solve_cx, copy_plain));
         assert!(!ty_is_copy(
@@ -1089,7 +1083,7 @@ impl Copy for Explicit {}
         let explicit = named_struct_ty(&db, top_mod, "Explicit");
         let copy_explicit = TraitInstId::new(&db, copy_trait, vec![explicit], IndexMap::new());
         let assumptions = PredicateListId::empty_list(&db);
-        let solve_cx = TraitSolveCx::new(&db, top_mod.scope()).with_assumptions(assumptions);
+        let solve_cx = crate::semantic::context_at(&db, top_mod.scope(), None).solver_context(&db);
 
         assert!(copy_goal_has_possible_impl(&db, solve_cx, copy_explicit));
         assert!(ty_is_copy(

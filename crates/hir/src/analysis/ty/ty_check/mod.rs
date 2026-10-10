@@ -1503,7 +1503,7 @@ fn const_body_ctfe_diags_with_context<'db>(
             owner,
             GenericSubst::none(db),
             EffectProviderSubst::empty(db),
-            ImplEnv::empty(db, owner.scope()),
+            ImplEnv::root_caller(db, owner),
         );
         let request = const_computation_for_instance(db, key, Vec::new());
         match describe_const_computation(db, request, CtfeConfig::default()) {
@@ -1540,7 +1540,7 @@ fn const_body_ctfe_diags_with_context<'db>(
                     owner,
                     GenericSubst::none(db),
                     EffectProviderSubst::empty(db),
-                    ImplEnv::empty(db, owner.scope()),
+                    ImplEnv::root_caller(db, owner),
                 );
                 let semantic = get_or_build_semantic_instance(db, key);
                 if reify_runtime_const_for_ty(db, semantic, expected, value).is_none() {
@@ -2664,10 +2664,7 @@ impl<'db> TyChecker<'db> {
         let Some(selection) = selection else {
             return context;
         };
-        let mut selections = context.selections(self.db).to_vec();
-        selections.retain(|previous| !previous.matches(self.db, selection.goal()));
-        selections.push(selection);
-        context.with_selections(self.db, selections)
+        context.within_named_application(self.db, selection)
     }
 
     fn check_trait_const_obligation(
@@ -7152,9 +7149,7 @@ mod capability_hint_tests {
     use crate::{
         analysis::ty::{
             diagnostics::{FuncBodyDiag, TraitConstraintDiag, TyDiagCollection},
-            trait_resolution::{
-                GoalSatisfiability, TraitSolveCompletion, TraitSolveCx, is_goal_satisfiable,
-            },
+            trait_resolution::{GoalSatisfiability, TraitSolveCompletion, is_goal_satisfiable},
             ty_def::CapabilityKind,
         },
         test_db::{HirAnalysisTestDb, find_func},
@@ -7189,7 +7184,7 @@ fn owned_bound() where P<S, S>: Foo {}
         let owned_bound = find_func(&db, top_mod, "owned_bound");
         let owned_goal = declared_call_bound(&db, owned_bound.into(), 0).expect("owned bound");
         assert!(matches!(
-            is_goal_satisfiable(&db, TraitSolveCx::new(&db, top_mod.scope()), owned_goal),
+            is_goal_satisfiable(&db, crate::semantic::context_at(&db, top_mod.scope(), None).solver_context(&db), owned_goal),
             GoalSatisfiability::NeedsConfirmation {
                 solutions,
                 completion: TraitSolveCompletion::Saturated,

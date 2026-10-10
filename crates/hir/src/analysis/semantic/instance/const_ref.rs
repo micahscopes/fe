@@ -718,7 +718,7 @@ fn semantic_callee_key_with_context<'db>(
                             Some(crate::semantic::Provision::Bound(_))
                         ) =>
                 {
-                    super::template::provisional_opened_method(db, context, inst, name)
+                    crate::core::semantic::provisional_opened_method(db, context, inst, name)
                 }
                 TraitCallChoice::Recorded(choice) => {
                     recorded_method_instance(db, context, choice, name)
@@ -1302,7 +1302,7 @@ fn semantic_const_key_for_const<'db>(
         owner,
         GenericSubst::none(db),
         EffectProviderSubst::empty(db),
-        ImplEnv::empty(db, owner.scope()),
+        ImplEnv::root_caller(db, owner),
     ))
 }
 
@@ -1318,7 +1318,7 @@ fn semantic_const_key_for_inherent_const<'db>(
         BodyOwner::AnonConstBody { body, expected: ty },
         GenericSubst::for_owner(db, use_.impl_().into(), impl_args),
         EffectProviderSubst::empty(db),
-        ImplEnv::new(db, use_.origin_scope(), use_.assumptions(), vec![]),
+        ImplEnv::inherent_const_caller(db, use_),
     ))
 }
 
@@ -1355,29 +1355,7 @@ fn semantic_const_key_for_assoc_const<'db>(
         BodyOwner::AnonConstBody { body, expected: ty },
         GenericSubst::complete(db, subst),
         EffectProviderSubst::empty(db),
-        // The constant's body reads the provisions its goal reaches.
-        ImplEnv::new(
-            db,
-            assoc.origin_scope(),
-            assoc.assumptions(),
-            assoc
-                .dependent_context()
-                .map(|env| env.witnesses(db).clone())
-                .unwrap_or_default()
-                .into_iter()
-                .chain([assoc.inst()])
-                .collect(),
-        )
-        .with_selections(
-            db,
-            assoc
-                .dependent_context()
-                .map(|env| env.selections(db).clone())
-                .unwrap_or_default()
-                .into_iter()
-                .chain(selection)
-                .collect(),
-        ),
+        ImplEnv::associated_const_caller(db, assoc, selection),
     ))
 }
 
@@ -1398,8 +1376,7 @@ mod tests {
     fn recorded_method_uses_the_accepted_choice_instead_of_ordinary_lookup() {
         use crate::{
             analysis::ty::{
-                trait_def::resolve_trait_method_instance,
-                trait_resolution::{Selection, TraitSolveCx},
+                trait_def::resolve_trait_method_instance, trait_resolution::Selection,
                 ty_check::check_func_body,
             },
             hir_def::IdentId,
@@ -1431,7 +1408,7 @@ fn selected() -> u256 { with (Alternative) { <S as Read>::read() } }
             .decisions()
             .choice_ref(&accepted.site())
             .expect("record identity");
-        let context = TraitSolveCx::new(&db, function.scope());
+        let context = crate::semantic::context_at(&db, function.scope(), None).solver_context(&db);
         let name = IdentId::new(&db, "read".to_owned());
         let Selection::Unique(ordinary) =
             resolve_trait_method_instance(&db, context, accepted.goal(), name)

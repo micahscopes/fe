@@ -19,7 +19,6 @@ use super::{
     layout_holes::LayoutRootUse,
     trait_def::{
         ImplementorOrigin, TraitInstId, TraitRefId, impls_for_trait_inst_with_possible_constraints,
-        resolve_trait_impl_instance,
     },
     trait_lower::complete_candidate_impl_assoc_ty,
     trait_resolution::{PredicateListId, Selection},
@@ -224,9 +223,9 @@ pub(crate) fn normalize_layout_root_uses<'db>(
             return;
         }
         if let TyData::AssocTy(assoc) = ty.data(db) {
-            let solve_cx = premises.solver_context(db);
-            if let Selection::Unique(resolved) =
-                resolve_trait_impl_instance(db, solve_cx, assoc.trait_.as_predicate(db))
+            if let Selection::Unique(resolved) = premises
+                .queries(db)
+                .resolved_instance(db, assoc.trait_.as_predicate(db))
                 && let ImplementorOrigin::Hir(impl_trait) = resolved.selected().origin(db)
             {
                 for root_use in resolved.assoc_ty_layout_root_uses(db, assoc.name) {
@@ -813,8 +812,8 @@ impl<'db> TypeNormalizer<'db> {
 
         let mut dedup: IndexMap<TyId<'db>, ()> = IndexMap::new();
 
-        let solve_cx = self.premises.solver_context(self.db);
-        let (primary, secondary) = solve_cx.search_ingots_for_trait_inst(self.db, trait_inst);
+        let queries = self.premises.queries(self.db);
+        let (primary, secondary) = queries.search_ingots_for_trait_inst(self.db, trait_inst);
         let search_ingots = [Some(primary), secondary];
 
         // Canonicalize the target trait instance so we can unify against it in a

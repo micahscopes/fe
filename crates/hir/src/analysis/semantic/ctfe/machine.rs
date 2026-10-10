@@ -247,7 +247,7 @@ pub fn eval_body_owner_const<'db>(
         owner,
         subst,
         crate::analysis::semantic::EffectProviderSubst::empty(db),
-        ImplEnv::empty(db, owner.scope()),
+        ImplEnv::root_caller(db, owner),
     );
     eval_const_instance(db, get_or_build_semantic_instance(db, key))
 }
@@ -284,7 +284,7 @@ pub fn eval_body_owner_const_with_args<'db>(
         owner,
         subst,
         crate::analysis::semantic::EffectProviderSubst::empty(db),
-        ImplEnv::empty(db, owner.scope()),
+        ImplEnv::root_caller(db, owner),
     );
     execute_resolved_const_computation(db, key, args, CtfeConfig::default(), SemOrigin::Body(owner))
 }
@@ -1550,13 +1550,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     BodyOwner::AnonConstBody { body, expected: ty },
                     GenericSubst::complete(self.db, subst),
                     crate::analysis::semantic::EffectProviderSubst::empty(self.db),
-                    ImplEnv::new(
-                        self.db,
-                        assoc.origin_scope(),
-                        proof.context().assumptions(),
-                        vec![goal],
-                    )
-                    .with_selections(self.db, vec![selection]),
+                    ImplEnv::opened_const_caller(self.db, assoc, selection, &proof),
                 );
                 let value =
                     self.eval_const_ref_value(SemanticConstRef::new(self.db, key, ty, origin))?;
@@ -2220,7 +2214,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             body_owner,
             GenericSubst::complete(db, generic_args),
             crate::analysis::semantic::EffectProviderSubst::empty(db),
-            ImplEnv::empty(db, body_owner.scope()),
+            ImplEnv::root_caller(db, body_owner),
         );
         let instance = self.instance_for_key(key);
         // Keep this call in the current machine: nested queries must share its
@@ -2323,32 +2317,15 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         let env = key.impl_env(db);
         // Validate at the call site. The callee's own trait requirements
         // cannot establish the selected application's prerequisites.
-        let mut selections = env.selections(db).clone();
-        let mut bound_choices = env.bound_choices(db).clone();
+        let mut env = env;
         let mut opened_method = None;
         for &(witness, goal) in provisions {
             let (selection, proof) = self.opened_proof(frame_idx, witness, goal, origin)?;
-            let supplied = crate::analysis::semantic::SelectedApplication::from_evidence(&proof);
+            env = env.open_application(db, selection, &proof);
             if opened_call.is_some_and(|(required, _)| required == goal) {
                 opened_method = Some(proof);
             }
-            // Opening in this callee is a new frame. Its validated witness
-            // shadows any choice inherited through the callee's bounds.
-            selections.retain(|inherited| !inherited.matches(db, goal));
-            selections.push(selection);
-            // The operand supplies the callee's bound arguments as well as
-            // its selection context. Keeping a provisional ordinary answer
-            // here would make the body dispatch differently from the opening.
-            for (_, choice) in &mut bound_choices {
-                if choice.data(db).goal() == goal {
-                    *choice =
-                        crate::analysis::ty::ty_check::TraitChoiceId::for_selected_application(
-                            db, supplied,
-                        );
-                }
-            }
         }
-        let env = env.with_call_choices(db, selections, bound_choices);
         let key = SemanticInstanceKey::new(
             db,
             key.owner(db),
@@ -2356,7 +2333,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             key.effect_providers(db),
             env,
         );
-        let Some((goal, method)) = opened_call else {
+        let Some((_, method)) = opened_call else {
             return Ok((key, false));
         };
         let proof = opened_method.ok_or_else(invalid)?;
@@ -2370,8 +2347,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             owner,
             GenericSubst::complete(db, args),
             crate::analysis::semantic::EffectProviderSubst::empty(db),
-            ImplEnv::new(db, owner.scope(), proof.context().assumptions(), vec![goal])
-                .with_selections(db, env.selections(db).clone()),
+            env.opened_method_caller(db, func, &proof),
         );
         Ok((key, true))
     }

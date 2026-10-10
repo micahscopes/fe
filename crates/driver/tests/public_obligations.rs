@@ -345,8 +345,7 @@ fn checked_evidence_survives_ordinary_const_function_forwarding(fixture: Fixture
     let checked = selection
         .revalidate(
             &db,
-            hir::analysis::ty::trait_resolution::TraitSolveCx::new(&db, selection.scope())
-                .with_assumptions(selection.assumptions()),
+            hir::semantic::context_at(&db, selection.scope(), None).solver_context(&db),
             goal,
         )
         .expect("forwarded evidence must retain a valid selected application");
@@ -664,10 +663,7 @@ fn opening_rejects_mismatched_evidence_goal(fixture: Fixture<&str>) {
             SelectedApplication, SemConstId, SemConstValue, StructuralHandle,
             eval_body_owner_const_with_args,
         },
-        ty::{
-            trait_def::prove_selected_hir_impl_evidence, trait_resolution::TraitSolveCx,
-            ty_check::BodyOwner,
-        },
+        ty::{trait_def::prove_selected_hir_impl_evidence, ty_check::BodyOwner},
     };
     let mut db = DriverDataBase::default();
     let file = db.workspace().update(
@@ -741,7 +737,7 @@ fn opening_rejects_mismatched_evidence_goal(fixture: Fixture<&str>) {
     ));
     let selected = prove_selected_hir_impl_evidence(
         &db,
-        TraitSolveCx::new(&db, module.scope()),
+        hir::semantic::context_at(&db, module.scope(), None).solver_context(&db),
         module.all_impl_traits(&db)[1],
         goal,
     )

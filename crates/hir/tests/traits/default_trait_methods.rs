@@ -4,7 +4,7 @@ use fe_hir::analysis::semantic::{
     root_semantic_instance_key, typed_body_template,
 };
 use fe_hir::analysis::ty::trait_def::resolve_trait_method_instance;
-use fe_hir::analysis::ty::trait_resolution::{Selection, TraitSolveCx};
+use fe_hir::analysis::ty::trait_resolution::Selection;
 use fe_hir::analysis::ty::ty_check::{BodyOwner, check_func_body};
 use fe_hir::hir_def::{Expr, ItemKind, Partial};
 use fe_hir::test_db::HirAnalysisTestDb;
@@ -60,7 +60,7 @@ fn run(evm: mut Evm) -> u256 {
 
     let Selection::Unique(resolved) = resolve_trait_method_instance(
         &db,
-        TraitSolveCx::new(&db, impl_trait.scope()),
+        fe_hir::semantic::context_at(&db, impl_trait.scope(), None).solver_context(&db),
         inst,
         method_name,
     ) else {

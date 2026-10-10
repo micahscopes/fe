@@ -2464,7 +2464,7 @@ fn condition_instance_key<'db>(
         EffectProviderSubst::empty(db),
         // The instance substitutes the checked body's premises once. Only
         // lexical choices belong here; owner premises are not caller inputs.
-        ImplEnv::empty(db, owner.scope()).with_selections(db, selections),
+        ImplEnv::root_caller(db, owner).with_selections(db, selections),
     )
 }
 
@@ -3209,9 +3209,7 @@ mod recording_tests {
 
     #[test]
     fn authored_types_and_param_env_share_trait_method_self_premise() {
-        use crate::analysis::ty::trait_resolution::{
-            GoalSatisfiability, TraitSolveCx, is_goal_satisfiable,
-        };
+        use crate::analysis::ty::trait_resolution::GoalSatisfiability;
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
             "trait_method_context.fe".into(),
@@ -3237,9 +3235,12 @@ fn inspect() { let _: [u8; Self::N] } }",
         let written = crate::semantic::context_at(&db, scope, None).assumptions(&db);
         let parameter = crate::semantic::param_env(&db, method.into());
         let solve = |assumptions| {
-            is_goal_satisfiable(
+            crate::analysis::ty::trait_resolution::is_goal_satisfiable_under_premises(
                 &db,
-                TraitSolveCx::new(&db, scope).with_assumptions(assumptions),
+                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                    scope,
+                    assumptions,
+                ),
                 goal,
             )
         };
