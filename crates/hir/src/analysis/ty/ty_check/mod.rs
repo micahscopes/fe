@@ -463,8 +463,7 @@ pub(crate) fn check_generic_default_body_types<'db>(
                 db,
                 hir_ty,
                 view.span().into_type_param().default_ty(),
-                owner.scope(),
-                crate::semantic::generic_default_context_at(db, owner).assumptions(db),
+                crate::semantic::generic_default_context_at(db, owner).premises(db),
             )
         }
         GenericDefault::Const { .. } => Vec::new(),

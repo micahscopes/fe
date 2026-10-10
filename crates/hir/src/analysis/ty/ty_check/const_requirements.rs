@@ -3053,8 +3053,7 @@ pub(super) fn written_type_const_args<'db>(
     db: &'db dyn HirAnalysisDb,
     hir_ty: crate::hir_def::TypeId<'db>,
     span: crate::span::types::LazyTySpan<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> Vec<(Body<'db>, TyId<'db>)> {
     use crate::hir_def::TraitRefId;
     use crate::span::types::LazyTySpan;
@@ -3065,7 +3064,7 @@ pub(super) fn written_type_const_args<'db>(
     };
     struct Finder<'db> {
         db: &'db dyn HirAnalysisDb,
-        assumptions: PredicateListId<'db>,
+        premises: crate::analysis::semantic::SolverPremises<'db>,
         found: Vec<(Body<'db>, TyId<'db>)>,
     }
     impl<'db> Visitor<'db> for Finder<'db> {
@@ -3078,7 +3077,7 @@ pub(super) fn written_type_const_args<'db>(
                 self.db,
                 hir_ty,
                 ctxt.scope(),
-                self.assumptions,
+                self.premises.assumptions(),
             ));
             walk_type(self, ctxt, hir_ty);
         }
@@ -3093,7 +3092,7 @@ pub(super) fn written_type_const_args<'db>(
                     self.db,
                     path,
                     ctxt.scope(),
-                    self.assumptions,
+                    self.premises.assumptions(),
                 ));
             }
             walk_trait_ref(self, ctxt, trait_ref);
@@ -3104,10 +3103,10 @@ pub(super) fn written_type_const_args<'db>(
     }
     let mut finder = Finder {
         db,
-        assumptions,
+        premises,
         found: Vec::new(),
     };
-    finder.visit_ty(&mut VisitorCtxt::new(db, scope, span), hir_ty);
+    finder.visit_ty(&mut VisitorCtxt::new(db, premises.scope(), span), hir_ty);
     finder.found
 }
 
