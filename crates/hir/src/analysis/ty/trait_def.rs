@@ -1464,13 +1464,13 @@ pub(crate) fn impls_for_ty_with_satisfied_constraints<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
     ty: Canonical<TyId<'db>>,
-    premises: crate::analysis::semantic::SolverPremises<'db>,
+    solve_cx: TraitSolveCx<'db>,
 ) -> Vec<ImplementorId<'db>> {
     impls_for_ty_with_constraint_mode(
         db,
         ingot,
         ImplConstraintQuery::SelfType(ty),
-        premises,
+        solve_cx,
         false,
     )
 }
@@ -1487,7 +1487,7 @@ pub(crate) fn impls_for_trait_inst_with_possible_constraints<'db>(
         db,
         ingot,
         ImplConstraintQuery::TraitInstance(inst),
-        premises,
+        premises.solver_context(db),
         true,
     )
 }
@@ -1501,7 +1501,7 @@ fn impls_for_ty_with_constraint_mode<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
     query: ImplConstraintQuery<'db>,
-    premises: crate::analysis::semantic::SolverPremises<'db>,
+    solve_cx: TraitSolveCx<'db>,
     allow_needs_confirmation: bool,
 ) -> Vec<ImplementorId<'db>> {
     let mut table = UnificationTable::new(db);
@@ -1514,7 +1514,6 @@ fn impls_for_ty_with_constraint_mode<'db>(
     };
     let trait_def = trait_inst.map(|inst| inst.def(db));
 
-    let solve_cx = TraitSolveCx::ingot_impl_search(db, ingot, premises);
     if ty.has_invalid(db) || ty.base_ty(db).is_never(db) {
         return vec![];
     }

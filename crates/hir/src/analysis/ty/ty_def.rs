@@ -30,7 +30,6 @@ use super::{
     diagnostics::TyDiagCollection,
     effects::place_effect_provider_param_index_map,
     trait_def::{TraitInstId, TraitRefId},
-    trait_resolution::PredicateListId,
     ty_lower::collect_generic_params,
     unify::{InferenceKey, UnificationTable},
     visitor::{TyVisitable, TyVisitor, walk_const_ty, walk_ty},
@@ -705,10 +704,9 @@ impl<'db> TyId<'db> {
         self,
         db: &'db dyn HirAnalysisDb,
         solve_cx: TraitSolveCx<'db>,
-        assumptions: PredicateListId<'db>,
         span: DynLazySpan<'db>,
     ) -> Option<TyDiagCollection<'db>> {
-        check_ty_wf(db, solve_cx.with_assumptions(assumptions), self).into_diag(span)
+        check_ty_wf(db, solve_cx, self).into_diag(span)
     }
 
     pub(super) fn ty_var(

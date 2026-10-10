@@ -51,7 +51,6 @@ def inventory() -> dict:
 NAMED_EXCEPTIONS = {
     "coherence": "crates/hir/src/analysis/ty/trait_resolution/mod.rs",
     "signature_comparison": "crates/hir/src/analysis/ty/method_cmp.rs",
-    "ingot_impl_search": "crates/hir/src/analysis/ty/trait_def.rs",
 }
 
 
@@ -79,7 +78,7 @@ OWNED_MODULES = (
     "crates/hir/src/core/semantic/",
 )
 CONTEXT_OWNER = "crates/hir/src/analysis/semantic/instance/template.rs"
-EDIT_CEILING = 27
+EDIT_CEILING = 24
 EDIT_NAMES = "with_assumptions|with_provisions|with_selections|with_witnesses"
 
 

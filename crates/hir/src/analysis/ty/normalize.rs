@@ -757,10 +757,9 @@ impl<'db> TypeNormalizer<'db> {
         let self_ty = self.fold_ty(self.db, assoc.trait_.self_ty(self.db));
         let mut raw_cands = match find_associated_type(
             self.db,
-            self.premises.scope(),
+            self.premises,
             Canonicalized::new(self.db, self_ty),
             assoc.name,
-            self.premises.assumptions(),
         ) {
             Ok(raw_cands) => raw_cands,
             Err(FindAssociatedTypeError::InfiniteBoundRecursion) => return None,

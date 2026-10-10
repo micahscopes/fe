@@ -44,7 +44,7 @@ use crate::analysis::{
             lower_trait_ref, lower_trait_ref_impl_with_minter, lower_trait_ref_with_minter,
         },
         trait_resolution::{
-            GoalSatisfiability, PredicateListId, TraitSolveCx, constraint::collect_constraints,
+            GoalSatisfiability, PredicateListId, constraint::collect_constraints,
             is_goal_satisfiable,
         },
         ty_def::{InvalidCause, Kind, TyBase, TyData, TyId},
@@ -1223,9 +1223,13 @@ where
                 // Inherent impl consts take precedence over trait impl consts.
                 // Conflicting inherent impls are rejected at their definition,
                 // so resolve to the first applicable impl here.
-                if let Some(impl_) =
-                    select_inherent_const_candidate(db, ty, ident, scope, assumptions)
-                {
+                if let Some(impl_) = select_inherent_const_candidate(
+                    db,
+                    ty,
+                    ident,
+                    scope,
+                    minter.selection_context(),
+                ) {
                     *decided_by_value = true;
                     reject_generic_args(db, path)?;
                     let r = PathRes::InherentConst(ty, impl_, ident);
@@ -1235,7 +1239,14 @@ where
 
                 // Probe impls across both the call-site scope and the receiver type's ingot so
                 // `OtherIngotType::CONST` and `ExternalType::LOCAL_TRAIT_CONST` both resolve.
-                match select_assoc_const_candidate(db, ty, ident, scope, assumptions) {
+                match select_assoc_const_candidate(
+                    db,
+                    ty,
+                    ident,
+                    scope,
+                    assumptions,
+                    minter.selection_context(),
+                ) {
                     AssocConstSelection::Found(inst) => {
                         *decided_by_value = true;
                         reject_generic_args(db, path)?;
@@ -1350,14 +1361,27 @@ where
             }
 
             // Find raw associated types, then dedup by normalized result here.
+            let context = minter.selection_context();
+            // Header naming already holds the declaration's current premises.
+            // Re-reading the declaration here would require its own layout
+            // output before that output has been collected. Body positions
+            // instead project the checker's complete retained context.
+            let premises = context.map_or_else(
+                || {
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        scope,
+                        assumptions,
+                    )
+                },
+                |context| context.premises(db),
+            );
             let assoc_tys = match find_associated_type_in_mode(
                 db,
-                scope,
+                premises,
                 Canonicalized::new(db, ty),
                 ident,
-                assumptions,
                 minter.const_bodies(),
-                minter.selection_context(),
+                context,
             ) {
                 Ok(assoc_tys) => assoc_tys,
                 Err(FindAssociatedTypeError::InfiniteBoundRecursion) => {
@@ -1579,7 +1603,7 @@ fn select_inherent_const_candidate<'db>(
     receiver_ty: TyId<'db>,
     name: IdentId<'db>,
     scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> Option<Impl<'db>> {
     // Inherent impls can only be probed for concrete receiver types.
     let TyData::TyBase(receiver_base) = receiver_ty.base_ty(db).data(db) else {
@@ -1605,13 +1629,9 @@ fn select_inherent_const_candidate<'db>(
 
     // Cheap name-indexed lookup first; the canonical receiver and solve
     // context are only built when there is at least one candidate.
-    let candidates: Vec<(common::ingot::Ingot<'db>, &Vec<Impl<'db>>)> = search_ingots
+    let candidates: Vec<&Vec<Impl<'db>>> = search_ingots
         .into_iter()
-        .filter_map(|ingot| {
-            ingot_impl_const_map(db, ingot)
-                .get(&(*receiver_base, name))
-                .map(|impls| (ingot, impls))
-        })
+        .filter_map(|ingot| ingot_impl_const_map(db, ingot).get(&(*receiver_base, name)))
         .collect();
     if candidates.is_empty() {
         return None;
@@ -1619,9 +1639,10 @@ fn select_inherent_const_candidate<'db>(
 
     let canonical_receiver = Canonicalized::new(db, receiver_ty).canonical();
 
-    for (ingot, impls) in candidates {
-        let solve_cx =
-            TraitSolveCx::new(db, ingot.root_mod(db).scope()).with_assumptions(assumptions);
+    let context =
+        context.unwrap_or_else(|| crate::core::semantic::declaration_context_at(db, scope));
+    let solve_cx = context.solver_context(db);
+    for impls in candidates {
         for &impl_ in impls {
             let Some(impl_ty) = impl_.admissible_inherent_impl_ty(db) else {
                 continue;
@@ -1778,6 +1799,7 @@ fn select_assoc_const_candidate<'db>(
     name: IdentId<'db>,
     scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
+    context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> AssocConstSelection<'db> {
     // Qualified type: `<A as T>::C` must resolve against the explicit trait instance.
     if let TyData::QualifiedTy(trait_inst) = receiver_ty.data(db) {
@@ -1878,6 +1900,9 @@ fn select_assoc_const_candidate<'db>(
         _ => return AssocConstSelection::Ambiguous(assumption_matches.into_iter().collect()),
     }
 
+    let solve_cx = context
+        .unwrap_or_else(|| crate::core::semantic::declaration_context_at(db, scope))
+        .solver_context(db);
     let receiver = Canonicalized::new(db, receiver_ty);
     let scope_ingot = scope.ingot(db);
     let search_ingots = [
@@ -1890,15 +1915,9 @@ fn select_assoc_const_candidate<'db>(
     receiver.with_materialized(db, |cx| {
         let receiver_ty = cx.query();
         for ingot in search_ingots.into_iter().flatten() {
-            for candidate in impls_for_ty_with_satisfied_constraints(
-                db,
-                ingot,
-                receiver.canonical(),
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    scope,
-                    assumptions,
-                ),
-            ) {
+            for candidate in
+                impls_for_ty_with_satisfied_constraints(db, ingot, receiver.canonical(), solve_cx)
+            {
                 let declared = candidate.trait_(db);
                 if declared.def(db).const_(db, name).is_none() {
                     continue;
@@ -1932,20 +1951,11 @@ fn select_assoc_const_candidate<'db>(
 
 pub(crate) fn find_associated_type<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     ty: Canonicalized<'db, TyId<'db>>,
     name: IdentId<'db>,
-    assumptions: PredicateListId<'db>,
 ) -> Result<SmallVec<(TraitInstId<'db>, TyId<'db>), 4>, FindAssociatedTypeError> {
-    find_associated_type_in_mode(
-        db,
-        scope,
-        ty,
-        name,
-        assumptions,
-        ConstBodyLowering::Eager,
-        None,
-    )
+    find_associated_type_in_mode(db, premises, ty, name, ConstBodyLowering::Eager, None)
 }
 
 /// The bounds implied by a trait's own `Self: Trait` predicate.
@@ -1994,10 +2004,9 @@ fn assoc_ty_candidate_evidence<'db>(
 
 fn find_associated_type_in_mode<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     ty: Canonicalized<'db, TyId<'db>>,
     name: IdentId<'db>,
-    assumptions: PredicateListId<'db>,
     const_bodies: ConstBodyLowering,
     context: Option<crate::analysis::semantic::ImplEnv<'db>>,
 ) -> Result<SmallVec<(TraitInstId<'db>, TyId<'db>), 4>, FindAssociatedTypeError> {
@@ -2007,8 +2016,12 @@ fn find_associated_type_in_mode<'db>(
     // Candidate discovery must see implied bounds: `T: Sub` with
     // `trait Sub: Super { .. }` makes `Super`'s associated types reachable
     // through `T::Item`.
-    let assumptions = assumptions.extend_all_bounds(db);
-    let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+    let scope = premises.scope();
+    let assumptions = premises.assumptions().extend_all_bounds(db);
+    let solve_cx = context.map_or_else(
+        || premises.solver_context(db),
+        |context| context.solver_context(db),
+    );
 
     // Qualified type: `<A as T>::B`. Always construct the associated type projection
     // against the qualified trait instance; bindings (if any) will be handled downstream.
@@ -2109,15 +2122,9 @@ fn find_associated_type_in_mode<'db>(
         // traits on external types and external traits on local types are both visible.
         if !matches!(original_ty.data(db), TyData::TyParam(_)) {
             for ingot in search_ingots.into_iter().flatten() {
-                for impl_ in impls_for_ty_with_satisfied_constraints(
-                    db,
-                    ingot,
-                    canonical_ty,
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        scope,
-                        assumptions,
-                    ),
-                ) {
+                for impl_ in
+                    impls_for_ty_with_satisfied_constraints(db, ingot, canonical_ty, solve_cx)
+                {
                     let impl_ = match const_bodies {
                         ConstBodyLowering::Eager => {
                             let Some(impl_) = complete_impl_assoc_ty(db, impl_, name) else {

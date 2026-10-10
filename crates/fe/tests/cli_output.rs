@@ -4878,6 +4878,11 @@ fn evidence_generic_instance_condition_and_dispatch_at_o0_and_o2() {
 }
 
 #[test]
+fn inherent_const_outer_prerequisite_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("inherent_const_outer_prerequisite.fe");
+}
+
+#[test]
 fn effect_provider_outer_prerequisite_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("effect_provider_outer_prerequisite.fe");
 }

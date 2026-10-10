@@ -21,9 +21,7 @@ use crate::analysis::ty::corelib::{resolve_core_trait, resolve_lib_type_path};
 use crate::analysis::ty::diagnostics::FuncBodyDiag;
 use crate::analysis::ty::trait_def::TraitInstId;
 use crate::analysis::ty::trait_lower::lower_impl_trait;
-use crate::analysis::ty::trait_resolution::{
-    GoalSatisfiability, TraitSolveCx, is_goal_satisfiable,
-};
+use crate::analysis::ty::trait_resolution::{GoalSatisfiability, is_goal_satisfiable};
 use crate::analysis::ty::ty_def::TyId;
 use crate::analysis::ty::ty_error::diag_from_invalid_cause;
 use crate::hir_def::{AbiRecordKind, ImplTrait, Struct, TopLevelMod};
@@ -129,7 +127,7 @@ pub(crate) fn abi_record_field_issues<'db>(
         return Vec::new();
     };
 
-    let solve_cx = TraitSolveCx::new(db, record.scope());
+    let solve_cx = crate::semantic::context_at(db, record.scope(), None).solver_context(db);
     let adt = AdtRef::from(record).as_adt(db);
     let mut issues = Vec::new();
     for (idx, field_ty) in abi_record_field_tys(db, record, kind) {

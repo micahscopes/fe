@@ -1701,7 +1701,7 @@ impl<'db> FuncParamView<'db> {
     /// All type-related diagnostics for this parameter.
     pub fn ty_diags(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
         let func = self.func;
-        let assumptions = func.assumptions(db);
+        let context = context_at(db, func.scope(), None);
 
         let Some(param) = self
             .func
@@ -1749,12 +1749,7 @@ impl<'db> FuncParamView<'db> {
         }
 
         // Surface name-resolution errors for the parameter type first
-        let errs = collect_hir_ty_diags(
-            db,
-            hir_ty,
-            self.lazy_ty_span(db),
-            context_at(db, func.scope(), None).premises(db),
-        );
+        let errs = collect_hir_ty_diags(db, hir_ty, self.lazy_ty_span(db), context.premises(db));
         if !errs.is_empty() {
             return errs;
         }
@@ -1801,7 +1796,7 @@ impl<'db> FuncParamView<'db> {
 
         // Well-formedness / trait-bound satisfaction for parameter type
         if let Some(diag) =
-            check_ty_wf(db, item_solver_context(db, func.scope()), ty).into_diag(ty_span.clone())
+            check_ty_wf(db, context.solver_context(db), ty).into_diag(ty_span.clone())
         {
             out.push(diag);
         }
@@ -1821,14 +1816,7 @@ impl<'db> FuncParamView<'db> {
                         substitute_layout_holes_by_placeholder(db, expected, receiver_layout_args);
                 }
             }
-            let ty_norm = normalize_ty(
-                db,
-                ty,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    func.scope(),
-                    assumptions,
-                ),
-            );
+            let ty_norm = normalize_ty(db, ty, context.premises(db));
 
             let matches_expected = |candidate: TyId<'db>| {
                 let (exp_base, exp_args) = expected.decompose_ty_app(db);
@@ -5112,17 +5100,9 @@ impl<'db> ImplAssocTypeView<'db> {
         }
 
         let ty_span = self.span().ty();
-        let assumptions = self.with_parameter_bounds(db, constraints_for(db, self.owner.into()));
+        let context = context_at(db, self.scope(), None);
 
-        let errs = collect_ty_lower_errors(
-            db,
-            hir,
-            ty_span.clone(),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.scope(),
-                assumptions,
-            ),
-        );
+        let errs = collect_ty_lower_errors(db, hir, ty_span.clone(), context.premises(db));
         if !errs.is_empty() {
             return errs;
         }
@@ -5133,24 +5113,12 @@ impl<'db> ImplAssocTypeView<'db> {
         if let Some(diag) = ty.emit_diag(db, ty_span.clone().into()) {
             return vec![diag];
         }
-        let normalized = normalize_ty(
-            db,
-            ty,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.scope(),
-                assumptions,
-            ),
-        );
+        let normalized = normalize_ty(db, ty, context.premises(db));
         if let Some(diag) = normalized.emit_diag(db, ty_span.clone().into()) {
             return vec![diag];
         }
-        let context = item_solver_context(db, self.scope());
-        if let Some(diag) = check_ty_wf(
-            db,
-            context.with_assumptions(self.with_parameter_bounds(db, context.assumptions())),
-            ty,
-        )
-        .into_diag(ty_span.into())
+        if let Some(diag) =
+            check_ty_wf(db, context.solver_context(db), ty).into_diag(ty_span.into())
         {
             return vec![diag];
         }

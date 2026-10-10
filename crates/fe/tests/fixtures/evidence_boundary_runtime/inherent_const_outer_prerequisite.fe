@@ -1,0 +1,17 @@
+trait Gate {}
+struct X {}
+struct Y {}
+struct Holder<T> {}
+impl Gate for X as Open {}
+impl Gate for Y {}
+impl<T> Holder<T> where T: Gate { const VALUE: u256 = 7 }
+fn bounded<T: Gate>() -> u256 { Holder<T>::VALUE }
+
+#[test]
+fn outer_prerequisite() {
+    with (Open) {
+        assert(Holder<X>::VALUE == 7)
+        assert(bounded<X>() == 7)
+        assert(Holder<Y>::VALUE == 7)
+    }
+}

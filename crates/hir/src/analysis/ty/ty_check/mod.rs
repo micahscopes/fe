@@ -3375,8 +3375,7 @@ impl<'db> TyChecker<'db> {
                     let ty = ty.fold_with(db, &mut env::Prober::new(&mut self.table, scope));
                     if !ty.has_invalid(db) && !ty.has_var(db) {
                         let solve_cx = context.solver_context(db);
-                        let assumptions = context.assumptions(db);
-                        if let Some(diag) = ty.emit_wf_diag(db, solve_cx, assumptions, span) {
+                        if let Some(diag) = ty.emit_wf_diag(db, solve_cx, span) {
                             self.push_diag(diag);
                         }
                     }
