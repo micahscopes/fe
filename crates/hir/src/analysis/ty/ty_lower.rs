@@ -45,9 +45,7 @@ use super::{
     trait_def::{ImplementorId, TraitInstId},
     trait_resolution::{
         PredicateListId,
-        constraint::{
-            collect_callable_shape_constraints, collect_candidate_constraints, collect_constraints,
-        },
+        constraint::{collect_candidate_constraints, collect_constraints},
     },
     ty_def::{InvalidCause, Kind, PrimTy, TyBase, TyData, TyId, TyParam},
     visitor::{TyVisitable, TyVisitor},
@@ -1904,37 +1902,22 @@ struct CallableInputLayoutPlan<'db> {
         FxHashMap<CallableInputLayoutHoleOrigin, FxHashMap<LayoutBundlePath, Vec<usize>>>,
 }
 
-/// Deferred lowering discovers slots, so its predicates must not depend on the
-/// completed callable parameter list.
-fn callable_input_assumptions<'db>(
-    db: &'db dyn HirAnalysisDb,
-    func: crate::hir_def::Func<'db>,
-    const_bodies: ConstBodyLowering,
-) -> PredicateListId<'db> {
-    match const_bodies {
-        ConstBodyLowering::Eager => {
-            super::trait_resolution::constraint::collect_func_decl_premises(db, func.into())
-        }
-        ConstBodyLowering::Deferred => collect_callable_shape_constraints(db, func),
-    }
-}
-
 fn callable_input_layout_types<'db>(
     db: &'db dyn HirAnalysisDb,
     func: crate::hir_def::Func<'db>,
     const_bodies: ConstBodyLowering,
 ) -> Vec<(CallableInputLayoutHoleOrigin, TyId<'db>)> {
-    let assumptions = callable_input_assumptions(db, func, const_bodies);
+    let context = crate::semantic::callable_input_context_at(db, func, const_bodies);
+    let assumptions = context.assumptions(db);
     let lower_ty = |hir_ty| match const_bodies {
         ConstBodyLowering::Eager => normalize_from_assumptions(
             db,
             lower_hir_ty(db, hir_ty, func.scope(), assumptions),
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                func.scope(),
-                assumptions,
-            ),
+            context.premises(db),
         ),
-        ConstBodyLowering::Deferred => lower_callable_input_shape_ty(db, func, hir_ty, assumptions),
+        ConstBodyLowering::Deferred => {
+            lower_callable_input_shape_ty(db, func, hir_ty, context.premises(db))
+        }
     };
     let mut inputs = Vec::new();
     if func.is_method(db)
@@ -1986,7 +1969,8 @@ fn callable_input_layout_projections<'db>(
     CallableInputLayoutHoleOrigin,
     CallableLayoutProjections<'db>,
 )> {
-    let assumptions = callable_input_assumptions(db, func, const_bodies);
+    let context = crate::semantic::callable_input_context_at(db, func, const_bodies);
+    let assumptions = context.assumptions(db);
     callable_input_layout_types(db, func, const_bodies)
         .into_iter()
         .map(|(origin, ty)| {
@@ -2014,7 +1998,8 @@ fn callable_input_carrier_projections<'db>(
     CallableInputLayoutHoleOrigin,
     CallableLayoutProjections<'db>,
 )> {
-    let assumptions = callable_input_assumptions(db, func, ConstBodyLowering::Eager);
+    let context = crate::semantic::callable_input_context_at(db, func, ConstBodyLowering::Eager);
+    let assumptions = context.assumptions(db);
     callable_input_layout_types(db, func, ConstBodyLowering::Eager)
         .into_iter()
         .map(|(origin, ty)| {
@@ -2774,8 +2759,9 @@ fn lower_callable_input_shape_ty<'db>(
     db: &'db dyn HirAnalysisDb,
     func: crate::hir_def::Func<'db>,
     hir_ty: HirTyId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> TyId<'db> {
+    let assumptions = premises.assumptions();
     let minter = LoweringContext::deferred(HoleAnchor::TemplateTy {
         ty: hir_ty,
         scope: func.scope(),
@@ -2785,10 +2771,7 @@ fn lower_callable_input_shape_ty<'db>(
     normalize_from_assumptions(
         db,
         lower_hir_ty_with_minter(db, hir_ty, func.scope(), assumptions, &minter),
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-            func.scope(),
-            assumptions,
-        ),
+        premises,
     )
 }
 
@@ -2797,7 +2780,8 @@ pub(crate) fn callable_input_layout_hole_groups<'db>(
     func: crate::hir_def::Func<'db>,
 ) -> Vec<CallableInputLayoutHoleGroup<'db>> {
     let mut groups = Vec::new();
-    let assumptions = collect_callable_shape_constraints(db, func);
+    let context = crate::semantic::callable_input_context_at(db, func, ConstBodyLowering::Deferred);
+    let assumptions = context.assumptions(db);
 
     if func.is_method(db)
         && let Some(param) = func.params(db).next()
@@ -2808,7 +2792,7 @@ pub(crate) fn callable_input_layout_hole_groups<'db>(
             param.hir_ty(db).map(|hir_ty| {
                 bind_callable_input_layout_holes(
                     db,
-                    lower_callable_input_shape_ty(db, func, hir_ty, assumptions),
+                    lower_callable_input_shape_ty(db, func, hir_ty, context.premises(db)),
                     func,
                     CallableInputLayoutHoleOrigin::Receiver,
                 )
@@ -2834,7 +2818,7 @@ pub(crate) fn callable_input_layout_hole_groups<'db>(
 
         let ty = bind_callable_input_layout_holes(
             db,
-            lower_callable_input_shape_ty(db, func, hir_ty, assumptions),
+            lower_callable_input_shape_ty(db, func, hir_ty, context.premises(db)),
             func,
             CallableInputLayoutHoleOrigin::ValueParam(param.index()),
         );

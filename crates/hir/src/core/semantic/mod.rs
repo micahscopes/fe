@@ -343,6 +343,25 @@ pub(crate) fn header_context_at<'db>(
     Chain::<()>::new(db, premises).context(db, scope)
 }
 
+/// Callable input formation keeps declaration-only source numbering before
+/// discovered layout/effect slots exist. Completed lowering retains its
+/// existing declaration premises; neither stage reads the completed body.
+pub(crate) fn callable_input_context_at<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: Func<'db>,
+    const_bodies: crate::analysis::ty::const_ty::ConstBodyLowering,
+) -> ImplEnv<'db> {
+    use crate::analysis::ty::const_ty::ConstBodyLowering;
+    use crate::analysis::ty::trait_resolution::constraint::{
+        collect_callable_shape_constraints, collect_func_decl_premises,
+    };
+    let premises = match const_bodies {
+        ConstBodyLowering::Eager => collect_func_decl_premises(db, func.into()),
+        ConstBodyLowering::Deferred => collect_callable_shape_constraints(db, func),
+    };
+    Chain::<()>::new(db, premises).context(db, func.scope())
+}
+
 /// Declaration-phase premises at a position, for readers that run while a
 /// function's effect-provider bounds are still being computed. Asking for the
 /// completed premises there would re-enter the query that builds them, so a
