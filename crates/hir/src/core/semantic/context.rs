@@ -408,6 +408,14 @@ impl<'db> ImplEnv<'db> {
                 if use_.provision().is_some() {
                     return use_;
                 }
+                // A signature constant can read a choice through its impl's
+                // prerequisites even when its own goal has no provision.
+                let use_ = use_.with_dependent_provisions(db, self.context);
+                let use_ = if use_.dependent_context().is_some() {
+                    use_.with_premises(self.context.premises(db))
+                } else {
+                    use_
+                };
                 let Some(provision) = (self.lookup)(use_.inst()) else {
                     return use_;
                 };

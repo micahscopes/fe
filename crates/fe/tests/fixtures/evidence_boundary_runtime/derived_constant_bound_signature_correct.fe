@@ -1,0 +1,13 @@
+// INTENT: Correct-length twin of r4b. The bound is the derived goal; under Wide
+// INTENT: the signature length should be 2, so the two-element argument should
+// INTENT: be ACCEPTED and `last` should return 42. All tests pass.
+trait Width { const N: usize }
+trait Derived { const M: usize }
+struct Subject {}
+struct Wrap<T> {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+impl<T: Width> Derived for Wrap<T> { const M: usize = T::N }
+fn last<D: Derived>(_ value: [u256; D::M]) -> u256 { value[D::M - 1] }
+#[test]
+fn wide_two_element_last_42() { assert(with (Wide) { last<Wrap<Subject>>([41, 42]) } == 42) }

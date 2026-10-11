@@ -1,0 +1,18 @@
+// INTENT: Consequence of r4a. The bound is the derived goal; under Wide the
+// INTENT: signature length should be 2. Each test passes the one-element array
+// INTENT: the checker asks for; intended is REJECT (length 2 expected). If
+// INTENT: accepted, `last` indexes value[D::M - 1]: a revert means the body's
+// INTENT: D::M disagrees with the signature's length.
+trait Width { const N: usize }
+trait Derived { const M: usize }
+struct Subject {}
+struct Wrap<T> {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+impl<T: Width> Derived for Wrap<T> { const M: usize = T::N }
+fn last<D: Derived>(_ value: [u256; D::M]) -> u256 { value[D::M - 1] }
+const fn constant_last<D: Derived>(_ value: [u256; D::M]) -> u256 { value[D::M - 1] }
+#[test]
+fn ordinary_last_41() { assert(last<Wrap<Subject>>([41]) == 41) }
+#[test]
+fn wide_one_element_last_42() { assert(with (Wide) { last<Wrap<Subject>>([42]) } == 42) }

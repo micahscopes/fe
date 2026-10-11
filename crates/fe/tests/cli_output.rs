@@ -4918,6 +4918,17 @@ fn derived_constant_substituted_prerequisite_slots_at_o0_and_o2() {
 }
 
 #[test]
+fn derived_constant_bound_signature_follows_prerequisites() {
+    evidence_boundary_runtime_at_o0_and_o2("derived_constant_bound_signature_correct.fe");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/evidence_boundary_runtime/derived_constant_bound_signature_wrong.fe");
+    let (output, exit_code) = run_fe_main(&["check", "--standalone", fixture.to_str().unwrap()]);
+    assert_eq!(exit_code, 1, "{output}");
+    assert!(output.contains("error[8-0000]"), "{output}");
+    assert!(!output.contains("error[16-"), "{output}");
+}
+
+#[test]
 fn derived_constant_array_lengths_follow_prerequisites() {
     evidence_boundary_runtime_at_o0_and_o2("derived_constant_named_array_correct.fe");
     // A concrete literal against an opened-evidence symbolic length remains
