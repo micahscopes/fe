@@ -1,0 +1,43 @@
+// INTENT: Reduction of a1. The callee names Wide for Width<Subject>; its bound
+// INTENT: U: Width is answered by the caller's BigOther (7). The derived constant
+// INTENT: over both should be 27, as the method is. One test per candidate value
+// INTENT: shows what the constant returns. Intended: *_27 pass, *_25 fail.
+trait Width {
+    const N: usize
+    const fn n() -> usize
+}
+trait Derived {
+    const M: usize
+    const fn m() -> usize
+}
+struct Subject {}
+struct Other {}
+struct Pair<T, U> {}
+impl Width for Subject {
+    const N: usize = 1
+    const fn n() -> usize { 1 }
+}
+impl Width for Subject as Wide {
+    const N: usize = 2
+    const fn n() -> usize { 2 }
+}
+impl Width for Other {
+    const N: usize = 5
+    const fn n() -> usize { 5 }
+}
+impl Width for Other as BigOther {
+    const N: usize = 7
+    const fn n() -> usize { 7 }
+}
+impl<T: Width, U: Width> Derived for Pair<T, U> {
+    const M: usize = T::N * 10 + U::N
+    const fn m() -> usize { T::n() * 10 + U::n() }
+}
+fn rt_const<U: Width>() -> usize { with (Wide) { <Pair<Subject, U> as Derived>::M } }
+fn rt_method<U: Width>() -> usize { with (Wide) { <Pair<Subject, U> as Derived>::m() } }
+#[test]
+fn caller_named_choice() { assert(with (BigOther) { rt_const<Other>() } == 27) }
+#[test]
+fn caller_ordinary_choice() { assert(rt_const<Other>() == 25) }
+#[test]
+fn constant_matches_method() { assert(with (BigOther) { rt_const<Other>() == rt_method<Other>() }) }

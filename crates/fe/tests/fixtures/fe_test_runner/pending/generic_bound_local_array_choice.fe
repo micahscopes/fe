@@ -1,0 +1,15 @@
+// Pending: both accepted df486252c and da77aba1f check this source but hit the array-length/type backend invariant at O0/O2; no borrow-checker-internal fix. See MIXED_DERIVED_CHOICES_2026-10-11.md.
+// INTENT: Direct-constant control for i1g: a generic local array of length
+// INTENT: U::N, no derived constant, the caller answers the bound with BigOther
+// INTENT: (7 elements, index 6 holds 9). Shows whether the backend panic needs
+// INTENT: a derived constant at all. Valid: the test passes.
+trait Width { const N: usize }
+struct Other {}
+impl Width for Other { const N: usize = 5 }
+impl Width for Other as BigOther { const N: usize = 7 }
+fn direct_index<U: Width>(_ index: usize) -> u256 {
+    let y: [u256; U::N] = [9; U::N]
+    y[index]
+}
+#[test]
+fn direct_big_6_is_9() { assert(with (BigOther) { direct_index<Other>(6) } == 9) }

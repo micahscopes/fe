@@ -4918,6 +4918,11 @@ fn derived_constant_substituted_prerequisite_slots_at_o0_and_o2() {
 }
 
 #[test]
+fn derived_constant_mixed_caller_choices_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("derived_constant_mixed_caller_choices.fe");
+}
+
+#[test]
 fn derived_constant_bound_signature_follows_prerequisites() {
     evidence_boundary_runtime_at_o0_and_o2("derived_constant_bound_signature_correct.fe");
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))

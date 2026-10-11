@@ -562,6 +562,55 @@ impl<'db> ImplEnv<'db> {
         })
     }
 
+    /// Refresh caller-answered prerequisites while retaining the source's
+    /// explicit choices and evidence operands, including coinciding slots.
+    pub(crate) fn retain_captured_const_choices(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        captured: Option<Self>,
+    ) -> Self {
+        let Some(captured) = captured else {
+            return self;
+        };
+        let fixed = |goal: TraitInstId<'db>| {
+            captured
+                .selections(db)
+                .iter()
+                .any(|choice| choice.matches(db, goal))
+                || captured
+                    .openings(db)
+                    .iter()
+                    .any(|entry| entry.evidence_operand().is_some() && entry.goal() == goal)
+        };
+        let mut openings = captured
+            .openings(db)
+            .iter()
+            .copied()
+            .filter(|entry| entry.evidence_operand().is_some())
+            .collect::<Vec<_>>();
+        openings.extend(
+            self.openings(db)
+                .iter()
+                .copied()
+                .filter(|entry| !fixed(entry.goal())),
+        );
+        let mut selections = captured.selections(db).clone();
+        selections.extend(
+            self.selections(db)
+                .iter()
+                .copied()
+                .filter(|choice| !fixed(choice.goal())),
+        );
+        Self::new_with_openings(
+            db,
+            self.normalization_scope(db),
+            self.assumptions(db),
+            openings,
+            selections,
+            self.bound_choices(db).clone(),
+        )
+    }
+
     /// Read the provision held by this context. Source evidence retains its
     /// recorded operand; transported declaration witnesses retain only a goal.
     /// A missing source operand must never be reconstructed from that goal.

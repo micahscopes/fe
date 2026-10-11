@@ -1,0 +1,47 @@
+// Pending: same constant spelling in annotation/repetition rejects8-0000; layout experiments reach the generic-array length invariant. See MIXED_DERIVED_CHOICES_2026-10-11.md.
+// INTENT: Layout consequence of a1. The callee names Wide for Width<Subject>
+// INTENT: and builds [9; M] over Pair<Subject, U>; U: Width is answered by the
+// INTENT: caller. Under BigOther M = 27, so index 26 exists and len is 27; under
+// INTENT: the ordinary caller M = 25. Method-length twin for comparison.
+// INTENT: All tests should pass; a 25-long array under BigOther is the bug.
+trait Width {
+    const N: usize
+    const fn n() -> usize
+}
+trait Derived {
+    const M: usize
+    const fn m() -> usize
+}
+struct Subject {}
+struct Other {}
+struct Pair<T, U> {}
+impl Width for Subject {
+    const N: usize = 1
+    const fn n() -> usize { 1 }
+}
+impl Width for Subject as Wide {
+    const N: usize = 2
+    const fn n() -> usize { 2 }
+}
+impl Width for Other {
+    const N: usize = 5
+    const fn n() -> usize { 5 }
+}
+impl Width for Other as BigOther {
+    const N: usize = 7
+    const fn n() -> usize { 7 }
+}
+impl<T: Width, U: Width> Derived for Pair<T, U> {
+    const M: usize = T::N * 10 + U::N
+    const fn m() -> usize { T::n() * 10 + U::n() }
+}
+fn length<U: Width>() -> usize {
+    with (Wide) {
+        let y: [u256; <Pair<Subject, U> as Derived>::M] = [9; <Pair<Subject, U> as Derived>::M]
+        y.len()
+    }
+}
+#[test]
+fn ordinary_length() { assert(length<Other>() == 25) }
+#[test]
+fn named_caller_length() { assert(with (BigOther) { length<Other>() } == 27) }

@@ -48,20 +48,12 @@ impl<'db> AssocConstUse<'db> {
         db: &'db dyn HirAnalysisDb,
         context: crate::analysis::semantic::ImplEnv<'db>,
     ) -> Self {
-        // Actual source choices keep their recorded operands when substitution
-        // makes distinct generic goals coincide. Declaration-only bounds still
-        // obtain their provisions from the instantiated caller.
-        if self.dependent.is_some_and(|captured| {
-            !captured.selections(db).is_empty()
-                || captured
-                    .openings(db)
-                    .iter()
-                    .any(|provision| provision.evidence_operand().is_some())
-        }) {
-            return self;
-        }
         Self {
-            dependent: context.reached_from(db, self.inst, self.premises),
+            dependent: context
+                .reached_from(db, self.inst, self.premises)
+                .map_or(self.dependent, |current| {
+                    Some(current.retain_captured_const_choices(db, self.dependent))
+                }),
             ..self
         }
     }
