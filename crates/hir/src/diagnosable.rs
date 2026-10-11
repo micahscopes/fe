@@ -615,28 +615,17 @@ impl<'db> Trait<'db> {
                 continue;
             }
             let context = crate::core::semantic::context_at(db, assoc.scope(), None);
-            let assumptions = context.assumptions(db);
             let source_diags = ty::ty_error::collect_hir_ty_diags(
                 db,
                 assoc.default_hir_ty(db).expect("default type has source"),
                 assoc.span().ty(),
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    assoc.scope(),
-                    assumptions,
-                ),
+                context.premises(db),
             );
             if !source_diags.is_empty() {
                 diags.extend(source_diags);
                 continue;
             }
-            let normalized = ty::normalize::normalize_ty(
-                db,
-                default_ty,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    assoc.scope(),
-                    assumptions,
-                ),
-            );
+            let normalized = ty::normalize::normalize_ty(db, default_ty, context.premises(db));
             if let Some(diag) = normalized.emit_diag(db, assoc.span().ty().into()) {
                 diags.push(diag);
                 continue;
@@ -1378,7 +1367,8 @@ impl<'db> ImplTrait<'db> {
         let trait_inst = implementor.trait_(db);
         let trait_def = implementor.trait_def(db);
 
-        let solve_cx = crate::semantic::context_at(db, self.scope(), None).solver_context(db);
+        let context = crate::semantic::context_at(db, self.scope(), None);
+        let solve_cx = context.solver_context(db);
 
         if let Some(diag) =
             check_trait_inst_wf(db, solve_cx, trait_inst).into_diag(self.span().trait_ref().into())
@@ -1421,22 +1411,8 @@ impl<'db> ImplTrait<'db> {
                     expected = TyId::app(db, expected, arg);
                     given = TyId::app(db, given, arg);
                 }
-                let expected = normalize_ty(
-                    db,
-                    expected,
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        self.scope(),
-                        solve_cx.assumptions(),
-                    ),
-                );
-                let given = normalize_ty(
-                    db,
-                    given,
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        self.scope(),
-                        solve_cx.assumptions(),
-                    ),
-                );
+                let expected = normalize_ty(db, expected, context.premises(db));
+                let given = normalize_ty(db, given, context.premises(db));
                 if expected != given && !expected.has_invalid(db) && !given.has_invalid(db) {
                     diags.push(
                         ty::diagnostics::ImplDiag::NamedAssociatedTypeMismatch {
