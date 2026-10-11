@@ -1,0 +1,77 @@
+// INTENT: Reduction of h9a. frame<Subject, Subject>(e2, e3) should give 23 for
+// INTENT: the derived constant, as it does for the derived method and the direct
+// INTENT: read. One test per candidate value shows what the constant returns.
+use core::obligations::{Evidence, prove}
+trait Width {
+    const N: usize
+    const fn n() -> usize
+}
+trait Derived {
+    const M: usize
+    const fn m() -> usize
+}
+struct Subject {}
+struct Wrap<T> {}
+impl Width for Subject {
+    const N: usize = 1
+    const fn n() -> usize { 1 }
+}
+impl Width for Subject as Wide {
+    const N: usize = 2
+    const fn n() -> usize { 2 }
+}
+impl Width for Subject as Huge {
+    const N: usize = 3
+    const fn n() -> usize { 3 }
+}
+impl<T: Width> Derived for Wrap<T> {
+    const M: usize = T::N
+    const fn m() -> usize { T::n() }
+}
+const fn frame_const<T: Width, U: Width>(_ a: Evidence<Width<T>>, _ b: Evidence<Width<U>>) -> usize {
+    with (a, b) { <Wrap<T> as Derived>::M * 10 + <Wrap<U> as Derived>::M }
+}
+const fn frame_method<T: Width, U: Width>(_ a: Evidence<Width<T>>, _ b: Evidence<Width<U>>) -> usize {
+    with (a, b) { <Wrap<T> as Derived>::m() * 10 + <Wrap<U> as Derived>::m() }
+}
+const fn named_outside_slot<U: Width>(_ b: Evidence<Width<U>>) -> usize {
+    with (Wide) { with (b) { <Wrap<Subject> as Derived>::M * 10 + <Wrap<U> as Derived>::M } }
+}
+const fn slot_outside_named<U: Width>(_ b: Evidence<Width<U>>) -> usize {
+    with (b) { with (Wide) { <Wrap<Subject> as Derived>::M * 10 + <Wrap<U> as Derived>::M } }
+}
+const fn run_const() -> usize {
+    let e2 = with (Wide) { prove<Width<Subject>>() }
+    let e3 = with (Huge) { prove<Width<Subject>>() }
+    frame_const<Subject, Subject>(e2, e3)
+}
+const fn run_method() -> usize {
+    let e2 = with (Wide) { prove<Width<Subject>>() }
+    let e3 = with (Huge) { prove<Width<Subject>>() }
+    frame_method<Subject, Subject>(e2, e3)
+}
+const fn run_named_outside_slot() -> usize {
+    let e3 = with (Huge) { prove<Width<Subject>>() }
+    named_outside_slot<Subject>(e3)
+}
+const fn run_slot_outside_named() -> usize {
+    let e3 = with (Huge) { prove<Width<Subject>>() }
+    slot_outside_named<Subject>(e3)
+}
+const C: usize = run_const()
+const M: usize = run_method()
+const NOS: usize = run_named_outside_slot()
+const SON: usize = run_slot_outside_named()
+#[test]
+fn method_is_23() { assert(M == 23) }
+#[test]
+fn const_is_23() { assert(C == 23) }
+
+const fn run_reverse() -> usize {
+    let e2 = with (Wide) { prove<Width<Subject>>() }
+    let e3 = with (Huge) { prove<Width<Subject>>() }
+    frame_const<Subject, Subject>(e3, e2)
+}
+const REVERSE: usize = run_reverse()
+#[test]
+fn reversed_constant_is_32() { assert(REVERSE == 32) }

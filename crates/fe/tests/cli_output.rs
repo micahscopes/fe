@@ -4913,6 +4913,11 @@ fn derived_constant_core_sequence_consumers_at_o0_and_o2() {
 }
 
 #[test]
+fn derived_constant_substituted_prerequisite_slots_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("derived_constant_substituted_prerequisite_slots.fe");
+}
+
+#[test]
 fn derived_constant_array_lengths_follow_prerequisites() {
     evidence_boundary_runtime_at_o0_and_o2("derived_constant_named_array_correct.fe");
     // A concrete literal against an opened-evidence symbolic length remains
