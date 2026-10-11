@@ -1,0 +1,42 @@
+// INTENT: Reduction of h10e (accepted on the candidate). Shows what the accepted
+// INTENT: program does: inside `with (e1)` (ordinary, M = 1) the annotation
+// INTENT: [u256; M] holds the two-element array built under e2. Intended: REJECT.
+// INTENT: If accepted, the passing test names show the layout/value split.
+use core::obligations::{Evidence, prove}
+trait Width { const N: usize }
+trait Derived { const M: usize }
+struct Subject {}
+struct Wrap<T> {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+impl<T: Width> Derived for Wrap<T> { const M: usize = T::N }
+const fn second_element() -> u256 {
+    let e2 = with (Wide) { prove<Width<Subject>>() }
+    let e1 = prove<Width<Subject>>()
+    with (e2) {
+        let y: [u256; <Wrap<Subject> as Derived>::M] = [7; <Wrap<Subject> as Derived>::M]
+        with (e1) {
+            let z: [u256; <Wrap<Subject> as Derived>::M] = y
+            z[1]
+        }
+    }
+}
+const fn inner_value() -> usize {
+    let e2 = with (Wide) { prove<Width<Subject>>() }
+    let e1 = prove<Width<Subject>>()
+    with (e2) {
+        let y: [u256; <Wrap<Subject> as Derived>::M] = [7; <Wrap<Subject> as Derived>::M]
+        with (e1) {
+            let z: [u256; <Wrap<Subject> as Derived>::M] = y
+            <Wrap<Subject> as Derived>::M
+        }
+    }
+}
+const SECOND: u256 = second_element()
+const INNER: usize = inner_value()
+#[test]
+fn accepted_z_has_second_element_7() { assert(SECOND == 7) }
+#[test]
+fn accepted_inner_constant_is_1() { assert(INNER == 1) }
+#[test]
+fn accepted_inner_constant_is_2() { assert(INNER == 2) }

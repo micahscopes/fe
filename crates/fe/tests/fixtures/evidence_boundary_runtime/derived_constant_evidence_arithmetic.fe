@@ -1,0 +1,32 @@
+// INTENT: Minimal form of the r1c panic: local evidence, a derived length plus
+// INTENT: one in the annotation and the repeat, literal index 0. Returns 8.
+use core::obligations::{Evidence, prove}
+trait Width { const N: usize }
+trait Derived { const M: usize }
+struct Subject {}
+struct Wrap<T> {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+impl<T: Width> Derived for Wrap<T> { const M: usize = T::N }
+const fn f() -> u256 {
+    let e = with (Wide) { prove<Width<Subject>>() }
+    with (e) {
+        let y: [u256; <Wrap<Subject> as Derived>::M + 1] = [8; <Wrap<Subject> as Derived>::M + 1]
+        y[0]
+    }
+}
+const F: u256 = f()
+#[test]
+fn value_8() { assert(F == 8) }
+
+// The selected prerequisite makes M + 1 equal three, not two.
+const fn selected_last() -> u256 {
+    let e = with (Wide) { prove<Width<Subject>>() }
+    with (e) {
+        let y: [u256; <Wrap<Subject> as Derived>::M + 1] = [8; <Wrap<Subject> as Derived>::M + 1]
+        y[2]
+    }
+}
+const LAST: u256 = selected_last()
+#[test]
+fn selected_last_8() { assert(LAST == 8) }

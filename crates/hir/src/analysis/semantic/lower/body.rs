@@ -851,6 +851,29 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                 self.db,
                 self.instance.context_at(self.db, SemOrigin::Expr(expr)),
             );
+            let caller = self.instance.key(self.db).impl_env(self.db);
+            if matches!(self.template_owner, BodyOwner::AnonConstBody { .. })
+                && caller.normalization_scope(self.db) != self.body.scope()
+                && assoc
+                    .opened_provisions(self.db)
+                    .any(|provision| caller.openings(self.db).contains(&provision))
+            {
+                // Compound constant descriptions are extracted in an anonymous
+                // body. Its caller's evidence expressions belong to the enclosing
+                // body; only that body can supply their lexical values. Retain
+                // the description here until its checked openings are consumed.
+                let term = crate::analysis::ty::const_ty::abstract_const_ty_from_assoc_const_use(
+                    self.db, assoc, ty,
+                );
+                return self.emit_expr_with_origin(
+                    SemOrigin::Expr(expr),
+                    ty,
+                    SExpr::Const(SConst::Description(SemConstId::new(
+                        self.db,
+                        SemConstValue::Description(term),
+                    ))),
+                );
+            }
             let provisions = assoc
                 .opened_provisions(self.db)
                 .map(|provision| {

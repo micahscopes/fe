@@ -5618,7 +5618,11 @@ impl<'db> TyChecker<'db> {
                 ConstTyData::Abstract(expr, _) => {
                     let operands: &[TyId<'db>] = match expr.data(self.db) {
                         ConstExpr::TraitConst(use_) => {
-                            opened |= use_.provision().is_some();
+                            opened |= use_.provision().is_some()
+                                || use_.opened_provisions(self.db).next().is_some()
+                                || use_
+                                    .dependent_context()
+                                    .is_some_and(|context| !context.selections(self.db).is_empty());
                             continue;
                         }
                         ConstExpr::ArithBinOp { lhs, rhs, .. } => &[*lhs, *rhs],

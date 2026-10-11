@@ -290,6 +290,7 @@ where
             (TraitConst(assoc1), TraitConst(assoc2)) => {
                 if assoc1.name() != assoc2.name()
                     || assoc1.provision() != assoc2.provision()
+                    || assoc1.dependent_context() != assoc2.dependent_context()
                     || (assoc1
                         .provision()
                         .is_some_and(|p| p.evidence_operand().is_some())
