@@ -1,0 +1,23 @@
+// INTENT: Split of h10n (candidate panic in trait proof search), part 1:
+// INTENT: Seq::len on a derived-length array. Under Wide 2, without a choice 1.
+// INTENT: All tests pass.
+trait Width { const N: usize }
+trait Derived { const M: usize }
+struct Subject {}
+struct Wrap<T> {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+impl<T: Width> Derived for Wrap<T> { const M: usize = T::N }
+#[test]
+fn wide_len_2() {
+    let n = with (Wide) {
+        let y: [u256; <Wrap<Subject> as Derived>::M] = [7; <Wrap<Subject> as Derived>::M]
+        y.len()
+    }
+    assert(n == 2)
+}
+#[test]
+fn ordinary_len_1() {
+    let y: [u256; <Wrap<Subject> as Derived>::M] = [7; <Wrap<Subject> as Derived>::M]
+    assert(y.len() == 1)
+}

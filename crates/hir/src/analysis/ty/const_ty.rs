@@ -2657,9 +2657,13 @@ fn selected_const_body_assumptions<'db>(
     let Some(env) = impl_env else {
         return assumptions_for_body(db, body);
     };
+    // Paths are still written in declaration coordinates. Keep their bounds
+    // for name lookup before capture specialization; the resulting use reads
+    // its actual proof context from the caller in assoc_const_use_for_body.
     crate::semantic::lookup_assumptions(
         db,
-        env.assumptions(db),
+        env.assumptions(db)
+            .merge(db, assumptions_for_body(db, body)),
         env.witnesses(db),
         env.selections(db).iter().copied(),
     )

@@ -1,0 +1,18 @@
+// INTENT: Split of h10n, part 3: element equality between a derived-length
+// INTENT: array under Wide (2) and a literal two-element array. Test passes.
+trait Width { const N: usize }
+trait Derived { const M: usize }
+struct Subject {}
+struct Wrap<T> {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+impl<T: Width> Derived for Wrap<T> { const M: usize = T::N }
+#[test]
+fn wide_equal_arrays() {
+    let same = with (Wide) {
+        let y: [u256; <Wrap<Subject> as Derived>::M] = [7; <Wrap<Subject> as Derived>::M]
+        let z: [u256; 2] = [7, 7]
+        y == z
+    }
+    assert(same)
+}

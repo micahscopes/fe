@@ -4903,6 +4903,16 @@ fn derived_constant_core_abi_size_at_o0_and_o2() {
 }
 
 #[test]
+fn derived_constant_core_sequence_consumers_at_o0_and_o2() {
+    for name in [
+        "derived_constant_core_seq_length.fe",
+        "derived_constant_core_array_equality.fe",
+    ] {
+        evidence_boundary_runtime_at_o0_and_o2(name);
+    }
+}
+
+#[test]
 fn derived_constant_array_lengths_follow_prerequisites() {
     evidence_boundary_runtime_at_o0_and_o2("derived_constant_named_array_correct.fe");
     // A concrete literal against an opened-evidence symbolic length remains
