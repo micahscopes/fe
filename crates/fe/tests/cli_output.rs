@@ -4898,6 +4898,11 @@ fn derived_constant_evidence_arithmetic_at_o0_and_o2() {
 }
 
 #[test]
+fn derived_constant_core_abi_size_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("derived_constant_core_abi_size.fe");
+}
+
+#[test]
 fn derived_constant_array_lengths_follow_prerequisites() {
     evidence_boundary_runtime_at_o0_and_o2("derived_constant_named_array_correct.fe");
     // A concrete literal against an opened-evidence symbolic length remains

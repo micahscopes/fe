@@ -335,10 +335,12 @@ pub(crate) fn selected_impl_requirements_hold<'db>(
     conditions: crate::analysis::ty::trait_resolution::ImplConditionsId<'db>,
     scope: ScopeId<'db>,
 ) -> bool {
-    crate::analysis::ty::trait_resolution::assert_outside_proof_search();
     selected_impl_condition_obligations(db, conditions, scope)
         .iter()
         .all(|use_| {
+            // Empty structural proofs discharge no const conditions. Keep the
+            // phase guard at every actual condition evaluation.
+            crate::analysis::ty::trait_resolution::assert_outside_proof_search();
             matches!(
                 discharge_selected_requirement(
                     db,

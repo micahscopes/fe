@@ -1,0 +1,19 @@
+// INTENT: Split of h10n, part 2: the ABI head size of a derived-length array
+// INTENT: type. Under Wide 64, without a choice 32. All tests pass.
+use core::abi::AbiSize
+trait Width { const N: usize }
+trait Derived { const M: usize }
+struct Subject {}
+struct Wrap<T> {}
+impl Width for Subject { const N: usize = 1 }
+impl Width for Subject as Wide { const N: usize = 2 }
+impl<T: Width> Derived for Wrap<T> { const M: usize = T::N }
+#[test]
+fn wide_head_size_64() {
+    let size = with (Wide) { <[u256; <Wrap<Subject> as Derived>::M] as AbiSize>::HEAD_SIZE }
+    assert(size == 64)
+}
+#[test]
+fn ordinary_head_size_32() {
+    assert(<[u256; <Wrap<Subject> as Derived>::M] as AbiSize>::HEAD_SIZE == 32)
+}
