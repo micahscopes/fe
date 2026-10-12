@@ -58,6 +58,19 @@ impl<'db> AssocConstUse<'db> {
         }
     }
 
+    /// A declaration bound was already answered by the caller. Its prerequisites
+    /// belong to that answer, rather than a frame entered by the callee.
+    pub(crate) fn with_caller_bound_provisions(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        caller: crate::analysis::semantic::ImplEnv<'db>,
+    ) -> Self {
+        Self {
+            dependent: caller.reached_from(db, self.inst, self.premises),
+            ..self
+        }
+    }
+
     /// The reached provisions of the use's position, as a context for the
     /// constant's body.
     pub(crate) fn dependent_context(self) -> Option<crate::analysis::semantic::ImplEnv<'db>> {

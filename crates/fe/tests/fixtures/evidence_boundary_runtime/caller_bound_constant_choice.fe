@@ -1,0 +1,52 @@
+// INTENT: H8. The caller proves the bound D: Derived under Wide (M = 2). The
+// INTENT: callee enters its own named frame Huge for Width<Subject> and reads
+// INTENT: D::M and D::m(). The bound was answered by the caller, so the callee's
+// INTENT: frame must not change it: constant and method both 2 (ordinary caller
+// INTENT: 1), and the outer caller context is restored after the inner frame.
+trait Width {
+    const N: usize
+    const fn n() -> usize
+}
+trait Derived {
+    const M: usize
+    const fn m() -> usize
+}
+struct Subject {}
+struct Wrap<T> {}
+impl Width for Subject {
+    const N: usize = 1
+    const fn n() -> usize { 1 }
+}
+impl Width for Subject as Wide {
+    const N: usize = 2
+    const fn n() -> usize { 2 }
+}
+impl Width for Subject as Huge {
+    const N: usize = 3
+    const fn n() -> usize { 3 }
+}
+impl<T: Width> Derived for Wrap<T> {
+    const M: usize = T::N
+    const fn m() -> usize { T::n() }
+}
+fn shadow_const<D: Derived>() -> usize { with (Huge) { D::M } }
+fn shadow_method<D: Derived>() -> usize { with (Huge) { D::m() } }
+fn plain_const<D: Derived>() -> usize { D::M }
+fn around_const<D: Derived>() -> usize {
+    let before = D::M
+    let inside = with (Huge) { D::M }
+    let after = D::M
+    before * 100 + inside * 10 + after
+}
+#[test]
+fn caller_bound_constant_and_method_agree() {
+    assert(with (Wide) { shadow_const<Wrap<Subject>>() } == 2)
+    assert(with (Wide) { shadow_method<Wrap<Subject>>() } == 2)
+    assert(shadow_const<Wrap<Subject>>() == 1)
+    assert(shadow_method<Wrap<Subject>>() == 1)
+}
+#[test]
+fn caller_bound_constant_restores_outer_context() {
+    assert(with (Wide) { around_const<Wrap<Subject>>() } == 222)
+    assert(with (Wide) { plain_const<Wrap<Subject>>() } == 2)
+}

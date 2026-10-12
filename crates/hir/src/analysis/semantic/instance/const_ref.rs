@@ -621,19 +621,31 @@ pub(crate) fn recorded_method_instance<'db>(
     choice: TraitChoiceId<'db>,
     method: crate::hir_def::IdentId<'db>,
 ) -> Result<Selection<ResolvedMethodInstance<'db>>, SelectedEvidenceError> {
+    Ok(resolved_method_instance(
+        db,
+        context,
+        recorded_impl_instance(db, context, choice)?,
+        method,
+    ))
+}
+
+fn recorded_impl_instance<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    choice: TraitChoiceId<'db>,
+) -> Result<ResolvedImplInstance<'db>, SelectedEvidenceError> {
     let choice = choice.data(db);
-    let instance = match choice.via() {
+    match choice.via() {
         TraitChoiceVia::Implementation(selected) => {
             let selected =
                 complete_selected_impl(db, selected).ok_or(SelectedEvidenceError::Unsupported)?;
             instantiate_selected_impl(db, selected, choice.goal())
-                .ok_or(SelectedEvidenceError::Unsupported)?
+                .ok_or(SelectedEvidenceError::Unsupported)
         }
-        TraitChoiceVia::Selected(selected) => selected
+        TraitChoiceVia::Selected(selected) => Ok(selected
             .revalidate(db, context, choice.goal())?
-            .resolved_instance(),
-    };
-    Ok(resolved_method_instance(db, context, instance, method))
+            .resolved_instance()),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1254,21 +1266,49 @@ pub(crate) fn resolve_semantic_const_ref_in_instance<'db>(
     origin: SemOrigin<'db>,
     inherit_trait_selection: bool,
 ) -> Option<SemanticConstRef<'db>> {
+    let supplied_choice = caller_key
+        .filter(|_| inherit_trait_selection)
+        .and_then(|caller| {
+            let typed = caller.typed_body(db);
+            let body = typed
+                .body()
+                .expect("a source constant reference has a body");
+            let SemOrigin::Expr(expr) = origin else {
+                return None;
+            };
+            let site = DecisionSite::trait_reference(expr.span(body).into());
+            let record = typed
+                .decisions()
+                .choice_ref(&site)
+                .expect("a source trait constant must retain its accepted choice");
+            supplied_bound_choice(db, caller, &site, record).filter(|answer| {
+                !matches!(
+                    answer.data(db).answer_origin(db),
+                    ImplementorOrigin::Assumption
+                )
+            })
+        });
     // The constant's own accepted answer and its prerequisite choices are
     // distinct: an ordinary blanket constant still reads the caller's bounds.
     let const_ref = match (const_ref, caller_key) {
         (ConstRef::TraitConst(assoc), Some(caller)) => {
-            ConstRef::TraitConst(assoc.with_dependent_provisions(
-                db,
-                SemanticInstance::new(db, caller).context_at(db, origin),
-            ))
+            ConstRef::TraitConst(if supplied_choice.is_some() {
+                assoc.with_caller_bound_provisions(db, caller.impl_env(db))
+            } else {
+                assoc.with_dependent_provisions(
+                    db,
+                    SemanticInstance::new(db, caller).context_at(db, origin),
+                )
+            })
         }
         (const_ref, _) => const_ref,
     };
     let caller_key = caller_key.filter(|_| inherit_trait_selection);
     let instance = match const_ref {
         ConstRef::Const(const_) => semantic_const_key_for_const(db, const_),
-        ConstRef::TraitConst(assoc) => semantic_const_key_for_assoc_const(db, caller_key, assoc),
+        ConstRef::TraitConst(assoc) => {
+            semantic_const_key_for_assoc_const(db, caller_key, assoc, supplied_choice)
+        }
         ConstRef::InherentConst(use_) => semantic_const_key_for_inherent_const(db, use_),
     }?;
     Some(SemanticConstRef::new(db, instance, ty, origin))
@@ -1308,6 +1348,7 @@ fn semantic_const_key_for_assoc_const<'db>(
     db: &'db dyn HirAnalysisDb,
     caller_key: Option<SemanticInstanceKey<'db>>,
     assoc: AssocConstUse<'db>,
+    supplied_choice: Option<TraitChoiceId<'db>>,
 ) -> Option<SemanticInstanceKey<'db>> {
     if assoc.opened_provisions(db).next().is_some() {
         // The lexical operand, not an ordinary lookup, decides this read.
@@ -1316,7 +1357,13 @@ fn semantic_const_key_for_assoc_const<'db>(
     let selection = assoc
         .selection()
         .or_else(|| caller_key.and_then(|key| key.impl_env(db).selection_for(db, assoc.inst())));
-    let (body, ty, subst) = if let Some(selection) = selection {
+    let (body, ty, subst) = if let Some(choice) = supplied_choice {
+        selected_assoc_const_body_template(
+            db,
+            recorded_impl_instance(db, assoc.solve_cx(db), choice).ok()?,
+            assoc.name(),
+        )?
+    } else if let Some(selection) = selection {
         let proof = selection
             .revalidate(db, assoc.solve_cx(db), assoc.inst())
             .ok()?;
