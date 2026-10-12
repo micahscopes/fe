@@ -258,6 +258,18 @@ impl<'db> SolverPremises<'db> {
         Self { scope, assumptions }
     }
 
+    /// Local-value layout schemas describe already lowered declaration topology.
+    /// They do not inherit body bounds or lexical selections for expansion.
+    pub(crate) fn for_value_layout_schema(
+        db: &'db dyn HirAnalysisDb,
+        body: crate::hir_def::Body<'db>,
+    ) -> Self {
+        Self {
+            scope: body.scope(),
+            assumptions: PredicateListId::empty_list(db),
+        }
+    }
+
     /// Completed callable inputs include the declaration's effect-provider
     /// premises. Earlier header/input formation must not use this projection.
     pub(crate) fn for_completed_callable_input(

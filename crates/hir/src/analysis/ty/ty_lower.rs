@@ -810,21 +810,6 @@ fn lower_path<'db>(
     lower_path_impl(db, scope, path, assumptions, TypePosition::Type, &minter)
 }
 
-pub(crate) fn generic_param_owner_assumptions<'db>(
-    db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
-) -> PredicateListId<'db> {
-    GenericParamOwner::from_item_opt(scope.item()).map_or_else(
-        || PredicateListId::empty_list(db),
-        |owner| match owner {
-            GenericParamOwner::Func(func) => {
-                super::trait_resolution::constraint::collect_func_decl_premises(db, func.into())
-            }
-            _ => super::trait_resolution::constraint::decl_premises(db, owner),
-        },
-    )
-}
-
 /// Collects the generic parameters of the given generic parameter owner.
 #[salsa::tracked(
     cycle_initial=collect_generic_params_cycle_initial,
@@ -903,7 +888,7 @@ struct CallableLayoutProjections<'db> {
 struct CallableLayoutProjectionCollector<'db> {
     db: &'db dyn HirAnalysisDb,
     site: CallableLayoutSchemaSite<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     next_ordinal: usize,
     placeholders: Vec<TyId<'db>>,
     seen_placeholders: FxHashSet<TyId<'db>>,
@@ -1034,15 +1019,18 @@ impl<'db> CallableLayoutSchemaSite<'db> {
             .unwrap_or(value)
     }
 
-    fn scope(self) -> ScopeId<'db> {
+    fn premises(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> crate::analysis::semantic::SolverPremises<'db> {
         match self {
-            Self::Input { owner, .. } | Self::Output { owner } => owner.scope(),
-            Self::Value { body, .. } => body.scope(),
+            Self::Input { owner, .. } | Self::Output { owner } => {
+                crate::semantic::header_context_at(db, owner.scope()).premises(db)
+            }
+            Self::Value { body, .. } => {
+                crate::analysis::semantic::SolverPremises::for_value_layout_schema(db, body)
+            }
         }
-    }
-
-    fn assumptions(self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
-        generic_param_owner_assumptions(db, self.scope())
     }
 }
 
@@ -1287,16 +1275,9 @@ impl<'db> CallableLayoutProjectionCollector<'db> {
         let Some(adt) = ty.adt_def(self.db) else {
             return;
         };
-        let effect_target = self.expand_effect_targets.then(|| {
-            resolve_effect_handle(
-                self.db,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    self.site.scope(),
-                    self.assumptions,
-                ),
-                ty,
-            )
-        });
+        let effect_target = self
+            .expand_effect_targets
+            .then(|| resolve_effect_handle(self.db, self.premises, ty));
         let family = match &effect_target {
             Some(EffectHandleResolution::Resolved { impl_instance, .. }) => {
                 CallableLayoutExpansionFamily::Provider(impl_instance.selected())
@@ -1771,7 +1752,7 @@ fn callable_layout_projections_for_ty<'db>(
     site: CallableLayoutSchemaSite<'db>,
     ty: TyId<'db>,
 ) -> CallableLayoutProjections<'db> {
-    callable_layout_projections_for_ty_with_effect_targets(db, site, ty, true, site.assumptions(db))
+    callable_layout_projections_for_ty_with_effect_targets(db, site, ty, true, site.premises(db))
 }
 
 fn callable_layout_projections_for_ty_with_effect_targets<'db>(
@@ -1779,7 +1760,7 @@ fn callable_layout_projections_for_ty_with_effect_targets<'db>(
     site: CallableLayoutSchemaSite<'db>,
     ty: TyId<'db>,
     expand_effect_targets: bool,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> CallableLayoutProjections<'db> {
     let (anchor, boundary) = match site {
         CallableLayoutSchemaSite::Input { owner, origin } => (
@@ -1819,7 +1800,7 @@ fn callable_layout_projections_for_ty_with_effect_targets<'db>(
     let mut collector = CallableLayoutProjectionCollector {
         db,
         site,
-        assumptions,
+        premises,
         next_ordinal: 0,
         placeholders: Vec::new(),
         seen_placeholders: FxHashSet::default(),
@@ -1973,7 +1954,6 @@ fn callable_input_layout_projections<'db>(
     CallableLayoutProjections<'db>,
 )> {
     let context = crate::semantic::callable_input_context_at(db, func, const_bodies);
-    let assumptions = context.assumptions(db);
     callable_input_layout_types(db, func, const_bodies)
         .into_iter()
         .map(|(origin, ty)| {
@@ -1987,7 +1967,7 @@ fn callable_input_layout_projections<'db>(
                     },
                     ty,
                     true,
-                    assumptions,
+                    context.premises(db),
                 ),
             )
         })
@@ -2002,7 +1982,6 @@ fn callable_input_carrier_projections<'db>(
     CallableLayoutProjections<'db>,
 )> {
     let context = crate::semantic::callable_input_context_at(db, func, ConstBodyLowering::Eager);
-    let assumptions = context.assumptions(db);
     callable_input_layout_types(db, func, ConstBodyLowering::Eager)
         .into_iter()
         .map(|(origin, ty)| {
@@ -2016,7 +1995,7 @@ fn callable_input_carrier_projections<'db>(
                     },
                     ty,
                     false,
-                    assumptions,
+                    context.premises(db),
                 ),
             )
         })
