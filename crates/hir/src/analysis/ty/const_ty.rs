@@ -3309,7 +3309,16 @@ impl<'db> ConstTyId<'db> {
         if captured.is_empty() {
             // Calls in an extracted expression still need its source choices,
             // even when no associated-constant path needs operand capture.
-            return self.with_impl_env(db, context);
+            return if body.exprs(db).iter().any(|(expr, _)| {
+                matches!(
+                    expr.data(db, *body),
+                    Partial::Present(Expr::Call(..) | Expr::MethodCall(..))
+                )
+            }) {
+                self.with_impl_env(db, context)
+            } else {
+                self
+            };
         }
         let Some(expected) = template_ty.or(*ty) else {
             return self;
