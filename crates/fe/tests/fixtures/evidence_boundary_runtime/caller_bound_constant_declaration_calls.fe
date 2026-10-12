@@ -1,0 +1,33 @@
+// A concrete call retains its declaration answer while a generic bound uses the caller answer.
+trait Width {
+    const N: usize
+    const fn n() -> usize
+}
+trait Derived {
+    const M: usize
+    const fn m() -> usize
+}
+struct S {}
+struct Wrap<T> {}
+impl Width for S {
+    const N: usize = 1
+    const fn n() -> usize { 1 }
+}
+impl Width for S as Wide {
+    const N: usize = 2
+    const fn n() -> usize { 2 }
+}
+const fn size<T: Width>() -> usize { T::N }
+impl<T: Width> Derived for Wrap<T> {
+    const M: usize = T::N * 10 + size<S>()
+    const fn m() -> usize { T::n() * 10 + size<S>() }
+}
+#[test]
+fn frozen_concrete_call_and_forwarded_bound_agree() {
+    with (Wide) {
+        assert(<Wrap<S> as Derived>::M == 21)
+        assert(<Wrap<S> as Derived>::m() == 21)
+    }
+    assert(<Wrap<S> as Derived>::M == 11)
+    assert(<Wrap<S> as Derived>::m() == 11)
+}

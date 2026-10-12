@@ -4918,6 +4918,11 @@ fn derived_constant_substituted_prerequisite_slots_at_o0_and_o2() {
 }
 
 #[test]
+fn caller_bound_constant_declaration_calls_at_o0_and_o2() {
+    evidence_boundary_runtime_at_o0_and_o2("caller_bound_constant_declaration_calls.fe");
+}
+
+#[test]
 fn caller_bound_constant_choice_at_o0_and_o2() {
     evidence_boundary_runtime_at_o0_and_o2("caller_bound_constant_choice.fe");
 }

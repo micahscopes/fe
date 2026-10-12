@@ -479,7 +479,8 @@ fn source_trait_choices<'db>(
                     let record = typed.decisions().choice_ref(&choice.site())?;
                     let record =
                         supplied_bound_choice(db, caller, &choice.site(), record).unwrap_or(record);
-                    let answer = if matches!(caller.owner(db), BodyOwner::AnonConstBody { .. })
+                    let answer = if matches!(caller.owner(db), BodyOwner::AnonConstBody { body, .. }
+                        if body.body_kind(db) == crate::hir_def::BodyKind::Anonymous)
                         && matches!(record.data(db).via(), TraitChoiceVia::Implementation(_))
                         && let position = SemanticInstance::new(db, caller).context_at(db, origin)
                         && let Some(selection) = position.selection_for(db, record.data(db).goal())
