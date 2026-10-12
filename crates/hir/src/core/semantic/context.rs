@@ -257,6 +257,34 @@ impl<'db> SolverPremises<'db> {
         Self { scope, assumptions }
     }
 
+    /// Body normalization keeps the lowering stage's premises and the
+    /// actual body scope. Provisional lowering must not read final effects.
+    pub(crate) fn for_body_lowering(
+        db: &'db dyn HirAnalysisDb,
+        instance: crate::analysis::semantic::SemanticInstance<'db>,
+        mode: crate::analysis::semantic::lower::BindingRoleMode,
+    ) -> Self {
+        use crate::analysis::semantic::lower::BindingRoleMode;
+        let assumptions = match mode {
+            BindingRoleMode::Final => instance.assumptions(db),
+            BindingRoleMode::Provisional => {
+                crate::analysis::semantic::semantic_instance_base_assumptions_for_key(
+                    db,
+                    instance.key(db),
+                )
+            }
+        };
+        Self {
+            scope: instance
+                .key(db)
+                .typed_body(db)
+                .body()
+                .expect("body lowering has a body")
+                .scope(),
+            assumptions,
+        }
+    }
+
     pub fn scope(self) -> ScopeId<'db> {
         self.scope
     }

@@ -189,7 +189,7 @@ pub(super) struct SmirLowerCtxt<'a, 'db> {
     pub(super) call_sites: &'a [Option<CallSiteLowering<'db>>],
     pub(super) for_loop_call_sites: &'a [Option<ForLoopCallSites<'db>>],
     pub(super) binding_role_mode: BindingRoleMode,
-    pub(super) assumptions: crate::analysis::ty::trait_resolution::PredicateListId<'db>,
+    pub(super) premises: crate::analysis::semantic::SolverPremises<'db>,
     pub(super) entry_locals: Vec<SLocalId>,
     pub(super) locals: Vec<SLocal<'db>>,
     pub(super) assigned_snapshots: Vec<bool>,
@@ -250,15 +250,11 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             call_sites: inputs.call_sites,
             for_loop_call_sites: inputs.for_loop_call_sites,
             binding_role_mode: inputs.binding_role_mode,
-            assumptions: match inputs.binding_role_mode {
-                BindingRoleMode::Final => instance.assumptions(db),
-                BindingRoleMode::Provisional => {
-                    crate::analysis::semantic::semantic_instance_base_assumptions_for_key(
-                        db,
-                        instance.key(db),
-                    )
-                }
-            },
+            premises: crate::analysis::semantic::SolverPremises::for_body_lowering(
+                db,
+                instance,
+                inputs.binding_role_mode,
+            ),
             entry_locals: Vec::new(),
             locals: Vec::new(),
             assigned_snapshots: Vec::new(),
@@ -605,14 +601,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     .into_iter()
                     .enumerate()
                     .map(|(idx, field_ty)| {
-                        let field_ty = normalize_ty(
-                            self.db,
-                            field_ty,
-                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                                self.body.scope(),
-                                self.assumptions,
-                            ),
-                        );
+                        let field_ty = normalize_ty(self.db, field_ty, self.premises);
                         if field_ty == TyId::unit(self.db) || field_ty.is_zero_sized(self.db) {
                             unit
                         } else if idx == 0 {
@@ -1069,11 +1058,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         typed_semantics: PathReadSemantics,
         expr_ty: TyId<'db>,
     ) -> PathReadSemantics {
-        let scope = self.body.scope();
-        let premises = crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-            scope,
-            self.assumptions,
-        );
+        let premises = self.premises;
         if normalize_ty(self.db, expr_ty, premises)
             == normalize_ty(self.db, self.binding_ty(binding), premises)
         {
@@ -1311,10 +1296,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         callable: &Callable<'db>,
         param: usize,
     ) -> SValueId {
-        let premises = crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-            self.body.scope(),
-            self.assumptions,
-        );
+        let premises = self.premises;
         let ty = self.expr_ty(expr);
         if !ty_is_copy(self.db, premises, ty)
             && callable.arg_ty(self.db, param).is_some_and(|param_ty| {
@@ -1407,10 +1389,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     .generic_args()
                     .first()
                     .expect("core::size_of lowering requires a concrete generic arg"),
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    self.body.scope(),
-                    self.assumptions,
-                ),
+                self.premises,
             ),
         };
         let result_ty = self.expr_ty(expr);

@@ -143,7 +143,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         provider_semantics(
             self.db,
             self.body.scope(),
-            self.assumptions,
+            self.premises.assumptions(),
             self.expr_ty(expr),
         )
         .kind

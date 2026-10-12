@@ -64,10 +64,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
     }
 
     fn fallback_local_role(&self, ty: TyId<'db>) -> SemanticLocalRole<'db> {
-        let premises = crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-            self.body.scope(),
-            self.assumptions,
-        );
+        let premises = self.premises;
         let ty = normalize_ty(self.db, ty, premises);
         if let Some((_, value_ty)) = ty.as_capability(self.db) {
             return SemanticLocalRole::PlaceCarrier {
@@ -75,7 +72,8 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                 value_ty: normalize_ty(self.db, value_ty, premises),
             };
         }
-        let semantics = provider_semantics(self.db, self.body.scope(), self.assumptions, ty);
+        let semantics =
+            provider_semantics(self.db, self.body.scope(), self.premises.assumptions(), ty);
         semantics.binding_target_ty(self.db, false).map_or_else(
             ordinary_direct_value_role,
             |target_ty| SemanticLocalRole::DirectCarrier {

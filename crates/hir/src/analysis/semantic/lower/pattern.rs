@@ -315,11 +315,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         dst: crate::analysis::semantic::SLocalId,
         src: PatternValue<'db>,
     ) {
-        let scope = self.body.scope();
-        let premises = crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-            scope,
-            self.assumptions,
-        );
+        let premises = self.premises;
         let src_ty = normalize_ty(self.db, src.carrier_ty.0, premises);
         let dst_ty = normalize_ty(self.db, self.locals[dst.index()].ty, premises);
         debug_assert_eq!(
@@ -367,12 +363,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     let by_borrow = self.typed_body.pat_binding_mode(binding.representative_pat)
                         == Some(PatBindingMode::ByBorrow);
                     let source_matches_dst = {
-                        let scope = self.body.scope();
-                        let premises =
-                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                                scope,
-                                self.assumptions,
-                            );
+                        let premises = self.premises;
                         normalize_ty(self.db, value.carrier_ty.0, premises)
                             == normalize_ty(self.db, dst_ty, premises)
                     };
