@@ -477,12 +477,31 @@ fn source_trait_choices<'db>(
                         return None;
                     }
                     let record = typed.decisions().choice_ref(&choice.site())?;
-                    Some((
-                        slot,
-                        supplied_bound_choice(db, caller, &choice.site(), record).unwrap_or(record),
-                    ))
+                    let record =
+                        supplied_bound_choice(db, caller, &choice.site(), record).unwrap_or(record);
+                    let answer = if matches!(caller.owner(db), BodyOwner::AnonConstBody { .. })
+                        && matches!(record.data(db).via(), TraitChoiceVia::Implementation(_))
+                        && let position = SemanticInstance::new(db, caller).context_at(db, origin)
+                        && let Some(selection) = position.selection_for(db, record.data(db).goal())
+                    {
+                        // An extracted constant call inherits the context of
+                        // its source position. Record that transported answer
+                        // before the callee consumes its declaration bound.
+                        selection
+                            .revalidate(db, position.solver_context(db), record.data(db).goal())
+                            .map(|proof| {
+                                TraitChoiceId::for_selected_application(
+                                    db,
+                                    super::SelectedApplication::from_evidence(&proof),
+                                )
+                            })
+                            .map_err(MethodArgMapError::SelectedEvidence)
+                    } else {
+                        Ok(record)
+                    };
+                    Some(answer.map(|record| (slot, record)))
                 })
-                .collect()
+                .collect::<Result<Vec<_>, _>>()?
         }
         _ => Vec::new(),
     };
