@@ -5,7 +5,7 @@ use crate::analysis::{
     HirAnalysisDb,
     semantic::{
         LayoutBackingProjection, SLocal, SLocalId, SStmtId, SemOrigin, SemanticBody,
-        SemanticLocalRole, ValueProvenance,
+        SemanticLocalRole, SolverPremises, ValueProvenance,
         normalized::{
             NDataPath, NDataProjection, NExpr, NIndex, NRootId, NRootKind, NStatementKind,
             NValueDefinition, NValueId, NormalizedBody,
@@ -454,10 +454,7 @@ fn projection_base_ty<'db>(
     let ty = normalize_ty(
         db,
         ty,
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-            source.template_owner.scope(),
-            source.owner.assumptions(db),
-        ),
+        SolverPremises::for_normalized_body(db, source.owner),
     );
     ty.as_capability(db).map_or(ty, |(_, target)| target)
 }

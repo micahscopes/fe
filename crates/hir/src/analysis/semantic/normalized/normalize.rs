@@ -11,7 +11,7 @@ use crate::{
             BorrowActivation, EvalOutcome, FieldIndex, LayoutBackingPlace, LayoutBackingProjection,
             PlaceProvenance, SBlockId, SConst, SExpr, SLocal, SLocalId, SOperand, SPlace, SStmtId,
             SStmtKind, STerminatorKind, SemConstValue, SemOrigin, SemanticBody, SemanticInstance,
-            SemanticLocalRole, ValueProvenance, VariantIndex,
+            SemanticLocalRole, SolverPremises, ValueProvenance, VariantIndex,
             capability::{
                 handle::OpaqueHandleContract,
                 semantics::{CapabilityClass, CapabilitySemantics, capability_semantics},
@@ -40,7 +40,6 @@ use crate::{
             provider::{
                 ProviderAddressSpace, ProviderKind, ProviderLayoutEvidence, provider_semantics,
             },
-            trait_resolution::PredicateListId,
             ty_check::{BodyOwner, LocalBinding},
             ty_def::{BorrowKind, CapabilityKind, TyData, TyId},
             ty_is_copy,
@@ -73,16 +72,16 @@ pub fn normalize_raw_body<'db>(
     db: &'db dyn HirAnalysisDb,
     instance: SemanticInstance<'db>,
     raw: &SemanticBody<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: SolverPremises<'db>,
 ) -> Result<NormalizedArtifacts<'db>, NormalizeError<'db>> {
-    NormalizeCx::new(db, instance, raw, assumptions).normalize()
+    NormalizeCx::new(db, instance, raw, premises).normalize()
 }
 
 struct NormalizeCx<'a, 'db> {
     db: &'db dyn HirAnalysisDb,
     instance: SemanticInstance<'db>,
     raw: &'a SemanticBody<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: SolverPremises<'db>,
     roots: Vec<NRoot<'db>>,
     root_for_local: Vec<Option<NRootId>>,
     provider_target_root_for_local: Vec<Option<NRootId>>,
@@ -105,14 +104,14 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
         db: &'db dyn HirAnalysisDb,
         instance: SemanticInstance<'db>,
         raw: &'a SemanticBody<'db>,
-        assumptions: PredicateListId<'db>,
+        premises: SolverPremises<'db>,
     ) -> Self {
         let local_count = raw.locals.len();
         Self {
             db,
             instance,
             raw,
-            assumptions,
+            premises,
             roots: Vec::new(),
             root_for_local: vec![None; local_count],
             provider_target_root_for_local: vec![None; local_count],
@@ -1083,7 +1082,7 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
                 .key(self.db)
                 .impl_env(self.db)
                 .normalization_scope(self.db),
-            self.assumptions,
+            self.premises.assumptions(),
             ty,
         )
         .map_err(|error| NormalizeError::UnresolvedHandleOrigin(error.0))?;
@@ -1109,7 +1108,7 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
         capability_shape_at_context(
             self.db,
             self.instance.key(self.db).impl_env(self.db),
-            self.assumptions,
+            self.premises.assumptions(),
             ty,
         )
         .map_err(|_| NormalizeError::UnresolvedHandleOrigin(ty))
@@ -2295,14 +2294,7 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
         if let Some(result) = self.copy_cache.borrow().get(&ty) {
             return *result;
         }
-        let result = ty_is_copy(
-            self.db,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.raw.template_owner.scope(),
-                self.assumptions,
-            ),
-            ty,
-        );
+        let result = ty_is_copy(self.db, self.premises, ty);
         self.copy_cache.borrow_mut().insert(ty, result);
         result
     }
@@ -2385,7 +2377,7 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
                 provider_semantics(
                     self.db,
                     self.raw.template_owner.scope(),
-                    self.assumptions,
+                    self.premises.assumptions(),
                     ty,
                 )
                 .evidence,
@@ -3100,8 +3092,8 @@ mod tests {
     use crate::{
         analysis::{
             semantic::{
-                BorrowActivation, FieldIndex, Mutability, SConst, SStmtId, VariantIndex,
-                get_or_build_semantic_instance, identity_semantic_instance_key,
+                BorrowActivation, FieldIndex, Mutability, SConst, SStmtId, SolverPremises,
+                VariantIndex, get_or_build_semantic_instance, identity_semantic_instance_key,
                 normalized::{
                     NDataPath, NDataProjection, NEffectArgValue, NExpr, NIndex, NPlace, NPlaceBase,
                     NRootId, NRootKind, NStatementKind, NTerminatorKind, NValueDefinition,
@@ -3148,7 +3140,8 @@ mod tests {
         let raw = instance
             .admitted_body(db)
             .expect("test body should be admitted");
-        normalize_raw_body(db, instance, raw, instance.assumptions(db))
+        let premises = SolverPremises::for_normalized_body(db, instance);
+        normalize_raw_body(db, instance, raw, premises)
             .unwrap_or_else(|error| panic!("test body should normalize: {error:?}\n{raw:#?}"))
     }
 

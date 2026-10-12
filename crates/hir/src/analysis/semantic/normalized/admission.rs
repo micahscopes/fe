@@ -4,16 +4,15 @@ use crate::analysis::{
     HirAnalysisDb,
     semantic::{
         BlockedSemanticBody, SemanticBody, SemanticDiagnostic, SemanticDiagnosticId,
-        SemanticInstance, SemanticNormalizationFailure,
+        SemanticInstance, SemanticNormalizationFailure, SolverPremises,
         ctfe::{canonicalize_semantic_const_refs, canonicalize_semantic_consts_for_runtime},
         diagnostics::{
             normalized_body_error_to_diag, normalized_body_verify_error_to_diag,
             normalized_layout_plan_verify_error_to_diag, smir_lowering_admission_diag,
         },
         instance::SemanticBodyAdmissionError,
-        semantic_instance_base_assumptions_for_key,
+        lower::BindingRoleMode,
     },
-    ty::trait_resolution::PredicateListId,
 };
 
 use super::{
@@ -103,7 +102,7 @@ fn admitted_semantic_body_query<'db>(
         Err(error) => return admission_failure(db, instance, error),
     };
     let raw = canonicalize_semantic_const_refs(db, instance, raw);
-    normalize_and_verify(db, instance, &raw, instance.assumptions(db))
+    normalize_and_verify(db, instance, &raw, BindingRoleMode::Final)
 }
 
 #[salsa::tracked]
@@ -119,7 +118,7 @@ fn runtime_admitted_semantic_body_query<'db>(
     if folded == canonicalize_semantic_const_refs(db, instance, raw) {
         return admitted_semantic_body_query(db, instance);
     }
-    normalize_and_verify(db, instance, &folded, instance.assumptions(db))
+    normalize_and_verify(db, instance, &folded, BindingRoleMode::Final)
 }
 
 #[salsa::tracked]
@@ -132,21 +131,17 @@ fn provisional_admitted_semantic_body_query<'db>(
         Err(error) => return admission_failure(db, instance, error),
     };
     let raw = canonicalize_semantic_const_refs(db, instance, raw);
-    normalize_and_verify(
-        db,
-        instance,
-        &raw,
-        semantic_instance_base_assumptions_for_key(db, instance.key(db)),
-    )
+    normalize_and_verify(db, instance, &raw, BindingRoleMode::Provisional)
 }
 
 fn normalize_and_verify<'db>(
     db: &'db dyn HirAnalysisDb,
     instance: SemanticInstance<'db>,
     raw: &SemanticBody<'db>,
-    assumptions: PredicateListId<'db>,
+    mode: BindingRoleMode,
 ) -> SemanticBodyAdmission<'db> {
-    match normalize_raw_body(db, instance, raw, assumptions) {
+    let premises = SolverPremises::for_normalization(db, instance, mode);
+    match normalize_raw_body(db, instance, raw, premises) {
         Ok(artifacts) => {
             if let Err(error) = verify_normalized_body(db, &artifacts.body) {
                 return internal_failure(

@@ -3,6 +3,7 @@
 use crate::{
     analysis::{
         HirAnalysisDb,
+        semantic::{SemanticInstance, lower::BindingRoleMode},
         ty::{
             fold::{TyFoldable, TyFolder},
             trait_def::{
@@ -262,18 +263,8 @@ impl<'db> SolverPremises<'db> {
     pub(crate) fn for_body_lowering(
         db: &'db dyn HirAnalysisDb,
         instance: crate::analysis::semantic::SemanticInstance<'db>,
-        mode: crate::analysis::semantic::lower::BindingRoleMode,
+        mode: BindingRoleMode,
     ) -> Self {
-        use crate::analysis::semantic::lower::BindingRoleMode;
-        let assumptions = match mode {
-            BindingRoleMode::Final => instance.assumptions(db),
-            BindingRoleMode::Provisional => {
-                crate::analysis::semantic::semantic_instance_base_assumptions_for_key(
-                    db,
-                    instance.key(db),
-                )
-            }
-        };
         Self {
             scope: instance
                 .key(db)
@@ -281,7 +272,36 @@ impl<'db> SolverPremises<'db> {
                 .body()
                 .expect("body lowering has a body")
                 .scope(),
-            assumptions,
+            ..Self::for_normalization(db, instance, mode)
+        }
+    }
+
+    /// Read the fixed final-body normalization premises of this instance.
+    pub fn for_normalized_body(
+        db: &'db dyn HirAnalysisDb,
+        instance: SemanticInstance<'db>,
+    ) -> Self {
+        Self::for_normalization(db, instance, BindingRoleMode::Final)
+    }
+
+    /// Normalized-body queries retain the declaration normalization scope
+    /// and the same final or provisional premises as their admission stage.
+    pub(crate) fn for_normalization(
+        db: &'db dyn HirAnalysisDb,
+        instance: crate::analysis::semantic::SemanticInstance<'db>,
+        mode: BindingRoleMode,
+    ) -> Self {
+        Self {
+            scope: instance.key(db).owner(db).scope(),
+            assumptions: match mode {
+                BindingRoleMode::Final => instance.assumptions(db),
+                BindingRoleMode::Provisional => {
+                    crate::analysis::semantic::semantic_instance_base_assumptions_for_key(
+                        db,
+                        instance.key(db),
+                    )
+                }
+            },
         }
     }
 

@@ -12,7 +12,7 @@ use fe_hir::{
             NEffectArgValue, NExpr, NIndex, NPlace, NPlaceBase, NRootKind, NStatementKind,
             NValueDefinition, NormalizedArtifacts, ReadMode, SExpr, SStmtKind, STerminatorKind,
             SemanticAnalysisError, SemanticBodyAdmission, SemanticDiagnosticKind, SemanticInstance,
-            SemanticNormalizationFailure, canonicalize_semantic_consts,
+            SemanticNormalizationFailure, SolverPremises, canonicalize_semantic_consts,
             capability::{
                 external::{AddressProvenance, ExternalOrigin},
                 footprint::AccessExtent,
@@ -4368,8 +4368,13 @@ fn write(array: *[u256; 2]) {
         }
     }
     assert!(replaced, "fixture must contain an indexed store");
-    let error = normalize_raw_body(&db, instance, &raw, instance.assumptions(&db))
-        .expect_err("wildcards cannot enter executable normalized paths");
+    let error = normalize_raw_body(
+        &db,
+        instance,
+        &raw,
+        SolverPremises::for_normalized_body(&db, instance),
+    )
+    .expect_err("wildcards cannot enter executable normalized paths");
     assert!(
         format!("{error:?}").contains("UnsupportedPlaceProjection"),
         "{error:?}"
@@ -5483,14 +5488,19 @@ fn contract_field_mut_borrow_matrix_fixture_borrowchecks() {
         include_str!("../../../fe/tests/fixtures/fe_test/contract_field_mut_borrow_matrix.fe"),
         |db, instance| {
             let raw = instance.body(db);
-            let artifacts = normalize_raw_body(db, instance, raw, instance.assumptions(db))
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "phase-one normalization failed for {} ({:?}): {error:#?}",
-                        owner_name(db, instance.key(db).owner(db)),
-                        instance.key(db),
-                    )
-                });
+            let artifacts = normalize_raw_body(
+                db,
+                instance,
+                raw,
+                SolverPremises::for_normalized_body(db, instance),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "phase-one normalization failed for {} ({:?}): {error:#?}",
+                    owner_name(db, instance.key(db).owner(db)),
+                    instance.key(db),
+                )
+            });
             verify_normalized_body(db, &artifacts.body).unwrap_or_else(|error| {
                 let type_detail = match error {
                     fe_hir::analysis::semantic::normalized::NormalizedBodyVerifyError::ForwardType {
@@ -5606,8 +5616,13 @@ fn choose(flag: bool) {
     }
     assert!(saw_diverging_call);
 
-    let artifacts = normalize_raw_body(&db, instance, raw, instance.assumptions(&db))
-        .expect("never-branch body should normalize");
+    let artifacts = normalize_raw_body(
+        &db,
+        instance,
+        raw,
+        SolverPremises::for_normalized_body(&db, instance),
+    )
+    .expect("never-branch body should normalize");
     verify_normalized_body(&db, &artifacts.body)
         .expect("never-branch normalized body should verify");
 }
@@ -7602,14 +7617,19 @@ fn zero_sized_aggregate_fixture_instances_normalize_and_borrowcheck() {
         include_str!("../../../codegen/tests/fixtures/zero_sized_aggregates.fe"),
         |db, instance| {
             let raw = instance.body(db);
-            let artifacts = normalize_raw_body(db, instance, raw, instance.assumptions(db))
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "phase-one normalization failed for {} ({:?}): {error:#?}",
-                        owner_name(db, instance.key(db).owner(db)),
-                        instance.key(db),
-                    )
-                });
+            let artifacts = normalize_raw_body(
+                db,
+                instance,
+                raw,
+                SolverPremises::for_normalized_body(db, instance),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "phase-one normalization failed for {} ({:?}): {error:#?}",
+                    owner_name(db, instance.key(db).owner(db)),
+                    instance.key(db),
+                )
+            });
             verify_normalized_body(db, &artifacts.body).unwrap_or_else(|error| {
                 panic!(
                     "phase-one normalized body failed verification for {} ({:?}): {error:#?}",
@@ -7641,14 +7661,19 @@ fn if_let_fixture_instances_normalize_and_borrowcheck() {
         include_str!("../../../fe/tests/fixtures/fe_test/if_let_while_let.fe"),
         |db, instance| {
             let raw = instance.body(db);
-            let artifacts = normalize_raw_body(db, instance, raw, instance.assumptions(db))
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "phase-one normalization failed for {} ({:?}): {error:#?}\nraw={raw:#?}",
-                        owner_name(db, instance.key(db).owner(db)),
-                        instance.key(db),
-                    )
-                });
+            let artifacts = normalize_raw_body(
+                db,
+                instance,
+                raw,
+                SolverPremises::for_normalized_body(db, instance),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "phase-one normalization failed for {} ({:?}): {error:#?}\nraw={raw:#?}",
+                    owner_name(db, instance.key(db).owner(db)),
+                    instance.key(db),
+                )
+            });
             verify_normalized_body(db, &artifacts.body).unwrap_or_else(|error| {
                 panic!(
                     "phase-one normalized body failed verification for {} ({:?}): {error:#?}\nraw={raw:#?}\nnormalized={:#?}",
@@ -7689,7 +7714,7 @@ fn custom_effect_handle_fixture_instances_normalize_and_borrowcheck() {
                     )
                 })
                 .collect::<Vec<_>>();
-            let artifacts = normalize_raw_body(db, instance, raw, instance.assumptions(db))
+            let artifacts = normalize_raw_body(db, instance, raw, SolverPremises::for_normalized_body(db, instance))
                 .unwrap_or_else(|error| {
                     panic!(
                         "phase-one normalization failed for {} ({:?}): {error:#?}\nlocal_types={local_types:#?}\nraw={raw:#?}",
@@ -8021,8 +8046,13 @@ fn inspect() {
         "store body must be HIR-valid"
     );
     let raw = instance.body(&db);
-    let artifacts = normalize_raw_body(&db, instance, raw, instance.assumptions(&db))
-        .expect("normalized operations");
+    let artifacts = normalize_raw_body(
+        &db,
+        instance,
+        raw,
+        SolverPremises::for_normalized_body(&db, instance),
+    )
+    .expect("normalized operations");
     let stores: Vec<_> = artifacts
         .body
         .blocks

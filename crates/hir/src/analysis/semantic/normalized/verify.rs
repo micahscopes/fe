@@ -6,7 +6,7 @@ use crate::{
         HirAnalysisDb,
         semantic::{
             BorrowActivation, CallSiteId, FieldIndex, Mutability, SConst, SemOrigin,
-            SemanticInstance, VariantIndex,
+            SemanticInstance, SolverPremises, VariantIndex,
             capability::{handle::OpaqueHandleContract, shape::capability_shape_at_context},
             get_or_build_semantic_instance,
             lower::{effect_param_site, enum_tag_ty},
@@ -629,10 +629,7 @@ fn verify_expr<'db>(
             }
             if !ty_is_copy(
                 db,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    body.template_owner.scope(),
-                    body.owner.assumptions(db),
-                ),
+                SolverPremises::for_normalized_body(db, body.owner),
                 element,
             ) {
                 return Err(NormalizedBodyVerifyError::ArrayRepeatRequiresCopy);
@@ -797,10 +794,7 @@ fn type_is_boundary_compatible<'db>(
         && (kind == CapabilityKind::View
             || ty_is_copy(
                 db,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    body.template_owner.scope(),
-                    body.owner.assumptions(db),
-                ),
+                SolverPremises::for_normalized_body(db, body.owner),
                 actual,
             ))
     {
