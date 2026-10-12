@@ -1825,6 +1825,9 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 value,
                 provisions,
             } => {
+                // Evaluate the extent in the same instance context as the
+                // normalized result type, including caller-selected bounds.
+                let ty = self.frames[frame_idx].body.owner.normalized_ty(self.db, ty);
                 let CtfeValue::Value(value) = self.read_operand(frame_idx, value, origin)? else {
                     return Err(CtfeError::InvalidBorrow { origin }.into());
                 };

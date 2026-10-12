@@ -1,4 +1,4 @@
-// Pending: both accepted df486252c and da77aba1f check this source but hit the array-length/type backend invariant at O0/O2; no borrow-checker-internal fix. See MIXED_DERIVED_CHOICES_2026-10-11.md.
+// Caller-bound selected extent must agree in repeat evaluation and runtime type.
 // INTENT: Direct-constant control for i1g: a generic local array of length
 // INTENT: U::N, no derived constant, the caller answers the bound with BigOther
 // INTENT: (7 elements, index 6 holds 9). Shows whether the backend panic needs
