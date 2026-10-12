@@ -1,0 +1,20 @@
+// Pending N4: check succeeds, but O0/O2 normally reject MIR emission because the local evidence-backed array length is not concrete for runtime layout.
+// Reproduced on accepted7b695951d and2a6749ad7. This needs no generic function, derived constant, arithmetic, or non-root module; the const-function counterpart works.
+// Separate from pendingN3: no backend invariant panic here. See scratch/mb3-recovery/runtime-evidence-layout-20261012/REPORT.md and its24 audited observations.
+// INTENT: Root-module runtime local evidence layout reduction, expected length8 and last element29.
+use core::obligations::prove
+trait Width { const N: usize }
+struct A {}
+impl Width for A { const N: usize = 2 }
+impl Width for A as Tall { const N: usize = 8 }
+fn run() {
+    let e = with (Tall) { prove<Width<A>>() }
+    with (e) {
+        let xs: [u256; A::N] = [29; A::N]
+        assert(xs.len() == 8)
+        assert(xs[7] == 29)
+    }
+    assert(A::N == 2)
+}
+#[test]
+fn check_values() { run() }
