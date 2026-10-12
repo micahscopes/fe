@@ -564,6 +564,68 @@ fn is_inapplicable_sol_compat_impl<'db>(
     })
 }
 
+/// Definition analysis reports missing supertraits at the impl header.
+/// Body reporting reuses those exact goals rather than repeating the error.
+#[salsa::tracked(return_ref)]
+fn supertrait_failures_reported_at_source<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> FxHashSet<trait_def::TraitInstId<'db>> {
+    let mut reported = FxHashSet::default();
+    for &implementation in top_mod.all_impl_traits(db) {
+        let Some(instance) = trait_lower::lower_impl_trait(db, implementation) else {
+            continue;
+        };
+        let goal = instance.trait_(db);
+        let supers = goal.def(db).super_traits(db);
+        if supers.is_empty() {
+            continue;
+        }
+        for diag in implementation.diags_trait_ref_and_wf(db) {
+            if let diagnostics::TyDiagCollection::Satisfiability(
+                diagnostics::TraitConstraintDiag::TraitBoundNotSat { primary_goal, .. },
+            ) = diag
+                && supers
+                    .iter()
+                    .any(|bound| bound.instantiate(db, goal.args(db)) == primary_goal)
+            {
+                reported.insert(primary_goal);
+            }
+        }
+    }
+    reported
+}
+
+fn repeats_reported_supertrait<'db>(
+    db: &'db dyn HirAnalysisDb,
+    diag: &diagnostics::FuncBodyDiag<'db>,
+    reported: &FxHashSet<trait_def::TraitInstId<'db>>,
+) -> bool {
+    matches!(diag,
+        diagnostics::FuncBodyDiag::Ty(diagnostics::TyDiagCollection::Satisfiability(
+            diagnostics::TraitConstraintDiag::TraitBoundNotSat {
+                primary_goal, unsat_subgoal: Some(subgoal), ..
+            }
+        )) if reported.contains(subgoal)
+            && primary_goal.def(db).super_traits(db).iter().any(|bound|
+                bound.instantiate(db, primary_goal.args(db)) == *subgoal)
+    )
+}
+
+fn extend_body_diagnostics<'db>(
+    db: &'db dyn HirAnalysisDb,
+    reported: &FxHashSet<trait_def::TraitInstId<'db>>,
+    out: &mut Vec<Box<dyn DiagnosticVoucher + 'db>>,
+    body_diags: &[diagnostics::FuncBodyDiag<'db>],
+) {
+    out.extend(
+        body_diags
+            .iter()
+            .filter(|diag| !repeats_reported_supertrait(db, diag, reported))
+            .map(|diag| diag.to_voucher()),
+    );
+}
+
 impl ModuleAnalysisPass for BodyAnalysisPass {
     fn run_on_module<'db>(
         &mut self,
@@ -572,6 +634,7 @@ impl ModuleAnalysisPass for BodyAnalysisPass {
     ) -> Vec<Box<dyn DiagnosticVoucher + 'db>> {
         // Check function and const bodies; contract-specific analysis is handled separately.
         let mut diags: Vec<Box<dyn DiagnosticVoucher + 'db>> = Vec::new();
+        let reported_supers = supertrait_failures_reported_at_source(db, top_mod);
         let indexed_dynamic_events = events_with_indexed_dynamic_fields(db, top_mod);
         let reported_at_source = generated_abi_reported_at_source(db, top_mod);
         let keep = |origin: &DesugaredOrigin| !reported_at_source.contains(origin);
@@ -603,7 +666,7 @@ impl ModuleAnalysisPass for BodyAnalysisPass {
             })
         {
             let (body_diags, _) = ty_check::check_func_body(db, *func);
-            diags.extend(body_diags.iter().map(|diag| diag.to_voucher()));
+            extend_body_diagnostics(db, reported_supers, &mut diags, &body_diags);
         }
 
         diags.extend(
@@ -689,7 +752,7 @@ impl ModuleAnalysisPass for BodyAnalysisPass {
                 };
                 let (body_diags, typed_body) =
                     ty_check::check_anon_const_body(db, body, expected_ty);
-                diags.extend(body_diags.iter().map(|diag| diag.to_voucher()));
+                extend_body_diagnostics(db, reported_supers, &mut diags, &body_diags);
                 // Validate constness at declaration; execute on value demand.
                 if body_diags.is_empty() {
                     diags.extend(
@@ -719,6 +782,7 @@ impl ModuleAnalysisPass for ContractAnalysisPass {
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher + 'db>> {
         let mut diags: Vec<Box<dyn DiagnosticVoucher + 'db>> = vec![];
+        let reported_supers = supertrait_failures_reported_at_source(db, top_mod);
 
         for &contract in top_mod.all_contracts(db) {
             // 1. Validate contract field types
@@ -802,7 +866,7 @@ impl ModuleAnalysisPass for ContractAnalysisPass {
 
             if contract.init(db).is_some() {
                 let (body_diags, _) = ty_check::check_contract_init_body(db, contract);
-                diags.extend(body_diags.iter().map(|diag| diag.to_voucher()));
+                extend_body_diagnostics(db, reported_supers, &mut diags, &body_diags);
             }
 
             let recvs = contract.recvs(db);
@@ -820,7 +884,7 @@ impl ModuleAnalysisPass for ContractAnalysisPass {
                         recv_idx as u32,
                         arm_idx as u32,
                     );
-                    diags.extend(body_diags.iter().map(|diag| diag.to_voucher()));
+                    extend_body_diagnostics(db, reported_supers, &mut diags, &body_diags);
                 }
             }
         }
