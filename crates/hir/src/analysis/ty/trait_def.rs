@@ -1906,8 +1906,22 @@ impl<'db> ImplementorId<'db> {
     pub(crate) fn constraints(self, db: &'db dyn HirAnalysisDb) -> PredicateListId<'db> {
         match self.origin(db) {
             ImplementorOrigin::Hir(impl_trait) => {
-                collect_candidate_constraints(db, impl_trait.into())
-                    .instantiate(db, self.params(db))
+                let declared = collect_candidate_constraints(db, impl_trait.into())
+                    .instantiate(db, self.params(db));
+                let trait_inst = self.trait_inst(db);
+                let inherited = PredicateListId::new(
+                    db,
+                    trait_inst
+                        .def(db)
+                        .super_traits(db)
+                        .iter()
+                        .map(|bound| bound.instantiate(db, trait_inst.args(db)))
+                        .collect::<Vec<_>>(),
+                );
+                // A selected implementation must establish its interface's
+                // supertraits too, retaining their deferred const conditions
+                // in the same proof answer for the caller to discharge.
+                declared.merge(db, inherited)
             }
             ImplementorOrigin::VirtualContract(_) | ImplementorOrigin::Assumption => {
                 PredicateListId::empty_list(db)
