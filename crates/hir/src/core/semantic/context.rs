@@ -258,6 +258,18 @@ impl<'db> SolverPremises<'db> {
         Self { scope, assumptions }
     }
 
+    /// Completed callable inputs include the declaration's effect-provider
+    /// premises. Earlier header/input formation must not use this projection.
+    pub(crate) fn for_completed_callable_input(
+        db: &'db dyn HirAnalysisDb,
+        func: crate::hir_def::Func<'db>,
+    ) -> Self {
+        Self {
+            scope: func.scope(),
+            assumptions: func.assumptions(db),
+        }
+    }
+
     /// Body normalization keeps the lowering stage's premises and the
     /// actual body scope. Provisional lowering must not read final effects.
     pub(crate) fn for_body_lowering(

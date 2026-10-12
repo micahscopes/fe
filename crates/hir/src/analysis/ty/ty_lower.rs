@@ -2578,15 +2578,12 @@ pub(crate) fn lower_callable_input_param_ty<'db>(
     func: crate::hir_def::Func<'db>,
     origin: CallableInputLayoutHoleOrigin,
     hir_ty: HirTyId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> TyId<'db> {
     let ty = normalize_from_assumptions(
         db,
-        lower_hir_ty(db, hir_ty, func.scope(), assumptions),
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-            func.scope(),
-            assumptions,
-        ),
+        lower_hir_ty(db, hir_ty, premises.scope(), premises.assumptions()),
+        premises,
     );
     bind_callable_input_layout_holes(db, ty, func, origin)
 }

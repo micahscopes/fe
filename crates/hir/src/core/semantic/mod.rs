@@ -1172,14 +1172,14 @@ fn elaborate_func_param_ty<'db>(
             func,
             CallableInputLayoutHoleOrigin::Receiver,
             hir_ty,
-            func.assumptions(db),
+            SolverPremises::for_completed_callable_input(db, func),
         ),
         (Some(hir_ty), false, _) => lower_callable_input_param_ty(
             db,
             func,
             CallableInputLayoutHoleOrigin::ValueParam(param_idx),
             hir_ty,
-            func.assumptions(db),
+            SolverPremises::for_completed_callable_input(db, func),
         ),
         (None, _, _) => TyId::invalid(db, InvalidCause::ParseError),
     };
