@@ -2056,9 +2056,11 @@ impl<'db> Diagnosable<'db> for Func<'db> {
                 ingot,
                 MethodProbe {
                     receiver: self_ty,
-                    assumptions: param_env(db, impl_.into()),
+                    premises:
+                        crate::analysis::semantic::SolverPremises::for_inherent_method_conflict(
+                            db, impl_, self,
+                        ),
                 },
-                self.scope(),
                 func_def.name(db).expect("impl methods have names"),
             ) {
                 if cand.def != func_def {

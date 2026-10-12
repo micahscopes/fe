@@ -4303,7 +4303,8 @@ impl<'db> TyChecker<'db> {
         let matched = self.table.unify(bound.key_ty, receiver_ty).is_ok()
             && cand
                 .query
-                .assumptions
+                .premises
+                .assumptions()
                 .list(self.db)
                 .iter()
                 .zip(bound.assumptions.list(self.db))

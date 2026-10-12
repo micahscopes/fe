@@ -1279,7 +1279,6 @@ where
                     &receiver_ty,
                     ident,
                     MethodLookup::from_path_premises(
-                        db,
                         crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
                             parent_scope,
                             assumptions,
@@ -1748,9 +1747,10 @@ pub(crate) fn shadowed_inherent_fn_for_const<'db>(
         ingot,
         MethodProbe {
             receiver: self_ty,
-            assumptions: collect_constraints(db, impl_.into()).instantiate_identity(),
+            premises: crate::analysis::semantic::SolverPremises::for_inherent_const_shadow(
+                db, impl_,
+            ),
         },
-        impl_.scope(),
         name,
     ) {
         let CallableDef::Func(func) = cand.def else {

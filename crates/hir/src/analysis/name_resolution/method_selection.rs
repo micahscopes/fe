@@ -105,7 +105,7 @@ enum TraitCandidateCheck<'db> {
 /// candidates are proved in.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MethodLookup<'db> {
-    proof_queries: ProofQueries<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 }
 
 impl<'db> MethodLookup<'db> {
@@ -117,27 +117,28 @@ impl<'db> MethodLookup<'db> {
         db: &'db dyn HirAnalysisDb,
         context: crate::analysis::semantic::ImplEnv<'db>,
     ) -> Self {
-        Self::from_path_premises(db, context.lookup_premises(db))
+        Self::from_path_premises(context.lookup_premises(db))
     }
 
     /// Path resolution still receives its scope and premises from its caller
     /// as an unpositioned pair (decision 1 replaces it with the position
     /// context).
     pub(crate) fn from_path_premises(
-        db: &'db dyn HirAnalysisDb,
         premises: crate::analysis::semantic::SolverPremises<'db>,
     ) -> Self {
-        Self {
-            proof_queries: premises.queries(db),
-        }
+        Self { premises }
+    }
+
+    fn proof_queries(self, db: &'db dyn HirAnalysisDb) -> ProofQueries<'db> {
+        self.premises.queries(db)
     }
 
     fn scope(self) -> ScopeId<'db> {
-        self.proof_queries.scope()
+        self.premises.scope()
     }
 
     fn assumptions(self) -> PredicateListId<'db> {
-        self.proof_queries.assumptions()
+        self.premises.assumptions()
     }
 }
 
@@ -236,9 +237,8 @@ impl<'db, 'a> CandidateAssembler<'db, 'a> {
             ingot,
             MethodProbe {
                 receiver: self.receiver.original(),
-                assumptions: self.lookup.assumptions(),
+                premises: self.lookup.premises,
             },
-            self.lookup.scope(),
             self.method_name,
         ) {
             self.candidates.insert_inherent_method(method);
@@ -698,11 +698,8 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
             return false;
         }
 
-        let proof_queries = self.lookup.proof_queries;
-        let query = self
-            .lookup
-            .proof_queries
-            .goal_query(self.db, candidate_inst);
+        let proof_queries = self.lookup.proof_queries(self.db);
+        let query = proof_queries.goal_query(self.db, candidate_inst);
         let confirmed = Canonical::new(self.db, confirmed_inst);
         let mut table = UnificationTable::new(self.db);
         match proof_queries.query_result(self.db, &query) {
@@ -761,12 +758,15 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
             return TraitCandidateCheck::Rejected;
         }
 
-        let proof_queries = self.lookup.proof_queries;
+        let proof_queries = self.lookup.proof_queries(self.db);
         let mut needs_confirmation = false;
         let mut unsatisfied = false;
         for &constraint in implementor.constraints(self.db).list(self.db) {
             let constraint = constraint.fold_with(self.db, &mut table);
-            let query = self.lookup.proof_queries.goal_query(self.db, constraint);
+            let query = self
+                .lookup
+                .proof_queries(self.db)
+                .goal_query(self.db, constraint);
             match proof_queries.query_result(self.db, &query) {
                 GoalSatisfiability::Satisfied(solution) => {
                     // A unique solution can bind impl parameters that the self
@@ -819,7 +819,12 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
         // unconstrained method. The refined goal still needs independent proof.
         let mut bindings = inst.assoc_type_bindings(self.db).clone();
         let mut consistent = true;
-        for &premise in self.lookup.proof_queries.assumptions().list(self.db) {
+        for &premise in self
+            .lookup
+            .proof_queries(self.db)
+            .assumptions()
+            .list(self.db)
+        {
             if premise.def(self.db) != inst.def(self.db)
                 || premise.args(self.db) != inst.args(self.db)
             {
@@ -867,14 +872,18 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
         // whose signatures don't mention those args (e.g. `AbiDecoder<A>::read_word`).
         let receiver_is_ty_param = receiver_is_ty_param_like(self.db, self.receiver.original());
 
-        let query = self.lookup.proof_queries.goal_query(self.db, inst);
+        let query = self.lookup.proof_queries(self.db).goal_query(self.db, inst);
         let inst = if receiver_is_ty_param {
             inst
         } else {
             table.instantiate_with_fresh_vars(inst)
         };
 
-        match self.lookup.proof_queries.query_result(self.db, &query) {
+        match self
+            .lookup
+            .proof_queries(self.db)
+            .query_result(self.db, &query)
+        {
             GoalSatisfiability::Satisfied(solution) => {
                 // Map back the solution to the current context.
                 let solution = query.extract_solution(&mut table, solution).inst;
@@ -927,7 +936,12 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
             insert_trait(trait_def);
         }
 
-        for pred in self.lookup.proof_queries.assumptions().list(self.db) {
+        for pred in self
+            .lookup
+            .proof_queries(self.db)
+            .assumptions()
+            .list(self.db)
+        {
             let trait_def = pred.def(self.db);
             insert_trait(trait_def)
         }

@@ -799,9 +799,6 @@ impl<'db> ProofQueries<'db> {
     pub(crate) fn assumptions(self) -> PredicateListId<'db> {
         self.0.assumptions()
     }
-    pub(crate) fn scope(self) -> ScopeId<'db> {
-        self.0.scope()
-    }
     pub(crate) fn goal_query(
         self,
         db: &'db dyn HirAnalysisDb,

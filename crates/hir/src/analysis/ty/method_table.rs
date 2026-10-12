@@ -1,4 +1,4 @@
-use crate::core::hir_def::{HirIngot, IdentId, Impl, scope_graph::ScopeId};
+use crate::core::hir_def::{HirIngot, IdentId, Impl};
 use common::ingot::Ingot;
 use rustc_hash::FxHashMap;
 use salsa::Update;
@@ -13,7 +13,7 @@ use super::{
     unify::UnificationTable,
     visitor::{TyVisitable, TyVisitor},
 };
-use crate::analysis::{HirAnalysisDb, ty::ty_def::TyData};
+use crate::analysis::{HirAnalysisDb, semantic::SolverPremises, ty::ty_def::TyData};
 use crate::hir_def::CallableDef;
 
 /// An inherent-method candidate returned by [`probe_method`], carrying the
@@ -42,13 +42,13 @@ impl<'db> ProbedMethod<'db> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub(crate) struct MethodProbe<'db> {
     pub receiver: TyId<'db>,
-    pub assumptions: PredicateListId<'db>,
+    pub premises: SolverPremises<'db>,
 }
 
 impl<'db> TyVisitable<'db> for MethodProbe<'db> {
     fn visit_with<V: TyVisitor<'db> + ?Sized>(&self, visitor: &mut V) {
         self.receiver.visit_with(visitor);
-        self.assumptions.visit_with(visitor);
+        self.premises.visit_with(visitor);
     }
 }
 
@@ -56,7 +56,7 @@ impl<'db> TyFoldable<'db> for MethodProbe<'db> {
     fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
         Self {
             receiver: self.receiver.fold_with(db, folder),
-            assumptions: self.assumptions.fold_with(db, folder),
+            premises: self.premises.fold_with(db, folder),
         }
     }
 }
@@ -132,10 +132,9 @@ pub(crate) fn probe_method<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
     query: MethodProbe<'db>,
-    scope: ScopeId<'db>,
     name: IdentId<'db>,
 ) -> Vec<ProbedMethod<'db>> {
-    probe_canonical_method(db, ingot, Canonical::new(db, query), scope, name)
+    probe_canonical_method(db, ingot, Canonical::new(db, query), name)
         .iter()
         .map(|&(def, bound)| ProbedMethod { def, bound, query })
         .collect()
@@ -146,18 +145,16 @@ fn probe_canonical_method<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
     query: Canonical<MethodProbe<'db>>,
-    scope: ScopeId<'db>,
     name: IdentId<'db>,
 ) -> Vec<(CallableDef<'db>, Solution<BoundInherentMethod<'db>>)> {
     let table = collect_methods(db, ingot);
-    table.probe(db, query, scope, name)
+    table.probe(db, query, name)
 }
 
 fn probe_canonical_method_cycle_initial<'db>(
     _db: &'db dyn HirAnalysisDb,
     _ingot: Ingot<'db>,
     _query: Canonical<MethodProbe<'db>>,
-    _scope: ScopeId<'db>,
     _name: IdentId<'db>,
 ) -> Vec<(CallableDef<'db>, Solution<BoundInherentMethod<'db>>)> {
     Vec::new()
@@ -169,7 +166,6 @@ fn probe_canonical_method_cycle_recover<'db>(
     _count: u32,
     _ingot: Ingot<'db>,
     _query: Canonical<MethodProbe<'db>>,
-    _scope: ScopeId<'db>,
     _name: IdentId<'db>,
 ) -> salsa::CycleRecoveryAction<Vec<(CallableDef<'db>, Solution<BoundInherentMethod<'db>>)>> {
     // Method collection can need this lookup while lowering an impl header.
@@ -187,7 +183,6 @@ impl<'db> MethodTable<'db> {
         &self,
         db: &'db dyn HirAnalysisDb,
         query: Canonical<MethodProbe<'db>>,
-        scope: ScopeId<'db>,
         name: IdentId<'db>,
     ) -> Vec<(CallableDef<'db>, Solution<BoundInherentMethod<'db>>)> {
         let mut table = UnificationTable::new(db);
@@ -200,7 +195,7 @@ impl<'db> MethodTable<'db> {
         };
 
         if let Some(bucket) = self.buckets.get(base) {
-            bucket.probe(query, &mut table, extracted, scope, name)
+            bucket.probe(query, &mut table, extracted, name)
         } else {
             vec![]
         }
@@ -258,7 +253,6 @@ impl<'db> MethodBucket<'db> {
         canonical_query: Canonical<MethodProbe<'db>>,
         table: &mut UnificationTable<'db>,
         query: MethodProbe<'db>,
-        scope: ScopeId<'db>,
         name: IdentId<'db>,
     ) -> Vec<(CallableDef<'db>, Solution<BoundInherentMethod<'db>>)> {
         let db = table.db;
@@ -283,7 +277,7 @@ impl<'db> MethodBucket<'db> {
             let key_ty = cand_key.instantiate(db, func_ty.generic_args(db));
             let key_ty = table.instantiate_to_term(key_ty);
 
-            if match_probe_key(table, key_ty, ty, scope, query.assumptions) {
+            if match_probe_key(table, key_ty, ty, query.premises) {
                 let bound = canonical_query.canonicalize_solution(
                     db,
                     table,
@@ -292,7 +286,7 @@ impl<'db> MethodBucket<'db> {
                     BoundInherentMethod {
                         func_ty,
                         key_ty: ty,
-                        assumptions: query.assumptions,
+                        assumptions: query.premises.assumptions(),
                     },
                 );
                 methods.push((func, bound));
@@ -311,8 +305,7 @@ fn match_probe_key<'db>(
     table: &mut UnificationTable<'db>,
     key: TyId<'db>,
     receiver: TyId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: SolverPremises<'db>,
 ) -> bool {
     let db = table.db;
     let mut pending = vec![(key, receiver)];
@@ -338,11 +331,7 @@ fn match_probe_key<'db>(
 
         let mut progressed = false;
         for (lhs, rhs) in deferred {
-            let assumptions = assumptions.fold_with(db, table);
-            let premises = crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                scope,
-                assumptions,
-            );
+            let premises = premises.fold_with(db, table);
             let normalized_lhs = normalize_ty(db, lhs.fold_with(db, table), premises);
             let normalized_rhs = normalize_ty(db, rhs.fold_with(db, table), premises);
             if table.unify(normalized_lhs, normalized_rhs).is_ok() {
@@ -432,10 +421,9 @@ impl<'db> MethodCollector<'db> {
                     self.db,
                     MethodProbe {
                         receiver: ty,
-                        assumptions: PredicateListId::empty_list(self.db),
+                        premises: SolverPremises::for_method_table_admission(self.db, func),
                     },
                 ),
-                func.scope(),
                 func.name(self.db).expect("callable has name"),
             )
             .is_empty()
@@ -490,9 +478,8 @@ fn context<T: Output<Item = U>, U>(value: Pair<u256, T>) {}
             top_mod.ingot(&db),
             MethodProbe {
                 receiver,
-                assumptions,
+                premises: SolverPremises::from_unpositioned_pair(func.scope(), assumptions),
             },
-            func.scope(),
             IdentId::new(&db, "selected"),
         );
         assert_eq!(candidates.len(), 1);

@@ -329,6 +329,45 @@ impl<'db> SolverPremises<'db> {
         }
     }
 
+    /// Conflict diagnostics use the enclosing impl environment at the method
+    /// declaration scope, before the method's own bounds are admitted.
+    pub(crate) fn for_inherent_method_conflict(
+        db: &'db dyn HirAnalysisDb,
+        impl_: crate::hir_def::Impl<'db>,
+        method: crate::hir_def::Func<'db>,
+    ) -> Self {
+        Self {
+            scope: method.scope(),
+            assumptions: crate::semantic::param_env(db, impl_.into()),
+        }
+    }
+
+    /// Constant-shadow diagnostics use the impl's unextended constraints.
+    pub(crate) fn for_inherent_const_shadow(
+        db: &'db dyn HirAnalysisDb,
+        impl_: crate::hir_def::Impl<'db>,
+    ) -> Self {
+        Self {
+            scope: impl_.scope(),
+            assumptions: crate::analysis::ty::trait_resolution::constraint::collect_constraints(
+                db,
+                impl_.into(),
+            )
+            .instantiate_identity(),
+        }
+    }
+
+    /// Method-table insertion checks receiver matching without caller bounds.
+    pub(crate) fn for_method_table_admission(
+        db: &'db dyn HirAnalysisDb,
+        callable: crate::hir_def::CallableDef<'db>,
+    ) -> Self {
+        Self {
+            scope: callable.scope(),
+            assumptions: PredicateListId::empty_list(db),
+        }
+    }
+
     pub fn scope(self) -> ScopeId<'db> {
         self.scope
     }
