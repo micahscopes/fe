@@ -1921,7 +1921,8 @@ impl<'db> ImplementorId<'db> {
                 // A selected implementation must establish its interface's
                 // supertraits too, retaining their deferred const conditions
                 // in the same proof answer for the caller to discharge.
-                declared.merge(db, inherited)
+                // The solver pops this stack: authored requirements retain priority.
+                inherited.merge(db, declared)
             }
             ImplementorOrigin::VirtualContract(_) | ImplementorOrigin::Assumption => {
                 PredicateListId::empty_list(db)
