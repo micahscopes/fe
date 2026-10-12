@@ -1,0 +1,13 @@
+trait Width { const N: usize }
+struct S {}
+impl Width for S { const N: usize = 1 }
+impl Width for S as Broad { const N: usize = 4 }
+const fn size<T: Width>() -> usize { T::N }
+#[test]
+fn f() { with (Broad) { let xs: [u256; 6] = [67; size<S>() + 2]
+assert(xs.len() == 6)
+assert(xs[5] == 67) }
+let ordinary: [u256; 3] = [69; size<S>() + 2]
+assert(ordinary.len() == 3)
+assert(ordinary[2] == 69)
+}

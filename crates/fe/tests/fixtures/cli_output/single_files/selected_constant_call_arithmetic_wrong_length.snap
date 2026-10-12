@@ -1,0 +1,16 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/selected_constant_call_arithmetic_wrong_length.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/selected_constant_call_arithmetic_wrong_length.fe
+
+error[8-0000]: type mismatch
+  ┌─ selected_constant_call_arithmetic_wrong_length.fe:6:45
+  │
+6 │ fn f() { with (Broad) { let xs: [u256; 3] = [67; size<S>() + 2] } }
+  │                                             ^^^^^^^^^^^^^^^^^^^ expected `[u256; 3]`, but `[u256; 6]` is given
+
+
+=== EXIT CODE: 1 ===

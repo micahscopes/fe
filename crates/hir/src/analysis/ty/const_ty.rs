@@ -3307,7 +3307,9 @@ impl<'db> ConstTyId<'db> {
             .filter_map(|(expr, _)| capture_path(expr).map(|value| (expr, value)))
             .collect();
         if captured.is_empty() {
-            return self;
+            // Calls in an extracted expression still need its source choices,
+            // even when no associated-constant path needs operand capture.
+            return self.with_impl_env(db, context);
         }
         let Some(expected) = template_ty.or(*ty) else {
             return self;
