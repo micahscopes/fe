@@ -2065,7 +2065,6 @@ impl<'db> RecvArmView<'db> {
             };
         }
 
-        let assumptions = PredicateListId::empty_list(db);
         let recv = self.recv(db);
         let contract = recv.contract(db);
 
@@ -2096,10 +2095,7 @@ impl<'db> RecvArmView<'db> {
             normalize_ty(
                 db,
                 return_proj,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    contract.scope(),
-                    assumptions,
-                ),
+                header_context_at(db, contract.scope()).premises(db),
             )
         } else {
             TyId::invalid(db, InvalidCause::Other)
