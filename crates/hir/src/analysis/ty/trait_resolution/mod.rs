@@ -551,6 +551,23 @@ impl<'db> TraitSolveCx<'db> {
         Self::normalization_scope_for_trait_inst_with_origin(db, self.scope.ingot(db), inst)
     }
 
+    /// A selected method's input layouts are compared under the caller's
+    /// premises and the trait application already established by selection.
+    /// Retain this projection on the method rather than rebuilding it for
+    /// each checked input; this premise-only view introduces no provisions.
+    pub(crate) fn selected_method_layout_premises(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        inst: TraitInstId<'db>,
+    ) -> crate::analysis::semantic::SolverPremises<'db> {
+        let mut predicates: IndexSet<_> = self.assumptions.list(db).iter().copied().collect();
+        predicates.insert(inst);
+        unpositioned_premises(
+            self.normalization_scope_for_trait_inst(db, inst),
+            PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>()),
+        )
+    }
+
     pub(crate) fn normalization_scope_for_trait_inst_with_origin(
         db: &'db dyn HirAnalysisDb,
         origin_ingot: Ingot<'db>,

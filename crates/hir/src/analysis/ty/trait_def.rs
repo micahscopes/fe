@@ -1186,8 +1186,7 @@ pub struct ResolvedMethodInstance<'db> {
     body_args: Vec<TyId<'db>>,
     body_to_nominal: Vec<Option<usize>>,
     effect_pairs: Vec<(usize, usize)>,
-    normalization_scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    layout_premises: crate::analysis::semantic::SolverPremises<'db>,
 }
 
 #[derive(Debug, Clone)]
@@ -1308,9 +1307,6 @@ impl<'db> ResolvedMethodInstance<'db> {
             });
         }
         if checked_inputs.is_some() || checked_effect_inputs.is_some() {
-            let mut predicates: IndexSet<_> = self.assumptions.list(db).iter().copied().collect();
-            predicates.insert(self.resolved.trait_inst());
-            let assumptions = PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>());
             let value_inputs =
                 checked_inputs
                     .into_iter()
@@ -1336,10 +1332,6 @@ impl<'db> ResolvedMethodInstance<'db> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             for (origin, actual_ty) in value_inputs.chain(effect_inputs) {
-                let premises = crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    self.normalization_scope,
-                    assumptions,
-                );
                 let Some(formal_ty) = callable_input_layout_origin_ty(db, body, origin) else {
                     continue;
                 };
@@ -1347,9 +1339,9 @@ impl<'db> ResolvedMethodInstance<'db> {
                     db,
                     substitute_complete(db, formal_ty, &args.residualize(db))
                         .expect("selected input template must match body schema"),
-                    premises,
+                    self.layout_premises,
                 );
-                let actual_ty = normalize_ty(db, actual_ty, premises);
+                let actual_ty = normalize_ty(db, actual_ty, self.layout_premises);
                 let mut bindings = Vec::new();
                 if !collect_layout_arg_bindings(db, formal_ty, actual_ty, &mut bindings) {
                     continue;
@@ -1445,8 +1437,6 @@ pub(crate) fn resolved_method_instance<'db>(
             }
         },
     );
-    let normalization_scope =
-        solve_cx.normalization_scope_for_trait_inst(db, resolved.trait_inst());
     Selection::Unique(ResolvedMethodInstance {
         resolved,
         declaration,
@@ -1454,8 +1444,7 @@ pub(crate) fn resolved_method_instance<'db>(
         body_args,
         body_to_nominal,
         effect_pairs,
-        normalization_scope,
-        assumptions: solve_cx.assumptions(),
+        layout_premises: solve_cx.selected_method_layout_premises(db, resolved.trait_inst()),
     })
 }
 
