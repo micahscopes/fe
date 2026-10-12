@@ -4,7 +4,10 @@ use camino::Utf8PathBuf;
 use dir_test::{Fixture, dir_test};
 use fe_hir::analysis::{
     analysis_pass::ModuleAnalysisPass,
-    name_resolution::{ImportAnalysisPass, NameDerivation, ResolvedImports, resolve_imports},
+    name_resolution::{
+        ImportAnalysisPass, NameDerivation, ResolvedImports, diagnostics::ImportDiag,
+        resolve_imports,
+    },
 };
 use fe_hir::test_db::{HirAnalysisTestDb, HirPropertyFormatter};
 use fe_hir::{hir_def::Use, span::LazySpan};
@@ -102,4 +105,95 @@ fn format_imports<'db>(
     }
 
     prop_formatter.finish(db)
+}
+
+fn padded_imports(padding: usize, imports: &[&str], body: &str) -> String {
+    format!(
+        "{}\n{}\n{body}",
+        (0..padding)
+            .map(|i| format!("mod pad{i} {{}}\n"))
+            .collect::<String>(),
+        imports.join("\n"),
+    )
+}
+
+#[test]
+fn builtin_glob_paths_wait_for_decidable_import_scopes() {
+    let cases = [
+        ("foo", "mod foo { pub mod i32 { pub struct Leaf {} } }"),
+        (
+            "ingress",
+            "mod ingress { pub use ingot::bridge::* }\nmod bridge { pub mod i32 { pub struct Leaf {} } }",
+        ),
+        (
+            "a",
+            "mod a { pub use ingot::b::* }\nmod b { pub use ingot::a::*\npub mod i32 { pub struct Leaf {} } }",
+        ),
+    ];
+    for padding in 0..24 {
+        for (prefix, body) in cases {
+            let glob = format!("use {prefix}::*");
+            for imports in [[glob.as_str(), "use i32::*"], ["use i32::*", glob.as_str()]] {
+                let mut db = HirAnalysisTestDb::default();
+                let source = padded_imports(
+                    padding,
+                    &imports,
+                    &format!("use Leaf as Item\n{body}\nfn accept(_ value: Item) {{}}"),
+                );
+                let file = db.new_stand_alone("builtin_glob.fe".into(), &source);
+                let (top_mod, _) = db.top_mod(file);
+                let (diags, _) = resolve_imports(&db, top_mod.ingot(&db));
+                // The disputed glob must publish Leaf before its ambiguity is
+                // diagnosed, so dependent imports have no cascading NotFound.
+                assert!(
+                    matches!(diags.as_slice(), [ImportDiag::Ambiguous(_, name, _)] if name.data(&db) == "i32"),
+                    "padding {padding}, imports {imports:?}: {diags:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn builtin_paths_without_competing_globs_remain_invalid() {
+    for padding in 0..24 {
+        let mut db = HirAnalysisTestDb::default();
+        let source = padded_imports(padding, &["use i32::*"], "");
+        let file = db.new_stand_alone("invalid_builtin.fe".into(), &source);
+        let (top_mod, _) = db.top_mod(file);
+        let (diags, _) = resolve_imports(&db, top_mod.ingot(&db));
+        assert!(
+            matches!(diags.as_slice(), [ImportDiag::InvalidPathSegment(_, name, _)] if name.data(&db) == "i32"),
+            "padding {padding}: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn named_overrides_and_glob_dependencies_keep_their_resolution() {
+    let cases = [
+        (
+            ["use foo::i32", "use i32::Leaf as Item"],
+            "mod foo { pub mod i32 { pub struct Leaf {} } }",
+        ),
+        (
+            ["use foo::*", "use branch::*"],
+            "use Leaf as Item\nmod foo { pub mod branch { pub struct Leaf {} } }",
+        ),
+    ];
+    for padding in 0..24 {
+        for (imports, body) in cases {
+            for imports in [imports, [imports[1], imports[0]]] {
+                let mut db = HirAnalysisTestDb::default();
+                let source = padded_imports(
+                    padding,
+                    &imports,
+                    &format!("{body}\nfn accept(_ value: Item) {{}}"),
+                );
+                let file = db.new_stand_alone("import_dependency.fe".into(), &source);
+                let (top_mod, _) = db.top_mod(file);
+                db.assert_no_diags(top_mod);
+            }
+        }
+    }
 }

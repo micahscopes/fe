@@ -131,6 +131,17 @@ impl<'db> ImportResolver<'db> {
                 continue;
             }
 
+            // A first segment may still have been waiting for a glob to shadow a
+            // builtin. The queues are drained now, so recheck its actual path
+            // error before falling back to NotFound. Successful paths still go
+            // through the final ambiguity check below.
+            if i_use.is_first_segment()
+                && self.suspicious_imports.contains(&i_use.use_)
+                && self.resolve_segment(&i_use).is_none()
+            {
+                continue;
+            }
+
             self.register_error(&i_use, NameResolutionError::NotFound);
         }
 
@@ -413,6 +424,16 @@ impl<'db> ImportResolver<'db> {
             let next_i_use = match i_use.proceed(self.db, bucket) {
                 Ok(next_i_use) => next_i_use,
                 Err(err) => {
+                    // A glob can still replace this provisional builtin. Keep
+                    // the path in the fixed-point queue until its lexical
+                    // import scopes are decidable, rather than committing an
+                    // error and removing it from final ambiguity verification.
+                    if i_use.is_first_segment()
+                        && matches!(&err, NameResolutionError::InvalidPathSegment(res) if res.is_builtin())
+                        && !self.is_decidable(i_use)
+                    {
+                        return Some(IUseResolution::Unchanged(i_use.clone()));
+                    }
                     self.register_error(i_use, err);
                     return None;
                 }
