@@ -666,7 +666,7 @@ impl ModuleAnalysisPass for BodyAnalysisPass {
             })
         {
             let (body_diags, _) = ty_check::check_func_body(db, *func);
-            extend_body_diagnostics(db, reported_supers, &mut diags, &body_diags);
+            extend_body_diagnostics(db, reported_supers, &mut diags, body_diags);
         }
 
         diags.extend(
@@ -752,7 +752,7 @@ impl ModuleAnalysisPass for BodyAnalysisPass {
                 };
                 let (body_diags, typed_body) =
                     ty_check::check_anon_const_body(db, body, expected_ty);
-                extend_body_diagnostics(db, reported_supers, &mut diags, &body_diags);
+                extend_body_diagnostics(db, reported_supers, &mut diags, body_diags);
                 // Validate constness at declaration; execute on value demand.
                 if body_diags.is_empty() {
                     diags.extend(
@@ -866,7 +866,7 @@ impl ModuleAnalysisPass for ContractAnalysisPass {
 
             if contract.init(db).is_some() {
                 let (body_diags, _) = ty_check::check_contract_init_body(db, contract);
-                extend_body_diagnostics(db, reported_supers, &mut diags, &body_diags);
+                extend_body_diagnostics(db, reported_supers, &mut diags, body_diags);
             }
 
             let recvs = contract.recvs(db);
@@ -884,7 +884,7 @@ impl ModuleAnalysisPass for ContractAnalysisPass {
                         recv_idx as u32,
                         arm_idx as u32,
                     );
-                    extend_body_diagnostics(db, reported_supers, &mut diags, &body_diags);
+                    extend_body_diagnostics(db, reported_supers, &mut diags, body_diags);
                 }
             }
         }
