@@ -181,6 +181,21 @@ pub(crate) fn trait_self_predicate<'db>(
     TraitInstId::new(db, trait_, trait_.params(db).to_vec(), IndexMap::new())
 }
 
+/// The bounds implied by a trait's own `Self: Trait` predicate.
+///
+/// Header positions such as a trait method signature deliberately withhold the
+/// self-predicate from `assumptions`, because assuming it while the trait's
+/// interface is still being lowered can recurse through the in-progress
+/// definition (see `header_constraints_for`). Its implied bounds are still
+/// sound for naming and comparing associated types, which never discharges a
+/// goal, so they are reconstructed locally where they are needed.
+pub(crate) fn trait_self_implied_bounds<'db>(
+    db: &'db dyn HirAnalysisDb,
+    trait_: Trait<'db>,
+) -> PredicateListId<'db> {
+    PredicateListId::new(db, vec![trait_self_predicate(db, trait_)]).extend_all_bounds(db)
+}
+
 /// Appends `pred` to `preds` unless it is already present.
 fn push_predicate<'db>(
     db: &'db dyn HirAnalysisDb,

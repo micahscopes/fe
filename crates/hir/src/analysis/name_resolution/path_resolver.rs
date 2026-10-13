@@ -5,7 +5,7 @@ use crate::{
         Const, Enum, EnumVariant, GenericParamOwner, HirIngot, IdentId, Impl, ImplTrait, ItemKind,
         Partial, PathId, PathKind, Trait, TypeBound, TypeKind, VariantKind, scope_graph::ScopeId,
     },
-    core::semantic::trait_self_predicate,
+    core::semantic::{trait_self_implied_bounds, trait_self_predicate},
     span::{DynLazySpan, path::LazyPathSpan},
 };
 use common::indexmap::{IndexMap, IndexSet};
@@ -1411,7 +1411,7 @@ where
                 observer(path, &r);
                 return Ok(r);
             }
-            let comparison = assoc_ty_comparison_premises(db, ty, scope, assumptions);
+            let comparison = premises.for_associated_type_comparison(db, ty);
             let mut dedup: IndexMap<TyId<'db>, (TraitInstId<'db>, TyId<'db>, TyId<'db>)> =
                 IndexMap::new();
             for (inst, ty_candidate) in assoc_tys.iter().copied() {
@@ -1932,53 +1932,6 @@ pub(crate) fn find_associated_type<'db>(
     name: IdentId<'db>,
 ) -> Result<SmallVec<(TraitInstId<'db>, TyId<'db>), 4>, FindAssociatedTypeError> {
     find_associated_type_in_mode(db, premises, ty, name, ConstBodyLowering::Eager, None)
-}
-
-/// The bounds implied by a trait's own `Self: Trait` predicate.
-///
-/// Header positions such as a trait method signature deliberately withhold the
-/// self-predicate from `assumptions`, because assuming it while the trait's
-/// interface is still being lowered can recurse through the in-progress
-/// definition (see `header_constraints_for`). Its implied bounds are still
-/// sound for naming and comparing associated types, which never discharges a
-/// goal, so they are reconstructed locally where they are needed.
-fn trait_self_implied_bounds<'db>(
-    db: &'db dyn HirAnalysisDb,
-    trait_: Trait<'db>,
-) -> PredicateListId<'db> {
-    PredicateListId::new(db, vec![trait_self_predicate(db, trait_)]).extend_all_bounds(db)
-}
-
-/// Evidence for comparing associated-type candidates with each other: the
-/// caller's assumptions and everything they imply, plus the enclosing trait's
-/// implied bounds when the receiver is that trait's `Self`.
-///
-/// Without the implied bounds a supertrait equality such as
-/// `Left: Base<Item = u256>` is invisible while normalizing, so a binding-free
-/// projection reached through a second supertrait cannot be recognized as the
-/// same type, and two paths to one declaration are reported as an ambiguity.
-fn assoc_ty_comparison_premises<'db>(
-    db: &'db dyn HirAnalysisDb,
-    ty: TyId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
-) -> crate::analysis::semantic::SolverPremises<'db> {
-    let evidence = assumptions.extend_all_bounds(db);
-    let evidence = if let TyData::TyParam(param) = ty.data(db)
-        && param.is_trait_self()
-        && let Some(trait_) = param.owner.resolve_to::<Trait>(db)
-    {
-        let mut list = evidence.list(db).to_vec();
-        for &bound in trait_self_implied_bounds(db, trait_).list(db) {
-            if !list.contains(&bound) {
-                list.push(bound);
-            }
-        }
-        PredicateListId::new(db, list)
-    } else {
-        evidence
-    };
-    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, evidence)
 }
 
 fn find_associated_type_in_mode<'db>(

@@ -12,10 +12,10 @@ use crate::{
             },
             trait_resolution::{PredicateListId, ProofProvisions, Selection, TraitSolveCx},
             ty_check::{BodyOwner, TraitChoiceId},
-            ty_def::TyId,
+            ty_def::{TyData, TyId},
         },
     },
-    hir_def::{IdentId, scope_graph::ScopeId},
+    hir_def::{IdentId, Trait, scope_graph::ScopeId},
 };
 
 /// Only the semantic owner can authorize raw solver construction.
@@ -365,6 +365,40 @@ impl<'db> SolverPremises<'db> {
         Self {
             scope: callable.scope(),
             assumptions: PredicateListId::empty_list(db),
+        }
+    }
+
+    /// Evidence for comparing associated-type candidates with each other: the
+    /// caller's assumptions and everything they imply, plus the enclosing trait's
+    /// implied bounds when the receiver is that trait's `Self`.
+    ///
+    /// Without the implied bounds a supertrait equality such as
+    /// `Left: Base<Item = u256>` is invisible while normalizing, so a binding-free
+    /// projection reached through a second supertrait cannot be recognized as the
+    /// same type, and two paths to one declaration are reported as an ambiguity.
+    pub(crate) fn for_associated_type_comparison(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        ty: TyId<'db>,
+    ) -> Self {
+        let evidence = self.assumptions.extend_all_bounds(db);
+        let evidence = if let TyData::TyParam(param) = ty.data(db)
+            && param.is_trait_self()
+            && let Some(trait_) = param.owner.resolve_to::<Trait>(db)
+        {
+            let mut list = evidence.list(db).to_vec();
+            for &bound in super::trait_self_implied_bounds(db, trait_).list(db) {
+                if !list.contains(&bound) {
+                    list.push(bound);
+                }
+            }
+            PredicateListId::new(db, list)
+        } else {
+            evidence
+        };
+        Self {
+            assumptions: evidence,
+            ..self
         }
     }
 
