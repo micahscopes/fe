@@ -512,21 +512,32 @@ impl<'db> LoweringContext<'db> {
         self.selection_context
     }
 
-    pub(crate) fn const_assumptions(
+    /// Capture one associated constant at its lowering position. Declaration
+    /// lowering keeps the already-held premises; body lowering adds its retained
+    /// selection and the prerequisites reached by that selection.
+    pub(crate) fn capture_assoc_const(
         &self,
         db: &'db dyn HirAnalysisDb,
-        default: PredicateListId<'db>,
-    ) -> PredicateListId<'db> {
-        self.selection_context
-            .map_or(default, |context| context.assumptions(db))
-    }
-
-    pub(crate) fn provision_for(
-        &self,
-        db: &'db dyn HirAnalysisDb,
+        scope: ScopeId<'db>,
+        assumptions: PredicateListId<'db>,
         goal: TraitInstId<'db>,
-    ) -> Option<crate::semantic::Provision<'db>> {
-        self.selection_context?.provision_for(db, goal)
+        name: IdentId<'db>,
+    ) -> AssocConstUse<'db> {
+        let assumptions = self
+            .selection_context
+            .map_or(assumptions, |context| context.assumptions(db));
+        let captured = AssocConstUse::new(
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+            goal,
+            name,
+        )
+        .with_provision(
+            self.selection_context
+                .and_then(|context| context.provision_for(db, goal)),
+        );
+        self.selection_context.map_or(captured, |context| {
+            captured.with_dependent_provisions(db, context)
+        })
     }
 
     pub(crate) fn const_impl_env(

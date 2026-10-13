@@ -12,7 +12,7 @@ use smallvec::smallvec;
 
 use super::{
     adt_def::{AdtDef, AdtRef, instantiate_adt_field_layout, instantiate_adt_field_shape},
-    assoc_const::{AssocConstUse, InherentConstUse},
+    assoc_const::InherentConstUse,
     const_ty::{
         CallableInputLayoutHoleOrigin, CallableLayoutOwner, ConstBodyLowering, ConstCaptureEnv,
         ConstTyData, ConstTyId, HoleAnchor, HoleId, LayoutBoundaryIdentity, LayoutHoleArgSite,
@@ -502,18 +502,7 @@ pub(crate) fn lower_const_body_path<'db>(
                     // Defer evaluation: the use position's expected type may
                     // differ in integer shape from the const's declared type
                     // (e.g. a `u256` trait const used as an array length).
-                    let assoc = AssocConstUse::new(
-                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                            scope,
-                            minter.const_assumptions(db, assumptions),
-                        ),
-                        inst,
-                        name,
-                    )
-                    .with_provision(minter.provision_for(db, inst));
-                    let assoc = minter.selection_context().map_or(assoc, |context| {
-                        assoc.with_dependent_provisions(db, context)
-                    });
+                    let assoc = minter.capture_assoc_const(db, scope, assumptions, inst, name);
                     super::const_ty::abstract_const_ty_from_assoc_const_use(db, assoc, expected_ty)
                 } else {
                     ConstTyId::invalid(db, InvalidCause::Other)
@@ -666,18 +655,7 @@ pub(crate) fn lower_type_position_path<'db>(
                 .and_then(|v| v.ty_binder(db))
                 .map(|b| b.instantiate(db, inst.args(db)))
             {
-                let assoc = AssocConstUse::new(
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        scope,
-                        minter.const_assumptions(db, assumptions),
-                    ),
-                    inst,
-                    name,
-                )
-                .with_provision(minter.provision_for(db, inst));
-                let assoc = minter.selection_context().map_or(assoc, |context| {
-                    assoc.with_dependent_provisions(db, context)
-                });
+                let assoc = minter.capture_assoc_const(db, scope, assumptions, inst, name);
                 if let Some(const_ty) = super::const_ty::const_ty_or_abstract_from_assoc_const_use(
                     db,
                     assoc,
