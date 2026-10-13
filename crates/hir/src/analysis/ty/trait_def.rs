@@ -1448,10 +1448,16 @@ pub(crate) fn resolved_method_instance<'db>(
     })
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ImplMemberQuery<'db> {
+    Constant(IdentId<'db>),
+    AssociatedType(IdentId<'db>),
+}
+
 pub(in crate::analysis::ty) enum ImplConstraintQuery<'db> {
     SelfType {
         receiver: Canonical<TyId<'db>>,
-        constant: Option<IdentId<'db>>,
+        member: ImplMemberQuery<'db>,
     },
     TraitInstance(Canonical<TraitInstId<'db>>),
 }
@@ -1464,9 +1470,9 @@ pub(in crate::analysis::ty) fn impls_for_ty_with_constraint_mode<'db>(
     allow_needs_confirmation: bool,
 ) -> Vec<ImplementorId<'db>> {
     let mut table = UnificationTable::new(db);
-    let (ty, trait_inst, constant) = match query {
-        ImplConstraintQuery::SelfType { receiver, constant } => {
-            (receiver.extract_identity(&mut table), None, constant)
+    let (ty, trait_inst, member) = match query {
+        ImplConstraintQuery::SelfType { receiver, member } => {
+            (receiver.extract_identity(&mut table), None, Some(member))
         }
         ImplConstraintQuery::TraitInstance(inst) => {
             let inst = inst.extract_identity(&mut table);
@@ -1494,8 +1500,24 @@ pub(in crate::analysis::ty) fn impls_for_ty_with_constraint_mode<'db>(
         .into_iter()
         .filter(|impl_| {
             // The question's member must exist before probing applicability.
-            // This reads only the trait declaration, not conditions or bodies.
-            if constant.is_some_and(|name| impl_.trait_(db).def(db).const_(db, name).is_none()) {
+            // This reads declarations or retained bindings, not conditions or bodies.
+            let has_member = match member {
+                Some(ImplMemberQuery::Constant(name)) => {
+                    impl_.trait_(db).def(db).const_(db, name).is_some()
+                }
+                Some(ImplMemberQuery::AssociatedType(name)) => match impl_.origin(db) {
+                    ImplementorOrigin::Hir(item) => {
+                        // Admit explicit bindings and trait defaults without lowering
+                        // either body. Completion remains after applicability proof.
+                        item.assoc_types(db)
+                            .any(|assoc| assoc.name(db) == Some(name))
+                            || impl_.trait_(db).def(db).assoc_ty(db, name).is_some()
+                    }
+                    _ => impl_.assoc_ty(db, name).is_some(),
+                },
+                None => true,
+            };
+            if !has_member {
                 return false;
             }
             let snapshot = table.snapshot();

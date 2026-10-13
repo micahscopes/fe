@@ -37,7 +37,7 @@ use crate::analysis::{
         generic_defaults::DefaultApplication,
         method_table::{MethodProbe, probe_method},
         normalize::normalize_ty,
-        trait_def::TraitInstId,
+        trait_def::{ImplMemberQuery, TraitInstId},
         trait_lower::{
             TraitArgError, TraitRefLowerError, complete_candidate_impl_assoc_ty,
             complete_impl_assoc_ty, lower_candidate_impl_assoc_ty, lower_checked_impl_assoc_ty,
@@ -1874,9 +1874,12 @@ fn select_assoc_const_candidate<'db>(
     receiver.with_materialized(db, |cx| {
         let receiver_ty = cx.query();
         for ingot in search_ingots.into_iter().flatten() {
-            for candidate in
-                queries.satisfied_implementations(db, ingot, receiver.canonical(), Some(name))
-            {
+            for candidate in queries.satisfied_implementations(
+                db,
+                ingot,
+                receiver.canonical(),
+                ImplMemberQuery::Constant(name),
+            ) {
                 let declared = candidate.trait_(db);
                 // Candidate discovery proves applicability but returns the impl's
                 // binder. Recover its arguments from this receiver before the
@@ -2038,7 +2041,12 @@ fn find_associated_type_in_mode<'db>(
         // traits on external types and external traits on local types are both visible.
         if !matches!(original_ty.data(db), TyData::TyParam(_)) {
             for ingot in search_ingots.into_iter().flatten() {
-                for impl_ in queries.satisfied_implementations(db, ingot, canonical_ty, None) {
+                for impl_ in queries.satisfied_implementations(
+                    db,
+                    ingot,
+                    canonical_ty,
+                    ImplMemberQuery::AssociatedType(name),
+                ) {
                     let impl_ = match const_bodies {
                         ConstBodyLowering::Eager => {
                             let Some(impl_) = complete_impl_assoc_ty(db, impl_, name) else {
