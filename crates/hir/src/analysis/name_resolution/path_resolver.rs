@@ -819,16 +819,13 @@ pub(crate) fn resolve_path_with_minter<'db>(
     resolve_tail_as_value: bool,
     minter: &LoweringContext<'db>,
 ) -> PathResolutionResult<'db, PathRes<'db>> {
-    let directive = QueryDirective::for_scope(db, scope);
-    resolve_path_impl(
+    resolve_path_with_observer_and_minter(
         db,
         path,
         scope,
         assumptions,
         resolve_tail_as_value,
-        directive,
-        true,
-        &mut |path, res| minter.record_resolution(path, res),
+        &mut |_, _| {},
         minter,
     )
 }
@@ -846,11 +843,12 @@ where
     F: FnMut(PathId<'db>, &PathRes<'db>),
 {
     let directive = QueryDirective::for_scope(db, scope);
+    let premises =
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
     resolve_path_impl(
         db,
         path,
-        scope,
-        assumptions,
+        premises,
         resolve_tail_as_value,
         directive,
         true,
@@ -886,6 +884,8 @@ pub(crate) fn resolve_type_position_path_with_minter<'db>(
     minter: &LoweringContext<'db>,
 ) -> PathResolutionResult<'db, PathRes<'db>> {
     let directive = QueryDirective::for_scope(db, scope);
+    let premises =
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
     let mut observer = |path: PathId<'db>, res: &PathRes<'db>| minter.record_resolution(path, res);
     let parent_res = path
         .parent(db)
@@ -893,8 +893,7 @@ pub(crate) fn resolve_type_position_path_with_minter<'db>(
             resolve_path_impl(
                 db,
                 parent,
-                scope,
-                assumptions,
+                premises,
                 false,
                 directive,
                 false,
@@ -908,8 +907,7 @@ pub(crate) fn resolve_type_position_path_with_minter<'db>(
             db,
             path,
             parent_res.clone(),
-            scope,
-            assumptions,
+            premises,
             as_value,
             directive,
             true,
@@ -965,8 +963,7 @@ pub(crate) fn resolve_type_position_path_with_minter<'db>(
 fn resolve_path_impl<'db, F>(
     db: &'db dyn HirAnalysisDb,
     path: PathId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     resolve_tail_as_value: bool,
     base_directive: QueryDirective,
     is_tail: bool,
@@ -982,8 +979,7 @@ where
             resolve_path_impl(
                 db,
                 path,
-                scope,
-                assumptions,
+                premises,
                 resolve_tail_as_value,
                 base_directive,
                 false,
@@ -996,8 +992,7 @@ where
         db,
         path,
         parent_res,
-        scope,
-        assumptions,
+        premises,
         resolve_tail_as_value,
         base_directive,
         is_tail,
@@ -1015,8 +1010,7 @@ fn resolve_segment<'db, F>(
     db: &'db dyn HirAnalysisDb,
     path: PathId<'db>,
     parent_res: Option<PathRes<'db>>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     resolve_tail_as_value: bool,
     base_directive: QueryDirective,
     is_tail: bool,
@@ -1027,6 +1021,8 @@ fn resolve_segment<'db, F>(
 where
     F: FnMut(PathId<'db>, &PathRes<'db>),
 {
+    let scope = premises.scope();
+    let assumptions = premises.assumptions();
     if let PathKind::BoundItem { item, .. } = path.kind(db) {
         let declaration = NameRes {
             kind: NameResKind::Scope(item),
@@ -1047,13 +1043,7 @@ where
             minter,
         )?;
         observer(path, &result);
-        return Ok(normalize_computed_path(
-            db,
-            result,
-            scope,
-            assumptions,
-            minter,
-        ));
+        return Ok(normalize_computed_path(db, result, premises, minter));
     }
 
     if let PathKind::BoundIngot { ingot, .. } = path.kind(db) {
@@ -1365,18 +1355,10 @@ where
             // Re-reading the declaration here would require its own layout
             // output before that output has been collected. Body positions
             // instead project the checker's complete retained context.
-            let premises = context.map_or_else(
-                || {
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        scope,
-                        assumptions,
-                    )
-                },
-                |context| context.premises(db),
-            );
+            let discovery_premises = context.map_or(premises, |context| context.premises(db));
             let assoc_tys = match find_associated_type_in_mode(
                 db,
-                premises,
+                discovery_premises,
                 Canonicalized::new(db, ty),
                 ident,
                 minter.const_bodies(),
@@ -1523,7 +1505,7 @@ where
     // Observers must see the application before reduction can erase its
     // declaration's requirements or its nominal visibility.
     observer(path, &r);
-    Ok(normalize_computed_path(db, r, scope, assumptions, minter))
+    Ok(normalize_computed_path(db, r, premises, minter))
 }
 
 enum AssocConstSelection<'db> {
@@ -2266,22 +2248,17 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
     assumptions: PredicateListId<'db>,
     minter: &LoweringContext<'db>,
 ) -> PathResolutionResult<'db, PathRes<'db>> {
+    let premises =
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
     let resolved =
         resolve_name_res_unexpanded(db, nameres, parent_ty, path, scope, assumptions, minter)?;
-    Ok(normalize_computed_path(
-        db,
-        resolved,
-        scope,
-        assumptions,
-        minter,
-    ))
+    Ok(normalize_computed_path(db, resolved, premises, minter))
 }
 
 fn normalize_computed_path<'db>(
     db: &'db dyn HirAnalysisDb,
     resolved: PathRes<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     minter: &LoweringContext<'db>,
 ) -> PathRes<'db> {
     if minter.const_bodies() == ConstBodyLowering::Eager
@@ -2294,9 +2271,7 @@ fn normalize_computed_path<'db>(
         )
     {
         return PathRes::Ty(crate::analysis::ty::normalize::normalize_ty(
-            db,
-            *ty,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+            db, *ty, premises,
         ));
     }
     resolved
