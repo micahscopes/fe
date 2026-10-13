@@ -613,7 +613,9 @@ fn lower_path_impl<'db>(
     let Some(path) = path.to_opt() else {
         return TyId::invalid(db, InvalidCause::ParseError);
     };
-    lower_type_position_path(db, path, scope, assumptions, position, minter)
+    let premises =
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
+    lower_type_position_path(db, path, premises, position, minter)
         .unwrap_or_else(|_| TyId::invalid(db, InvalidCause::PathResolutionFailed { path }))
 }
 
@@ -624,13 +626,13 @@ fn lower_path_impl<'db>(
 pub(crate) fn lower_type_position_path<'db>(
     db: &'db dyn HirAnalysisDb,
     path: PathId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     position: TypePosition,
     minter: &LoweringContext<'db>,
 ) -> PathResolutionResult<'db, TyId<'db>> {
-    let res =
-        resolve_type_position_path_with_minter(db, path, scope, assumptions, position, minter)?;
+    let scope = premises.scope();
+    let assumptions = premises.assumptions();
+    let res = resolve_type_position_path_with_minter(db, path, premises, position, minter)?;
     Ok(match res {
         PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) | PathRes::Func(ty) => ty,
         PathRes::Const(const_def, ty) => {

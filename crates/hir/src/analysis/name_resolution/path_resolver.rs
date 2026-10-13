@@ -874,14 +874,11 @@ pub(crate) enum TypePosition {
 pub(crate) fn resolve_type_position_path_with_minter<'db>(
     db: &'db dyn HirAnalysisDb,
     path: PathId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     position: TypePosition,
     minter: &LoweringContext<'db>,
 ) -> PathResolutionResult<'db, PathRes<'db>> {
-    let directive = QueryDirective::for_scope(db, scope);
-    let premises =
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
+    let directive = QueryDirective::for_scope(db, premises.scope());
     let mut observer = |path: PathId<'db>, res: &PathRes<'db>| minter.record_resolution(path, res);
     let parent_res = path
         .parent(db)
@@ -1057,18 +1054,13 @@ where
         // A path keeps the error that its single resolution reports, rather
         // than being resolved again to recover it.
         let ty = match type_.data(db) {
-            TypeKind::Path(Partial::Present(ty_path)) => lower_type_position_path(
-                db,
-                *ty_path,
-                scope,
-                assumptions,
-                TypePosition::Type,
-                minter,
-            )
-            .map_err(|inner| PathResError {
-                kind: PathResErrorKind::QualifiedTypeType(Box::new(Err(inner))),
-                failed_at: path,
-            })?,
+            TypeKind::Path(Partial::Present(ty_path)) => {
+                lower_type_position_path(db, *ty_path, premises, TypePosition::Type, minter)
+                    .map_err(|inner| PathResError {
+                        kind: PathResErrorKind::QualifiedTypeType(Box::new(Err(inner))),
+                        failed_at: path,
+                    })?
+            }
             _ => lower_hir_ty_with_minter(db, type_, scope, assumptions, minter),
         };
         if let Some(InvalidCause::NotAType(res)) = ty.invalid_cause(db) {
