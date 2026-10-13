@@ -695,23 +695,36 @@ fn query_has_solution<'db>(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn restricted_goal_query_result<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
     candidate: ImplementorId<'db>,
     goal: TraitInstId<'db>,
 ) -> TargetSearchResult<'db> {
+    restricted_goal_application_result(db, solve_cx, candidate, goal).1
+}
+
+/// Keep the normalized application used to prove an explicit candidate.
+/// Reconstruction must use this application, not normalize or infer a second one.
+pub(crate) fn restricted_goal_application_result<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    candidate: ImplementorId<'db>,
+    goal: TraitInstId<'db>,
+) -> (TraitInstId<'db>, TargetSearchResult<'db>) {
     let scope = solve_cx.normalization_scope_for_trait_inst(db, goal);
     let goal = normalize_trait_inst_preserving_validity(db, goal, scope, solve_cx.assumptions());
     let query = CanonicalGoalQuery::new(db, goal, solve_cx.assumptions());
-    query_has_solution(
+    let proof = query_has_solution(
         db,
         solve_cx.origin_scope(db),
         query.canonical(),
         (Canonical::new(db, goal), TargetSolutionMatch::Equal),
         Some(candidate),
         solve_cx.provisions,
-    )
+    );
+    (goal, proof)
 }
 
 pub(crate) fn goal_query_has_solution<'db>(

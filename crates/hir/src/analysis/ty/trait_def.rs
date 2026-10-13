@@ -832,11 +832,11 @@ pub fn prove_selected_impl_evidence<'db>(
     candidate: ImplementorId<'db>,
     goal: TraitInstId<'db>,
 ) -> Result<SelectedImplEvidence<'db>, SelectedEvidenceError> {
-    use super::trait_resolution::{TargetSolutionStatus, restricted_goal_query_result};
+    use super::trait_resolution::{TargetSolutionStatus, restricted_goal_application_result};
     if !evidence_inputs_supported(db, context, candidate, goal) {
         return Err(SelectedEvidenceError::Unsupported);
     }
-    let proof = restricted_goal_query_result(db, context, candidate, goal);
+    let (application, proof) = restricted_goal_application_result(db, context, candidate, goal);
     match proof.status {
         TargetSolutionStatus::NotFound => return Err(SelectedEvidenceError::NotProven),
         TargetSolutionStatus::Incomplete => return Err(SelectedEvidenceError::Incomplete),
@@ -850,8 +850,8 @@ pub fn prove_selected_impl_evidence<'db>(
         .ok_or(SelectedEvidenceError::Incomplete)?;
     let selected =
         complete_selected_impl(db, candidate).ok_or(SelectedEvidenceError::Unsupported)?;
-    let instance =
-        instantiate_selected_impl(db, selected, goal).ok_or(SelectedEvidenceError::Unsupported)?;
+    let instance = instantiate_selected_impl(db, selected, application)
+        .ok_or(SelectedEvidenceError::Unsupported)?;
     checked_selected_impl_evidence(db, context, candidate, goal, instance, conditions)
 }
 
