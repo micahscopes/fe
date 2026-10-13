@@ -1449,7 +1449,10 @@ pub(crate) fn resolved_method_instance<'db>(
 }
 
 pub(in crate::analysis::ty) enum ImplConstraintQuery<'db> {
-    SelfType(Canonical<TyId<'db>>),
+    SelfType {
+        receiver: Canonical<TyId<'db>>,
+        constant: Option<IdentId<'db>>,
+    },
     TraitInstance(Canonical<TraitInstId<'db>>),
 }
 
@@ -1461,11 +1464,13 @@ pub(in crate::analysis::ty) fn impls_for_ty_with_constraint_mode<'db>(
     allow_needs_confirmation: bool,
 ) -> Vec<ImplementorId<'db>> {
     let mut table = UnificationTable::new(db);
-    let (ty, trait_inst) = match query {
-        ImplConstraintQuery::SelfType(ty) => (ty.extract_identity(&mut table), None),
+    let (ty, trait_inst, constant) = match query {
+        ImplConstraintQuery::SelfType { receiver, constant } => {
+            (receiver.extract_identity(&mut table), None, constant)
+        }
         ImplConstraintQuery::TraitInstance(inst) => {
             let inst = inst.extract_identity(&mut table);
-            (inst.self_ty(db), Some(inst))
+            (inst.self_ty(db), Some(inst), None)
         }
     };
     let trait_def = trait_inst.map(|inst| inst.def(db));
@@ -1488,6 +1493,11 @@ pub(in crate::analysis::ty) fn impls_for_ty_with_constraint_mode<'db>(
     raw_impls
         .into_iter()
         .filter(|impl_| {
+            // The question's member must exist before probing applicability.
+            // This reads only the trait declaration, not conditions or bodies.
+            if constant.is_some_and(|name| impl_.trait_(db).def(db).const_(db, name).is_none()) {
+                return false;
+            }
             let snapshot = table.snapshot();
 
             let inst = table.instantiate_with_fresh_vars(*impl_);

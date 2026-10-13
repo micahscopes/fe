@@ -1874,11 +1874,10 @@ fn select_assoc_const_candidate<'db>(
     receiver.with_materialized(db, |cx| {
         let receiver_ty = cx.query();
         for ingot in search_ingots.into_iter().flatten() {
-            for candidate in queries.satisfied_implementations(db, ingot, receiver.canonical()) {
+            for candidate in
+                queries.satisfied_implementations(db, ingot, receiver.canonical(), Some(name))
+            {
                 let declared = candidate.trait_(db);
-                if declared.def(db).const_(db, name).is_none() {
-                    continue;
-                }
                 // Candidate discovery proves applicability but returns the impl's
                 // binder. Recover its arguments from this receiver before the
                 // selected trait instance leaves the inference context.
@@ -2039,7 +2038,7 @@ fn find_associated_type_in_mode<'db>(
         // traits on external types and external traits on local types are both visible.
         if !matches!(original_ty.data(db), TyData::TyParam(_)) {
             for ingot in search_ingots.into_iter().flatten() {
-                for impl_ in queries.satisfied_implementations(db, ingot, canonical_ty) {
+                for impl_ in queries.satisfied_implementations(db, ingot, canonical_ty, None) {
                     let impl_ = match const_bodies {
                         ConstBodyLowering::Eager => {
                             let Some(impl_) = complete_impl_assoc_ty(db, impl_, name) else {

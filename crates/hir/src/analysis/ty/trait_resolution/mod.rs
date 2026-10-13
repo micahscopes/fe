@@ -22,7 +22,7 @@ use crate::analysis::{
 };
 use crate::{
     Ingot,
-    hir_def::{CallableDef, HirIngot, Trait, scope_graph::ScopeId},
+    hir_def::{CallableDef, HirIngot, IdentId, Trait, scope_graph::ScopeId},
 };
 use common::indexmap::IndexSet;
 use constraint::collect_constraints;
@@ -858,11 +858,15 @@ impl<'db> ProofQueries<'db> {
         db: &'db dyn HirAnalysisDb,
         ingot: Ingot<'db>,
         ty: Canonical<TyId<'db>>,
+        constant: Option<IdentId<'db>>,
     ) -> Vec<super::trait_def::ImplementorId<'db>> {
         super::trait_def::impls_for_ty_with_constraint_mode(
             db,
             ingot,
-            super::trait_def::ImplConstraintQuery::SelfType(ty),
+            super::trait_def::ImplConstraintQuery::SelfType {
+                receiver: ty,
+                constant,
+            },
             self.0,
             false,
         )
