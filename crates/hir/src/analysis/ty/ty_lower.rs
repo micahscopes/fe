@@ -163,10 +163,11 @@ fn lower_hir_ty_impl<'db>(
 pub(crate) fn lower_hir_ty_with_resolutions<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: HirTyId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     const_bodies: ConstBodyLowering,
 ) -> (TyId<'db>, Vec<(PathId<'db>, PathRes<'db>)>) {
+    let scope = premises.scope();
+    let assumptions = premises.assumptions();
     let minter = LoweringContext::for_const_bodies(
         HoleAnchor::TemplateTy {
             ty,

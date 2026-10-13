@@ -2700,8 +2700,7 @@ fn written_types_query<'db>(
                 let bodies = trait_ref_const_args(
                     self.db,
                     path,
-                    scope,
-                    crate::semantic::context_at(self.db, scope, None).assumptions(self.db),
+                    crate::semantic::context_at(self.db, scope, None).premises(self.db),
                 );
                 if !bodies.is_empty() {
                     self.entries.push(WrittenEntry::ConstBodies {
@@ -2774,7 +2773,8 @@ fn written_types_query<'db>(
             walk_nested: impl FnOnce(&mut Self),
         ) {
             let db = self.db;
-            let assumptions = crate::semantic::context_at(db, scope, None).assumptions(db);
+            let premises = crate::semantic::context_at(db, scope, None).premises(db);
+            let assumptions = premises.assumptions();
             let (ty, applications) = match hir_ty.data(db) {
                 // Only a path of two or more segments passes through types
                 // that its lowering does not hold. A one-segment path lowers
@@ -2786,8 +2786,7 @@ fn written_types_query<'db>(
                     let (ty, resolutions) = lower_hir_ty_with_resolutions(
                         db,
                         hir_ty,
-                        scope,
-                        assumptions,
+                        premises,
                         ConstBodyLowering::Eager,
                     );
                     let applications = resolutions
@@ -2801,7 +2800,7 @@ fn written_types_query<'db>(
             let in_default = self.defaults.contains(&hir_ty);
             self.default_depth += usize::from(in_default);
             if self.default_depth == 0 {
-                let bodies = written_const_args(db, hir_ty, scope, assumptions);
+                let bodies = written_const_args(db, hir_ty, premises);
                 if !bodies.is_empty() {
                     self.entries.push(WrittenEntry::ConstBodies {
                         bodies,
@@ -3075,12 +3074,8 @@ pub(super) fn written_type_const_args<'db>(
             ctxt: &mut VisitorCtxt<'db, LazyTySpan<'db>>,
             hir_ty: crate::hir_def::TypeId<'db>,
         ) {
-            self.found.extend(written_const_args(
-                self.db,
-                hir_ty,
-                ctxt.scope(),
-                self.premises.assumptions(),
-            ));
+            self.found
+                .extend(written_const_args(self.db, hir_ty, self.premises));
             walk_type(self, ctxt, hir_ty);
         }
 
@@ -3090,12 +3085,8 @@ pub(super) fn written_type_const_args<'db>(
             trait_ref: TraitRefId<'db>,
         ) {
             if let Some(path) = trait_ref.path(self.db).to_opt() {
-                self.found.extend(trait_ref_const_args(
-                    self.db,
-                    path,
-                    ctxt.scope(),
-                    self.premises.assumptions(),
-                ));
+                self.found
+                    .extend(trait_ref_const_args(self.db, path, self.premises));
             }
             walk_trait_ref(self, ctxt, trait_ref);
         }
@@ -3118,9 +3109,10 @@ pub(super) fn written_type_const_args<'db>(
 fn trait_ref_const_args<'db>(
     db: &'db dyn HirAnalysisDb,
     path: PathId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> Vec<(Body<'db>, TyId<'db>)> {
+    let scope = premises.scope();
+    let assumptions = premises.assumptions();
     if path_const_bodies(db, path).is_empty() {
         return Vec::new();
     }
@@ -3140,8 +3132,7 @@ fn trait_ref_const_args<'db>(
 fn written_const_args<'db>(
     db: &'db dyn HirAnalysisDb,
     hir_ty: crate::hir_def::TypeId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> Vec<(Body<'db>, TyId<'db>)> {
     use crate::hir_def::TypeKind;
     match hir_ty.data(db) {
@@ -3150,13 +3141,8 @@ fn written_const_args<'db>(
             .into_iter()
             .collect(),
         TypeKind::Path(Partial::Present(path)) if !path_const_bodies(db, *path).is_empty() => {
-            let (_, resolutions) = lower_hir_ty_with_resolutions(
-                db,
-                hir_ty,
-                scope,
-                assumptions,
-                ConstBodyLowering::Deferred,
-            );
+            let (_, resolutions) =
+                lower_hir_ty_with_resolutions(db, hir_ty, premises, ConstBodyLowering::Deferred);
             segment_const_args(db, *path, &resolutions)
         }
         _ => Vec::new(),
