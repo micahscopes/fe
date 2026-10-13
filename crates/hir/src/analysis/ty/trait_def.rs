@@ -848,7 +848,11 @@ pub fn prove_selected_impl_evidence<'db>(
     let conditions = proof
         .impl_conditions
         .ok_or(SelectedEvidenceError::Incomplete)?;
-    checked_selected_impl_evidence(db, context, candidate, goal, conditions)
+    let selected =
+        complete_selected_impl(db, candidate).ok_or(SelectedEvidenceError::Unsupported)?;
+    let instance =
+        instantiate_selected_impl(db, selected, goal).ok_or(SelectedEvidenceError::Unsupported)?;
+    checked_selected_impl_evidence(db, context, candidate, goal, instance, conditions)
 }
 
 fn checked_selected_impl_evidence<'db>(
@@ -856,15 +860,12 @@ fn checked_selected_impl_evidence<'db>(
     context: TraitSolveCx<'db>,
     candidate: ImplementorId<'db>,
     goal: TraitInstId<'db>,
+    instance: ResolvedImplInstance<'db>,
     conditions: super::trait_resolution::ImplConditionsId<'db>,
 ) -> Result<SelectedImplEvidence<'db>, SelectedEvidenceError> {
     if !evidence_inputs_supported(db, context, candidate, goal) {
         return Err(SelectedEvidenceError::Unsupported);
     }
-    let selected =
-        complete_selected_impl(db, candidate).ok_or(SelectedEvidenceError::Unsupported)?;
-    let instance =
-        instantiate_selected_impl(db, selected, goal).ok_or(SelectedEvidenceError::Unsupported)?;
     // Existential proof may leave impl arguments undetermined. Such an answer
     // is not sufficient to expose one selected application's output meaning.
     if !evidence_types_supported(db, instance.impl_args(db).to_vec()) {
@@ -903,7 +904,7 @@ pub(crate) fn resolve_ordinary_impl_evidence<'db>(
     else {
         return Err(OrdinaryEvidenceError::NotUnique);
     };
-    checked_selected_impl_evidence(db, context, instance.selected(), goal, conditions)
+    checked_selected_impl_evidence(db, context, instance.selected(), goal, instance, conditions)
         .map_err(|_| OrdinaryEvidenceError::PrerequisitesNotProven)
 }
 
