@@ -3326,6 +3326,19 @@ impl<T> Grow for T where Wrap<T>: Grow {}
             ),
             Err(SelectedEvidenceError::Incomplete)
         ));
+        let ordinary = super::super::trait_def::resolve_ordinary_impl_evidence(
+            &db,
+            TraitSolveCx::new(&db, top_mod.scope()),
+            goal,
+        )
+        .err()
+        .expect("incomplete growth cannot introduce ordinary evidence");
+        assert!(matches!(
+            ordinary,
+            super::super::trait_def::OrdinaryEvidenceError::Selection(
+                super::super::trait_def::ImplSelectionFailure::Incomplete(_)
+            )
+        ));
     }
 
     #[dir_test(dir: "$CARGO_MANIFEST_DIR/tests/fixtures/impl_const_requirements", glob: "evidence.fe")]
@@ -3371,6 +3384,13 @@ impl<T> Grow for T where Wrap<T>: Grow {}
                     expected,
                     "ordinary {trait_name} for {name}"
                 );
+                if let Err(selected_error) = result {
+                    assert!(matches!(
+                        ordinary,
+                        Err(super::super::trait_def::OrdinaryEvidenceError::PrerequisitesNotProven(reason))
+                            if reason == selected_error
+                    ));
+                }
                 let GoalSatisfiability::Satisfied(solution) =
                     is_goal_satisfiable(&db, TraitSolveCx::new(&db, top_mod.scope()), goal)
                 else {

@@ -2224,10 +2224,10 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         let evidence = resolve_ordinary_impl_evidence(db, context.solver_context(db), goal)
             .map_err(|error| {
                 invalid(match error {
-                    OrdinaryEvidenceError::NotUnique => {
+                    OrdinaryEvidenceError::Selection(_) => {
                         "no unique proven FieldQuery implementation"
                     }
-                    OrdinaryEvidenceError::PrerequisitesNotProven => {
+                    OrdinaryEvidenceError::PrerequisitesNotProven(_) => {
                         "selected query prerequisites were not proved"
                     }
                 })

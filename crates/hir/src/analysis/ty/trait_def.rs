@@ -888,8 +888,8 @@ fn checked_selected_impl_evidence<'db>(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OrdinaryEvidenceError {
-    NotUnique,
-    PrerequisitesNotProven,
+    Selection(ImplSelectionFailure),
+    PrerequisitesNotProven(SelectedEvidenceError),
 }
 
 /// Ordinary discovery and evidence introduction share one checked lookup.
@@ -899,13 +899,12 @@ pub(crate) fn resolve_ordinary_impl_evidence<'db>(
     context: TraitSolveCx<'db>,
     goal: TraitInstId<'db>,
 ) -> Result<SelectedImplEvidence<'db>, OrdinaryEvidenceError> {
-    let ImplSelection::Unique(instance, conditions) =
-        resolve_trait_impl_instance_query(db, context, goal)
-    else {
-        return Err(OrdinaryEvidenceError::NotUnique);
+    let (instance, conditions) = match resolve_trait_impl_instance_query(db, context, goal) {
+        Ok((instance, conditions)) => (instance, conditions),
+        Err(reason) => return Err(OrdinaryEvidenceError::Selection(reason)),
     };
     checked_selected_impl_evidence(db, context, instance.selected(), goal, instance, conditions)
-        .map_err(|_| OrdinaryEvidenceError::PrerequisitesNotProven)
+        .map_err(OrdinaryEvidenceError::PrerequisitesNotProven)
 }
 
 /// Validates the public goal before either scoped capture or ordinary discovery.
@@ -931,10 +930,10 @@ pub(crate) fn introduce_obligation<'db>(
 ) -> Result<SelectedImplEvidence<'db>, &'static str> {
     let goal = concrete_obligation_goal(db, term)?;
     resolve_ordinary_impl_evidence(db, context, goal).map_err(|error| match error {
-        OrdinaryEvidenceError::NotUnique => {
+        OrdinaryEvidenceError::Selection(_) => {
             "ordinary lookup did not establish a unique implementation"
         }
-        OrdinaryEvidenceError::PrerequisitesNotProven => {
+        OrdinaryEvidenceError::PrerequisitesNotProven(_) => {
             "selected implementation prerequisites were not proved"
         }
     })
@@ -1099,20 +1098,24 @@ pub(crate) fn resolve_trait_impl_instance<'db>(
     inst: TraitInstId<'db>,
 ) -> Selection<ResolvedImplInstance<'db>> {
     match resolve_trait_impl_instance_query(db, solve_cx, inst) {
-        ImplSelection::Unique(resolved, _) => Selection::Unique(resolved),
-        ImplSelection::Ambiguous => Selection::Ambiguous(IndexSet::new()),
-        ImplSelection::NotFound => Selection::NotFound,
+        Ok((resolved, _)) => Selection::Unique(resolved),
+        Err(reason) => match reason {
+            ImplSelectionFailure::Ambiguous
+            | ImplSelectionFailure::Incomplete(_)
+            | ImplSelectionFailure::NormalizationFault => Selection::Ambiguous(IndexSet::new()),
+            ImplSelectionFailure::NotFound | ImplSelectionFailure::Invalid => Selection::NotFound,
+        },
     }
 }
 
-/// An implementation selection, without candidates for an ambiguous one.
+/// Why selection did not establish a usable instance. Diagnostic views may
+/// group these outcomes; evidence admission retains their distinct causes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
-enum ImplSelection<'db> {
-    Unique(
-        ResolvedImplInstance<'db>,
-        super::trait_resolution::ImplConditionsId<'db>,
-    ),
+pub(crate) enum ImplSelectionFailure {
     Ambiguous,
+    Incomplete(super::trait_resolution::TraitSolveCompletion),
+    NormalizationFault,
+    Invalid,
     NotFound,
 }
 
@@ -1122,24 +1125,34 @@ fn resolve_trait_impl_instance_query<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
     inst: TraitInstId<'db>,
-) -> ImplSelection<'db> {
+) -> Result<
+    (
+        ResolvedImplInstance<'db>,
+        super::trait_resolution::ImplConditionsId<'db>,
+    ),
+    ImplSelectionFailure,
+> {
     let (inst, proof) = solve_cx.select_impl_application_proof(db, inst);
     match proof {
         GoalSatisfiability::Satisfied(proof) => complete_selected_impl(db, proof.value.implementor)
             .and_then(|selected| instantiate_selected_impl(db, selected, inst))
-            .map_or(ImplSelection::NotFound, |resolved| {
-                ImplSelection::Unique(resolved, proof.value.impl_conditions)
+            .map_or(Err(ImplSelectionFailure::NotFound), |resolved| {
+                Ok((resolved, proof.value.impl_conditions))
             }),
         // There is deliberately no resolved instance for a non-unique
         // selection. Re-unifying each candidate would both fabricate evidence
         // the caller must not consume and attempt to fold inference variables
         // owned by the caller through a fresh local table.
-        GoalSatisfiability::NeedsConfirmation { .. } | GoalSatisfiability::NormalizationFault => {
-            ImplSelection::Ambiguous
+        GoalSatisfiability::NeedsConfirmation { completion, .. } => {
+            Err(if completion.is_saturated() {
+                ImplSelectionFailure::Ambiguous
+            } else {
+                ImplSelectionFailure::Incomplete(completion)
+            })
         }
-        GoalSatisfiability::ContainsInvalid | GoalSatisfiability::UnSat(_) => {
-            ImplSelection::NotFound
-        }
+        GoalSatisfiability::NormalizationFault => Err(ImplSelectionFailure::NormalizationFault),
+        GoalSatisfiability::ContainsInvalid => Err(ImplSelectionFailure::Invalid),
+        GoalSatisfiability::UnSat(_) => Err(ImplSelectionFailure::NotFound),
     }
 }
 
