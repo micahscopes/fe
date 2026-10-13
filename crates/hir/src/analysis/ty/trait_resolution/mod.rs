@@ -154,12 +154,22 @@ impl<'db> CanonicalGoalQuery<'db> {
         goal: TraitInstId<'db>,
         assumptions: PredicateListId<'db>,
     ) -> Self {
+        Self::with_root_requirement(db, goal, assumptions, false)
+    }
+
+    /// Restrict the root answer without changing prerequisite premises.
+    fn with_root_requirement(
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+        assumptions: PredicateListId<'db>,
+        require_impl: bool,
+    ) -> Self {
         Self::from_query(
             db,
             TraitSolverQuery {
                 goal,
                 assumptions: assumptions.extend_all_bounds(db),
-                require_impl: false,
+                require_impl,
             },
         )
     }
@@ -461,7 +471,7 @@ impl<'db> TraitSolveCx<'db> {
         {
             is_goal_satisfiable(db, self, inst)
         } else {
-            let query = self.implementation_goal_query(db, inst);
+            let query = CanonicalGoalQuery::with_root_requirement(db, inst, self.assumptions, true);
             match is_goal_query_satisfiable(db, self, &query) {
                 // A bound with no provable implementation can still be supplied
                 // by the caller. Incomplete searches cannot establish this.
@@ -480,23 +490,8 @@ impl<'db> TraitSolveCx<'db> {
         db: &'db dyn HirAnalysisDb,
         goal: TraitInstId<'db>,
     ) -> GoalSatisfiability<'db> {
-        let query = self.implementation_goal_query(db, goal);
+        let query = CanonicalGoalQuery::with_root_requirement(db, goal, self.assumptions, true);
         is_goal_query_satisfiable(db, self, &query)
-    }
-
-    fn implementation_goal_query(
-        self,
-        db: &'db dyn HirAnalysisDb,
-        goal: TraitInstId<'db>,
-    ) -> CanonicalGoalQuery<'db> {
-        CanonicalGoalQuery::from_query(
-            db,
-            TraitSolverQuery {
-                goal,
-                assumptions: self.assumptions.extend_all_bounds(db),
-                require_impl: true,
-            },
-        )
     }
 
     pub(crate) fn search_ingots_for_trait_inst(
@@ -715,7 +710,7 @@ pub(crate) fn restricted_goal_application_result<'db>(
 ) -> (TraitInstId<'db>, TargetSearchResult<'db>) {
     let scope = solve_cx.normalization_scope_for_trait_inst(db, goal);
     let goal = normalize_trait_inst_preserving_validity(db, goal, scope, solve_cx.assumptions());
-    let query = CanonicalGoalQuery::new(db, goal, solve_cx.assumptions());
+    let query = solve_cx.goal_query(db, goal);
     let proof = query_has_solution(
         db,
         solve_cx.origin_scope(db),
@@ -931,7 +926,7 @@ pub fn is_goal_satisfiable<'db>(
     solve_cx: TraitSolveCx<'db>,
     goal: TraitInstId<'db>,
 ) -> GoalSatisfiability<'db> {
-    let query = CanonicalGoalQuery::new(db, goal, solve_cx.assumptions());
+    let query = solve_cx.goal_query(db, goal);
     is_goal_query_satisfiable(db, solve_cx, &query)
 }
 
