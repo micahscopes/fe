@@ -1429,7 +1429,7 @@ where
                 observer(path, &r);
                 return Ok(r);
             }
-            let evidence = assoc_ty_candidate_evidence(db, ty, assumptions);
+            let comparison = assoc_ty_comparison_premises(db, ty, scope, assumptions);
             let mut dedup: IndexMap<TyId<'db>, (TraitInstId<'db>, TyId<'db>, TyId<'db>)> =
                 IndexMap::new();
             for (inst, ty_candidate) in assoc_tys.iter().copied() {
@@ -1444,13 +1444,7 @@ where
                     .get(&ident)
                     .copied()
                     .map_or(applied, |bound| TyId::foldl(db, bound, &seg_args));
-                let norm = normalize_ty(
-                    db,
-                    candidate_ty,
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        scope, evidence,
-                    ),
-                );
+                let norm = normalize_ty(db, candidate_ty, comparison);
                 let key = if norm.has_invalid(db) { applied } else { norm };
                 dedup.entry(key).or_insert((inst, applied, norm));
             }
@@ -1981,13 +1975,14 @@ fn trait_self_implied_bounds<'db>(
 /// `Left: Base<Item = u256>` is invisible while normalizing, so a binding-free
 /// projection reached through a second supertrait cannot be recognized as the
 /// same type, and two paths to one declaration are reported as an ambiguity.
-fn assoc_ty_candidate_evidence<'db>(
+fn assoc_ty_comparison_premises<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: TyId<'db>,
+    scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
-) -> PredicateListId<'db> {
+) -> crate::analysis::semantic::SolverPremises<'db> {
     let evidence = assumptions.extend_all_bounds(db);
-    if let TyData::TyParam(param) = ty.data(db)
+    let evidence = if let TyData::TyParam(param) = ty.data(db)
         && param.is_trait_self()
         && let Some(trait_) = param.owner.resolve_to::<Trait>(db)
     {
@@ -1997,9 +1992,11 @@ fn assoc_ty_candidate_evidence<'db>(
                 list.push(bound);
             }
         }
-        return PredicateListId::new(db, list);
-    }
-    evidence
+        PredicateListId::new(db, list)
+    } else {
+        evidence
+    };
+    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, evidence)
 }
 
 fn find_associated_type_in_mode<'db>(
