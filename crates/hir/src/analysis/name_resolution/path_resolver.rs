@@ -1029,15 +1029,8 @@ where
             PathRes::Ty(ty) | PathRes::TyAlias(_, ty, _) => Some(*ty),
             _ => None,
         });
-        let result = resolve_name_res_unexpanded(
-            db,
-            &declaration,
-            parent_ty,
-            path,
-            scope,
-            assumptions,
-            minter,
-        )?;
+        let result =
+            resolve_name_res_unexpanded(db, &declaration, parent_ty, path, premises, minter)?;
         observer(path, &result);
         return Ok(normalize_computed_path(db, result, premises, minter));
     }
@@ -1497,7 +1490,7 @@ where
         pick_type_domain_from_bucket(parent_res, bucket, path, path.parent(db))?
     };
 
-    let r = resolve_name_res_unexpanded(db, &res, parent_ty, path, scope, assumptions, minter)?;
+    let r = resolve_name_res_unexpanded(db, &res, parent_ty, path, premises, minter)?;
     // Observers must see the application before reduction can erase its
     // declaration's requirements or its nominal visibility.
     observer(path, &r);
@@ -2199,8 +2192,7 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
 ) -> PathResolutionResult<'db, PathRes<'db>> {
     let premises =
         crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
-    let resolved =
-        resolve_name_res_unexpanded(db, nameres, parent_ty, path, scope, assumptions, minter)?;
+    let resolved = resolve_name_res_unexpanded(db, nameres, parent_ty, path, premises, minter)?;
     Ok(normalize_computed_path(db, resolved, premises, minter))
 }
 
@@ -2231,10 +2223,11 @@ fn resolve_name_res_unexpanded<'db>(
     nameres: &NameRes<'db>,
     parent_ty: Option<TyId<'db>>,
     path: PathId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     minter: &LoweringContext<'db>,
 ) -> PathResolutionResult<'db, PathRes<'db>> {
+    let scope = premises.scope();
+    let assumptions = premises.assumptions();
     // Lowered only by the resolutions that apply them: lowering arguments that
     // are then rejected or ignored repeats the whole nested lowering whenever a
     // caller resolves the path again in another namespace.
@@ -2352,12 +2345,12 @@ fn resolve_name_res_unexpanded<'db>(
                                     && let TypeKind::Path(p) = hir_ty.data(db)
                                     && let Some(arg_path) = p.to_opt()
                                 {
-                                    match resolve_path_with_minter(
+                                    match resolve_path_with_observer_and_premises(
                                         db,
                                         arg_path,
-                                        scope,
-                                        assumptions,
+                                        premises,
                                         false,
+                                        &mut |_, _| {},
                                         minter,
                                     ) {
                                         Ok(res)
