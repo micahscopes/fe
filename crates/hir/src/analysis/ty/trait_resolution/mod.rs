@@ -433,9 +433,16 @@ impl<'db> TraitSolveCx<'db> {
         self.scope
     }
 
-    /// Keep the application used to reconstruct a selected instance with its
-    /// proof. Preserve the reconstruction normalization before proof selection;
-    /// selection still applies its own scope and validity policy.
+    /// Retain the proof and its conditions until the caller chooses its view.
+    pub(crate) fn select_impl_proof(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        inst: TraitInstId<'db>,
+    ) -> GoalSatisfiability<'db> {
+        self.select_impl_application_proof(db, inst).1
+    }
+
+    /// Normalize the application once for both proof and reconstruction.
     pub(crate) fn select_impl_application_proof(
         self,
         db: &'db dyn HirAnalysisDb,
@@ -443,21 +450,10 @@ impl<'db> TraitSolveCx<'db> {
     ) -> (TraitInstId<'db>, GoalSatisfiability<'db>) {
         let scope = self.normalization_scope_for_trait_inst(db, inst);
         let inst = normalize_trait_inst_preserving_validity(db, inst, scope, self.assumptions);
-        (inst, self.select_impl_proof(db, inst))
-    }
-
-    /// Retain the proof and its conditions until the caller chooses its view.
-    pub(crate) fn select_impl_proof(
-        self,
-        db: &'db dyn HirAnalysisDb,
-        inst: TraitInstId<'db>,
-    ) -> GoalSatisfiability<'db> {
-        let scope = self.normalization_scope_for_trait_inst(db, inst);
-        let inst = normalize_trait_inst_preserving_validity(db, inst, scope, self.assumptions);
         // An assumption proves a bound; it is not a second implementation.
         // Keep inference goals on the ordinary proof query: an assumption may
         // select a different substitution from the implementations in scope.
-        if inst.args(db).iter().any(|ty| ty.has_var(db))
+        let proof = if inst.args(db).iter().any(|ty| ty.has_var(db))
             || inst
                 .assoc_type_bindings(db)
                 .values()
@@ -472,7 +468,8 @@ impl<'db> TraitSolveCx<'db> {
                 GoalSatisfiability::UnSat(_) => is_goal_satisfiable(db, self, inst),
                 result => result,
             }
-        }
+        };
+        (inst, proof)
     }
 
     /// Specialize a known root effect provider from an implementation, rather
