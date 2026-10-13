@@ -38,7 +38,7 @@ def inventory(sources):
         ('env', 'provision_for_goal', 'lookup'),
         ('chain', 'lookup', 'lookup_trait_goal'),
         ('chain', 'visible', 'lookup_trait_goal'),
-        ('const', 'provision_for', 'provision_for'),
+        ('capture', 'with_position_provisions', 'provision_for'),
     ]:
         readers = bodies(sources[file], name)
         if len(readers) != 1 or delegate + '(' not in readers[0]:
@@ -61,6 +61,7 @@ if __name__ == '__main__':
         'env': 'crates/hir/src/analysis/ty/ty_check/env.rs',
         'chain': 'crates/hir/src/core/semantic/provision.rs',
         'const': 'crates/hir/src/analysis/ty/const_ty.rs',
+        'capture': 'crates/hir/src/analysis/ty/assoc_const.rs',
         'lower': 'crates/hir/src/analysis/ty/ty_lower.rs',
     }
     sources = {name: (ROOT / path).read_text() for name, path in paths.items()}
@@ -69,7 +70,7 @@ if __name__ == '__main__':
     except ValueError as error:
         sys.exit(str(error))
     # Mutations must not turn adapters back into independent lookup authorities.
-    for file, name in [('impl', 'provision_for'), ('impl', 'selection_for'), ('const', 'provision_for'), ('env', 'provision_for_goal'), ('chain', 'lookup'), ('chain', 'visible')]:
+    for file, name in [('impl', 'provision_for'), ('impl', 'selection_for'), ('capture', 'with_position_provisions'), ('env', 'provision_for_goal'), ('chain', 'lookup'), ('chain', 'visible')]:
         mutant = dict(sources)
         body = bodies(sources[file], name)[0]
         mutant[file] = sources[file].replace(body, '{ entries.rev().find(|entry| true) }')
