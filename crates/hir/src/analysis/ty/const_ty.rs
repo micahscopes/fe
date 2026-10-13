@@ -530,13 +530,9 @@ impl<'db> LoweringContext<'db> {
             crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
             goal,
             name,
-        )
-        .with_provision(
-            self.selection_context
-                .and_then(|context| context.provision_for(db, goal)),
         );
         self.selection_context.map_or(captured, |context| {
-            captured.with_dependent_provisions(db, context)
+            captured.with_position_provisions(db, context)
         })
     }
 
@@ -2688,15 +2684,17 @@ fn assoc_const_use_for_body<'db>(
     inst: TraitInstId<'db>,
     name: IdentId<'db>,
 ) -> AssocConstUse<'db> {
-    let scope = impl_env.map_or(body.scope(), |env| env.normalization_scope(db));
-    let assumptions = impl_env.map_or(assumptions, |env| env.assumptions(db));
-    let use_ = AssocConstUse::new(
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
-        inst,
-        name,
-    )
-    .with_provision(impl_env.and_then(|env| env.provision_for(db, inst)));
-    impl_env.map_or(use_, |context| use_.with_dependent_provisions(db, context))
+    let premises = impl_env.map_or_else(
+        || {
+            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                body.scope(),
+                assumptions,
+            )
+        },
+        |env| env.premises(db),
+    );
+    let use_ = AssocConstUse::new(premises, inst, name);
+    impl_env.map_or(use_, |context| use_.with_position_provisions(db, context))
 }
 
 pub(crate) fn assumptions_for_body<'db>(

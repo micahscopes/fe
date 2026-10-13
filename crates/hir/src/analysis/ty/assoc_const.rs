@@ -41,6 +41,16 @@ impl<'db> AssocConstUse<'db> {
         }
     }
 
+    /// Capture the direct answer and its reached prerequisites together.
+    pub(crate) fn with_position_provisions(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        context: crate::analysis::semantic::ImplEnv<'db>,
+    ) -> Self {
+        self.with_provision(context.provision_for(db, self.inst))
+            .with_dependent_provisions(db, context)
+    }
+
     /// Keep the provisions of `context` that proving this use's goal can
     /// reach, other than the goal's own provision.
     pub(crate) fn with_dependent_provisions(
