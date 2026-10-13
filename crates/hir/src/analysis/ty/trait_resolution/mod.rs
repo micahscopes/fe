@@ -433,6 +433,19 @@ impl<'db> TraitSolveCx<'db> {
         self.scope
     }
 
+    /// Keep the application used to reconstruct a selected instance with its
+    /// proof. Preserve the reconstruction normalization before proof selection;
+    /// selection still applies its own scope and validity policy.
+    pub(crate) fn select_impl_application_proof(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        inst: TraitInstId<'db>,
+    ) -> (TraitInstId<'db>, GoalSatisfiability<'db>) {
+        let scope = self.normalization_scope_for_trait_inst(db, inst);
+        let inst = normalize_trait_inst_preserving_validity(db, inst, scope, self.assumptions);
+        (inst, self.select_impl_proof(db, inst))
+    }
+
     /// Retain the proof and its conditions until the caller chooses its view.
     pub(crate) fn select_impl_proof(
         self,

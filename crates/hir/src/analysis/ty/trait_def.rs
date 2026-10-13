@@ -33,7 +33,6 @@ use super::{
     trait_lower::collect_implementor_methods,
     trait_resolution::{
         TraitSolveCx, constraint::collect_candidate_constraints, is_goal_satisfiable,
-        normalize_trait_inst_preserving_validity,
     },
     ty_def::{TyBase, TyData, TyId},
     ty_lower::{
@@ -1153,10 +1152,8 @@ fn resolve_trait_impl_instance_query<'db>(
     solve_cx: TraitSolveCx<'db>,
     inst: TraitInstId<'db>,
 ) -> ImplSelection<'db> {
-    let assumptions = solve_cx.assumptions();
-    let norm_scope = solve_cx.normalization_scope_for_trait_inst(db, inst);
-    let inst = normalize_trait_inst_preserving_validity(db, inst, norm_scope, assumptions);
-    match solve_cx.select_impl_proof(db, inst) {
+    let (inst, proof) = solve_cx.select_impl_application_proof(db, inst);
+    match proof {
         GoalSatisfiability::Satisfied(proof) => complete_selected_impl(db, proof.value.implementor)
             .and_then(|selected| instantiate_selected_impl(db, selected, inst))
             .map_or(ImplSelection::NotFound, |resolved| {
