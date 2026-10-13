@@ -10,7 +10,7 @@ use crate::analysis::{
         canonical::{Canonical, Canonicalized, Solution},
         fold::TyFoldable as _,
         method_table::{MethodProbe, ProbedMethod, probe_method},
-        trait_def::{ImplementorId, TraitInstId, impls_for_trait_and_ty, impls_for_ty},
+        trait_def::{ImplementorId, TraitInstId, impls_for_method},
         trait_resolution::{GoalSatisfiability, PredicateListId, ProofQueries},
         ty_def::{TyData, TyId},
         unify::UnificationTable,
@@ -273,11 +273,13 @@ impl<'db, 'a> CandidateAssembler<'db, 'a> {
                     .filter(|&ingot| ingot != scope_ingot),
             ];
             for ingot in search_ingots.into_iter().flatten() {
-                let implementors = if let Some(trait_def) = self.trait_ {
-                    impls_for_trait_and_ty(self.db, ingot, trait_def, self.receiver.canonical())
-                } else {
-                    impls_for_ty(self.db, ingot, self.receiver.canonical())
-                };
+                let implementors = impls_for_method(
+                    self.db,
+                    ingot,
+                    self.trait_,
+                    self.receiver.canonical(),
+                    self.method_name,
+                );
                 for &imp in implementors {
                     self.insert_impl_trait_method_cand(imp);
                 }

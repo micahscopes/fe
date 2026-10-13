@@ -120,47 +120,17 @@ pub(crate) fn impls_for_trait_def<'db>(
         .collect()
 }
 
-/// Returns ordinary implementors for `trait_def` whose self type can apply to `ty`.
-///
-/// Method lookup knows both halves of this key for explicitly selected traits
-/// (notably operator traits). Intersecting them before completing candidates is
-/// important: receiver-only lookup necessarily includes every blanket and
-/// otherwise unindexed impl, whose signatures may themselves require method
-/// lookup while being lowered.
+/// Discover ordinary receiver impls declaring the requested trait method before
+/// completing any candidate. The optional trait restricts operator lookup.
 #[salsa::tracked(return_ref)]
-pub(crate) fn impls_for_trait_and_ty<'db>(
+pub(crate) fn impls_for_method<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
-    trait_def: Trait<'db>,
+    trait_def: Option<Trait<'db>>,
     ty: Canonical<TyId<'db>>,
+    method: IdentId<'db>,
 ) -> Vec<ImplementorId<'db>> {
-    let mut table = UnificationTable::new(db);
-    let ty = ty.extract_identity(&mut table);
-
-    if ty.has_invalid(db) || ty.base_ty(db).is_never(db) {
-        return vec![];
-    }
-
-    let env = ingot_trait_env(db, ingot);
-    let mut implementors = env.impls_for_trait(db, trait_def);
-
-    if is_std_evm_contract_trait_def(db, trait_def) && ty.as_contract(db).is_some() {
-        implementors.extend(contract_virtual_impls(db, ingot).iter().copied());
-    }
-
-    implementors
-        .into_iter()
-        .filter(|implementor| {
-            let snapshot = table.snapshot();
-            let instantiated = table.instantiate_with_fresh_vars(*implementor);
-            let impl_ty = table.instantiate_to_term(instantiated.self_ty(db));
-            let ty = table.instantiate_to_term(ty);
-            let unifies = table.unify(impl_ty, ty).is_ok();
-            table.rollback_to(snapshot);
-            unifies
-        })
-        .map(|implementor| complete_impl_trait(db, implementor))
-        .collect()
+    receiver_impl_candidates(db, ingot, trait_def, ty, Some(method))
 }
 
 /// The goals a proof of `requirements` can reach: the requirements, and, at
@@ -1564,32 +1534,50 @@ pub(crate) fn impls_for_ty<'db>(
     ingot: Ingot<'db>,
     ty: Canonical<TyId<'db>>,
 ) -> Vec<ImplementorId<'db>> {
+    receiver_impl_candidates(db, ingot, None, ty, None)
+}
+
+fn receiver_impl_candidates<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+    trait_def: Option<Trait<'db>>,
+    ty: Canonical<TyId<'db>>,
+    method: Option<IdentId<'db>>,
+) -> Vec<ImplementorId<'db>> {
     let mut table = UnificationTable::new(db);
     let ty = ty.extract_identity(&mut table);
-
     if ty.has_invalid(db) || ty.base_ty(db).is_never(db) {
         return vec![];
     }
     let env = ingot_trait_env(db, ingot);
-    let mut raw_impls = env.impls_for_self_key(db, ty.base_ty(db));
-
-    if ty.as_contract(db).is_some() {
+    let mut raw_impls = match trait_def {
+        Some(trait_def) => env.impls_for_trait(db, trait_def),
+        None => env.impls_for_self_key(db, ty.base_ty(db)),
+    };
+    if ty.as_contract(db).is_some()
+        && trait_def.is_none_or(|trait_def| is_std_evm_contract_trait_def(db, trait_def))
+    {
         raw_impls.extend(contract_virtual_impls(db, ingot).iter().copied());
     }
-
     raw_impls
         .into_iter()
-        .filter(|impl_| {
+        .filter(|implementor| {
+            // Read the trait declaration before freshening or completing the impl.
+            if method.is_some_and(|name| {
+                !implementor
+                    .trait_def(db)
+                    .method_defs(db)
+                    .contains_key(&name)
+            }) {
+                return false;
+            }
             let snapshot = table.snapshot();
-
-            let inst = table.instantiate_with_fresh_vars(*impl_);
+            let inst = table.instantiate_with_fresh_vars(*implementor);
             let impl_ty = table.instantiate_to_term(inst.self_ty(db));
             let ty_term = table.instantiate_to_term(ty);
-            let is_ok = table.unify(impl_ty, ty_term).is_ok();
-
+            let unifies = table.unify(impl_ty, ty_term).is_ok();
             table.rollback_to(snapshot);
-
-            is_ok
+            unifies
         })
         .map(|implementor| complete_impl_trait(db, implementor))
         .collect()
