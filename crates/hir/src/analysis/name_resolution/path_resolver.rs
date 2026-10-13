@@ -842,9 +842,28 @@ pub(crate) fn resolve_path_with_observer_and_minter<'db, F>(
 where
     F: FnMut(PathId<'db>, &PathRes<'db>),
 {
-    let directive = QueryDirective::for_scope(db, scope);
-    let premises =
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
+    resolve_path_with_observer_and_premises(
+        db,
+        path,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+        resolve_tail_as_value,
+        observer,
+        minter,
+    )
+}
+
+pub(crate) fn resolve_path_with_observer_and_premises<'db, F>(
+    db: &'db dyn HirAnalysisDb,
+    path: PathId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
+    resolve_tail_as_value: bool,
+    observer: &mut F,
+    minter: &LoweringContext<'db>,
+) -> PathResolutionResult<'db, PathRes<'db>>
+where
+    F: FnMut(PathId<'db>, &PathRes<'db>),
+{
+    let directive = QueryDirective::for_scope(db, premises.scope());
     resolve_path_impl(
         db,
         path,

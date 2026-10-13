@@ -1,5 +1,5 @@
 use crate::analysis::HirAnalysisDb;
-use crate::analysis::name_resolution::{PathRes, resolve_path_with_minter};
+use crate::analysis::name_resolution::{PathRes, resolve_path_with_observer_and_premises};
 use crate::analysis::ty::const_ty::{
     ConstCanonEnv, ConstCanonMode, HoleAnchor, HoleId, LayoutHoleArgSite, LayoutIntroSite,
     LoweringContext, StructuralHoleOrigin, canonicalize_trait_inst_for_mode,
@@ -220,7 +220,14 @@ pub(crate) fn lower_effect_key_schema<'db>(
     let Some(key_path) = path.to_opt() else {
         return ResolvedEffectKey::Other;
     };
-    match resolve_path_with_minter(db, key_path, scope, assumptions, false, minter) {
+    match resolve_path_with_observer_and_premises(
+        db,
+        key_path,
+        premises,
+        false,
+        &mut |_, _| {},
+        minter,
+    ) {
         Ok(PathRes::Ty(ty)) if ty.is_star_kind(db) => {
             let ty = normalize_from_assumptions(db, ty, premises);
             let schema = TypeKeySchema {
