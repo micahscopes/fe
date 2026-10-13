@@ -859,7 +859,13 @@ impl<'db> ProofQueries<'db> {
         ingot: Ingot<'db>,
         ty: Canonical<TyId<'db>>,
     ) -> Vec<super::trait_def::ImplementorId<'db>> {
-        super::trait_def::impls_for_ty_with_satisfied_constraints(db, ingot, ty, self.0)
+        super::trait_def::impls_for_ty_with_constraint_mode(
+            db,
+            ingot,
+            super::trait_def::ImplConstraintQuery::SelfType(ty),
+            self.0,
+            false,
+        )
     }
     pub(crate) fn application_requirements(
         self,

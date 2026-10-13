@@ -1448,35 +1448,6 @@ pub(crate) fn resolved_method_instance<'db>(
     })
 }
 
-/// Returns all implementors for the given `ty` whose constraints are fully proven.
-pub(crate) fn impls_for_ty_with_satisfied_constraints<'db>(
-    db: &'db dyn HirAnalysisDb,
-    ingot: Ingot<'db>,
-    ty: Canonical<TyId<'db>>,
-    solve_cx: TraitSolveCx<'db>,
-) -> Vec<ImplementorId<'db>> {
-    impls_for_ty_with_constraint_mode(
-        db,
-        ingot,
-        ImplConstraintQuery::SelfType(ty),
-        solve_cx,
-        false,
-    )
-}
-
-/// Returns implementors whose full trait instance can apply to `inst` and
-/// whose constraints are not known to be unsatisfied.
-pub(crate) fn impls_for_trait_inst_with_possible_constraints<'db>(
-    db: &'db dyn HirAnalysisDb,
-    ingot: Ingot<'db>,
-    inst: Canonical<TraitInstId<'db>>,
-    premises: crate::analysis::semantic::SolverPremises<'db>,
-) -> Vec<ImplementorId<'db>> {
-    premises
-        .queries(db)
-        .possible_implementations(db, ingot, inst)
-}
-
 pub(in crate::analysis::ty) enum ImplConstraintQuery<'db> {
     SelfType(Canonical<TyId<'db>>),
     TraitInstance(Canonical<TraitInstId<'db>>),

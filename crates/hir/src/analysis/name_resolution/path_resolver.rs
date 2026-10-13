@@ -37,14 +37,14 @@ use crate::analysis::{
         generic_defaults::DefaultApplication,
         method_table::{MethodProbe, probe_method},
         normalize::normalize_ty,
-        trait_def::{TraitInstId, impls_for_ty_with_satisfied_constraints},
+        trait_def::TraitInstId,
         trait_lower::{
             TraitArgError, TraitRefLowerError, complete_candidate_impl_assoc_ty,
             complete_impl_assoc_ty, lower_candidate_impl_assoc_ty, lower_checked_impl_assoc_ty,
             lower_trait_ref, lower_trait_ref_impl_with_minter, lower_trait_ref_with_minter,
         },
         trait_resolution::{
-            GoalSatisfiability, PredicateListId, constraint::collect_constraints,
+            GoalSatisfiability, PredicateListId, ProofQueries, constraint::collect_constraints,
             is_goal_satisfiable,
         },
         ty_def::{InvalidCause, Kind, TyBase, TyData, TyId},
@@ -1857,9 +1857,11 @@ fn select_assoc_const_candidate<'db>(
         _ => return AssocConstSelection::Ambiguous(assumption_matches.into_iter().collect()),
     }
 
-    let solve_cx = context
-        .unwrap_or_else(|| crate::core::semantic::declaration_context_at(db, scope))
-        .solver_context(db);
+    let queries = ProofQueries::from_context(
+        context
+            .unwrap_or_else(|| crate::core::semantic::declaration_context_at(db, scope))
+            .solver_context(db),
+    );
     let receiver = Canonicalized::new(db, receiver_ty);
     let scope_ingot = scope.ingot(db);
     let search_ingots = [
@@ -1872,9 +1874,7 @@ fn select_assoc_const_candidate<'db>(
     receiver.with_materialized(db, |cx| {
         let receiver_ty = cx.query();
         for ingot in search_ingots.into_iter().flatten() {
-            for candidate in
-                impls_for_ty_with_satisfied_constraints(db, ingot, receiver.canonical(), solve_cx)
-            {
+            for candidate in queries.satisfied_implementations(db, ingot, receiver.canonical()) {
                 let declared = candidate.trait_(db);
                 if declared.def(db).const_(db, name).is_none() {
                     continue;

@@ -17,9 +17,7 @@ use super::{
     },
     fold::{TyFoldable, TyFolder, ty_contains},
     layout_holes::LayoutRootUse,
-    trait_def::{
-        ImplementorOrigin, TraitInstId, TraitRefId, impls_for_trait_inst_with_possible_constraints,
-    },
+    trait_def::{ImplementorOrigin, TraitInstId, TraitRefId},
     trait_lower::complete_candidate_impl_assoc_ty,
     trait_resolution::{PredicateListId, Selection},
     ty_def::{AssocTy, InvalidCause, TyBase, TyData, TyId, TyParam, collect_variables},
@@ -823,12 +821,9 @@ impl<'db> TypeNormalizer<'db> {
             let target_inst = cx.query();
             let original_target = cx.try_extract::<TraitInstId<'db>>(target_inst);
             for ingot in search_ingots.into_iter().flatten() {
-                for implementor in impls_for_trait_inst_with_possible_constraints(
-                    self.db,
-                    ingot,
-                    canonical_trait_inst,
-                    self.premises,
-                ) {
+                for implementor in
+                    queries.possible_implementations(self.db, ingot, canonical_trait_inst)
+                {
                     let Some(implementor) =
                         complete_candidate_impl_assoc_ty(self.db, implementor, assoc.name)
                     else {
