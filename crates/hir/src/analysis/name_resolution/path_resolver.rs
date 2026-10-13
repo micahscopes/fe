@@ -819,35 +819,12 @@ pub(crate) fn resolve_path_with_minter<'db>(
     resolve_tail_as_value: bool,
     minter: &LoweringContext<'db>,
 ) -> PathResolutionResult<'db, PathRes<'db>> {
-    resolve_path_with_observer_and_minter(
-        db,
-        path,
-        scope,
-        assumptions,
-        resolve_tail_as_value,
-        &mut |_, _| {},
-        minter,
-    )
-}
-
-pub(crate) fn resolve_path_with_observer_and_minter<'db, F>(
-    db: &'db dyn HirAnalysisDb,
-    path: PathId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
-    resolve_tail_as_value: bool,
-    observer: &mut F,
-    minter: &LoweringContext<'db>,
-) -> PathResolutionResult<'db, PathRes<'db>>
-where
-    F: FnMut(PathId<'db>, &PathRes<'db>),
-{
     resolve_path_with_observer_and_premises(
         db,
         path,
         crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
         resolve_tail_as_value,
-        observer,
+        &mut |_, _| {},
         minter,
     )
 }

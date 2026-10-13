@@ -138,7 +138,7 @@ use crate::analysis::ty::{
 use crate::analysis::{
     HirAnalysisDb,
     name_resolution::{
-        PathRes, PathResError, diagnostics::PathResDiag, resolve_path_with_observer_and_minter,
+        PathRes, PathResError, diagnostics::PathResDiag, resolve_path_with_observer_and_premises,
     },
     ty::{
         ty_def::{TyFlags, inference_keys},
@@ -4220,11 +4220,10 @@ impl<'db> TyChecker<'db> {
             }
         };
 
-        let res = match resolve_path_with_observer_and_minter(
+        let res = match resolve_path_with_observer_and_premises(
             self.db,
             path,
-            lookup_scope,
-            self.env.method_lookup_assumptions(),
+            self.env.path_lookup_premises(lookup_scope),
             resolve_tail_as_value,
             &mut observe_segment,
             minter,

@@ -741,6 +741,17 @@ impl<'db> TyCheckEnv<'db> {
         )
     }
 
+    /// Path lookup projects the live provisions at its lexical or qualified
+    /// namespace, independently of the body's normalization scope.
+    pub(super) fn path_lookup_premises(
+        &self,
+        scope: ScopeId<'db>,
+    ) -> crate::analysis::semantic::SolverPremises<'db> {
+        self.provisions
+            .context(self.db, scope)
+            .lookup_premises(self.db)
+    }
+
     pub(super) fn method_lookup_assumptions(&self) -> PredicateListId<'db> {
         self.provisions.method_lookup_assumptions(self.db)
     }
