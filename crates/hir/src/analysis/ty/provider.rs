@@ -12,7 +12,7 @@ use crate::{
             corelib::resolve_lib_type_path,
             normalize::normalize_ty,
             trait_def::{ImplementorId, ImplementorOrigin, ResolvedImplInstance, TraitInstId},
-            trait_resolution::{PredicateListId, Selection},
+            trait_resolution::{GoalSatisfiability, PredicateListId, Selection},
             ty_check::EffectParamSite,
             ty_def::{CapabilityKind, TyBase, TyData, TyId},
             visitor::{TyVisitable, TyVisitor, walk_ty},
@@ -206,9 +206,13 @@ fn resolve_effect_handle_query<'db>(
     let inst = TraitInstId::new(db, effect_handle, vec![provider_ty], IndexMap::new());
     let queries = premises.queries(db);
     if provider_ty.has_var(db) {
-        return match queries.selected_implementation(db, inst) {
-            Selection::NotFound => EffectHandleResolution::NotHandle,
-            Selection::Unique(_) | Selection::Ambiguous(_) => {
+        return match queries.selected_implementation_proof(db, inst) {
+            GoalSatisfiability::ContainsInvalid | GoalSatisfiability::UnSat(_) => {
+                EffectHandleResolution::NotHandle
+            }
+            GoalSatisfiability::Satisfied(_)
+            | GoalSatisfiability::NeedsConfirmation { .. }
+            | GoalSatisfiability::NormalizationFault => {
                 EffectHandleResolution::Invalid(ProviderLayoutFailure::Ambiguous)
             }
         };

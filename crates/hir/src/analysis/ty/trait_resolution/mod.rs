@@ -433,26 +433,6 @@ impl<'db> TraitSolveCx<'db> {
         self.scope
     }
 
-    pub(crate) fn select_impl(
-        self,
-        db: &'db dyn HirAnalysisDb,
-        inst: TraitInstId<'db>,
-    ) -> Selection<ImplementorId<'db>> {
-        let result = self.select_impl_proof(db, inst);
-        match result {
-            GoalSatisfiability::Satisfied(solution) => {
-                Selection::Unique(solution.value.implementor)
-            }
-            GoalSatisfiability::NeedsConfirmation { solutions, .. } => {
-                Selection::Ambiguous(solutions.iter().map(|s| s.value.implementor).collect())
-            }
-            GoalSatisfiability::ContainsInvalid | GoalSatisfiability::UnSat(_) => {
-                Selection::NotFound
-            }
-            GoalSatisfiability::NormalizationFault => Selection::Ambiguous(IndexSet::default()),
-        }
-    }
-
     /// Retain the proof and its conditions until the caller chooses its view.
     pub(crate) fn select_impl_proof(
         self,
@@ -838,12 +818,12 @@ impl<'db> ProofQueries<'db> {
     ) -> GoalSatisfiability<'db> {
         is_goal_satisfiable(db, self.0, goal)
     }
-    pub(crate) fn selected_implementation(
+    pub(crate) fn selected_implementation_proof(
         self,
         db: &'db dyn HirAnalysisDb,
         goal: TraitInstId<'db>,
-    ) -> Selection<super::trait_def::ImplementorId<'db>> {
-        self.0.select_impl(db, goal)
+    ) -> GoalSatisfiability<'db> {
+        self.0.select_impl_proof(db, goal)
     }
     pub(crate) fn resolved_instance(
         self,
@@ -2549,7 +2529,7 @@ fn probe<T>() {}
         let solve = TraitSolveCx::new(&db, func.scope())
             .with_assumptions(PredicateListId::new(&db, vec![goal]));
         assert!(
-            matches!(solve.select_impl(&db, goal), Selection::Ambiguous(implementors) if implementors.len() == 2)
+            matches!(solve.select_impl_proof(&db, goal), GoalSatisfiability::NeedsConfirmation { solutions, .. } if solutions.len() == 2)
         );
     }
 
@@ -2580,8 +2560,8 @@ fn probe<T: Picks>() {}
         );
         let solve = TraitSolveCx::new(&db, func.scope()).with_assumptions(assumptions);
         assert!(matches!(
-            solve.select_impl(&db, goal),
-            Selection::Ambiguous(_)
+            solve.select_impl_proof(&db, goal),
+            GoalSatisfiability::NeedsConfirmation { .. }
         ));
     }
 
