@@ -150,7 +150,7 @@ pub(crate) fn alias_applied_types_body<'db>(
     };
     // The alias's own lowering context, so constants in its right-hand side
     // are the ones its lowering produced.
-    let assumptions = constraints_for(db, alias.into());
+    let premises = SolverPremises::for_alias_written_type(db, alias);
     let minter = crate::analysis::ty::const_ty::LoweringContext::for_const_bodies(
         crate::analysis::ty::const_ty::HoleAnchor::AliasTemplate(alias),
         crate::analysis::ty::const_ty::ConstBodyLowering::Eager,
@@ -159,8 +159,7 @@ pub(crate) fn alias_applied_types_body<'db>(
         db,
         hir_ty,
         alias.span().ty(),
-        alias.scope(),
-        assumptions,
+        premises,
         &minter,
     )
 }

@@ -15,7 +15,7 @@ use crate::{
             ty_def::{TyData, TyId},
         },
     },
-    hir_def::{IdentId, Trait, scope_graph::ScopeId},
+    hir_def::{IdentId, Trait, TypeAlias, scope_graph::ScopeId},
 };
 
 /// Only the semantic owner can authorize raw solver construction.
@@ -256,6 +256,18 @@ impl<'db> SolverPremises<'db> {
     /// counts them and the count may only decrease.
     pub fn from_unpositioned_pair(scope: ScopeId<'db>, assumptions: PredicateListId<'db>) -> Self {
         Self { scope, assumptions }
+    }
+
+    /// Written alias applications keep the alias's own declared constraints.
+    /// This question must not read the alias's body or completed layout output.
+    pub(crate) fn for_alias_written_type(
+        db: &'db dyn HirAnalysisDb,
+        alias: TypeAlias<'db>,
+    ) -> Self {
+        Self {
+            scope: alias.scope(),
+            assumptions: super::constraints_for(db, alias.into()),
+        }
     }
 
     /// Local-value layout schemas describe already lowered declaration topology.

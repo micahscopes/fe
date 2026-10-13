@@ -7,7 +7,7 @@ use crate::{
 use crate::analysis::{
     HirAnalysisDb,
     name_resolution::{
-        ExpectedPathKind, PathRes, diagnostics::PathResDiag, resolve_path_with_observer_and_minter,
+        ExpectedPathKind, PathRes, diagnostics::PathResDiag,
         resolve_path_with_observer_and_premises,
     },
     ty::visitor::{TyVisitor, walk_ty},
@@ -16,7 +16,6 @@ use crate::analysis::{
 use super::{
     const_ty::{ConstBodyLowering, ConstTyData, HoleAnchor, LoweringContext, ty_is_fully_ground},
     diagnostics::{TyDiagCollection, TyLowerDiag},
-    trait_resolution::PredicateListId,
     ty_def::{InvalidCause, TyData, TyId},
     ty_lower::lower_hir_ty_in_mode,
 };
@@ -259,13 +258,12 @@ pub(crate) fn written_type_uses<'db>(
     db: &'db dyn HirAnalysisDb,
     hir_ty: TypeId<'db>,
     span: LazyTySpan<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     minter: &LoweringContext<'db>,
 ) -> Vec<TyId<'db>> {
     struct WrittenUses<'a, 'db> {
         db: &'db dyn HirAnalysisDb,
-        assumptions: PredicateListId<'db>,
+        premises: crate::analysis::semantic::SolverPremises<'db>,
         minter: &'a LoweringContext<'db>,
         uses: Vec<TyId<'db>>,
     }
@@ -282,15 +280,14 @@ pub(crate) fn written_type_uses<'db>(
             ctxt: &mut VisitorCtxt<'db, LazyPathSpan<'db>>,
             path: PathId<'db>,
         ) {
-            let scope = ctxt.scope();
+            assert_eq!(ctxt.scope(), self.premises.scope());
             let mut type_uses = Vec::new();
             let mut collect =
                 |path: PathId<'db>, reso: &PathRes<'db>| push_type_uses(&mut type_uses, path, reso);
-            let _ = resolve_path_with_observer_and_minter(
+            let _ = resolve_path_with_observer_and_premises(
                 self.db,
                 path,
-                scope,
-                self.assumptions,
+                self.premises,
                 false,
                 &mut collect,
                 self.minter,
@@ -310,11 +307,11 @@ pub(crate) fn written_type_uses<'db>(
     }
     let mut visitor = WrittenUses {
         db,
-        assumptions,
+        premises,
         minter,
         uses: Vec::new(),
     };
-    let mut ctxt = VisitorCtxt::new(db, scope, span);
+    let mut ctxt = VisitorCtxt::new(db, premises.scope(), span);
     visitor.visit_ty(&mut ctxt, hir_ty);
     visitor.uses
 }
