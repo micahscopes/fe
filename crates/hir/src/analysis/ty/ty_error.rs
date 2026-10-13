@@ -7,8 +7,8 @@ use crate::{
 use crate::analysis::{
     HirAnalysisDb,
     name_resolution::{
-        ExpectedPathKind, PathRes, diagnostics::PathResDiag, resolve_path_with_minter,
-        resolve_path_with_observer_and_minter,
+        ExpectedPathKind, PathRes, diagnostics::PathResDiag, resolve_path_with_observer_and_minter,
+        resolve_path_with_observer_and_premises,
     },
     ty::visitor::{TyVisitor, walk_ty},
 };
@@ -352,19 +352,18 @@ impl<'db> Visitor<'db> for ApplicationRequirementVisitor<'db> {
         .with_context(self.context);
         // Resolution errors are reported by lowering; only uses that resolved
         // are checked here.
-        let _ = resolve_path_with_observer_and_minter(
-            self.db,
-            path,
-            scope,
-            self.context.assumptions(self.db),
-            false,
-            &mut collect,
-            &context,
-        );
         // The visitor's root scope is the context's normalization scope, and
         // written types introduce no scopes of their own (const bodies are
         // skipped above), so these are the premises of this path's position.
         assert_eq!(scope, self.context.normalization_scope(self.db));
+        let _ = resolve_path_with_observer_and_premises(
+            self.db,
+            path,
+            self.context.premises(self.db),
+            false,
+            &mut collect,
+            &context,
+        );
         self.diags.extend(application_requirement_diags(
             self.db,
             self.context.premises(self.db),
@@ -387,6 +386,7 @@ struct HirTyErrVisitor<'db> {
 
 impl<'db> HirTyErrVisitor<'db> {
     fn path_context(&self, path: PathId<'db>, scope: ScopeId<'db>) -> LoweringContext<'db> {
+        assert_eq!(scope, self.premises.scope());
         LoweringContext::for_const_bodies(
             HoleAnchor::TemplatePath {
                 path,
@@ -417,12 +417,12 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
             && let Some(hir_ty) = type_arg.ty.to_opt()
             && let TypeKind::Path(path_partial) = hir_ty.data(self.db)
             && let Some(path) = path_partial.to_opt()
-            && let Ok(resolved) = resolve_path_with_minter(
+            && let Ok(resolved) = resolve_path_with_observer_and_premises(
                 self.db,
                 path,
-                ctxt.scope(),
-                self.premises.assumptions(),
+                self.premises,
                 true,
+                &mut |_, _| {},
                 &self.path_context(path, ctxt.scope()),
             )
         {
@@ -453,11 +453,10 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
                         }
                     };
 
-                    let resolved = resolve_path_with_observer_and_minter(
+                    let resolved = resolve_path_with_observer_and_premises(
                         self.db,
                         path,
-                        scope,
-                        self.premises.assumptions(),
+                        self.premises,
                         true,
                         &mut check_visibility,
                         &self.path_context(path, scope),
@@ -609,11 +608,10 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
             }
         };
 
-        let resolved = resolve_path_with_observer_and_minter(
+        let resolved = resolve_path_with_observer_and_premises(
             self.db,
             path,
-            scope,
-            self.premises.assumptions(),
+            self.premises,
             false,
             &mut check_visibility,
             &self.path_context(path, scope),
@@ -684,11 +682,10 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
         // TODO(diags): In the future, refine this to walk only generic args
         // under the trait ref and surface kind/arg mismatches with precise
         // spans when available from semantic lowering.
-        let resolved = resolve_path_with_observer_and_minter(
+        let resolved = resolve_path_with_observer_and_premises(
             self.db,
             path,
-            scope,
-            self.premises.assumptions(),
+            self.premises,
             false,
             &mut check_visibility,
             &self.path_context(path, scope),
