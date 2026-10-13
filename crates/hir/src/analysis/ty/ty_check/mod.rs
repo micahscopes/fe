@@ -3849,8 +3849,7 @@ impl<'db> TyChecker<'db> {
             let ty = super::ty_lower::lower_hir_ty_with_minter(
                 self.db,
                 hir_ty,
-                self.env.scope(),
-                assumptions,
+                self.env.path_lookup_premises(self.env.scope()),
                 &minter,
             );
             let ty = context.contextualize_const_types_with(self.db, ty, |goal| {
@@ -3870,8 +3869,7 @@ impl<'db> TyChecker<'db> {
             super::ty_lower::lower_hir_ty_with_minter(
                 self.db,
                 hir_ty,
-                self.env.scope(),
-                lookup_assumptions,
+                self.env.path_lookup_premises(self.env.scope()),
                 &minter,
             )
         };

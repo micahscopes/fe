@@ -643,14 +643,19 @@ pub(crate) fn lower_trait_ref_impl<'db>(
         scope,
         assumptions,
     });
-    lower_trait_ref_impl_with_minter(db, path, scope, assumptions, t, &minter)
+    lower_trait_ref_impl_with_minter(
+        db,
+        path,
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
+        t,
+        &minter,
+    )
 }
 
 pub(crate) fn lower_trait_ref_impl_with_minter<'db>(
     db: &'db (dyn HirAnalysisDb + 'static),
     path: PathId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     t: Trait<'db>,
     minter: &LoweringContext<'db>,
 ) -> Result<TraitInstId<'db>, TraitArgError<'db>> {
@@ -662,7 +667,7 @@ pub(crate) fn lower_trait_ref_impl_with_minter<'db>(
     for (arg_idx, arg) in args.iter().enumerate() {
         match arg {
             GenericArg::Type(ty_arg) => {
-                let ty = lower_opt_hir_ty_with_minter(db, ty_arg.ty, scope, assumptions, minter);
+                let ty = lower_opt_hir_ty_with_minter(db, ty_arg.ty, premises, minter);
                 provided_explicit.push(ty);
             }
             GenericArg::Const(const_arg) => match const_arg.value {
@@ -693,7 +698,7 @@ pub(crate) fn lower_trait_ref_impl_with_minter<'db>(
                     {
                         return Err(TraitArgError::AssocTypeBindingWithParams { name });
                     }
-                    let ty = lower_hir_ty_with_minter(db, ty, scope, assumptions, minter);
+                    let ty = lower_hir_ty_with_minter(db, ty, premises, minter);
                     assoc_bindings.insert(name, ty);
                 }
             }

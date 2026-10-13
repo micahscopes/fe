@@ -118,8 +118,7 @@ pub(crate) fn generic_default<'db>(
             let ty = lower_hir_ty_with_minter(
                 db,
                 hir_ty,
-                owner.scope(),
-                crate::semantic::generic_default_context_at(db, owner).assumptions(db),
+                crate::semantic::generic_default_context_at(db, owner).premises(db),
                 &minter,
             );
             let set = collect_generic_params(db, owner);

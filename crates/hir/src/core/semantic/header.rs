@@ -167,7 +167,7 @@ fn try_resolve_type_bound<'db>(
                         assumptions,
                     })
                     .with_source_params(source_params);
-                    lower_hir_ty_with_minter(db, hir_ty, scope, assumptions, &minter)
+                    lower_hir_ty_with_minter(db, hir_ty, premises, &minter)
                 }
             };
             if ty.has_invalid(db) {

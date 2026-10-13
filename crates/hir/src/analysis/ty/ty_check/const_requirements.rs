@@ -2923,8 +2923,10 @@ fn written_type_check_query<'db>(
                     let ty = super::super::ty_lower::lower_hir_ty_with_minter(
                         db,
                         written.hir_ty,
-                        written.scope,
-                        assumptions,
+                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                            written.scope,
+                            assumptions,
+                        ),
                         &minter,
                     );
                     let ty = crate::analysis::ty::normalize::normalize_from_assumptions(

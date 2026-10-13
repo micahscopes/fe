@@ -5136,8 +5136,7 @@ impl<'db> ImplAssocTypeView<'db> {
         Some(lower_hir_ty_with_minter(
             db,
             hir,
-            self.scope(),
-            assumptions,
+            SolverPremises::from_unpositioned_pair(self.scope(), assumptions),
             &minter,
         ))
     }
@@ -5155,8 +5154,7 @@ impl<'db> ImplAssocTypeView<'db> {
         Some(lower_hir_ty_with_minter(
             db,
             hir,
-            self.scope(),
-            assumptions,
+            SolverPremises::from_unpositioned_pair(self.scope(), assumptions),
             &minter,
         ))
     }

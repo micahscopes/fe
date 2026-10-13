@@ -1061,7 +1061,7 @@ where
                         failed_at: path,
                     })?
             }
-            _ => lower_hir_ty_with_minter(db, type_, scope, assumptions, minter),
+            _ => lower_hir_ty_with_minter(db, type_, premises, minter),
         };
         if let Some(InvalidCause::NotAType(res)) = ty.invalid_cause(db) {
             return Err(PathResError::new(
@@ -1130,8 +1130,7 @@ where
                     let args = lower_generic_arg_list(
                         db,
                         path.generic_args(db),
-                        scope,
-                        assumptions,
+                        premises,
                         LayoutHoleArgSite::Path(path),
                         minter,
                     );
@@ -1319,8 +1318,7 @@ where
                 let seg_args = lower_generic_arg_list(
                     db,
                     path.generic_args(db),
-                    scope,
-                    assumptions,
+                    premises,
                     LayoutHoleArgSite::Path(path),
                     minter,
                 );
@@ -1372,8 +1370,7 @@ where
             let seg_args = lower_generic_arg_list(
                 db,
                 path.generic_args(db),
-                scope,
-                assumptions,
+                premises,
                 LayoutHoleArgSite::Path(path),
                 minter,
             );
@@ -2225,8 +2222,6 @@ fn resolve_name_res_unexpanded<'db>(
     premises: crate::analysis::semantic::SolverPremises<'db>,
     minter: &LoweringContext<'db>,
 ) -> PathResolutionResult<'db, PathRes<'db>> {
-    let scope = premises.scope();
-    let assumptions = premises.assumptions();
     // Lowered only by the resolutions that apply them: lowering arguments that
     // are then rejected or ignored repeats the whole nested lowering whenever a
     // caller resolves the path again in another namespace.
@@ -2234,8 +2229,7 @@ fn resolve_name_res_unexpanded<'db>(
         lower_generic_arg_list(
             db,
             path.generic_args(db),
-            scope,
-            assumptions,
+            premises,
             LayoutHoleArgSite::Path(path),
             minter,
         )
@@ -2378,14 +2372,8 @@ fn resolve_name_res_unexpanded<'db>(
                                 }
                             }
                         }
-                        let lowered = lower_trait_ref_impl_with_minter(
-                            db,
-                            path,
-                            scope,
-                            assumptions,
-                            t,
-                            minter,
-                        );
+                        let lowered =
+                            lower_trait_ref_impl_with_minter(db, path, premises, t, minter);
                         match lowered {
                             Ok(t) => PathRes::Trait(t),
                             Err(err) => {

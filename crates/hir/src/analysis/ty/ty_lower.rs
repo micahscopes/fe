@@ -57,7 +57,7 @@ use crate::analysis::name_resolution::{
 };
 use crate::analysis::{
     HirAnalysisDb,
-    semantic::{VariantIndex, enum_const},
+    semantic::{SolverPremises, VariantIndex, enum_const},
     ty::binder::Binder,
 };
 
@@ -74,7 +74,12 @@ pub fn lower_hir_ty<'db>(
         scope,
         assumptions,
     });
-    lower_hir_ty_impl(db, ty, scope, assumptions, &minter)
+    lower_hir_ty_impl(
+        db,
+        ty,
+        SolverPremises::from_unpositioned_pair(scope, assumptions),
+        &minter,
+    )
 }
 
 /// Lower a checked primitive using the caller's scope and assumptions.
@@ -96,12 +101,12 @@ pub fn lower_hir_primitive<'db>(
 fn lower_hir_ty_impl<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: HirTyId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: SolverPremises<'db>,
     minter: &LoweringContext<'db>,
 ) -> TyId<'db> {
-    let lower_child =
-        |child_ty, _slot| lower_opt_hir_ty_impl(db, child_ty, scope, assumptions, minter);
+    let scope = premises.scope();
+    let assumptions = premises.assumptions();
+    let lower_child = |child_ty, _slot| lower_opt_hir_ty_impl(db, child_ty, premises, minter);
 
     match ty.data(db) {
         HirTyKind::Ptr(pointee) => {
@@ -119,9 +124,7 @@ fn lower_hir_ty_impl<'db>(
             }
         }
 
-        HirTyKind::Path(path) => {
-            lower_path_impl(db, scope, *path, assumptions, TypePosition::Type, minter)
-        }
+        HirTyKind::Path(path) => lower_path_impl(db, *path, premises, TypePosition::Type, minter),
 
         HirTyKind::Primitive(primitive) => TyId::new(db, TyData::TyBase(TyBase::from(*primitive))),
 
@@ -163,7 +166,7 @@ fn lower_hir_ty_impl<'db>(
 pub(crate) fn lower_hir_ty_with_resolutions<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: HirTyId<'db>,
-    premises: crate::analysis::semantic::SolverPremises<'db>,
+    premises: SolverPremises<'db>,
     const_bodies: ConstBodyLowering,
 ) -> (TyId<'db>, Vec<(PathId<'db>, PathRes<'db>)>) {
     let scope = premises.scope();
@@ -177,7 +180,7 @@ pub(crate) fn lower_hir_ty_with_resolutions<'db>(
         const_bodies,
     )
     .recording_resolutions();
-    let lowered = lower_hir_ty_impl(db, ty, scope, assumptions, &minter);
+    let lowered = lower_hir_ty_impl(db, ty, premises, &minter);
     (lowered, minter.into_resolutions())
 }
 
@@ -190,11 +193,10 @@ pub(crate) fn lower_hir_ty_with_resolutions<'db>(
 pub(crate) fn lower_hir_ty_with_minter<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: HirTyId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: SolverPremises<'db>,
     minter: &LoweringContext<'db>,
 ) -> TyId<'db> {
-    lower_hir_ty_impl(db, ty, scope, assumptions, minter)
+    lower_hir_ty_impl(db, ty, premises, minter)
 }
 
 /// Lowers an item-signature type without validating or evaluating anonymous
@@ -211,7 +213,12 @@ pub(crate) fn lower_hir_ty_deferred<'db>(
         scope,
         assumptions,
     });
-    lower_hir_ty_impl(db, ty, scope, assumptions, &minter)
+    lower_hir_ty_impl(
+        db,
+        ty,
+        SolverPremises::from_unpositioned_pair(scope, assumptions),
+        &minter,
+    )
 }
 
 pub(crate) fn lower_hir_ty_in_mode<'db>(
@@ -230,11 +237,10 @@ pub(crate) fn lower_hir_ty_in_mode<'db>(
 pub(crate) fn lower_opt_hir_ty_with_minter<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: Partial<HirTyId<'db>>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: SolverPremises<'db>,
     minter: &LoweringContext<'db>,
 ) -> TyId<'db> {
-    lower_opt_hir_ty_impl(db, ty, scope, assumptions, minter)
+    lower_opt_hir_ty_impl(db, ty, premises, minter)
 }
 
 pub fn lower_opt_hir_ty<'db>(
@@ -253,7 +259,12 @@ pub fn lower_opt_hir_ty<'db>(
         scope,
         assumptions,
     });
-    lower_hir_ty_impl(db, hir_ty, scope, assumptions, &minter)
+    lower_hir_ty_impl(
+        db,
+        hir_ty,
+        SolverPremises::from_unpositioned_pair(scope, assumptions),
+        &minter,
+    )
 }
 
 pub(crate) fn lower_layout_root_uses_in_hir_ty<'db>(
@@ -264,32 +275,39 @@ pub(crate) fn lower_layout_root_uses_in_hir_ty<'db>(
     minter: &LoweringContext<'db>,
 ) -> Vec<super::layout_holes::LayoutRootUse<'db>> {
     let mut uses = Vec::new();
-    collect_layout_root_uses_in_hir_ty(db, ty, scope, assumptions, minter, &mut uses);
+    collect_layout_root_uses_in_hir_ty(
+        db,
+        ty,
+        SolverPremises::from_unpositioned_pair(scope, assumptions),
+        minter,
+        &mut uses,
+    );
     uses
 }
 
 fn collect_layout_root_uses_in_hir_ty<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: HirTyId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: SolverPremises<'db>,
     minter: &LoweringContext<'db>,
     uses: &mut Vec<super::layout_holes::LayoutRootUse<'db>>,
 ) {
+    let scope = premises.scope();
+    let assumptions = premises.assumptions();
     match ty.data(db) {
         HirTyKind::Ptr(pointee) | HirTyKind::Mode(_, pointee) => {
             if let Some(pointee) = pointee.to_opt() {
-                collect_layout_root_uses_in_hir_ty(db, pointee, scope, assumptions, minter, uses);
+                collect_layout_root_uses_in_hir_ty(db, pointee, premises, minter, uses);
             }
         }
         HirTyKind::Tuple(tuple) => {
             for elem in tuple.data(db).iter().filter_map(|elem| elem.to_opt()) {
-                collect_layout_root_uses_in_hir_ty(db, elem, scope, assumptions, minter, uses);
+                collect_layout_root_uses_in_hir_ty(db, elem, premises, minter, uses);
             }
         }
         HirTyKind::Array(element, _) => {
             if let Some(element) = element.to_opt() {
-                collect_layout_root_uses_in_hir_ty(db, element, scope, assumptions, minter, uses);
+                collect_layout_root_uses_in_hir_ty(db, element, premises, minter, uses);
             }
         }
         HirTyKind::Path(path) => {
@@ -299,8 +317,7 @@ fn collect_layout_root_uses_in_hir_ty<'db>(
             let args = lower_generic_arg_list(
                 db,
                 path.generic_args(db),
-                scope,
-                assumptions,
+                premises,
                 LayoutHoleArgSite::Path(path),
                 minter,
             );
@@ -319,7 +336,7 @@ fn collect_layout_root_uses_in_hir_ty<'db>(
                 if let GenericArg::Type(arg) = arg
                     && let Some(arg) = arg.ty.to_opt()
                 {
-                    collect_layout_root_uses_in_hir_ty(db, arg, scope, assumptions, minter, uses);
+                    collect_layout_root_uses_in_hir_ty(db, arg, premises, minter, uses);
                 }
             }
         }
@@ -330,13 +347,12 @@ fn collect_layout_root_uses_in_hir_ty<'db>(
 fn lower_opt_hir_ty_impl<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: Partial<HirTyId<'db>>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: SolverPremises<'db>,
     minter: &LoweringContext<'db>,
 ) -> TyId<'db> {
     ty.to_opt().map_or_else(
         || TyId::invalid(db, InvalidCause::ParseError),
-        |hir_ty| lower_hir_ty_impl(db, hir_ty, scope, assumptions, minter),
+        |hir_ty| lower_hir_ty_impl(db, hir_ty, premises, minter),
     )
 }
 
@@ -535,10 +551,11 @@ pub(crate) fn lower_const_body_path<'db>(
 fn lower_constraint_term<'db>(
     db: &'db dyn HirAnalysisDb,
     path: Partial<PathId<'db>>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: SolverPremises<'db>,
     minter: &LoweringContext<'db>,
 ) -> Option<TyId<'db>> {
+    let scope = premises.scope();
+    let assumptions = premises.assumptions();
     use crate::analysis::name_resolution::{NameResKind, resolve_type_path_definition};
     use crate::hir_def::{ItemKind, PathKind, TraitRefId};
     let path = path.to_opt()?;
@@ -551,7 +568,7 @@ fn lower_constraint_term<'db>(
     let (GenericArg::Type(subject), rest) = arguments.split_first()? else {
         return Some(TyId::invalid(db, InvalidCause::Other));
     };
-    let subject = lower_opt_hir_ty_with_minter(db, subject.ty, scope, assumptions, minter);
+    let subject = lower_opt_hir_ty_with_minter(db, subject.ty, premises, minter);
     if !subject.is_star_kind(db) {
         return Some(TyId::invalid(
             db,
@@ -602,20 +619,17 @@ fn lower_constraint_term<'db>(
 
 fn lower_path_impl<'db>(
     db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
     path: Partial<PathId<'db>>,
-    assumptions: PredicateListId<'db>,
+    premises: SolverPremises<'db>,
     position: TypePosition,
     minter: &LoweringContext<'db>,
 ) -> TyId<'db> {
-    if let Some(goal) = lower_constraint_term(db, path, scope, assumptions, minter) {
+    if let Some(goal) = lower_constraint_term(db, path, premises, minter) {
         return goal;
     }
     let Some(path) = path.to_opt() else {
         return TyId::invalid(db, InvalidCause::ParseError);
     };
-    let premises =
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
     lower_type_position_path(db, path, premises, position, minter)
         .unwrap_or_else(|_| TyId::invalid(db, InvalidCause::PathResolutionFailed { path }))
 }
@@ -627,7 +641,7 @@ fn lower_path_impl<'db>(
 pub(crate) fn lower_type_position_path<'db>(
     db: &'db dyn HirAnalysisDb,
     path: PathId<'db>,
-    premises: crate::analysis::semantic::SolverPremises<'db>,
+    premises: SolverPremises<'db>,
     position: TypePosition,
     minter: &LoweringContext<'db>,
 ) -> PathResolutionResult<'db, TyId<'db>> {
@@ -741,7 +755,7 @@ fn lower_hir_ty_cycle_recover<'db>(
 fn lower_const_ty_ty<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: HirTyId<'db>,
-    premises: crate::analysis::semantic::SolverPremises<'db>,
+    premises: SolverPremises<'db>,
 ) -> TyId<'db> {
     let scope = premises.scope();
     let assumptions = premises.assumptions();
@@ -788,7 +802,13 @@ fn lower_path<'db>(
         scope,
         assumptions,
     });
-    lower_path_impl(db, scope, path, assumptions, TypePosition::Type, &minter)
+    lower_path_impl(
+        db,
+        path,
+        SolverPremises::from_unpositioned_pair(scope, assumptions),
+        TypePosition::Type,
+        &minter,
+    )
 }
 
 /// Collects the generic parameters of the given generic parameter owner.
@@ -869,7 +889,7 @@ struct CallableLayoutProjections<'db> {
 struct CallableLayoutProjectionCollector<'db> {
     db: &'db dyn HirAnalysisDb,
     site: CallableLayoutSchemaSite<'db>,
-    premises: crate::analysis::semantic::SolverPremises<'db>,
+    premises: SolverPremises<'db>,
     next_ordinal: usize,
     placeholders: Vec<TyId<'db>>,
     seen_placeholders: FxHashSet<TyId<'db>>,
@@ -1000,17 +1020,12 @@ impl<'db> CallableLayoutSchemaSite<'db> {
             .unwrap_or(value)
     }
 
-    fn premises(
-        self,
-        db: &'db dyn HirAnalysisDb,
-    ) -> crate::analysis::semantic::SolverPremises<'db> {
+    fn premises(self, db: &'db dyn HirAnalysisDb) -> SolverPremises<'db> {
         match self {
             Self::Input { owner, .. } | Self::Output { owner } => {
                 crate::semantic::header_context_at(db, owner.scope()).premises(db)
             }
-            Self::Value { body, .. } => {
-                crate::analysis::semantic::SolverPremises::for_value_layout_schema(db, body)
-            }
+            Self::Value { body, .. } => SolverPremises::for_value_layout_schema(db, body),
         }
     }
 }
@@ -1741,7 +1756,7 @@ fn callable_layout_projections_for_ty_with_effect_targets<'db>(
     site: CallableLayoutSchemaSite<'db>,
     ty: TyId<'db>,
     expand_effect_targets: bool,
-    premises: crate::analysis::semantic::SolverPremises<'db>,
+    premises: SolverPremises<'db>,
 ) -> CallableLayoutProjections<'db> {
     let (anchor, boundary) = match site {
         CallableLayoutSchemaSite::Input { owner, origin } => (
@@ -2538,7 +2553,7 @@ pub(crate) fn lower_callable_input_param_ty<'db>(
     func: crate::hir_def::Func<'db>,
     origin: CallableInputLayoutHoleOrigin,
     hir_ty: HirTyId<'db>,
-    premises: crate::analysis::semantic::SolverPremises<'db>,
+    premises: SolverPremises<'db>,
 ) -> TyId<'db> {
     let ty = normalize_from_assumptions(
         db,
@@ -2719,7 +2734,7 @@ fn lower_callable_input_shape_ty<'db>(
     db: &'db dyn HirAnalysisDb,
     func: crate::hir_def::Func<'db>,
     hir_ty: HirTyId<'db>,
-    premises: crate::analysis::semantic::SolverPremises<'db>,
+    premises: SolverPremises<'db>,
 ) -> TyId<'db> {
     let assumptions = premises.assumptions();
     let minter = LoweringContext::deferred(HoleAnchor::TemplateTy {
@@ -2730,7 +2745,7 @@ fn lower_callable_input_shape_ty<'db>(
     .with_source_params(Some(func.into()));
     normalize_from_assumptions(
         db,
-        lower_hir_ty_with_minter(db, hir_ty, func.scope(), assumptions, &minter),
+        lower_hir_ty_with_minter(db, hir_ty, premises, &minter),
         premises,
     )
 }
@@ -3514,9 +3529,12 @@ fn lower_type_alias_from_hir_in_mode<'db>(
         lower_layout_root_uses_in_hir_ty(db, hir_ty, alias.scope(), assumptions, &minter);
     let alias_to = match const_bodies {
         ConstBodyLowering::Eager => lower_hir_ty(db, hir_ty, alias.scope(), assumptions),
-        ConstBodyLowering::Deferred => {
-            lower_hir_ty_impl(db, hir_ty, alias.scope(), assumptions, &minter)
-        }
+        ConstBodyLowering::Deferred => lower_hir_ty_impl(
+            db,
+            hir_ty,
+            SolverPremises::from_unpositioned_pair(alias.scope(), assumptions),
+            &minter,
+        ),
     };
     let alias_to = if let TyData::Invalid(InvalidCause::AliasCycle(cycle)) = alias_to.data(db) {
         if cycle.contains(&alias) {
@@ -3877,11 +3895,12 @@ pub(crate) fn layout_param_root_uses<'db>(
 pub(crate) fn lower_generic_arg_list<'db>(
     db: &'db dyn HirAnalysisDb,
     args: GenericArgListId<'db>,
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: SolverPremises<'db>,
     hole_site: LayoutHoleArgSite<'db>,
     minter: &LoweringContext<'db>,
 ) -> Vec<TyId<'db>> {
+    let scope = premises.scope();
+    let assumptions = premises.assumptions();
     args.data(db)
         .iter()
         .enumerate()
@@ -3890,15 +3909,10 @@ pub(crate) fn lower_generic_arg_list<'db>(
             // even when `String` expects a const generic arg, so a path is lowered as the
             // constant it names, if it names one.
             GenericArg::Type(ty_arg) => match ty_arg.ty.to_opt().map(|ty| ty.data(db)) {
-                Some(HirTyKind::Path(path)) => lower_path_impl(
-                    db,
-                    scope,
-                    *path,
-                    assumptions,
-                    TypePosition::GenericArg,
-                    minter,
-                ),
-                _ => lower_opt_hir_ty_impl(db, ty_arg.ty, scope, assumptions, minter),
+                Some(HirTyKind::Path(path)) => {
+                    lower_path_impl(db, *path, premises, TypePosition::GenericArg, minter)
+                }
+                _ => lower_opt_hir_ty_impl(db, ty_arg.ty, premises, minter),
             },
             GenericArg::Const(const_arg) => match const_arg.value {
                 ConstGenericArgValue::Expr(body) => {

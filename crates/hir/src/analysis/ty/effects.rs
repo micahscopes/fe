@@ -208,7 +208,7 @@ pub(crate) fn lower_effect_key_schema<'db>(
     let TypeKind::Path(path) = key_ty.data(db) else {
         let carrier = normalize_from_assumptions(
             db,
-            lower_hir_ty_with_minter(db, key_ty, scope, assumptions, minter),
+            lower_hir_ty_with_minter(db, key_ty, premises, minter),
             premises,
         );
         return if carrier.is_star_kind(db) {

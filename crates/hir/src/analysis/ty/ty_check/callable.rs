@@ -203,8 +203,7 @@ pub(super) fn unify_explicit_call_generic_args<'db>(
         lower_generic_arg_list(
             db,
             args,
-            tc.env.scope(),
-            tc.env.assumptions(),
+            tc.env.position_context().premises(db),
             LayoutHoleArgSite::GenericArgList(args),
             &minter,
         )
