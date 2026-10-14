@@ -2443,36 +2443,17 @@ fn instantiate_normalized_trait_inst<'db>(
     let scope = key.owner(db).scope();
     let assumptions = semantic_instance_base_assumptions_for_key(db, key);
     let trait_inst = instantiate_checked(db, key.owner(db), trait_inst, key.subst(db))?;
+    let premises =
+        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
     let args = trait_inst
         .args(db)
         .iter()
-        .map(|&arg| {
-            normalize_ty(
-                db,
-                arg,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    scope,
-                    assumptions,
-                ),
-            )
-        })
+        .map(|&arg| normalize_ty(db, arg, premises))
         .collect::<Vec<_>>();
     let assoc_type_bindings = trait_inst
         .assoc_type_bindings(db)
         .iter()
-        .map(|(&name, &ty)| {
-            (
-                name,
-                normalize_ty(
-                    db,
-                    ty,
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        scope,
-                        assumptions,
-                    ),
-                ),
-            )
-        })
+        .map(|(&name, &ty)| (name, normalize_ty(db, ty, premises)))
         .collect::<IndexMap<_, _>>();
     Ok(crate::analysis::ty::trait_def::TraitInstId::new(
         db,
