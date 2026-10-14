@@ -46,9 +46,7 @@ use crate::{
         },
     },
     core::semantic::{EffectEnvView, EffectRequirementKey, ProviderBinding},
-    hir_def::{
-        CallableDef, Const, Func, GenericParamOwner, params::FuncParamMode, scope_graph::ScopeId,
-    },
+    hir_def::{CallableDef, Const, Func, GenericParamOwner, params::FuncParamMode},
 };
 use common::indexmap::IndexSet;
 use rustc_hash::FxHashMap;
@@ -169,8 +167,7 @@ fn instantiated_method_signature<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
     args: &[TyId<'db>],
-    scope: ScopeId<'db>,
-    evidence: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     trait_inst: TraitInstId<'db>,
     rebase_same_trait_uses: bool,
 ) -> Result<InstantiatedMethodSignature<'db>, MethodArgMapError<'db>> {
@@ -189,13 +186,9 @@ fn instantiated_method_signature<'db>(
     let normalize = |ty| {
         normalize_compare_assoc_consts(
             db,
-            normalize_ty(
-                db,
-                ty,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, evidence),
-            ),
-            scope,
-            evidence,
+            normalize_ty(db, ty, premises),
+            premises.scope(),
+            premises.assumptions(),
             trait_inst,
             rebase_same_trait_uses,
         )
@@ -219,8 +212,8 @@ fn instantiated_method_signature<'db>(
                     EffectRequirementKey::Trait(normalize_predicate_for_comparison(
                         db,
                         Binder::bind(func.into(), inst).instantiate(db, args),
-                        scope,
-                        evidence,
+                        premises.scope(),
+                        premises.assumptions(),
                         trait_inst,
                         rebase_same_trait_uses,
                     ))
@@ -1053,12 +1046,15 @@ fn semantic_callee_key_with_context<'db>(
         predicates.extend(body_constraints.list(db).iter().copied());
         let evidence = PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>())
             .extend_all_bounds(db);
+        let signature_premises = crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+            normalization_scope,
+            evidence,
+        );
         let nominal_signature = instantiated_method_signature(
             db,
             nominal_func,
             callable.generic_args(),
-            normalization_scope,
-            evidence,
+            signature_premises,
             nominal_inst,
             true,
         )?;
@@ -1066,8 +1062,7 @@ fn semantic_callee_key_with_context<'db>(
             db,
             body_func,
             &subst_args,
-            normalization_scope,
-            evidence,
+            signature_premises,
             resolved.trait_inst(),
             false,
         )?;
