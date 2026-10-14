@@ -685,6 +685,7 @@ fn semantic_callee_key_with_context<'db>(
         return Ok(None);
     };
     let assumptions = impl_env.assumptions(db);
+    let caller_premises = impl_env.premises(db);
     let mut requirements = callable.selection_requirements(db).list(db).to_vec();
     let method_choice = match &source_choice.method {
         TraitCallChoice::Recorded(choice) => Some(*choice),
@@ -881,14 +882,7 @@ fn semantic_callee_key_with_context<'db>(
                 .iter()
                 .zip(resolved.trait_inst().args(db))
                 .all(|(&nominal, &selected)| {
-                    normalize_ty(
-                        db,
-                        nominal,
-                        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                            impl_env.normalization_scope(db),
-                            assumptions,
-                        ),
-                    ) == selected
+                    normalize_ty(db, nominal, caller_premises) == selected
                 })
             && {
                 let body_args = body_func.arg_tys(db);
@@ -898,40 +892,28 @@ fn semantic_callee_key_with_context<'db>(
                             .arg_ty(db, idx)
                             .expect("nominal input arity changed");
                         let body = body.instantiate(db, &subst_args);
-                        normalize_ty(
-                            db,
-                            nominal,
-                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                                impl_env.normalization_scope(db),
-                                assumptions,
-                            ),
-                        ) == normalize_ty(
-                            db,
-                            body,
-                            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                                owner.scope(),
-                                PredicateListId::empty_list(db),
-                            ),
-                        )
+                        normalize_ty(db, nominal, caller_premises)
+                            == normalize_ty(
+                                db,
+                                body,
+                                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                                    owner.scope(),
+                                    PredicateListId::empty_list(db),
+                                ),
+                            )
                     })
             }
-            && normalize_ty(
-                db,
-                callable.ret_ty(db),
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    impl_env.normalization_scope(db),
-                    assumptions,
-                ),
-            ) == normalize_ty(
-                db,
-                CallableDef::Func(body_func)
-                    .ret_ty(db)
-                    .instantiate(db, &subst_args),
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    owner.scope(),
-                    PredicateListId::empty_list(db),
-                ),
-            );
+            && normalize_ty(db, callable.ret_ty(db), caller_premises)
+                == normalize_ty(
+                    db,
+                    CallableDef::Func(body_func)
+                        .ret_ty(db)
+                        .instantiate(db, &subst_args),
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+                        owner.scope(),
+                        PredicateListId::empty_list(db),
+                    ),
+                );
         (
             independent && (original_ground || nominal_redundant),
             !nominal_redundant,
@@ -951,20 +933,13 @@ fn semantic_callee_key_with_context<'db>(
         // without the caller's assumptions.
         let empty = PredicateListId::empty_list(db);
         let scope = nominal_func.scope();
-        let caller_scope = impl_env.normalization_scope(db);
         let same_without_caller = |ty| {
-            normalize_ty(
-                db,
-                ty,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    caller_scope,
-                    assumptions,
-                ),
-            ) == normalize_ty(
-                db,
-                ty,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, empty),
-            )
+            normalize_ty(db, ty, caller_premises)
+                == normalize_ty(
+                    db,
+                    ty,
+                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, empty),
+                )
         };
         let bounds = collect_func_decl_constraints(db, CallableDef::Func(nominal_func), true)
             .instantiate(db, &subst_args);
