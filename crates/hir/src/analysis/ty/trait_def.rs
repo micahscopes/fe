@@ -1511,32 +1511,19 @@ pub(in crate::analysis::ty) fn impls_for_ty_with_constraint_mode<'db>(
             let unifies = table.unify(impl_ty, ty_term).is_ok()
                 && trait_inst.is_none_or(|goal| table.unify(inst.trait_(db), goal).is_ok());
 
-            if unifies {
-                let impl_constraints = inst.constraints(db);
-                if impl_constraints.is_empty(db) {
-                    table.rollback_to(snapshot);
-                    return true;
-                }
-
-                for &constraint in impl_constraints.list(db) {
+            let applicable = unifies
+                && inst.constraints(db).list(db).iter().all(|&constraint| {
                     let constraint = constraint.fold_with(db, &mut table);
                     let satisfiability = is_goal_satisfiable(db, solve_cx, constraint);
-                    let constraint_holds =
-                        matches!(satisfiability, GoalSatisfiability::Satisfied(_))
-                            || (allow_needs_confirmation
-                                && matches!(
-                                    satisfiability,
-                                    GoalSatisfiability::NeedsConfirmation { .. }
-                                ));
-                    if !constraint_holds {
-                        table.rollback_to(snapshot);
-                        return false;
-                    }
-                }
-            }
-
+                    matches!(satisfiability, GoalSatisfiability::Satisfied(_))
+                        || (allow_needs_confirmation
+                            && matches!(
+                                satisfiability,
+                                GoalSatisfiability::NeedsConfirmation { .. }
+                            ))
+                });
             table.rollback_to(snapshot);
-            unifies
+            applicable
         })
         .collect()
 }
