@@ -745,6 +745,9 @@ impl<'db> SelectedImplEvidence<'db> {
             self.instance.trait_inst().args(self.db).clone(),
             bindings,
         );
+        let normalization_scope = self
+            .context
+            .normalization_scope_for_trait_inst(self.db, selected_bindings);
         // Impl evidence does not discharge a method's own requirements. Do
         // not add these requirements as assumptions while proving them.
         for (func, method_args) in [
@@ -768,8 +771,7 @@ impl<'db> SelectedImplEvidence<'db> {
                 let requirement = normalize_with_trait_evidence(
                     self.db,
                     requirement,
-                    self.context
-                        .normalization_scope_for_trait_inst(self.db, selected_bindings),
+                    normalization_scope,
                     selected_bindings,
                 );
                 if !evidence_types_supported(self.db, requirement)
@@ -783,10 +785,8 @@ impl<'db> SelectedImplEvidence<'db> {
                     GoalSatisfiability::NeedsConfirmation { .. } => {
                         return Err(SelectedEvidenceError::Incomplete);
                     }
-                    GoalSatisfiability::ContainsInvalid => {
-                        return Err(SelectedEvidenceError::Unsupported);
-                    }
-                    GoalSatisfiability::NormalizationFault => {
+                    GoalSatisfiability::ContainsInvalid
+                    | GoalSatisfiability::NormalizationFault => {
                         return Err(SelectedEvidenceError::Unsupported);
                     }
                 }
