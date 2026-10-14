@@ -684,7 +684,6 @@ fn semantic_callee_key_with_context<'db>(
     let CallableDef::Func(nominal_func) = callable.callable_def() else {
         return Ok(None);
     };
-    let assumptions = impl_env.assumptions(db);
     let caller_premises = impl_env.premises(db);
     let mut requirements = callable.selection_requirements(db).list(db).to_vec();
     let method_choice = match &source_choice.method {
