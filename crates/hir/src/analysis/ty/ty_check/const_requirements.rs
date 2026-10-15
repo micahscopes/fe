@@ -4165,8 +4165,8 @@ fn use_it() -> u256 { read<7>() }";
             super::GenericSubst::for_body_owner(&db, owner, vec![super::TyId::u8(&db)]),
             Vec::new(),
         );
-        let premises =
-            crate::analysis::semantic::semantic_instance_base_assumptions_for_key(&db, key);
+        let premises = crate::analysis::semantic::semantic_instance_base_premises_for_key(&db, key)
+            .assumptions();
         assert!(!premises.list(&db).is_empty());
         assert!(
             premises

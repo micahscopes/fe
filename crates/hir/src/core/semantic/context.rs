@@ -327,17 +327,17 @@ impl<'db> SolverPremises<'db> {
         instance: crate::analysis::semantic::SemanticInstance<'db>,
         mode: BindingRoleMode,
     ) -> Self {
-        Self {
-            scope: instance.key(db).owner(db).scope(),
-            assumptions: match mode {
-                BindingRoleMode::Final => instance.assumptions(db),
-                BindingRoleMode::Provisional => {
-                    crate::analysis::semantic::semantic_instance_base_assumptions_for_key(
-                        db,
-                        instance.key(db),
-                    )
-                }
+        match mode {
+            BindingRoleMode::Final => Self {
+                scope: instance.key(db).owner(db).scope(),
+                assumptions: instance.assumptions(db),
             },
+            BindingRoleMode::Provisional => {
+                crate::analysis::semantic::semantic_instance_base_premises_for_key(
+                    db,
+                    instance.key(db),
+                )
+            }
         }
     }
 
@@ -1095,7 +1095,7 @@ pub(crate) fn instance_position_context<'db>(
 ) -> ImplEnv<'db> {
     use crate::analysis::semantic::SemOrigin;
     use crate::analysis::semantic::{
-        instance::{instantiate_checked, semantic_instance_base_assumptions_for_key},
+        instance::{instantiate_checked, semantic_instance_base_premises_for_key},
         instantiated_effect_env,
     };
     use crate::analysis::ty::ty_check::{SemanticExprLowering, infer_body};
@@ -1160,7 +1160,7 @@ pub(crate) fn instance_position_context<'db>(
         }
     }
     let assumptions = instantiated_effect_env(db, instance).map_or_else(
-        || semantic_instance_base_assumptions_for_key(db, key),
+        || semantic_instance_base_premises_for_key(db, key).assumptions(),
         |env| env.assumptions(db),
     );
     let witnesses = witnesses

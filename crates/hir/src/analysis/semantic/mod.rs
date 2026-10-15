@@ -31,7 +31,7 @@ pub use instance::{
 };
 pub(crate) use instance::{
     provisional_provider_binding_for_instance_effect, provisional_provider_idx_for_requirement,
-    semantic_instance_base_assumptions_for_key,
+    semantic_instance_base_premises_for_key,
 };
 pub use ir::*;
 pub use layout_evidence::*;

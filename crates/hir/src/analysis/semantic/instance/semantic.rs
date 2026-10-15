@@ -352,7 +352,7 @@ fn provisional_call_sites<'db>(
             diagnostic: None,
         };
     };
-    let assumptions = semantic_instance_base_assumptions_for_key(db, instance.key(db));
+    let assumptions = semantic_instance_base_premises_for_key(db, instance.key(db)).assumptions();
     let scope = body.scope();
     let mut sites = vec![None; body.exprs(db).len()];
     let mut diagnostic = None;
@@ -594,7 +594,7 @@ fn finalize_call_sites<'db>(
     let template = &infer_body(db, instance.key(db).owner(db)).1;
     let refinements = |site| by_site.get(&site).map(Vec::as_slice);
     let same_assumptions = instance.assumptions(db)
-        == semantic_instance_base_assumptions_for_key(db, instance.key(db));
+        == semantic_instance_base_premises_for_key(db, instance.key(db)).assumptions();
     for (expr, expr_data) in body.exprs(db).iter() {
         let Some(site) = call_sites.get_mut(expr.index()).and_then(Option::as_mut) else {
             continue;
@@ -1105,7 +1105,7 @@ impl<'db> SemanticInstance<'db> {
             db,
             self,
             self.provisional_binding_ty(db, binding),
-            semantic_instance_base_assumptions_for_key(db, self.key(db)),
+            semantic_instance_base_premises_for_key(db, self.key(db)).assumptions(),
             provisional_provider_binding_for_instance_effect(db, self, binding),
         )
     }
@@ -1124,7 +1124,11 @@ impl<'db> SemanticInstance<'db> {
                 let requirement_ty = requirement
                     .as_ref()
                     .and_then(|requirement| requirement.key.binding_ty(db))
-                    .and_then(|ty| instantiate_normalized_ty(db, self.key(db), ty).ok());
+                    .and_then(|ty| {
+                        let key = self.key(db);
+                        let premises = semantic_instance_base_premises_for_key(db, key);
+                        instantiate_normalized_ty(db, key, ty, premises).ok()
+                    });
                 let provider_ty =
                     provisional_provider_binding_for_instance_effect(db, self, binding)
                         .map(|provider| provider.provider_ty);
@@ -1677,7 +1681,7 @@ fn provisional_provider_binding_for_effect<'db>(
             {
                 let provider_param_idx = provider_map[requirement_idx as usize]?;
                 let provider_ty = *CallableDef::Func(func).params(db).get(provider_param_idx)?;
-                let assumptions = semantic_instance_base_assumptions_for_key(db, key);
+                let assumptions = semantic_instance_base_premises_for_key(db, key).assumptions();
                 return Some(ProviderBinding {
                     provider_idx,
                     provider_ty,
@@ -2004,7 +2008,7 @@ fn instantiate_effect_env_data_for_key<'db>(
     let Some(site) = effect_param_site(owner) else {
         return Ok(None);
     };
-    let base_assumptions = semantic_instance_base_assumptions_for_key(db, key);
+    let base_assumptions = semantic_instance_base_premises_for_key(db, key).assumptions();
     let view = EffectEnvView::new(site);
     let requirements = view
         .requirements(db)
@@ -2072,10 +2076,11 @@ fn instantiate_provider_bindings_for_key<'db>(
         .collect()
 }
 
-pub(crate) fn semantic_instance_base_assumptions_for_key<'db>(
+pub(crate) fn semantic_instance_base_premises_for_key<'db>(
     db: &'db dyn HirAnalysisDb,
     key: SemanticInstanceKey<'db>,
-) -> PredicateListId<'db> {
+) -> crate::analysis::semantic::SolverPremises<'db> {
+    let scope = key.owner(db).scope();
     // Assumptions are an input to instance decisions, not a read of their output.
     let template = &infer_body(db, key.owner(db)).1;
     let assumptions = instantiate_checked(db, key.owner(db), template.assumptions(), key.subst(db))
@@ -2084,7 +2089,9 @@ pub(crate) fn semantic_instance_base_assumptions_for_key<'db>(
     let mut predicates: IndexSet<_> = assumptions.list(db).iter().copied().collect();
     predicates.extend(impl_env.assumptions(db).list(db).iter().copied());
     predicates.extend(impl_env.witnesses(db));
-    PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>()).extend_all_bounds(db)
+    let assumptions =
+        PredicateListId::new(db, predicates.into_iter().collect::<Vec<_>>()).extend_all_bounds(db);
+    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions)
 }
 
 fn instantiated_effect_env_forwarded_witnesses<'db>(
@@ -2341,7 +2348,8 @@ fn instantiate_effect_requirement_key<'db>(
 ) -> Result<EffectRequirementKey<'db>, SemanticEffectEnvInstantiationError<'db>> {
     Ok(match requirement_key {
         EffectRequirementKey::Type(ty) => {
-            EffectRequirementKey::Type(instantiate_normalized_ty(db, key, ty)?)
+            let premises = semantic_instance_base_premises_for_key(db, key);
+            EffectRequirementKey::Type(instantiate_normalized_ty(db, key, ty, premises)?)
         }
         EffectRequirementKey::Trait(trait_inst) => {
             EffectRequirementKey::Trait(instantiate_normalized_trait_inst(db, key, trait_inst)?)
@@ -2355,9 +2363,9 @@ fn instantiate_provider_binding<'db>(
     key: SemanticInstanceKey<'db>,
     provider: ProviderBinding<'db>,
 ) -> Result<ProviderBinding<'db>, SemanticEffectEnvInstantiationError<'db>> {
-    let scope = key.owner(db).scope();
-    let assumptions = semantic_instance_base_assumptions_for_key(db, key);
-    let provider_ty = instantiate_normalized_ty(db, key, provider.provider_ty)?;
+    let premises = semantic_instance_base_premises_for_key(db, key);
+    let instantiate_ty = |ty| instantiate_normalized_ty(db, key, ty, premises);
+    let provider_ty = instantiate_ty(provider.provider_ty)?;
     let source = match provider.source.clone() {
         ProviderSource::RootProvider {
             scope,
@@ -2365,7 +2373,7 @@ fn instantiate_provider_binding<'db>(
         } => ProviderSource::RootProvider {
             scope,
             registration: crate::analysis::ty::provider::RootProviderRegistration {
-                provider_ty: instantiate_normalized_ty(db, key, registration.provider_ty)?,
+                provider_ty: instantiate_ty(registration.provider_ty)?,
                 ..registration
             },
         },
@@ -2374,7 +2382,7 @@ fn instantiate_provider_binding<'db>(
     let target_ty = provider
         .semantics
         .target_ty
-        .map(|ty| instantiate_normalized_ty(db, key, ty))
+        .map(instantiate_ty)
         .transpose()?;
     let semantics = if matches!(
         provider.semantics.evidence,
@@ -2401,8 +2409,8 @@ fn instantiate_provider_binding<'db>(
     } else {
         provider_semantics_for_specialized_call(
             db,
-            scope,
-            assumptions,
+            premises.scope(),
+            premises.assumptions(),
             provider_ty,
             target_ty,
             provider.semantics.address_space,
@@ -2421,15 +2429,10 @@ fn instantiate_normalized_ty<'db>(
     db: &'db dyn HirAnalysisDb,
     key: SemanticInstanceKey<'db>,
     ty: TyId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> Result<TyId<'db>, SemanticEffectEnvInstantiationError<'db>> {
-    let scope = key.owner(db).scope();
-    let assumptions = semantic_instance_base_assumptions_for_key(db, key);
     let ty = instantiate_checked(db, key.owner(db), ty, key.subst(db))?;
-    Ok(normalize_ty(
-        db,
-        ty,
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions),
-    ))
+    Ok(normalize_ty(db, ty, premises))
 }
 
 fn instantiate_normalized_trait_inst<'db>(
@@ -2440,11 +2443,8 @@ fn instantiate_normalized_trait_inst<'db>(
     crate::analysis::ty::trait_def::TraitInstId<'db>,
     SemanticEffectEnvInstantiationError<'db>,
 > {
-    let scope = key.owner(db).scope();
-    let assumptions = semantic_instance_base_assumptions_for_key(db, key);
+    let premises = semantic_instance_base_premises_for_key(db, key);
     let trait_inst = instantiate_checked(db, key.owner(db), trait_inst, key.subst(db))?;
-    let premises =
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
     let args = trait_inst
         .args(db)
         .iter()
@@ -2545,7 +2545,7 @@ mod tests {
         let assumptions = instance.assumptions(db);
         assert_eq!(
             assumptions,
-            semantic_instance_base_assumptions_for_key(db, instance.key(db))
+            semantic_instance_base_premises_for_key(db, instance.key(db)).assumptions()
         );
         let typed_body = instance.key(db).typed_body(db);
         let body = typed_body.body().unwrap();
