@@ -1173,10 +1173,7 @@ impl<'db> SemanticInstance<'db> {
         normalize_ty(
             db,
             ty,
-            crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                self.normalization_scope(db),
-                self.assumptions(db),
-            ),
+            crate::analysis::semantic::SolverPremises::for_normalized_body(db, self),
         )
     }
 
@@ -1396,6 +1393,7 @@ impl<'db> SemanticInstance<'db> {
         }
 
         if let Some(body) = typed_body.body() {
+            let mut premises = None;
             for (expr, _) in body.exprs(db).iter() {
                 let Some(SemanticExprLowering::ConstIntrinsic {
                     callable,
@@ -1407,14 +1405,14 @@ impl<'db> SemanticInstance<'db> {
                 let Some(arg) = callable.generic_args().first().copied() else {
                     continue;
                 };
-                let arg = normalize_ty(
-                    db,
-                    arg,
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        body.scope(),
-                        self.assumptions(db),
-                    ),
-                );
+                let premises = *premises.get_or_insert_with(|| {
+                    crate::analysis::semantic::SolverPremises::for_body_lowering(
+                        db,
+                        self,
+                        BindingRoleMode::Final,
+                    )
+                });
+                let arg = normalize_ty(db, arg, premises);
                 if let Err(error) = runtime_size_bytes(db, arg) {
                     return Err(SemanticBodyAdmissionError::InvalidConcreteType(
                         invalid_size_diagnostic(db, self, SemOrigin::Expr(expr), arg, error),
