@@ -1751,7 +1751,10 @@ fn provisional_root_provider_binding<'db>(
             provider.provider_idx == provider_idx
                 && matches!(provider.source, ProviderSource::RootProvider { .. })
         })
-        .and_then(|provider| instantiate_provider_binding(db, key, provider).ok())
+        .and_then(|provider| {
+            let premises = semantic_instance_base_premises_for_key(db, key);
+            instantiate_provider_binding(db, key, provider, premises).ok()
+        })
 }
 
 fn effect_binding_ty_from_env<'db>(
@@ -2008,7 +2011,8 @@ fn instantiate_effect_env_data_for_key<'db>(
     let Some(site) = effect_param_site(owner) else {
         return Ok(None);
     };
-    let base_assumptions = semantic_instance_base_premises_for_key(db, key).assumptions();
+    let base_premises = semantic_instance_base_premises_for_key(db, key);
+    let base_assumptions = base_premises.assumptions();
     let view = EffectEnvView::new(site);
     let requirements = view
         .requirements(db)
@@ -2016,8 +2020,14 @@ fn instantiate_effect_env_data_for_key<'db>(
         .map(|requirement| instantiate_effect_requirement(db, key, requirement))
         .collect::<Result<Vec<_>, _>>()?;
     let resolutions = view.resolutions(db);
-    let providers =
-        instantiate_provider_bindings_for_key(db, key, site, view.providers(db), &resolutions)?;
+    let providers = instantiate_provider_bindings_for_key(
+        db,
+        key,
+        site,
+        view.providers(db),
+        &resolutions,
+        base_premises,
+    )?;
     let forwarded_witnesses =
         instantiated_effect_env_forwarded_witnesses(db, &requirements, &providers, &resolutions);
     let assumptions = if forwarded_witnesses.is_empty() {
@@ -2043,12 +2053,13 @@ fn instantiate_provider_bindings_for_key<'db>(
     site: crate::analysis::ty::ty_check::EffectParamSite<'db>,
     canonical: Vec<ProviderBinding<'db>>,
     resolutions: &[ResolvedEffectBinding],
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> Result<Vec<ProviderBinding<'db>>, SemanticEffectEnvInstantiationError<'db>> {
     let mut specializations = FxHashMap::default();
     for provider in key.effect_providers(db).providers(db) {
         specializations.insert(
             provider.provider_idx,
-            instantiate_provider_binding(db, key, provider.clone())?,
+            instantiate_provider_binding(db, key, provider.clone(), premises)?,
         );
     }
     if matches!(
@@ -2071,7 +2082,10 @@ fn instantiate_provider_bindings_for_key<'db>(
             specializations
                 .get(&provider.provider_idx)
                 .cloned()
-                .map_or_else(|| instantiate_provider_binding(db, key, provider), Ok)
+                .map_or_else(
+                    || instantiate_provider_binding(db, key, provider, premises),
+                    Ok,
+                )
         })
         .collect()
 }
@@ -2362,8 +2376,8 @@ fn instantiate_provider_binding<'db>(
     db: &'db dyn HirAnalysisDb,
     key: SemanticInstanceKey<'db>,
     provider: ProviderBinding<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
 ) -> Result<ProviderBinding<'db>, SemanticEffectEnvInstantiationError<'db>> {
-    let premises = semantic_instance_base_premises_for_key(db, key);
     let instantiate_ty = |ty| instantiate_normalized_ty(db, key, ty, premises);
     let provider_ty = instantiate_ty(provider.provider_ty)?;
     let source = match provider.source.clone() {
