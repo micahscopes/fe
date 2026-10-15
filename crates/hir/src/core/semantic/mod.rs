@@ -3927,16 +3927,12 @@ impl<'db> TypeAlias<'db> {
         };
         let assumptions = constraints_for(db, self.into());
         let ty = lower_hir_ty(db, hir_ty, self.scope(), assumptions);
+        let premises = crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+            self.scope(),
+            assumptions,
+        );
         if ty.has_invalid(db) {
-            collect_ty_lower_errors(
-                db,
-                hir_ty,
-                self.span().ty(),
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    self.scope(),
-                    assumptions,
-                ),
-            )
+            collect_ty_lower_errors(db, hir_ty, self.span().ty(), premises)
         } else if let Some(cause) = demanded_ground_const_cause(db, ty) {
             diag_from_invalid_cause(self.span().ty().into(), &cause)
                 .into_iter()
@@ -3944,10 +3940,7 @@ impl<'db> TypeAlias<'db> {
         } else {
             crate::analysis::ty::ty_error::normalization_limit_diag(
                 db,
-                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                    self.scope(),
-                    assumptions,
-                ),
+                premises,
                 ty,
                 self.span().ty().into(),
             )
