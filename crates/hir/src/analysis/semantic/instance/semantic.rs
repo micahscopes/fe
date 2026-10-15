@@ -1089,9 +1089,8 @@ impl<'db> SemanticInstance<'db> {
     ) -> SemanticLocalRole<'db> {
         classify_binding_role(
             db,
-            self,
             self.binding_ty(db, binding),
-            self.assumptions(db),
+            crate::analysis::semantic::SolverPremises::for_normalized_body(db, self),
             resolved_provider_binding_for_instance_effect(db, self, binding),
         )
     }
@@ -1103,9 +1102,8 @@ impl<'db> SemanticInstance<'db> {
     ) -> SemanticLocalRole<'db> {
         classify_binding_role(
             db,
-            self,
             self.provisional_binding_ty(db, binding),
-            semantic_instance_base_premises_for_key(db, self.key(db)).assumptions(),
+            semantic_instance_base_premises_for_key(db, self.key(db)),
             provisional_provider_binding_for_instance_effect(db, self, binding),
         )
     }
@@ -1948,15 +1946,12 @@ fn collect_callees<'db>(
 
 fn classify_binding_role<'db>(
     db: &'db dyn HirAnalysisDb,
-    instance: SemanticInstance<'db>,
     ty: TyId<'db>,
-    assumptions: PredicateListId<'db>,
+    premises: crate::analysis::semantic::SolverPremises<'db>,
     provider: Option<ProviderBinding<'db>>,
 ) -> SemanticLocalRole<'db> {
-    let owner = instance.key(db).owner(db);
-    let scope = owner.scope();
-    let premises =
-        crate::analysis::semantic::SolverPremises::from_unpositioned_pair(scope, assumptions);
+    let scope = premises.scope();
+    let assumptions = premises.assumptions();
     let ty = normalize_ty(db, ty, premises);
     if let Some((_, value_ty)) = ty.as_capability(db) {
         let value_ty = normalize_ty(db, value_ty, premises);
