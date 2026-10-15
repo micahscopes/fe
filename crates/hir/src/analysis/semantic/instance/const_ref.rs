@@ -853,6 +853,10 @@ fn semantic_callee_key_with_context<'db>(
         );
         let original_ground = is_ground(collect_flags(db, inst));
         let independent = body_ground && independent_context.selects_method(db, resolved, name);
+        let body_premises = crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
+            owner.scope(),
+            PredicateListId::empty_list(db),
+        );
         // A symbolic nominal receiver can be discarded after selection only if
         // it normalizes to the independent implementation and neither signature
         // has additional effects, method bounds, or layout slots to carry.
@@ -885,14 +889,7 @@ fn semantic_callee_key_with_context<'db>(
                             .expect("nominal input arity changed");
                         let body = body.instantiate(db, &subst_args);
                         normalize_ty(db, nominal, caller_premises)
-                            == normalize_ty(
-                                db,
-                                body,
-                                crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                                    owner.scope(),
-                                    PredicateListId::empty_list(db),
-                                ),
-                            )
+                            == normalize_ty(db, body, body_premises)
                     })
             }
             && normalize_ty(db, callable.ret_ty(db), caller_premises)
@@ -901,10 +898,7 @@ fn semantic_callee_key_with_context<'db>(
                     CallableDef::Func(body_func)
                         .ret_ty(db)
                         .instantiate(db, &subst_args),
-                    crate::analysis::semantic::SolverPremises::from_unpositioned_pair(
-                        owner.scope(),
-                        PredicateListId::empty_list(db),
-                    ),
+                    body_premises,
                 );
         (
             independent && (original_ground || nominal_redundant),
