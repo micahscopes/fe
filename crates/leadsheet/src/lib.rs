@@ -199,7 +199,8 @@ pub fn lower_program<'db>(
         order.push(f);
         queue.extend(callees(db, f));
     }
-    let mut used: FxHashSet<String> = FxHashSet::default();
+    let exports = contract_exports(db, package, entry);
+    let mut used: FxHashSet<String> = exports.iter().map(|e| e.name.clone()).collect();
     let mut names: FxHashMap<RuntimeInstance<'db>, String> = FxHashMap::default();
     for (i, f) in order.iter().enumerate() {
         let mut n = symbols.get(f).cloned().unwrap_or_else(|| format!("fn_{i}"));
@@ -379,6 +380,12 @@ pub fn lower_program<'db>(
         let l = lower::Lower::new(&prog, bodies[f].clone(), cfg, &facts[f], &plans[f]);
         functions.push(l.lower().map_err(|e| format!("@{}: {e}", names[f]))?);
     }
+    for ep in &exports {
+        if let Some(uplan) = plans.get(&ep.plan.user_recv) {
+            functions.push(build_export_fn(ep, uplan)?);
+        }
+    }
+    let fn_count = functions.len();
     let mut comments = vec![
         format!("lowered by fe-leadsheet from Fe's runtime MIR (fe {FE_PIN})"),
         format!("{} {name}: entry @{}", if expect.is_some() { "test" } else { "contract" }, names[&entry]),
@@ -396,5 +403,239 @@ pub fn lower_program<'db>(
         comments.push(format!("constructor @{c}: its word is where its arguments start in the creation code"));
     }
     let module = text::Module { comments, entry: Some(names[&entry].clone()), functions };
-    Ok(Lowered { name: name.to_string(), entry: names[&entry].clone(), constructor, text: module.print(), expect, functions: order.len() })
+    Ok(Lowered { name: name.to_string(), entry: names[&entry].clone(), constructor, text: module.print(), expect, functions: fn_count })
+}
+
+struct ExportPlan<'db> {
+    name: String,
+    words: usize,
+    projected: Vec<usize>,
+    plan: mir::runtime::ContractRecvAbiPlan<'db>,
+}
+
+fn is_static_word(db: Db<'_>, class: &mir::RuntimeClass<'_>) -> bool {
+    match class {
+        mir::RuntimeClass::Scalar(sc) => {
+            matches!(sc.repr, mir::ScalarRepr::Bool | mir::ScalarRepr::Int { .. } | mir::ScalarRepr::Address { .. })
+        }
+        mir::RuntimeClass::AggregateValue { layout } => {
+            matches!(layout.data(db), mir::Layout::Struct(s) if s.fields.len() == 1 && is_static_word(db, &s.fields[0]))
+        }
+        _ => false,
+    }
+}
+
+/// Static one-word ABI functions a contract's runtime root dispatches to,
+/// exported under their ABI names for `leadsheet-abi::dispatcher`.
+fn contract_exports<'db>(db: Db<'db>, package: RuntimePackage<'db>, entry: RuntimeInstance<'db>) -> Vec<ExportPlan<'db>> {
+    use mir::runtime::{ContractRecvAbiPlan, EntryEffectArgPlan, RuntimeInputPlan, RuntimeReturnPlan};
+    let Some(root) = package.functions(db).into_iter().find(|f| f.instance(db) == entry) else {
+        return Vec::new();
+    };
+    let RuntimeFunctionOwner::Synthetic(RuntimeSyntheticSpec::ContractRuntimeRoot { contract, dispatch, .. }) = root.owner(db) else {
+        return Vec::new();
+    };
+    let unit = hir::analysis::ty::ty_def::TyId::unit(db);
+    let mut by_selector: FxHashMap<u32, String> = FxHashMap::default();
+    for arm in contract.recv_views(db).flat_map(|r| r.arms(db)) {
+        let info = arm.abi_info(db, unit);
+        if let (Some(sel), Some(sig)) = (info.selector_value, info.selector_signature) {
+            let name = sig.split('(').next().unwrap_or("").trim().to_string();
+            if !name.is_empty() {
+                by_selector.insert(sel, name);
+            }
+        }
+    }
+    let mut wrappers: FxHashMap<RuntimeInstance<'db>, ContractRecvAbiPlan<'db>> = FxHashMap::default();
+    for f in package.functions(db) {
+        if let RuntimeFunctionOwner::Synthetic(RuntimeSyntheticSpec::ContractRecvAbi { plan }) = f.owner(db) {
+            wrappers.insert(f.instance(db), plan);
+        }
+    }
+    let mut used = FxHashSet::default();
+    let mut out = Vec::new();
+    for arm in dispatch.iter() {
+        let (Some(name), Some(plan)) = (by_selector.get(&arm.selector), wrappers.get(&arm.wrapper)) else {
+            continue;
+        };
+        let (words, projected) = match &plan.input {
+            RuntimeInputPlan::None => (0, Vec::new()),
+            RuntimeInputPlan::DecodeHostPayload { decode_args_fn, projected_fields, .. } => {
+                let p: Vec<usize> = projected_fields.iter().map(|i| *i as usize).collect();
+                match decode_args_fn.body(db).signature.ret {
+                    None if p.is_empty() => (0, p),
+                    Some(c) if is_static_word(db, &c) && p.iter().all(|&i| i == 0) => (1, p),
+                    Some(mir::RuntimeClass::AggregateValue { layout }) => match layout.data(db) {
+                        mir::Layout::Struct(s) if s.fields.iter().all(|f| is_static_word(db, f)) && p.iter().all(|&i| i < s.fields.len()) => (s.fields.len(), p),
+                        _ => continue,
+                    },
+                    _ => continue,
+                }
+            }
+        };
+        let ret_ok = match (&plan.ret, plan.user_recv.body(db).signature.ret) {
+            (RuntimeReturnPlan::Unit, None) => true,
+            (RuntimeReturnPlan::Value { .. }, Some(c)) if is_static_word(db, &c) => true,
+            (RuntimeReturnPlan::Value { ty, .. }, Some(mir::RuntimeClass::AggregateValue { layout })) if ty.is_tuple(db) => {
+                matches!(layout.data(db), mir::Layout::Struct(s) if s.fields.iter().all(|f| is_static_word(db, f)))
+            }
+            _ => false,
+        };
+        if !ret_ok {
+            continue;
+        }
+        let effects_ok = plan.entry_args.effects.iter().all(|e| match e {
+            EntryEffectArgPlan::ContractField(b) => {
+                matches!(b.slot, mir::ContractFieldSlot::Words(_))
+                    && matches!(b.kind, mir::RefKind::Provider { space: AddressSpace::Storage | AddressSpace::Transient, .. })
+            }
+            EntryEffectArgPlan::TargetRootProvider(_) => true,
+        });
+        if !effects_ok || !used.insert(name.clone()) {
+            continue;
+        }
+        out.push(ExportPlan { name: name.clone(), words, projected, plan: plan.clone() });
+    }
+    out
+}
+
+fn build_export_fn(ep: &ExportPlan<'_>, uplan: &Plan) -> Result<text::Function, String> {
+    use mir::runtime::EntryEffectArgPlan;
+    use text::{Builder, End, Function, Owns, Space, Ty, V};
+    let mut b = Builder::new();
+    let mut tys: Vec<Ty> = vec![Ty::Word; ep.words];
+    let mut owns: Vec<Option<Owns>> = vec![None; ep.words];
+    let mut add_state = |s: Space, o: Option<Owns>| {
+        tys.push(Ty::State(s));
+        owns.push(o);
+        tys.len() - 1
+    };
+    let pool_at = uplan.pool.then(|| add_state(Space::Mem, Some(Owns::Free)));
+    let stor_at = (uplan.stor != Mode::None).then(|| add_state(Space::Stor, None));
+    let tstor_at = (uplan.tstor != Mode::None).then(|| add_state(Space::Tstor, None));
+    let world_at = uplan.world.then(|| add_state(Space::World, None));
+    let ctl_at = uplan.ctl.then(|| add_state(Space::Ctl, None));
+    let params = b.open(&tys);
+    let mut results: Vec<(Ty, Option<Owns>)> = (0..uplan.ret_words).map(|_| (Ty::Word, None)).collect();
+    for at in [pool_at, stor_at, tstor_at, world_at, ctl_at].into_iter().flatten() {
+        results.push((tys[at], owns[at].clone()));
+    }
+    let mut pool = pool_at.map(|i| params[i]);
+    let mut stor = stor_at.map(|i| params[i]);
+    let mut tstor = tstor_at.map(|i| params[i]);
+    let mut world = world_at.map(|i| params[i]);
+    let mut ctl = ctl_at.map(|i| params[i]);
+    let mut ins: Vec<V> = Vec::new();
+    let mut call_tys: Vec<Ty> = Vec::new();
+    let mut taken: Vec<bool> = Vec::new();
+    for (k, &field_idx) in ep.projected.iter().enumerate() {
+        for _ in 0..uplan.params[k].0 {
+            ins.push(params[field_idx]);
+            call_tys.push(Ty::Word);
+        }
+    }
+    for (j, effect) in (ep.projected.len()..uplan.params.len()).zip(ep.plan.entry_args.effects.iter()) {
+        match effect {
+            EntryEffectArgPlan::ContractField(binding) => {
+                let mir::ContractFieldSlot::Words(slot_words) = binding.slot else {
+                    return Err(format!("@{}: unsupported contract field slot", ep.name));
+                };
+                let slot = b.konst(ruint::aliases::U256::from_be_bytes(slot_words.to_be_bytes::<32>()));
+                for _ in 0..uplan.params[j].0 {
+                    ins.push(slot);
+                    call_tys.push(Ty::Word);
+                }
+                for (kind, len) in uplan.pieces_of(j) {
+                    let n = b.k(len);
+                    match kind {
+                        plan::Kind::StorRange => {
+                            let s = stor.ok_or_else(|| format!("@{}: missing stor", ep.name))?;
+                            let (piece, rest) = b.split(s, slot, n);
+                            stor = Some(rest);
+                            ins.push(piece);
+                            call_tys.push(Ty::State(Space::Stor));
+                            taken.push(true);
+                        }
+                        plan::Kind::StorMap => {
+                            let s = stor.ok_or_else(|| format!("@{}: missing stor", ep.name))?;
+                            let (piece, rest) = b.split_map(s, slot, n);
+                            stor = Some(rest);
+                            ins.push(piece);
+                            call_tys.push(Ty::State(Space::Stor));
+                            taken.push(true);
+                        }
+                        plan::Kind::TstorRange => {
+                            let s = tstor.ok_or_else(|| format!("@{}: missing tstor", ep.name))?;
+                            let (piece, rest) = b.split(s, slot, n);
+                            tstor = Some(rest);
+                            ins.push(piece);
+                            call_tys.push(Ty::State(Space::Tstor));
+                            taken.push(false);
+                        }
+                        plan::Kind::TstorMap => {
+                            let s = tstor.ok_or_else(|| format!("@{}: missing tstor", ep.name))?;
+                            let (piece, rest) = b.split_map(s, slot, n);
+                            tstor = Some(rest);
+                            ins.push(piece);
+                            call_tys.push(Ty::State(Space::Tstor));
+                            taken.push(false);
+                        }
+                        plan::Kind::Mem => return Err(format!("@{}: unexpected memory piece on contract field", ep.name)),
+                    }
+                }
+            }
+            EntryEffectArgPlan::TargetRootProvider(_) => {
+                if uplan.params[j].0 > 0 || !uplan.pieces_of(j).is_empty() {
+                    return Err(format!("@{}: unexpected root provider parameter", ep.name));
+                }
+            }
+        }
+    }
+    for (take, cur, s) in [
+        (uplan.pool, pool, Space::Mem),
+        (uplan.stor == Mode::Whole, stor, Space::Stor),
+        (uplan.tstor == Mode::Whole, tstor, Space::Tstor),
+        (uplan.world, world, Space::World),
+        (uplan.ctl, ctl, Space::Ctl),
+    ] {
+        if take {
+            ins.push(cur.ok_or_else(|| format!("@{}: missing state", ep.name))?);
+            call_tys.push(Ty::State(s));
+        }
+    }
+    let mut out_tys: Vec<Ty> = (0..uplan.ret_words).map(|_| Ty::Word).collect();
+    out_tys.extend(call_tys.iter().copied().filter(|t| *t != Ty::Word));
+    let outs = b.apply(&uplan.name, &ins, &out_tys);
+    let ret_words = &outs[..uplan.ret_words];
+    let pieces = &outs[uplan.ret_words..uplan.ret_words + taken.len()];
+    let mut rests = outs[uplan.ret_words + taken.len()..].iter().copied();
+    if uplan.pool {
+        pool = rests.next();
+    }
+    if uplan.stor == Mode::Whole {
+        stor = rests.next();
+    }
+    if uplan.tstor == Mode::Whole {
+        tstor = rests.next();
+    }
+    if uplan.world {
+        world = rests.next();
+    }
+    if uplan.ctl {
+        ctl = rests.next();
+    }
+    for (&is_stor, &v) in taken.iter().zip(pieces).rev() {
+        if is_stor {
+            stor = Some(b.join(v, stor.unwrap()));
+        } else {
+            tstor = Some(b.join(v, tstor.unwrap()));
+        }
+    }
+    let mut ret_vals = ret_words.to_vec();
+    for v in [pool, stor, tstor, world, ctl].into_iter().flatten() {
+        ret_vals.push(v);
+    }
+    let body = b.close(params.clone(), End::Yield(ret_vals));
+    let fparams = params.into_iter().zip(tys).zip(owns).map(|((v, t), o)| (v, t, o)).collect();
+    Ok(Function { name: ep.name.clone(), params: fparams, results, body })
 }
