@@ -96,7 +96,8 @@ fn main() -> ExitCode {
     for r in results {
         match r {
             Ok(l) => {
-                eprintln!("{}: {} functions, entry @{}{}", l.name, l.functions, l.entry, l.expect.as_ref().map_or(String::new(), |e| format!(", expect {e}")));
+                let ctor = l.constructor.as_ref().map_or(String::new(), |c| format!(", constructor @{c}"));
+                eprintln!("{}: {} functions, entry @{}{ctor}{}", l.name, l.functions, l.entry, l.expect.as_ref().map_or(String::new(), |e| format!(", expect {e}")));
                 match &out {
                     Some(dir) => {
                         let file = std::path::Path::new(dir).join(format!("{}.vsdg", l.name));

@@ -153,6 +153,9 @@ enum Halt {
 pub struct Program<'p, 'db> {
     pub db: Db<'db>,
     pub plans: &'p FxHashMap<RuntimeInstance<'db>, Plan>,
+    /// Map-entry lookups made hashes, by key type: where the module rests on
+    /// the hash assumption.
+    pub hashed: std::cell::RefCell<BTreeMap<String, usize>>,
 }
 
 pub struct Lower<'p, 'db> {
@@ -172,6 +175,9 @@ pub struct Lower<'p, 'db> {
     loops: Vec<LoopCtx>,
     /// The function has loops: objects' and pieces' addresses are held.
     has_loops: bool,
+    /// The constructor's word: where its arguments start in the creation
+    /// code.
+    args_at: Option<V>,
 }
 
 impl<'p, 'db> Lower<'p, 'db> {
@@ -192,6 +198,7 @@ impl<'p, 'db> Lower<'p, 'db> {
             bases: FxHashMap::default(),
             loops: Vec::new(),
             has_loops,
+            args_at: None,
         }
     }
 
@@ -275,6 +282,10 @@ impl<'p, 'db> Lower<'p, 'db> {
         // (rMIR param index, first word index) for annotations.
         let mut word_at: Vec<usize> = Vec::new();
         let mut piece_slots: Vec<(usize, usize, Piece)> = Vec::new();
+        if plan.ctor {
+            tys.push(Ty::Word);
+            owns.push(None);
+        }
         if plan.entry {
             tys.push(Ty::State(Space::Mem));
             owns.push(None);
@@ -345,9 +356,13 @@ impl<'p, 'db> Lower<'p, 'db> {
             results.push((tys[at], owns[at].clone()));
         }
         // The environment at entry.
+        if plan.ctor {
+            self.args_at = Some(params[0]);
+        }
         if plan.entry {
+            let mem = params[usize::from(plan.ctor)];
             let (a, v) = (self.b.k(0x40), self.b.k(0x80));
-            let m = self.b.op("mstore", &[params[0], a, v], 0, &[Space::Mem])[0];
+            let m = self.b.op("mstore", &[mem, a, v], 0, &[Space::Mem])[0];
             self.set(Key::Pool, m);
         }
         if let Some(at) = pool_at {
@@ -2016,6 +2031,9 @@ impl<'p, 'db> Lower<'p, 'db> {
                 }
                 (out, Src::Class(class))
             }
+            RExpr::Call { callee, args } if let Some(l) = crate::maps::locate(self.db, *callee) => {
+                (self.map_entry(*callee, args, &l)?, Src::Word)
+            }
             RExpr::Call { callee, args } => {
                 let ws = self.call(*callee, args)?;
                 let ret = callee.interface_signature(self.db).ret;
@@ -2366,6 +2384,10 @@ impl<'p, 'db> Lower<'p, 'db> {
             }
             B::CallValue => one(self, "callvalue"),
             B::CallDataSize => one(self, "calldatasize"),
+            // The constructor's arguments are at the end of the creation
+            // code, whoever compiled it.
+            B::CodeSize if self.plan.ctor => one(self, "codesize"),
+            B::CurrentCodeRegionLen => vec![self.args_at.ok_or("the code region's length outside the constructor")?],
             B::CodeSize => return Err("codesize differs between two compilers' code".into()),
             B::Address => one(self, "address"),
             B::Caller => one(self, "caller"),
@@ -2394,6 +2416,10 @@ impl<'p, 'db> Lower<'p, 'db> {
             B::CallDataCopy { dst, offset, len } => {
                 let (d, o, l) = (w(self, dst)?, as_word(self, offset)?, as_word(self, len)?);
                 self.mem_op("calldatacopy", *dst, &[d, o, l], 0, true)?
+            }
+            B::CodeCopy { dst, offset, len } if self.plan.ctor => {
+                let (d, o, l) = (w(self, dst)?, as_word(self, offset)?, as_word(self, len)?);
+                self.mem_op("codecopy", *dst, &[d, o, l], 0, true)?
             }
             B::CodeCopy { .. } => return Err("codecopy differs between two compilers' code".into()),
             B::Keccak256 { offset, len } => {
@@ -2529,6 +2555,41 @@ impl<'p, 'db> Lower<'p, 'db> {
     }
 
     // ------------------------------------------------------------ calls
+
+    /// `StorageMap::locate(map, root, key)` with a word key: the entry's
+    /// `Location`, its slot the hash of the key's words and the root, its
+    /// offset 0 (see `maps`). The words are hashed where the pool's free
+    /// memory starts, without allocating: leadsheet-evm does not compile
+    /// `keccak_words` yet, and the pool owns everything from the free
+    /// pointer up.
+    fn map_entry(&mut self, callee: RuntimeInstance<'db>, args: &[RLocalId], l: &crate::maps::Locate) -> R<Vec<V>> {
+        let sig = callee.interface_signature(self.db);
+        let [_, root, key] = args else { return Err("a map lookup without its three arguments".into()) };
+        let mut words = Vec::new();
+        for (a, p) in [(key, &sig.params[2]), (root, &sig.params[1])] {
+            let ws = self.words(*a)?;
+            let ws = match self.class(*a) {
+                Some(c) => self.coerce_val(ws, &Src::Class(c), &p.class),
+                None => ws,
+            };
+            words.extend(ws);
+        }
+        if sig.ret.as_ref().map(|c| flat_len(self.db, c)) != Some(2) {
+            return Err("a map lookup whose location is not two words".into());
+        }
+        *self.prog.hashed.borrow_mut().entry(l.key.clone()).or_default() += 1;
+        let fp = self.b.k(0x40);
+        let mut m = self.pool()?;
+        let p = self.b.op("mload", &[m, fp], 1, &[])[0];
+        for (i, w) in words.iter().enumerate() {
+            let a = self.offset(p, 32 * i as u64);
+            m = self.b.op("mstore", &[m, a, *w], 0, &[Space::Mem])[0];
+        }
+        self.set(Key::Pool, m);
+        let len = self.b.k(32 * words.len() as u64);
+        let slot = self.b.op("keccak256", &[m, p, len], 1, &[])[0];
+        Ok(vec![slot, self.b.k(0)])
+    }
 
     /// A call: arguments, the pieces each needs, the states the callee holds;
     /// afterwards the pieces go back where they came from. Gives the words

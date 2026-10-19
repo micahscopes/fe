@@ -170,6 +170,9 @@ pub struct Analyzer<'a, 'db> {
     pub cfg: &'a Cfg,
     /// The memory parameters each callee may return addresses into.
     pub ret_params: &'a FxHashMap<RuntimeInstance<'db>, BTreeSet<u16>>,
+    /// The body is the constructor's: it may read the creation code's tail,
+    /// where the constructor arguments are.
+    pub ctor: bool,
 }
 
 impl<'a, 'db> Analyzer<'a, 'db> {
@@ -252,6 +255,8 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 },
                 _ => OSet::new(),
             },
+            // A map entry's slot, hashed from the root: no address of ours.
+            RExpr::Call { callee, .. } if crate::maps::locate(self.db, *callee).is_some() => OSet::new(),
             RExpr::Call { callee, args } => {
                 let mut o = OSet::new();
                 if self.class(dst).is_some() {
@@ -378,6 +383,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             let block = &body.blocks[b];
             for stmt in &block.stmts {
                 match stmt {
+                    RStmt::Assign { expr: RExpr::Call { callee, .. }, .. } if crate::maps::locate(db, *callee).is_some() => {}
                     RStmt::Assign { expr: RExpr::Call { callee, args }, .. } => {
                         escape_args(&mut facts, callee, args);
                         facts.calls.push((*callee, args.to_vec()));
@@ -598,6 +604,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     facts.pool = true;
                     facts.ctl = true;
                 }
+                B::CurrentCodeRegionLen if self.ctor => {}
                 B::CodeRegionOffset { .. } | B::CodeRegionLen { .. } | B::CurrentCodeRegionLen => {
                     return Err("code regions are not lowered yet".into());
                 }
@@ -607,6 +614,8 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 facts.pool = true;
                 facts.ctl = true;
             }
+            // A map entry's slot is hashed in the pool's free memory.
+            RExpr::Call { callee, .. } if crate::maps::locate(self.db, *callee).is_some() => facts.pool = true,
             _ => {}
         }
         let _ = dst;
@@ -635,8 +644,12 @@ pub struct Plan {
     pub world: bool,
     /// Takes and gives back the control token.
     pub ctl: bool,
-    /// The contract's runtime entry: whole states, no words.
+    /// The contract's runtime entry, or its constructor: whole states, no
+    /// words (but the constructor's one).
     pub entry: bool,
+    /// The constructor: its one word is where its arguments start in the
+    /// creation code (Fe's `current_code_region_len`).
+    pub ctor: bool,
 }
 
 impl Plan {

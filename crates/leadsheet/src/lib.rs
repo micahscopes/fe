@@ -18,6 +18,7 @@
 pub mod cfg;
 pub mod class;
 pub mod lower;
+pub mod maps;
 pub mod plan;
 pub mod text;
 
@@ -45,6 +46,9 @@ pub struct Lowered {
     pub name: String,
     /// The function that starts a transaction.
     pub entry: String,
+    /// A contract's constructor (Fe's init, its arguments decoded from the
+    /// end of the creation code), for leadsheet-abi's creation code to run.
+    pub constructor: Option<String>,
     pub text: String,
     /// For a test, what Fe expects of it: `return`, `revert`, `revert panic
     /// 0xNN` or `revert selector 0xNNNNNNNN`.
@@ -57,14 +61,30 @@ pub fn lower_contracts(db: Db<'_>, top_mod: TopLevelMod<'_>) -> Result<Vec<Lower
     let package = mir::build_runtime_package(db, top_mod).map_err(|e| format!("{e:?}"))?;
     let mut out = Vec::new();
     for object in package.objects(db) {
-        for section in object.sections(db) {
+        let sections = object.sections(db);
+        let ctor = sections.iter().find(|s| s.name == RuntimeSectionName::Init).and_then(|s| init_abi(db, package, s.entry.instance(db)));
+        for section in &sections {
             if section.name == RuntimeSectionName::Runtime {
                 let name = object.name(db).clone();
-                out.push(lower_program(db, package, section.entry.instance(db), &name, None)?);
+                out.push(lower_program(db, package, section.entry.instance(db), ctor, &name, None)?);
             }
         }
     }
     Ok(out)
+}
+
+/// The constructor an init section's root calls: Fe's `ContractInitAbi`
+/// wrapper, which checks the value sent, decodes the arguments from the end
+/// of the creation code and runs the user's `init`. The root around it then
+/// returns the runtime code, which leadsheet-abi's creation code does instead.
+fn init_abi<'db>(db: Db<'db>, package: RuntimePackage<'db>, root: RuntimeInstance<'db>) -> Option<RuntimeInstance<'db>> {
+    let wrappers: FxHashSet<RuntimeInstance<'db>> = package
+        .functions(db)
+        .into_iter()
+        .filter(|f| matches!(f.owner(db), RuntimeFunctionOwner::Synthetic(RuntimeSyntheticSpec::ContractInitAbi { .. })))
+        .map(|f| f.instance(db))
+        .collect();
+    callees(db, root).into_iter().find(|c| wrappers.contains(c))
 }
 
 /// A lowered test, or its name and why it could not be lowered.
@@ -81,7 +101,7 @@ pub fn lower_tests(db: Db<'_>, top_mod: TopLevelMod<'_>) -> Result<Vec<TestModul
                 let owner = section.entry.owner(db);
                 let expect = test_expectation(db, &owner);
                 let lowered = expect
-                    .and_then(|e| lower_program(db, package, section.entry.instance(db), name, Some(e)))
+                    .and_then(|e| lower_program(db, package, section.entry.instance(db), None, name, Some(e)))
                     .map_err(|e| (name.clone(), e));
                 out.push(lowered);
             }
@@ -130,13 +150,16 @@ fn test_expectation(db: Db<'_>, owner: &RuntimeFunctionOwner<'_>) -> Result<Stri
     Ok("revert".into())
 }
 
-/// The calls a body makes.
+/// The calls a body makes (but map-entry lookups the lowering makes hashes
+/// of, `maps`).
 fn callees<'db>(db: Db<'db>, f: RuntimeInstance<'db>) -> Vec<RuntimeInstance<'db>> {
     let body = f.body(db);
     let mut out = Vec::new();
     for block in &body.blocks {
         for stmt in &block.stmts {
-            if let RStmt::Assign { expr: RExpr::Call { callee, .. }, .. } = stmt {
+            if let RStmt::Assign { expr: RExpr::Call { callee, .. }, .. } = stmt
+                && maps::locate(db, *callee).is_none()
+            {
                 out.push(*callee);
             }
         }
@@ -151,11 +174,13 @@ fn sanitize(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$' { c } else { '_' }).collect()
 }
 
-/// Lowers `entry` and every function it reaches.
+/// Lowers `entry`, the constructor `ctor` if there is one, and every
+/// function they reach.
 pub fn lower_program<'db>(
     db: Db<'db>,
     package: RuntimePackage<'db>,
     entry: RuntimeInstance<'db>,
+    ctor: Option<RuntimeInstance<'db>>,
     name: &str,
     expect: Option<String>,
 ) -> Result<Lowered, String> {
@@ -166,7 +191,7 @@ pub fn lower_program<'db>(
     // Reachable functions, the entry first.
     let mut order = Vec::new();
     let mut seen = FxHashSet::default();
-    let mut queue = VecDeque::from([entry]);
+    let mut queue: VecDeque<RuntimeInstance<'db>> = std::iter::once(entry).chain(ctor).collect();
     while let Some(f) = queue.pop_front() {
         if !seen.insert(f) {
             continue;
@@ -195,7 +220,7 @@ pub fn lower_program<'db>(
         let mut facts = FxHashMap::default();
         let mut changed = false;
         for f in &order {
-            let a = Analyzer { db, body: &bodies[f], cfg: &cfgs[f], ret_params: &ret_params };
+            let a = Analyzer { db, body: &bodies[f], cfg: &cfgs[f], ret_params: &ret_params, ctor: Some(*f) == ctor };
             let fx = a.analyze(*f).map_err(|e| format!("@{}: {e}", names[f]))?;
             facts.insert(*f, fx);
         }
@@ -235,7 +260,7 @@ pub fn lower_program<'db>(
             .collect();
         let has = |want: fn(&Piece) -> bool| params.iter().any(|(_, p)| want(p));
         let mode = |whole: bool, pieces: bool| if whole { Mode::Whole } else if pieces { Mode::Pieces } else { Mode::None };
-        let entry_fn = *f == entry;
+        let entry_fn = *f == entry || Some(*f) == ctor;
         plans.insert(
             *f,
             Plan {
@@ -247,6 +272,7 @@ pub fn lower_program<'db>(
                 world: fx.world,
                 ctl: fx.ctl || entry_fn,
                 entry: entry_fn,
+                ctor: Some(*f) == ctor,
                 params,
             },
         );
@@ -302,7 +328,7 @@ pub fn lower_program<'db>(
             break;
         }
     }
-    let prog = lower::Program { db, plans: &plans };
+    let prog = lower::Program { db, plans: &plans, hashed: Default::default() };
     let mut functions = Vec::new();
     for f in &order {
         let cfg = Cfg::new(&bodies[f]).map_err(|e| format!("@{}: {e}", names[f]))?;
@@ -316,6 +342,15 @@ pub fn lower_program<'db>(
     if let Some(e) = &expect {
         comments.push(format!("expect {e}"));
     }
+    for (key, sites) in prog.hashed.borrow().iter() {
+        comments.push(format!(
+            "hash assumption: {sites} map-entry slots keccak256(key ‖ root) of StorageMap<{key}, _> are apart from every literal slot and from each other"
+        ));
+    }
+    let constructor = ctor.map(|c| names[&c].clone());
+    if let Some(c) = &constructor {
+        comments.push(format!("constructor @{c}: its word is where its arguments start in the creation code"));
+    }
     let module = text::Module { comments, entry: Some(names[&entry].clone()), functions };
-    Ok(Lowered { name: name.to_string(), entry: names[&entry].clone(), text: module.print(), expect, functions: order.len() })
+    Ok(Lowered { name: name.to_string(), entry: names[&entry].clone(), constructor, text: module.print(), expect, functions: order.len() })
 }
