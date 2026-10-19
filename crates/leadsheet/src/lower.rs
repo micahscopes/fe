@@ -2563,6 +2563,139 @@ impl<'p, 'db> Lower<'p, 'db> {
                 let world = self.state(Key::World)?;
                 self.b.op(op, &[world], 1, &[])
             }
+            B::ReturnDataCopy { dst, offset, len } => {
+                let (d, o, l) = (w(self, dst)?, as_word(self, offset)?, as_word(self, len)?);
+                let key = self.mem_of(*dst)?;
+                let (m, world, c) = (self.state(key)?, self.state(Key::World)?, self.state(Key::Ctl)?);
+                let out = self.b.op("returndatacopy", &[m, world, c, d, o, l], 0, &[Space::Mem, Space::Ctl]);
+                self.set(key, out[0]);
+                self.set(Key::Ctl, out[1]);
+                vec![]
+            }
+            B::ExtCodeCopy { addr, dst, offset, len } => {
+                let (a, d, o, l) = (as_word(self, addr)?, w(self, dst)?, as_word(self, offset)?, as_word(self, len)?);
+                let key = self.mem_of(*dst)?;
+                let (m, world) = (self.state(key)?, self.state(Key::World)?);
+                let out = self.b.op("extcodecopy", &[m, world, a, d, o, l], 0, &[Space::Mem]);
+                self.set(key, out[0]);
+                vec![]
+            }
+            B::Call { gas, addr, value, args_offset, args_len, ret_offset, ret_len } => {
+                let (ka, kr) = (self.mem_of(*args_offset)?, self.mem_of(*ret_offset)?);
+                if ka != kr {
+                    return Err("a call across two memory states".into());
+                }
+                let (m, stor, tstor, world, ctl) = (
+                    self.state(ka)?,
+                    self.state(Key::Stor)?,
+                    self.state(Key::Tstor)?,
+                    self.state(Key::World)?,
+                    self.state(Key::Ctl)?,
+                );
+                let (g, a, v, ao, al, ro, rl) = (
+                    as_word(self, gas)?,
+                    as_word(self, addr)?,
+                    as_word(self, value)?,
+                    w(self, args_offset)?,
+                    as_word(self, args_len)?,
+                    w(self, ret_offset)?,
+                    as_word(self, ret_len)?,
+                );
+                let out = self.b.op(
+                    "call",
+                    &[m, stor, tstor, world, ctl, g, a, v, ao, al, ro, rl],
+                    1,
+                    &[Space::Mem, Space::Stor, Space::Tstor, Space::World, Space::Ctl],
+                );
+                self.set(ka, out[1]);
+                self.set(Key::Stor, out[2]);
+                self.set(Key::Tstor, out[3]);
+                self.set(Key::World, out[4]);
+                self.set(Key::Ctl, out[5]);
+                vec![out[0]]
+            }
+            B::DelegateCall { gas, addr, args_offset, args_len, ret_offset, ret_len } => {
+                let (ka, kr) = (self.mem_of(*args_offset)?, self.mem_of(*ret_offset)?);
+                if ka != kr {
+                    return Err("a call across two memory states".into());
+                }
+                let (m, stor, tstor, world, ctl) = (
+                    self.state(ka)?,
+                    self.state(Key::Stor)?,
+                    self.state(Key::Tstor)?,
+                    self.state(Key::World)?,
+                    self.state(Key::Ctl)?,
+                );
+                let (g, a, ao, al, ro, rl) = (
+                    as_word(self, gas)?,
+                    as_word(self, addr)?,
+                    w(self, args_offset)?,
+                    as_word(self, args_len)?,
+                    w(self, ret_offset)?,
+                    as_word(self, ret_len)?,
+                );
+                let out = self.b.op(
+                    "delegatecall",
+                    &[m, stor, tstor, world, ctl, g, a, ao, al, ro, rl],
+                    1,
+                    &[Space::Mem, Space::Stor, Space::Tstor, Space::World, Space::Ctl],
+                );
+                self.set(ka, out[1]);
+                self.set(Key::Stor, out[2]);
+                self.set(Key::Tstor, out[3]);
+                self.set(Key::World, out[4]);
+                self.set(Key::Ctl, out[5]);
+                vec![out[0]]
+            }
+            B::StaticCall { gas, addr, args_offset, args_len, ret_offset, ret_len } => {
+                let (ka, kr) = (self.mem_of(*args_offset)?, self.mem_of(*ret_offset)?);
+                if ka != kr {
+                    return Err("a call across two memory states".into());
+                }
+                let (m, stor, tstor, world, ctl) = (
+                    self.state(ka)?,
+                    self.state(Key::Stor)?,
+                    self.state(Key::Tstor)?,
+                    self.state(Key::World)?,
+                    self.state(Key::Ctl)?,
+                );
+                let (g, a, ao, al, ro, rl) = (
+                    as_word(self, gas)?,
+                    as_word(self, addr)?,
+                    w(self, args_offset)?,
+                    as_word(self, args_len)?,
+                    w(self, ret_offset)?,
+                    as_word(self, ret_len)?,
+                );
+                let out = self.b.op("staticcall", &[m, stor, tstor, world, ctl, g, a, ao, al, ro, rl], 1, &[Space::Mem, Space::World, Space::Ctl]);
+                self.set(ka, out[1]);
+                self.set(Key::World, out[2]);
+                self.set(Key::Ctl, out[3]);
+                vec![out[0]]
+            }
+            B::Create { value, offset, len } | B::Create2 { value, offset, len, .. } => {
+                let key = self.mem_of(*offset)?;
+                let (m, stor, tstor, world, ctl) = (
+                    self.state(key)?,
+                    self.state(Key::Stor)?,
+                    self.state(Key::Tstor)?,
+                    self.state(Key::World)?,
+                    self.state(Key::Ctl)?,
+                );
+                let (v, o, l) = (as_word(self, value)?, w(self, offset)?, as_word(self, len)?);
+                let out = match b {
+                    B::Create2 { salt, .. } => {
+                        let s = as_word(self, salt)?;
+                        self.b.op("create2", &[m, stor, tstor, world, ctl, v, o, l, s], 1, &[Space::Stor, Space::Tstor, Space::World, Space::Ctl])
+                    }
+                    _ => self.b.op("create", &[m, stor, tstor, world, ctl, v, o, l], 1, &[Space::Stor, Space::Tstor, Space::World, Space::Ctl]),
+                };
+                self.set(Key::Stor, out[1]);
+                self.set(Key::Tstor, out[2]);
+                self.set(Key::World, out[3]);
+                self.set(Key::Ctl, out[4]);
+                vec![out[0]]
+            }
             other => return Err(format!("the builtin {other:?} is not lowered yet")),
         })
     }

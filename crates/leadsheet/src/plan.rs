@@ -427,6 +427,22 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                         let o = facts.origins[value.index()].clone();
                         escape(&mut facts, &o);
                     }
+                    RStmt::Assign {
+                        expr:
+                            RExpr::Builtin(
+                                RuntimeBuiltin::Mcopy { dst: a, src: b, .. }
+                                | RuntimeBuiltin::Call { args_offset: a, ret_offset: b, .. }
+                                | RuntimeBuiltin::StaticCall { args_offset: a, ret_offset: b, .. }
+                                | RuntimeBuiltin::DelegateCall { args_offset: a, ret_offset: b, .. },
+                            ),
+                        ..
+                    } => {
+                        let (oa, ob) = (facts.origins[a.index()].clone(), facts.origins[b.index()].clone());
+                        if oa != ob {
+                            escape(&mut facts, &oa);
+                            escape(&mut facts, &ob);
+                        }
+                    }
                     // A reference source is copied from, not stored.
                     RStmt::CopyInto { src, .. } if !matches!(self.class(*src), Some(RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. })) => {
                         let o = facts.origins[src.index()].clone();
@@ -638,8 +654,20 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     facts.ctl = true;
                 }
                 B::Balance { .. } | B::ExtCodeSize { .. } | B::ExtCodeHash { .. } | B::SelfBalance | B::ReturnDataSize | B::Gas => facts.world = true,
-                B::Call { .. } | B::StaticCall { .. } | B::DelegateCall { .. } | B::Create { .. } | B::Create2 { .. } => {
-                    return Err("external calls and creation are not lowered yet".into());
+                B::Call { args_offset, ret_offset, .. } | B::StaticCall { args_offset, ret_offset, .. } | B::DelegateCall { args_offset, ret_offset, .. } => {
+                    pool_if(facts, args_offset);
+                    pool_if(facts, ret_offset);
+                    facts.stor_whole = true;
+                    facts.tstor_whole = true;
+                    facts.world = true;
+                    facts.ctl = true;
+                }
+                B::Create { offset, .. } | B::Create2 { offset, .. } => {
+                    pool_if(facts, offset);
+                    facts.stor_whole = true;
+                    facts.tstor_whole = true;
+                    facts.world = true;
+                    facts.ctl = true;
                 }
                 B::Malloc { .. } => {
                     facts.pool = true;
