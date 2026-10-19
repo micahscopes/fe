@@ -67,9 +67,12 @@ pub fn lower_contracts(db: Db<'_>, top_mod: TopLevelMod<'_>) -> Result<Vec<Lower
     Ok(out)
 }
 
+/// A lowered test, or its name and why it could not be lowered.
+pub type TestModule = Result<Lowered, (String, String)>;
+
 /// Lowers every `#[test]` of `top_mod`: one module per test, or the reason a
 /// test could not be lowered.
-pub fn lower_tests(db: Db<'_>, top_mod: TopLevelMod<'_>) -> Result<Vec<Result<Lowered, (String, String)>>, String> {
+pub fn lower_tests(db: Db<'_>, top_mod: TopLevelMod<'_>) -> Result<Vec<TestModule>, String> {
     let package = mir::build_test_runtime_package(db, top_mod, None).map_err(|e| format!("{e:?}"))?;
     let mut out = Vec::new();
     for object in package.objects(db) {

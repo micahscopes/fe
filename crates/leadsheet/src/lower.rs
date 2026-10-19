@@ -1849,7 +1849,7 @@ impl<'p, 'db> Lower<'p, 'db> {
         Self::key_of(self.holder(space, &self.org(l)))
     }
 
-    fn builtin(&mut self, b: &RuntimeBuiltin<'db>, dst: Option<&RuntimeClass<'db>>) -> R<Vec<V>> {
+    fn builtin(&mut self, b: &RuntimeBuiltin<'db>, _dst: Option<&RuntimeClass<'db>>) -> R<Vec<V>> {
         use RuntimeBuiltin as B;
         let w = |this: &mut Self, l: &RLocalId| this.word_of(*l);
         let as_word = |this: &mut Self, l: &RLocalId| -> R<V> {
@@ -2074,10 +2074,6 @@ impl<'p, 'db> Lower<'p, 'db> {
                 self.b.op(op, &[world], 1, &[])
             }
             other => return Err(format!("the builtin {other:?} is not lowered yet")),
-        })
-        .map(|ws| {
-            let _ = dst;
-            ws
         })
     }
 

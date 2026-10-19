@@ -75,7 +75,7 @@ fn main() -> ExitCode {
             }
         };
     }
-    let results: Vec<Result<fe_leadsheet::Lowered, (String, String)>> = if tests {
+    let results: Vec<fe_leadsheet::TestModule> = if tests {
         match fe_leadsheet::lower_tests(&db, top_mod) {
             Ok(r) => r,
             Err(e) => {

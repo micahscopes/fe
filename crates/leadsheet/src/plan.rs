@@ -228,7 +228,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             RExpr::Binary { op: hir::hir_def::BinOp::Arith(hir::hir_def::ArithBinOp::Add | hir::hir_def::ArithBinOp::Sub), lhs, rhs } => {
                 org(lhs).union(&org(rhs)).copied().collect()
             }
-            RExpr::AggregateMake { fields, .. } | RExpr::EnumMake { fields, .. } => fields.iter().flat_map(|f| org(f)).collect(),
+            RExpr::AggregateMake { fields, .. } | RExpr::EnumMake { fields, .. } => fields.iter().flat_map(org).collect(),
             RExpr::AddrOf { place } => self.place_info(facts, place)?.origin,
             RExpr::Load { place } => match self.place_info(facts, place)?.area {
                 Area::Obj | Area::Raw(AddressSpace::Memory) => OSet::from([Org::Pool]),
@@ -389,12 +389,10 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                         let o = facts.origins[value.index()].clone();
                         escape(&mut facts, &o);
                     }
-                    RStmt::CopyInto { src, .. } => {
-                        // A reference source is copied from, not stored.
-                        if !matches!(self.class(*src), Some(RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. })) {
-                            let o = facts.origins[src.index()].clone();
-                            escape(&mut facts, &o);
-                        }
+                    // A reference source is copied from, not stored.
+                    RStmt::CopyInto { src, .. } if !matches!(self.class(*src), Some(RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. })) => {
+                        let o = facts.origins[src.index()].clone();
+                        escape(&mut facts, &o);
                     }
                     _ => {}
                 }
