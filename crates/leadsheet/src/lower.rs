@@ -49,6 +49,10 @@ const HALT_EMPTY: &str = "\u{0}halts";
 
 type R<T> = Result<T, String>;
 
+/// Builds one variant's case of a branch on an enum's tag (`by_variant`):
+/// given the variant and the case's words, its words.
+type VariantArm<'a, 'p, 'db> = dyn FnMut(&mut Lower<'p, 'db>, u16, &[V]) -> R<Vec<V>> + 'a;
+
 /// A state the environment holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
@@ -1527,7 +1531,7 @@ impl<'p, 'db> Lower<'p, 'db> {
     /// and gives `n_out` words; a tag no variant has halts as `invalid`, as
     /// Sonatina's `unreachable` does. A known tag needs no branch. Every held
     /// state goes through the cases.
-    fn by_variant(&mut self, tag: V, words: &[V], n_out: usize, variants: u16, arm: &mut dyn FnMut(&mut Self, u16, &[V]) -> R<Vec<V>>) -> R<Vec<V>> {
+    fn by_variant(&mut self, tag: V, words: &[V], n_out: usize, variants: u16, arm: &mut VariantArm<'_, 'p, 'db>) -> R<Vec<V>> {
         if let Some(c) = self.b.known(tag) {
             if c < U256::from(variants) {
                 return arm(self, c.as_limbs()[0] as u16, words);
