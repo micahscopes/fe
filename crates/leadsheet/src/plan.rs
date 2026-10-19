@@ -1,0 +1,622 @@
+//! What each function's leadsheet-vsdg signature holds: its words, and which
+//! states it takes and gives back with what footprints.
+//!
+//! - **Memory.** A parameter that refers to a memory object (an object, a
+//!   memory provider, a constant region) carries an exactly owned piece
+//!   `state<mem>[%p, +size]` beside its address, given back after the call:
+//!   Fe checks every call against the callee's signature, and a `mut`
+//!   argument overlaps no other argument (`semantic/access/check.rs`). Any
+//!   other memory (heap buffers reached by raw pointers, objects whose
+//!   address escapes, the scratch words a panic writes) belongs to the pool,
+//!   a `state<mem>[free]`; objects a function makes come from the pool by
+//!   `alloc`, and stay apart from it while the function keeps their address
+//!   to itself.
+//! - **Storage.** A storage provider parameter (a contract field, or a place
+//!   in one) carries `state<stor>[%slot, +slots]`. A function that reaches
+//!   storage any other way (a literal slot, a computed slot, a map entry, an
+//!   external call) holds all of `stor` instead, and so do its callers.
+//!   Transient storage is the same in `tstor`.
+//! - **World** is held by a function that logs, calls out, or reads what
+//!   changes during execution, and by its callers.
+//!
+//! Which objects stay apart comes from an origin analysis of each body: every
+//! local's possible origins (an object made here, a memory parameter, the
+//! pool, a storage parameter, a literal slot). An object whose address mixes
+//! with another origin, or leaves the function other than as a piece argument
+//! (stored, passed as a word, returned), is joined into the pool.
+
+use std::collections::BTreeSet;
+
+use cranelift_entity::EntityRef;
+use hir::analysis::ty::AddressSpace;
+use mir::{
+    PlaceRoot, RExpr, RLocalId, RStmt, RTerminator, RefKind, ResolvedPlaceElem, ResolvedPlaceRootKind,
+    RuntimeBody, RuntimeBuiltin, RuntimeClass, RuntimeInstance, RuntimeLocalRoot, RuntimeMemoryLayout, RuntimePlace,
+};
+use rustc_hash::{FxHashMap, FxHashSet};
+
+use crate::Db;
+use crate::cfg::Cfg;
+use crate::class::obj_size;
+
+/// Where an address may come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Org {
+    /// An object this function makes (a slot root or an allocation site).
+    Obj(u32),
+    MemParam(u16),
+    Pool,
+    StorParam(u16),
+    StorLit,
+    TstorParam(u16),
+    TstorLit,
+}
+
+pub type OSet = BTreeSet<Org>;
+
+/// The state a memory access goes through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MemHolder {
+    Pool,
+    Piece(u16),
+    Obj(u32),
+}
+
+/// The state a storage (or transient) access goes through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StorHolder {
+    Whole,
+    Piece(u16),
+}
+
+/// How a function holds storage (or transient storage).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    None,
+    Pieces,
+    Whole,
+}
+
+/// The kind of state behind a place: an object of this lowering's layout, or
+/// a space in Fe's own layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Area {
+    Obj,
+    Raw(AddressSpace),
+}
+
+/// A place's root origin and the area its last step reaches.
+pub struct PlaceInfo {
+    pub origin: OSet,
+    pub area: Area,
+}
+
+/// The piece a parameter of this class carries: bytes of memory, or slots.
+pub fn mem_piece(db: Db<'_>, class: &RuntimeClass<'_>) -> Option<u64> {
+    match class {
+        RuntimeClass::Ref { pointee, kind: RefKind::Object | RefKind::Const | RefKind::Provider { space: AddressSpace::Memory, .. }, .. } => {
+            Some(obj_size(db, pointee)).filter(|n| *n > 0)
+        }
+        _ => None,
+    }
+}
+
+pub fn stor_piece(db: Db<'_>, class: &RuntimeClass<'_>, space: AddressSpace) -> Option<u64> {
+    match class {
+        RuntimeClass::Ref { pointee, kind: RefKind::Provider { space: s, .. }, .. } if *s == space => {
+            RuntimeMemoryLayout::for_space(db, space).class_size(pointee).ok().filter(|n| *n > 0)
+        }
+        _ => None,
+    }
+}
+
+/// What one body needs by itself, and the origins of its locals.
+pub struct Facts<'db> {
+    pub origins: Vec<OSet>,
+    /// Object sites: slot-root locals, and allocating statements by
+    /// (block, statement); with the class of each object.
+    pub slot_site: FxHashMap<RLocalId, u32>,
+    pub stmt_site: FxHashMap<(usize, usize), u32>,
+    pub site_class: Vec<RuntimeClass<'db>>,
+    pub pooled_objs: FxHashSet<u32>,
+    pub pooled_params: FxHashSet<u16>,
+    /// Memory parameters whose address may be in the returned value.
+    pub ret_params: BTreeSet<u16>,
+    pub pool: bool,
+    pub stor_whole: bool,
+    pub tstor_whole: bool,
+    pub world: bool,
+    /// The body takes the control token: it may halt (a revert, a panic, a
+    /// failed check, an allocation's bound), or changes storage, transient
+    /// storage or the world.
+    pub ctl: bool,
+    /// Each call: the callee and its arguments.
+    pub calls: Vec<(RuntimeInstance<'db>, Vec<RLocalId>)>,
+}
+
+impl<'db> Facts<'db> {
+    pub fn mem_holder(&self, o: &OSet) -> MemHolder {
+        let mut it = o.iter();
+        match (it.next(), it.next()) {
+            (Some(Org::Obj(k)), None) if !self.pooled_objs.contains(k) => MemHolder::Obj(*k),
+            (Some(Org::MemParam(i)), None) if !self.pooled_params.contains(i) => MemHolder::Piece(*i),
+            _ => MemHolder::Pool,
+        }
+    }
+
+    /// The storage holder an access with these origins needs: a parameter's
+    /// piece, or (`None`) all of the space.
+    pub fn stor_piece_of(o: &OSet, space: AddressSpace) -> Option<u16> {
+        let mut it = o.iter();
+        match (it.next(), it.next(), space) {
+            (Some(Org::StorParam(i)), None, AddressSpace::Storage) | (Some(Org::TstorParam(i)), None, AddressSpace::Transient) => Some(*i),
+            _ => None,
+        }
+    }
+}
+
+fn is_mem_org(o: &Org) -> bool {
+    matches!(o, Org::Obj(_) | Org::MemParam(_))
+}
+
+pub struct Analyzer<'a, 'db> {
+    pub db: Db<'db>,
+    pub body: &'a RuntimeBody<'db>,
+    pub cfg: &'a Cfg,
+    /// The memory parameters each callee may return addresses into.
+    pub ret_params: &'a FxHashMap<RuntimeInstance<'db>, BTreeSet<u16>>,
+}
+
+impl<'a, 'db> Analyzer<'a, 'db> {
+    fn class(&self, l: RLocalId) -> Option<&RuntimeClass<'db>> {
+        self.body.value_class(l)
+    }
+
+    /// Resolve a place's root and steps as the lowering does.
+    pub fn place_info(&self, facts: &Facts<'db>, place: &RuntimePlace<'db>) -> Result<PlaceInfo, String> {
+        let program = self.db as &dyn mir::MirDb;
+        let resolved = mir::resolve_runtime_place(self.db, &program, self.body, place).map_err(|e| format!("place: {e:?}"))?;
+        let carrier = |class: &RuntimeClass<'db>| -> Result<Area, String> {
+            match class {
+                RuntimeClass::Ref { kind: RefKind::Object | RefKind::Const | RefKind::Provider { space: AddressSpace::Memory, .. }, .. } => Ok(Area::Obj),
+                RuntimeClass::Ref { kind: RefKind::Provider { space, .. }, .. } => Ok(Area::Raw(*space)),
+                RuntimeClass::RawAddr { space, .. } => Ok(Area::Raw(*space)),
+                other => Err(format!("unsupported place carrier {other:?}")),
+            }
+        };
+        let (mut origin, mut area) = match &resolved.root_kind {
+            ResolvedPlaceRootKind::Slot { local, .. } => (OSet::from([Org::Obj(facts.slot_site[local])]), Area::Obj),
+            ResolvedPlaceRootKind::Ref { value, .. } => {
+                let c = self.class(*value).ok_or("erased place root")?;
+                (facts.origins[value.index()].clone(), carrier(c)?)
+            }
+            ResolvedPlaceRootKind::Provider { value, provider_class, .. } => (facts.origins[value.index()].clone(), carrier(provider_class)?),
+            ResolvedPlaceRootKind::Ptr { addr, space, .. } => (facts.origins[addr.index()].clone(), Area::Raw(*space)),
+        };
+        for elem in resolved.path.iter() {
+            if let ResolvedPlaceElem::Deref { carrier_class, .. } = elem {
+                area = carrier(carrier_class)?;
+                origin = match area {
+                    Area::Obj | Area::Raw(AddressSpace::Memory) => OSet::from([Org::Pool]),
+                    _ => OSet::new(),
+                };
+            }
+        }
+        Ok(PlaceInfo { origin, area })
+    }
+
+    fn place_root_local(place: &RuntimePlace<'db>) -> Option<RLocalId> {
+        match &place.root {
+            PlaceRoot::Slot(l) | PlaceRoot::Ref(l) | PlaceRoot::Ptr { addr: l, .. } => Some(*l),
+            PlaceRoot::Provider(_) => None,
+        }
+    }
+
+    fn expr_origin(&self, facts: &Facts<'db>, at: (usize, usize), dst: RLocalId, expr: &RExpr<'db>) -> Result<OSet, String> {
+        let org = |l: &RLocalId| facts.origins[l.index()].clone();
+        Ok(match expr {
+            RExpr::Use(x)
+            | RExpr::RetagRef { value: x }
+            | RExpr::ProviderRefToRaw { value: x }
+            | RExpr::WordToRawAddr { value: x, .. }
+            | RExpr::NativeRef { value: x }
+            | RExpr::ProviderRefFromRaw { raw: x, .. }
+            | RExpr::Cast { value: x, .. }
+            | RExpr::AggregateExtract { value: x, .. }
+            | RExpr::EnumExtract { value: x, .. }
+            | RExpr::EnumAssertVariantRef { root: x, .. } => org(x),
+            RExpr::Binary { op: hir::hir_def::BinOp::Arith(hir::hir_def::ArithBinOp::Add | hir::hir_def::ArithBinOp::Sub), lhs, rhs } => {
+                org(lhs).union(&org(rhs)).copied().collect()
+            }
+            RExpr::AggregateMake { fields, .. } | RExpr::EnumMake { fields, .. } => fields.iter().flat_map(|f| org(f)).collect(),
+            RExpr::AddrOf { place } => self.place_info(facts, place)?.origin,
+            RExpr::Load { place } => match self.place_info(facts, place)?.area {
+                Area::Obj | Area::Raw(AddressSpace::Memory) => OSet::from([Org::Pool]),
+                _ => OSet::new(),
+            },
+            RExpr::AllocObject { .. } | RExpr::MaterializeToObject { .. } | RExpr::MaterializePlaceToObject { .. } | RExpr::ConstRef { .. } => {
+                OSet::from([Org::Obj(facts.stmt_site[&at])])
+            }
+            RExpr::Builtin(b) => match b {
+                RuntimeBuiltin::Malloc { .. } | RuntimeBuiltin::Mload { .. } => OSet::from([Org::Pool]),
+                RuntimeBuiltin::PtrOffsetBytes { ptr, .. } => org(ptr),
+                RuntimeBuiltin::MakeContractFieldRef { kind, .. } => match kind {
+                    RefKind::Provider { space: AddressSpace::Storage, .. } => OSet::from([Org::StorLit]),
+                    RefKind::Provider { space: AddressSpace::Transient, .. } => OSet::from([Org::TstorLit]),
+                    _ => OSet::from([Org::Pool]),
+                },
+                _ => OSet::new(),
+            },
+            RExpr::Call { callee, args } => {
+                let mut o = OSet::new();
+                if self.class(dst).is_some() {
+                    o.insert(Org::Pool);
+                }
+                if let Some(rp) = self.ret_params.get(callee) {
+                    for i in rp {
+                        if let Some(a) = args.get(*i as usize) {
+                            o.extend(org(a).into_iter().filter(is_mem_org));
+                        }
+                    }
+                }
+                o
+            }
+            _ => OSet::new(),
+        })
+    }
+
+    pub fn analyze(&self, instance: RuntimeInstance<'db>) -> Result<Facts<'db>, String> {
+        let body = self.body;
+        let db = self.db;
+        let n = body.locals.len();
+        let mut facts = Facts {
+            origins: vec![OSet::new(); n],
+            slot_site: FxHashMap::default(),
+            stmt_site: FxHashMap::default(),
+            site_class: Vec::new(),
+            pooled_objs: FxHashSet::default(),
+            pooled_params: FxHashSet::default(),
+            ret_params: BTreeSet::new(),
+            pool: false,
+            stor_whole: false,
+            tstor_whole: false,
+            world: false,
+            ctl: false,
+            calls: Vec::new(),
+        };
+        let _ = instance;
+        // Object sites.
+        for (i, local) in body.locals.iter().enumerate() {
+            if let RuntimeLocalRoot::Slot(class) = &local.root {
+                facts.slot_site.insert(RLocalId::new(i), facts.site_class.len() as u32);
+                facts.site_class.push(class.clone());
+            }
+        }
+        let blocks: Vec<usize> = (0..body.blocks.len()).filter(|b| self.cfg.reachable[*b]).collect();
+        for &b in &blocks {
+            for (s, stmt) in body.blocks[b].stmts.iter().enumerate() {
+                if let RStmt::Assign { dst, expr } = stmt {
+                    let class = match expr {
+                        RExpr::AllocObject { layout } | RExpr::ConstRef { layout, .. } => Some(RuntimeClass::AggregateValue { layout: *layout }),
+                        RExpr::MaterializeToObject { .. } | RExpr::MaterializePlaceToObject { .. } => {
+                            self.class(*dst).and_then(|c| c.ref_pointee().cloned())
+                        }
+                        _ => None,
+                    };
+                    if let Some(c) = class {
+                        facts.stmt_site.insert((b, s), facts.site_class.len() as u32);
+                        facts.site_class.push(c);
+                    }
+                }
+            }
+        }
+        // Parameter origins.
+        for (j, p) in body.signature.params.iter().enumerate() {
+            let o = match &p.class {
+                c if mem_piece(db, c).is_some() => Some(Org::MemParam(j as u16)),
+                RuntimeClass::Ref { kind: RefKind::Provider { space: AddressSpace::Storage, .. }, .. } => Some(Org::StorParam(j as u16)),
+                RuntimeClass::Ref { kind: RefKind::Provider { space: AddressSpace::Transient, .. }, .. } => Some(Org::TstorParam(j as u16)),
+                _ => None,
+            };
+            if let Some(o) = o {
+                facts.origins[p.local.index()].insert(o);
+            }
+        }
+        // Origins, flow-insensitively, to a fixed point.
+        loop {
+            let mut changed = false;
+            for &b in &blocks {
+                for (s, stmt) in body.blocks[b].stmts.iter().enumerate() {
+                    if let RStmt::Assign { dst, expr } = stmt {
+                        let o = self.expr_origin(&facts, (b, s), *dst, expr)?;
+                        let before = facts.origins[dst.index()].len();
+                        facts.origins[dst.index()].extend(o);
+                        changed |= facts.origins[dst.index()].len() != before;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // Merges: an object or memory parameter mixed with anything else.
+        let escape = |facts: &mut Facts<'db>, o: &OSet| {
+            for x in o {
+                match x {
+                    Org::Obj(k) => {
+                        facts.pooled_objs.insert(*k);
+                    }
+                    Org::MemParam(i) => {
+                        facts.pooled_params.insert(*i);
+                    }
+                    _ => {}
+                }
+            }
+        };
+        for o in facts.origins.clone() {
+            if o.len() > 1 && o.iter().any(is_mem_org) {
+                escape(&mut facts, &o);
+            }
+        }
+        // Escapes: addresses that leave other than as a piece argument.
+        let callee_params = |callee: &RuntimeInstance<'db>| callee.interface_signature(db).params;
+        let escape_args = |facts: &mut Facts<'db>, callee: &RuntimeInstance<'db>, args: &[RLocalId]| {
+            for (a, p) in args.iter().zip(&callee_params(callee)) {
+                if mem_piece(db, &p.class).is_none() {
+                    let o = facts.origins[a.index()].clone();
+                    escape(facts, &o);
+                }
+            }
+        };
+        for &b in &blocks {
+            let block = &body.blocks[b];
+            for stmt in &block.stmts {
+                match stmt {
+                    RStmt::Assign { expr: RExpr::Call { callee, args }, .. } => {
+                        escape_args(&mut facts, callee, args);
+                        facts.calls.push((*callee, args.to_vec()));
+                    }
+                    RStmt::Assign {
+                        expr:
+                            RExpr::Builtin(
+                                RuntimeBuiltin::Mstore { value, .. }
+                                | RuntimeBuiltin::Mstore8 { value, .. }
+                                | RuntimeBuiltin::Sstore { value, .. },
+                            ),
+                        ..
+                    }
+                    | RStmt::Store { src: value, .. } => {
+                        let o = facts.origins[value.index()].clone();
+                        escape(&mut facts, &o);
+                    }
+                    RStmt::CopyInto { src, .. } => {
+                        // A reference source is copied from, not stored.
+                        if !matches!(self.class(*src), Some(RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. })) {
+                            let o = facts.origins[src.index()].clone();
+                            escape(&mut facts, &o);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match &block.terminator {
+                RTerminator::Return(Some(v)) => {
+                    let o = facts.origins[v.index()].clone();
+                    for x in &o {
+                        if let Org::MemParam(i) = x {
+                            facts.ret_params.insert(*i);
+                        }
+                    }
+                    let objs: OSet = o.into_iter().filter(|x| matches!(x, Org::Obj(_))).collect();
+                    escape(&mut facts, &objs);
+                }
+                RTerminator::TerminalCall { callee, args } => {
+                    escape_args(&mut facts, callee, args);
+                    facts.calls.push((*callee, args.to_vec()));
+                }
+                _ => {}
+            }
+        }
+        // What the body needs by itself, now that the pooled objects are known.
+        for &b in &blocks {
+            let block = &body.blocks[b];
+            for stmt in &block.stmts {
+                match stmt {
+                    RStmt::Assign { dst, expr } => self.expr_needs(&mut facts, *dst, expr)?,
+                    RStmt::Store { dst, .. } => self.access(&mut facts, dst, true)?,
+                    RStmt::CopyInto { dst, src } => {
+                        if matches!(self.class(*src), Some(RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. })) {
+                            let o = facts.origins[src.index()].clone();
+                            if facts.mem_holder(&o) == MemHolder::Pool {
+                                facts.pool = true;
+                            }
+                        }
+                        self.access(&mut facts, dst, true)?;
+                    }
+                    RStmt::AssertIndexInBounds { .. } => {
+                        facts.pool = true;
+                        facts.ctl = true;
+                    }
+                    RStmt::EnumSetTag { root, .. } | RStmt::EnumWriteVariant { root, .. } => {
+                        let o = facts.origins[root.index()].clone();
+                        if facts.mem_holder(&o) == MemHolder::Pool {
+                            facts.pool = true;
+                        }
+                    }
+                    RStmt::EnumAssertVariant { .. } => {}
+                    RStmt::End { .. } => return Err("an unfinished projection session".into()),
+                }
+            }
+            match &block.terminator {
+                RTerminator::ReturnData { .. } | RTerminator::Revert { .. } | RTerminator::RevertEmpty => {
+                    facts.pool = true;
+                    facts.ctl = true;
+                }
+                RTerminator::SelfDestruct { .. } => {
+                    facts.world = true;
+                    facts.ctl = true;
+                }
+                RTerminator::Stop | RTerminator::Trap | RTerminator::TerminalCall { .. } => facts.ctl = true,
+                RTerminator::Yield { .. } => return Err("an uninlined projection".into()),
+                _ => {}
+            }
+        }
+        // Objects and pooled parameters need the pool.
+        if !facts.site_class.is_empty() || !facts.pooled_params.is_empty() {
+            facts.pool = true;
+        }
+        if !facts.site_class.is_empty() {
+            facts.ctl = true;
+        }
+        Ok(facts)
+    }
+
+    /// A place accessed (read or written): which state it needs.
+    fn access(&self, facts: &mut Facts<'db>, place: &RuntimePlace<'db>, write: bool) -> Result<(), String> {
+        let info = self.place_info(facts, place)?;
+        // A dynamic index is checked, and its failure reverts.
+        if place.path.iter().any(|e| matches!(e, mir::PlaceElem::Index(hir::projection::IndexSource::Dynamic(_)))) {
+            facts.pool = true;
+            facts.ctl = true;
+        }
+        if write && matches!(info.area, Area::Raw(AddressSpace::Storage | AddressSpace::Transient)) {
+            facts.ctl = true;
+        }
+        let _ = Self::place_root_local(place);
+        match info.area {
+            Area::Obj | Area::Raw(AddressSpace::Memory) => {
+                if facts.mem_holder(&info.origin) == MemHolder::Pool {
+                    facts.pool = true;
+                }
+            }
+            Area::Raw(space @ AddressSpace::Storage) | Area::Raw(space @ AddressSpace::Transient) => {
+                if Facts::stor_piece_of(&info.origin, space).is_none() {
+                    if space == AddressSpace::Storage {
+                        facts.stor_whole = true;
+                    } else {
+                        facts.tstor_whole = true;
+                    }
+                }
+            }
+            Area::Raw(AddressSpace::Calldata) => {}
+            Area::Raw(AddressSpace::Code) => facts.pool = true,
+        }
+        Ok(())
+    }
+
+    fn expr_needs(&self, facts: &mut Facts<'db>, dst: RLocalId, expr: &RExpr<'db>) -> Result<(), String> {
+        use RuntimeBuiltin as B;
+        let pool_if = |facts: &mut Facts<'db>, l: &RLocalId| {
+            let o = facts.origins[l.index()].clone();
+            if facts.mem_holder(&o) == MemHolder::Pool {
+                facts.pool = true;
+            }
+        };
+        match expr {
+            RExpr::Load { place } | RExpr::EnumGetTag { place } | RExpr::MaterializePlaceToObject { place } => self.access(facts, place, false)?,
+            RExpr::AddrOf { place } => {
+                if place.path.iter().any(|e| matches!(e, mir::PlaceElem::Index(hir::projection::IndexSource::Dynamic(_)) | mir::PlaceElem::Deref)) {
+                    self.access(facts, place, false)?;
+                }
+            }
+            RExpr::MaterializeToObject { src } => {
+                if matches!(self.class(*src), Some(RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. })) {
+                    pool_if(facts, src);
+                }
+            }
+            RExpr::Binary { op: hir::hir_def::BinOp::Arith(op), .. } => {
+                use hir::hir_def::ArithBinOp as A;
+                if matches!(op, A::Add | A::Sub | A::Mul | A::Div | A::Rem | A::Pow) {
+                    facts.pool = true;
+                    facts.ctl = true;
+                }
+            }
+            RExpr::Builtin(b) => match b {
+                B::IntrinsicArith { checked, op, .. } => {
+                    if *checked || matches!(op, mir::IntrinsicArithBinOp::Pow) {
+                        facts.pool = true;
+                        facts.ctl = true;
+                    }
+                }
+                B::Mload { addr } | B::Mstore { addr, .. } | B::Mstore8 { addr, .. } | B::StoreConstBytes { dst: addr, .. } | B::ZeroMem { dst: addr, .. } => {
+                    pool_if(facts, addr)
+                }
+                B::Mcopy { .. } | B::Msize => facts.pool = true,
+                B::Keccak256 { offset, .. } => pool_if(facts, offset),
+                B::CallDataCopy { dst, .. } | B::CodeCopy { dst, .. } => pool_if(facts, dst),
+                B::ReturnDataCopy { dst, .. } | B::ExtCodeCopy { dst, .. } => {
+                    pool_if(facts, dst);
+                    facts.world = true;
+                    facts.ctl |= matches!(b, B::ReturnDataCopy { .. });
+                }
+                B::Sload { slot } | B::Sstore { slot, .. } => {
+                    if Facts::stor_piece_of(&facts.origins[slot.index()], AddressSpace::Storage).is_none() {
+                        facts.stor_whole = true;
+                    }
+                    facts.ctl |= matches!(b, B::Sstore { .. });
+                }
+                B::Log0 { offset, .. } | B::Log1 { offset, .. } | B::Log2 { offset, .. } | B::Log3 { offset, .. } | B::Log4 { offset, .. } => {
+                    pool_if(facts, offset);
+                    facts.world = true;
+                    facts.ctl = true;
+                }
+                B::Balance { .. } | B::ExtCodeSize { .. } | B::ExtCodeHash { .. } | B::SelfBalance | B::ReturnDataSize | B::Gas => facts.world = true,
+                B::Call { .. } | B::StaticCall { .. } | B::DelegateCall { .. } | B::Create { .. } | B::Create2 { .. } => {
+                    return Err("external calls and creation are not lowered yet".into());
+                }
+                B::Malloc { .. } => {
+                    facts.pool = true;
+                    facts.ctl = true;
+                }
+                B::CodeRegionOffset { .. } | B::CodeRegionLen { .. } | B::CurrentCodeRegionLen => {
+                    return Err("code regions are not lowered yet".into());
+                }
+                _ => {}
+            },
+            RExpr::ConstRef { .. } => {
+                facts.pool = true;
+                facts.ctl = true;
+            }
+            _ => {}
+        }
+        let _ = dst;
+        Ok(())
+    }
+}
+
+/// A parameter in a signature: its words and the piece it carries.
+#[derive(Clone, Debug)]
+pub enum Piece {
+    None,
+    Mem(u64),
+    Stor(u64),
+    Tstor(u64),
+}
+
+#[derive(Clone, Debug)]
+pub struct Plan {
+    pub name: String,
+    /// Per rMIR parameter: how many words, and its piece.
+    pub params: Vec<(usize, Piece)>,
+    pub ret_words: usize,
+    pub pool: bool,
+    pub stor: Mode,
+    pub tstor: Mode,
+    pub world: bool,
+    /// Takes and gives back the control token.
+    pub ctl: bool,
+    /// The contract's runtime entry: whole states, no words.
+    pub entry: bool,
+}
+
+impl Plan {
+    /// The pieces this function's signature carries: a storage piece only in
+    /// pieces mode.
+    pub fn carries(&self, j: usize) -> &Piece {
+        match &self.params[j].1 {
+            Piece::Stor(_) if self.stor != Mode::Pieces => &Piece::None,
+            Piece::Tstor(_) if self.tstor != Mode::Pieces => &Piece::None,
+            p => p,
+        }
+    }
+}

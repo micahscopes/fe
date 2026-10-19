@@ -2489,6 +2489,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fe-leadsheet"
+version = "26.4.0"
+dependencies = [
+ "cranelift-entity 0.136.1",
+ "fe-common",
+ "fe-driver",
+ "fe-hir",
+ "fe-mir",
+ "ruint",
+ "rustc-hash 2.1.1",
+ "url",
+]
+
+[[package]]
 name = "fe-mir"
 version = "26.4.0"
 dependencies = [
