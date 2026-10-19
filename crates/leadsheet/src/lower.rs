@@ -768,12 +768,8 @@ impl<'p, 'db> Lower<'p, 'db> {
         }
         match self.env.vals.get(&l) {
             Some(ws) => Ok(ws.clone()),
-            None => {
-                // A local no path to here assigned (rMIR may read one on a path
-                // the program never takes): zeros.
-                let n = self.word_count(l);
-                Ok((0..n).map(|_| self.b.k(0)).collect())
-            }
+            None if self.word_count(l) == 0 => Ok(Vec::new()),
+            None => Err(format!("%{} is read where no path assigned it", l.index())),
         }
     }
 

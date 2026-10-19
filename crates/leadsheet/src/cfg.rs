@@ -45,11 +45,21 @@ fn halts(t: &RTerminator<'_>) -> bool {
     )
 }
 
+/// The local a place rooted at a provider binding reads, which the place's
+/// own values leave out.
+fn provider_use(body: &RuntimeBody<'_>, place: Option<&mut mir::RuntimePlace<'_>>) -> Option<RLocalId> {
+    match place.map(|p| &p.root) {
+        Some(mir::PlaceRoot::Provider(b)) => body.provider_bindings.get(b.index()).map(|pb| pb.value),
+        _ => None,
+    }
+}
+
 /// The locals a statement reads, and the one it defines (an assignment to a
 /// local that is not a slot root, whose assignments are stores).
 pub fn stmt_uses_defs(body: &RuntimeBody<'_>, stmt: &RStmt<'_>) -> (Vec<RLocalId>, Option<RLocalId>) {
     let mut s = stmt.clone();
-    match &mut s {
+    let extra = provider_use(body, s.place_mut());
+    let (mut uses, def) = match &mut s {
         RStmt::Assign { dst, expr } => {
             let dst = *dst;
             let uses: Vec<RLocalId> = expr.values_mut().into_iter().map(|v| *v).collect();
@@ -57,7 +67,9 @@ pub fn stmt_uses_defs(body: &RuntimeBody<'_>, stmt: &RStmt<'_>) -> (Vec<RLocalId
             if slot { (uses.into_iter().chain([dst]).collect(), None) } else { (uses, Some(dst)) }
         }
         other => (other.locals_mut().into_iter().map(|v| *v).collect(), None),
-    }
+    };
+    uses.extend(extra);
+    (uses, def)
 }
 
 pub fn term_uses(t: &RTerminator<'_>) -> Vec<RLocalId> {
