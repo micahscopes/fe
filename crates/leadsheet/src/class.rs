@@ -99,6 +99,18 @@ impl Sc {
         }
     }
 
+    /// A word canonical for this type, computed here.
+    pub fn canon_word(self, x: U256) -> U256 {
+        if self.width >= 256 {
+            return x;
+        }
+        if self.is_bool() {
+            return U256::from(!x.is_zero() as u64);
+        }
+        let low = x & self.mask();
+        if self.signed && low.bit(self.width as usize - 1) { low | !self.mask() } else { low }
+    }
+
     /// As `canon`, for a value whose word is already 0 or 1 when this is a
     /// bool (a comparison's result).
     pub fn canon_cmp(self, b: &mut Builder, x: V) -> V {

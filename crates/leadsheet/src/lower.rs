@@ -32,6 +32,8 @@ use crate::text::{Builder, End, Function, Operand, Owns, Region, Space, Ty, V};
 
 const PANIC_OVERFLOW: u64 = 0x11;
 const PANIC_DIVISION_BY_ZERO: u64 = 0x12;
+/// The error a statement gives when its path always reverts empty from there.
+const HALT_EMPTY: &str = "\u{0}halts";
 
 type R<T> = Result<T, String>;
 
@@ -114,12 +116,14 @@ pub struct Lower<'p, 'db> {
     budget: usize,
     /// Addresses known to be an object's base, by its site.
     bases: FxHashMap<V, u32>,
+    /// Checked-exponentiation helpers this function calls, by type.
+    pub helpers: BTreeSet<(u16, bool)>,
 }
 
 impl<'p, 'db> Lower<'p, 'db> {
     pub fn new(prog: &'p Program<'p, 'db>, body: RuntimeBody<'db>, cfg: Cfg, facts: &'p Facts<'db>, plan: &'p Plan) -> Self {
         let budget = 64 * body.blocks.len().max(4);
-        Lower { db: prog.db, prog, body, cfg, facts, plan, b: Builder::new(), env: Env::default(), halt_end: None, budget, bases: FxHashMap::default() }
+        Lower { db: prog.db, prog, body, cfg, facts, plan, b: Builder::new(), env: Env::default(), halt_end: None, budget, bases: FxHashMap::default(), helpers: BTreeSet::new() }
     }
 
     fn class(&self, l: RLocalId) -> Option<RuntimeClass<'db>> {
@@ -193,8 +197,9 @@ impl<'p, 'db> Lower<'p, 'db> {
 
     // ------------------------------------------------------------ signature
 
-    /// Builds the function: signature, prologue, body.
-    pub fn lower(mut self) -> R<Function> {
+    /// Builds the function: signature, prologue, body; and the helpers it
+    /// calls.
+    pub fn lower(mut self) -> R<(Function, BTreeSet<(u16, bool)>)> {
         let plan = self.plan;
         let params_rmir = self.body.signature.params.clone();
         let mut tys: Vec<Ty> = Vec::new();
@@ -329,7 +334,7 @@ impl<'p, 'db> Lower<'p, 'db> {
         let body = self.b.close(params.clone(), end);
         let _ = ret_class;
         let fparams = params.iter().zip(tys.iter()).zip(owns).map(|((v, t), o)| (*v, *t, o)).collect();
-        Ok(Function { name: plan.name.clone(), params: fparams, results, body })
+        Ok((Function { name: plan.name.clone(), params: fparams, results, body }, self.helpers))
     }
 
     // ------------------------------------------------------------ control
@@ -353,7 +358,16 @@ impl<'p, 'db> Lower<'p, 'db> {
             self.budget -= 1;
             let data = self.body.blocks[block.index()].clone();
             for (i, stmt) in data.stmts.iter().enumerate() {
-                self.stmt(block, i, stmt).map_err(|e| format!("bb{}[{i}]: {e}", block.index()))?;
+                match self.stmt(block, i, stmt) {
+                    Ok(()) => {}
+                    Err(e) if e == HALT_EMPTY => {
+                        let m = self.any_mem()?;
+                        let c = self.state(Key::Ctl)?;
+                        self.halt_end = Some(halt_end(&mut self.b, m, c, Halt::Empty));
+                        return Ok(Flow::Halted);
+                    }
+                    Err(e) => return Err(format!("bb{}[{i}]: {e}", block.index())),
+                }
             }
             let (sel, cases, default): (V, Vec<(U256, RBlockId)>, Option<RBlockId>) = match &data.terminator {
                 RTerminator::Goto(t) => {
@@ -986,9 +1000,20 @@ impl<'p, 'db> Lower<'p, 'db> {
                 if (*i as u64) < len {
                     return Ok(self.b.k(*i as u64));
                 }
-                self.b.k(*i as u64)
+                // Always out of range: the path ends here, as Sonatina deletes
+                // the access behind such a check.
+                return Err(HALT_EMPTY.into());
             }
-            IndexSource::Dynamic(l) => self.word_of(*l)?,
+            IndexSource::Dynamic(l) => {
+                let i = self.word_of(*l)?;
+                // A constant after all: in range needs no check, out of range
+                // ends the path (Sonatina's `drop_dead_index_accesses`).
+                match self.b.known(i) {
+                    Some(c) if c < U256::from(len) => return Ok(i),
+                    Some(_) => return Err(HALT_EMPTY.into()),
+                    None => i,
+                }
+            }
             IndexSource::Any => return Err("a wildcard index".into()),
         };
         let n = self.b.k(len);
@@ -998,37 +1023,28 @@ impl<'p, 'db> Lower<'p, 'db> {
         Ok(i)
     }
 
-    /// Halts (an empty revert or a panic) when `flag` is 1.
+    /// Halts (an empty revert or a panic) when `flag` is 1. Every held
+    /// state goes through the check, so what follows (an access whose address
+    /// the check vouches for) is ordered after it by its data, not only by
+    /// the control token.
     fn guard(&mut self, flag: V, halt: Halt) -> R<()> {
         if self.b.known(flag) == Some(U256::ZERO) {
             return Ok(());
         }
-        let pool = self.pool()?;
-        let ctl = self.state(Key::Ctl)?;
-        let ty = [Ty::State(Space::Mem), Ty::State(Space::Ctl)];
-        let p = self.b.open(&ty);
+        let keys: Vec<Key> = self.env.held.keys().copied().collect();
+        let ins: Vec<V> = keys.iter().map(|k| self.env.held[k]).collect();
+        let tys: Vec<Ty> = ins.iter().map(|v| self.b.ty(*v)).collect();
+        let pool_at = keys.iter().position(|k| *k == Key::Pool).ok_or("a check without the pool")?;
+        let ctl_at = keys.iter().position(|k| *k == Key::Ctl).ok_or("a check without the control token")?;
+        let p = self.b.open(&tys);
         let ok = self.b.close(p.clone(), End::Yield(p));
-        let p = self.b.open(&ty);
-        let end = match halt {
-            Halt::Empty => {
-                let z = self.b.k(0);
-                End::Halt("revert", vec![p[0], p[1], z, z])
-            }
-            Halt::Panic(code) => {
-                let z = self.b.k(0);
-                let sel = self.b.konst(U256::from(0x4e48_7b71u64) << 224);
-                let m = self.b.op("mstore", &[p[0], z, sel], 0, &[Space::Mem])[0];
-                let four = self.b.k(4);
-                let c = self.b.k(code);
-                let m = self.b.op("mstore", &[m, four, c], 0, &[Space::Mem])[0];
-                let len = self.b.k(36);
-                End::Halt("revert", vec![m, p[1], z, len])
-            }
-        };
+        let p = self.b.open(&tys);
+        let end = halt_end(&mut self.b, p[pool_at], p[ctl_at], halt);
         let bad = self.b.close(p, end);
-        let out = self.b.gamma(flag, &[pool, ctl], vec![(U256::ZERO, ok)], bad, &ty);
-        self.set(Key::Pool, out[0]);
-        self.set(Key::Ctl, out[1]);
+        let outs = self.b.gamma(flag, &ins, vec![(U256::ZERO, ok)], bad, &tys);
+        for (k, v) in keys.iter().zip(outs) {
+            self.env.held.insert(*k, v);
+        }
         Ok(())
     }
 
@@ -1639,92 +1655,13 @@ impl<'p, 'db> Lower<'p, 'db> {
         }
     }
 
-    /// `c ? a : b` for a 0-or-1 `c`, without a branch.
-    fn select(&mut self, c: V, a: V, b: V) -> V {
-        let z = self.b.k(0);
-        let mask = self.b.w("sub", &[z, c]);
-        let d = self.b.w("xor", &[a, b]);
-        let m = self.b.w("and", &[d, mask]);
-        self.b.w("xor", &[b, m])
-    }
-
-    /// Whether a sign-extended word `x` is outside a narrow signed type.
-    fn outside_signed(&mut self, x: V, sc: Sc) -> V {
-        let k = self.b.k(u64::from(sc.width / 8 - 1));
-        let e = self.b.w("signextend", &[k, x]);
-        let same = self.b.w("eq", &[e, x]);
-        self.b.w("iszero", &[same])
-    }
-
-    fn add_overflow(&mut self, l: V, r: V, s: V, sc: Sc) -> V {
-        match (sc.signed, sc.width >= 256) {
-            (false, true) => self.b.w("lt", &[s, l]),
-            (false, false) => {
-                let max = self.b.konst(sc.max());
-                self.b.w("gt", &[s, max])
-            }
-            (true, true) => {
-                let a = self.b.w("slt", &[s, l]);
-                let z = self.b.k(0);
-                let b = self.b.w("slt", &[r, z]);
-                self.b.w("xor", &[a, b])
-            }
-            (true, false) => self.outside_signed(s, sc),
-        }
-    }
-
-    fn sub_overflow(&mut self, l: V, r: V, d: V, sc: Sc) -> V {
-        match (sc.signed, sc.width >= 256) {
-            (false, _) => self.b.w("lt", &[l, r]),
-            (true, true) => {
-                let z = self.b.k(0);
-                let p = self.b.w("sgt", &[r, z]);
-                let q = self.b.w("slt", &[d, l]);
-                self.b.w("xor", &[p, q])
-            }
-            (true, false) => self.outside_signed(d, sc),
-        }
-    }
-
-    fn mul_overflow(&mut self, l: V, r: V, m: V, sc: Sc) -> V {
-        match (sc.signed, sc.width >= 256) {
-            (false, true) => {
-                let lz = self.b.w("iszero", &[l]);
-                let nz = self.b.w("iszero", &[lz]);
-                let q = self.b.w("div", &[m, l]);
-                let same = self.b.w("eq", &[q, r]);
-                let differ = self.b.w("iszero", &[same]);
-                self.b.w("and", &[nz, differ])
-            }
-            (false, false) => {
-                let max = self.b.konst(sc.max());
-                self.b.w("gt", &[m, max])
-            }
-            (true, true) => {
-                let minus_one = self.b.konst(U256::MAX);
-                let min = self.b.konst(sc.signed_min());
-                let a = self.b.w("eq", &[l, minus_one]);
-                let b = self.b.w("eq", &[r, min]);
-                let first = self.b.w("and", &[a, b]);
-                let lz = self.b.w("iszero", &[l]);
-                let nz = self.b.w("iszero", &[lz]);
-                let q = self.b.w("sdiv", &[m, l]);
-                let same = self.b.w("eq", &[q, r]);
-                let differ = self.b.w("iszero", &[same]);
-                let second = self.b.w("and", &[nz, differ]);
-                self.b.w("or", &[first, second])
-            }
-            (true, false) => self.outside_signed(m, sc),
-        }
-    }
-
     /// Sonatina's `lower_arith`: operands already canonical for `sc`.
     fn arith(&mut self, op: ArithBinOp, checked: bool, l: V, r: V, sc: Sc) -> R<V> {
         Ok(match op {
             ArithBinOp::Add => {
                 let s = self.b.w("add", &[l, r]);
                 if checked {
-                    let o = self.add_overflow(l, r, s, sc);
+                    let o = add_overflow(&mut self.b, l, r, s, sc);
                     self.guard(o, Halt::Panic(PANIC_OVERFLOW))?;
                 }
                 sc.canon(&mut self.b, s)
@@ -1732,7 +1669,7 @@ impl<'p, 'db> Lower<'p, 'db> {
             ArithBinOp::Sub => {
                 let d = self.b.w("sub", &[l, r]);
                 if checked {
-                    let o = self.sub_overflow(l, r, d, sc);
+                    let o = sub_overflow(&mut self.b, l, r, d, sc);
                     self.guard(o, Halt::Panic(PANIC_OVERFLOW))?;
                 }
                 sc.canon(&mut self.b, d)
@@ -1740,7 +1677,7 @@ impl<'p, 'db> Lower<'p, 'db> {
             ArithBinOp::Mul => {
                 let m = self.b.w("mul", &[l, r]);
                 if checked {
-                    let o = self.mul_overflow(l, r, m, sc);
+                    let o = mul_overflow(&mut self.b, l, r, m, sc);
                     self.guard(o, Halt::Panic(PANIC_OVERFLOW))?;
                 }
                 sc.canon(&mut self.b, m)
@@ -1771,7 +1708,7 @@ impl<'p, 'db> Lower<'p, 'db> {
             }
             ArithBinOp::Pow => {
                 if checked {
-                    return Err("checked exponentiation is not lowered yet".into());
+                    return self.checked_pow(l, r, sc);
                 }
                 let e = self.b.w("exp", &[l, r]);
                 sc.canon(&mut self.b, e)
@@ -1788,19 +1725,78 @@ impl<'p, 'db> Lower<'p, 'db> {
         })
     }
 
+    /// Sonatina's checked `lower_pow`: a negative signed exponent reverts
+    /// empty; then exponentiation by squaring, every product checked. A base
+    /// of 0, 1 or -1 never overflows and is computed directly; any other base
+    /// overflows within a few squarings, so the helper's recursion is shallow.
+    fn checked_pow(&mut self, l: V, r: V, sc: Sc) -> R<V> {
+        if sc.signed {
+            let z = self.b.k(0);
+            let neg = self.b.w("slt", &[r, z]);
+            self.guard(neg, Halt::Empty)?;
+        }
+        self.helpers.insert((sc.width, sc.signed));
+        let (zero, one, two) = (self.b.k(0), self.b.k(1), self.b.k(2));
+        let mut small = self.b.w("lt", &[l, two]);
+        if sc.signed {
+            let minus_one = self.b.konst(U256::MAX);
+            let m = self.b.w("eq", &[l, minus_one]);
+            small = self.b.w("or", &[small, m]);
+        }
+        let keys: Vec<Key> = self.env.held.keys().copied().collect();
+        let mut ins = vec![l, r];
+        ins.extend(keys.iter().map(|k| self.env.held[k]));
+        let tys: Vec<Ty> = ins.iter().map(|v| self.b.ty(*v)).collect();
+        let pool_at = 2 + keys.iter().position(|k| *k == Key::Pool).ok_or("a power without the pool")?;
+        let ctl_at = 2 + keys.iter().position(|k| *k == Key::Ctl).ok_or("a power without the control token")?;
+        let _ = (zero, one);
+        // Any other base: the helper.
+        let p = self.b.open(&tys);
+        let one_in = self.b.k(1);
+        let outs = self.b.apply(&pow_name(sc), &[one_in, p[0], p[1], p[pool_at], p[ctl_at]], &[Ty::Word, Ty::State(Space::Mem), Ty::State(Space::Ctl)]);
+        let mut ys = vec![outs[0]];
+        for (i, v) in p[2..].iter().enumerate() {
+            ys.push(if i + 2 == pool_at { outs[1] } else if i + 2 == ctl_at { outs[2] } else { *v });
+        }
+        let big = self.b.close(p, End::Yield(ys));
+        // 0, 1 or -1.
+        let p = self.b.open(&tys);
+        let (base, e) = (p[0], p[1]);
+        let z = self.b.k(0);
+        let one = self.b.k(1);
+        let d0 = self.b.w("iszero", &[e]);
+        let is0 = self.b.w("eq", &[base, z]);
+        let is1 = self.b.w("eq", &[base, one]);
+        let odd = self.b.w("and", &[e, one]);
+        let minus_one = self.b.konst(sc.canon_word(U256::MAX));
+        let dm = select(&mut self.b, odd, minus_one, one);
+        let d = select(&mut self.b, is1, one, dm);
+        let d = select(&mut self.b, is0, d0, d);
+        let mut ys = vec![d];
+        ys.extend_from_slice(&p[2..]);
+        let direct = self.b.close(p, End::Yield(ys));
+        let mut out_tys = vec![Ty::Word];
+        out_tys.extend_from_slice(&tys[2..]);
+        let outs = self.b.gamma(small, &ins, vec![(U256::ZERO, big)], direct, &out_tys);
+        for (k, v) in keys.iter().zip(&outs[1..]) {
+            self.env.held.insert(*k, *v);
+        }
+        Ok(outs[0])
+    }
+
     fn saturating(&mut self, op: SaturatingBinOp, l: V, r: V, sc: Sc) -> V {
         let (raw, o) = match op {
             SaturatingBinOp::Add => {
                 let s = self.b.w("add", &[l, r]);
-                (s, self.add_overflow(l, r, s, sc))
+                (s, add_overflow(&mut self.b, l, r, s, sc))
             }
             SaturatingBinOp::Sub => {
                 let d = self.b.w("sub", &[l, r]);
-                (d, self.sub_overflow(l, r, d, sc))
+                (d, sub_overflow(&mut self.b, l, r, d, sc))
             }
             SaturatingBinOp::Mul => {
                 let m = self.b.w("mul", &[l, r]);
-                (m, self.mul_overflow(l, r, m, sc))
+                (m, mul_overflow(&mut self.b, l, r, m, sc))
             }
         };
         let bound = if !sc.signed {
@@ -1820,10 +1816,10 @@ impl<'p, 'db> Lower<'p, 'db> {
                 }
             };
             let (min, max) = (self.b.konst(sc.signed_min()), self.b.konst(sc.max()));
-            self.select(negative, min, max)
+            select(&mut self.b, negative, min, max)
         };
         let canon = sc.canon(&mut self.b, raw);
-        self.select(o, bound, canon)
+        select(&mut self.b, o, bound, canon)
     }
 
     // ------------------------------------------------------------ builtins
@@ -2096,9 +2092,15 @@ impl<'p, 'db> Lower<'p, 'db> {
         let sig = callee.interface_signature(self.db);
         let mut ins: Vec<V> = Vec::new();
         let mut tys: Vec<Ty> = Vec::new();
-        // Pieces taken: (the key they came from, or `None` when the whole
-        // object state was passed, and the object's key then).
+        // Pieces taken: the key each came from, and whether it was the whole
+        // state there (an object passed whole) or split out of it.
         let mut taken: Vec<(Key, bool)> = Vec::new();
+        // Each memory piece passed: its key, address, length and state, for an
+        // aliased view to be copied from.
+        let mut passed: Vec<(Key, V, u64, V)> = Vec::new();
+        // Copies made for aliased views, dropped into the pool afterwards.
+        let mut copies: Vec<usize> = Vec::new();
+        let callee_body = callee.body(self.db);
         for (j, (a, p)) in args.iter().zip(&sig.params).enumerate() {
             let ac = self.class(*a);
             let ws = if self.is_slot(*a) {
@@ -2122,6 +2124,45 @@ impl<'p, 'db> Lower<'p, 'db> {
                 Piece::Mem(n) => {
                     let h = self.mem_holder(&self.org(*a));
                     let key = Self::key_of(Holder::Mem(h))?;
+                    // A second view of a place already passed to this call
+                    // (Fe lets views overlap) gets a copy: the callee cannot
+                    // write a view, so a copy reads the same.
+                    let held = self.env.held.contains_key(&key);
+                    let aliased = passed.iter().find(|(k, addr, ..)| *k == key && (!held || *addr == ws[0])).copied();
+                    if let Some((_, _, _, state)) = aliased {
+                        let local = callee_body.signature.params[j].local;
+                        let mutable = matches!(
+                            callee_body.locals[local.index()].semantic_ty.as_capability(self.db),
+                            Some((hir::analysis::ty::ty_def::CapabilityKind::Mut, _))
+                        );
+                        if mutable {
+                            return Err(format!("a `mut` argument of @{} overlaps another", plan.name));
+                        }
+                        let words: Vec<V> = (0..n / 32)
+                            .map(|i| {
+                                let at = self.offset(ws[0], 32 * i);
+                                self.b.op("mload", &[state, at], 1, &[])[0]
+                            })
+                            .collect();
+                        let pool = self.pool()?;
+                        let ctl = self.state(Key::Ctl)?;
+                        let size = self.b.k(n);
+                        let (p, obj, rest, ctl) = self.b.alloc(pool, ctl, size);
+                        self.set(Key::Pool, rest);
+                        self.set(Key::Ctl, ctl);
+                        let mut o = obj;
+                        for (i, w) in words.iter().enumerate() {
+                            let off = self.offset(p, 32 * i as u64);
+                            o = self.b.op("mstore", &[o, off, *w], 0, &[Space::Mem])[0];
+                        }
+                        let at = ins.len() - ws.len();
+                        ins[at] = p;
+                        copies.push(taken.len());
+                        ins.push(o);
+                        taken.push((Key::Pool, false));
+                        tys.push(Ty::State(Space::Mem));
+                        continue;
+                    }
                     let whole = match h {
                         MemHolder::Obj(k) => {
                             obj_size(self.db, &self.facts.site_class[k as usize]) == n && self.bases.get(&ws[0]) == Some(&k)
@@ -2133,6 +2174,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                         self.env.held.remove(&key);
                         ins.push(s);
                         taken.push((key, true));
+                        passed.push((key, ws[0], n, s));
                     } else {
                         let s = self.state(key)?;
                         let len = self.b.k(n);
@@ -2140,6 +2182,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                         self.set(key, rest);
                         ins.push(piece);
                         taken.push((key, false));
+                        passed.push((key, ws[0], n, piece));
                     }
                     tys.push(Ty::State(Space::Mem));
                 }
@@ -2187,8 +2230,13 @@ impl<'p, 'db> Lower<'p, 'db> {
         for (k, v) in rest_keys.iter().zip(rests) {
             self.set(*k, *v);
         }
-        for ((key, whole), v) in taken.iter().zip(pieces).rev() {
-            if *whole {
+        for (i, ((key, whole), v)) in taken.iter().zip(pieces).enumerate().rev() {
+            if copies.contains(&i) {
+                // A copy for an aliased view: dropped into the pool.
+                let pool = self.pool()?;
+                let j = self.b.join(*v, pool);
+                self.set(Key::Pool, j);
+            } else if *whole {
                 self.set(*key, *v);
             } else {
                 let s = self.state(*key)?;
@@ -2200,6 +2248,164 @@ impl<'p, 'db> Lower<'p, 'db> {
         Ok(words)
     }
 }
+
+/// `c ? a : b` for a 0-or-1 `c`, without a branch.
+/// The end of a region that halts as a failed check does.
+fn halt_end(b: &mut Builder, m: V, c: V, halt: Halt) -> End {
+    let z = b.k(0);
+    match halt {
+        Halt::Empty => End::Halt("revert", vec![m, c, z, z]),
+        Halt::Panic(code) => {
+            let sel = b.konst(U256::from(0x4e48_7b71u64) << 224);
+            let m = b.op("mstore", &[m, z, sel], 0, &[Space::Mem])[0];
+            let four = b.k(4);
+            let k = b.k(code);
+            let m = b.op("mstore", &[m, four, k], 0, &[Space::Mem])[0];
+            let len = b.k(36);
+            End::Halt("revert", vec![m, c, z, len])
+        }
+    }
+}
+
+/// The name of the checked-exponentiation helper for a type.
+pub fn pow_name(sc: Sc) -> String {
+    format!("__fe_checked_pow_{}{}", if sc.signed { "i" } else { "u" }, sc.width)
+}
+
+/// A gamma that halts with a panic when `flag` is 1, over the pool and the
+/// control token; gives them back.
+fn panic_if(b: &mut Builder, flag: V, m: V, c: V, code: u64) -> (V, V) {
+    let tys = [Ty::State(Space::Mem), Ty::State(Space::Ctl)];
+    let p = b.open(&tys);
+    let ok = b.close(p.clone(), End::Yield(p));
+    let p = b.open(&tys);
+    let end = halt_end(b, p[0], p[1], Halt::Panic(code));
+    let bad = b.close(p, end);
+    let o = b.gamma(flag, &[m, c], vec![(U256::ZERO, ok)], bad, &tys);
+    (o[0], o[1])
+}
+
+/// The helper `acc * f^e` with every product checked, by squaring, as
+/// Sonatina's `lower_pow` loops: `(acc, f, e, pool, ctl) -> (acc, pool, ctl)`.
+pub fn pow_helper(sc: Sc) -> Function {
+    let name = pow_name(sc);
+    let mut b = Builder::new();
+    let (w, m, c) = (Ty::Word, Ty::State(Space::Mem), Ty::State(Space::Ctl));
+    let params = b.open(&[w, w, w, m, c]);
+    let z = b.w("iszero", &[params[2]]);
+    // e != 0: one step, then the rest.
+    let p = b.open(&[w, w, w, m, c]);
+    let (acc, f, e) = (p[0], p[1], p[2]);
+    let one = b.k(1);
+    let bit = b.w("and", &[e, one]);
+    let q = b.open(&[w, w, m, c]);
+    let keep = b.close(q.clone(), End::Yield(vec![q[0], q[2], q[3]]));
+    let q = b.open(&[w, w, m, c]);
+    let prod = b.w("mul", &[q[0], q[1]]);
+    let o = mul_overflow(&mut b, q[0], q[1], prod, sc);
+    let (m1, c1) = panic_if(&mut b, o, q[2], q[3], PANIC_OVERFLOW);
+    let prod = sc.canon(&mut b, prod);
+    let times = b.close(q, End::Yield(vec![prod, m1, c1]));
+    let a1 = b.gamma(bit, &[acc, f, p[3], p[4]], vec![(U256::ZERO, keep)], times, &[w, m, c]);
+    let next = b.w("shr", &[one, e]);
+    let done = b.w("iszero", &[next]);
+    let q = b.open(&[w, w, w, m, c]);
+    let sq = b.w("mul", &[q[1], q[1]]);
+    let o = mul_overflow(&mut b, q[1], q[1], sq, sc);
+    let (m2, c2) = panic_if(&mut b, o, q[3], q[4], PANIC_OVERFLOW);
+    let f2 = sc.canon(&mut b, sq);
+    let r = b.apply(&name, &[q[0], f2, q[2], m2, c2], &[w, m, c]);
+    let more = b.close(q, End::Yield(r));
+    let q = b.open(&[w, w, w, m, c]);
+    let stop = b.close(q.clone(), End::Yield(vec![q[0], q[3], q[4]]));
+    let a2 = b.gamma(done, &[a1[0], f, next, a1[1], a1[2]], vec![(U256::ZERO, more)], stop, &[w, m, c]);
+    let step = b.close(p, End::Yield(a2));
+    let p = b.open(&[w, w, w, m, c]);
+    let finished = b.close(p.clone(), End::Yield(vec![p[0], p[3], p[4]]));
+    let out = b.gamma(z, &params, vec![(U256::ZERO, step)], finished, &[w, m, c]);
+    let body = b.close(params.clone(), End::Yield(out));
+    let fparams = params.iter().zip([w, w, w, m, c]).enumerate().map(|(i, (v, t))| (*v, t, (i == 3).then_some(Owns::Free))).collect();
+    Function { name, params: fparams, results: vec![(w, None), (m, Some(Owns::Free)), (c, None)], body }
+}
+
+pub fn select(b: &mut Builder, c: V, x: V, y: V) -> V {
+    let z = b.k(0);
+    let mask = b.w("sub", &[z, c]);
+    let d = b.w("xor", &[x, y]);
+    let m = b.w("and", &[d, mask]);
+    b.w("xor", &[y, m])
+}
+
+/// Whether a sign-extended word `x` is outside a narrow signed type.
+pub fn outside_signed(b: &mut Builder, x: V, sc: Sc) -> V {
+    let k = b.k(u64::from(sc.width / 8 - 1));
+    let e = b.w("signextend", &[k, x]);
+    let same = b.w("eq", &[e, x]);
+    b.w("iszero", &[same])
+}
+
+pub fn add_overflow(b: &mut Builder, l: V, r: V, s: V, sc: Sc) -> V {
+    match (sc.signed, sc.width >= 256) {
+        (false, true) => b.w("lt", &[s, l]),
+        (false, false) => {
+            let max = b.konst(sc.max());
+            b.w("gt", &[s, max])
+        }
+        (true, true) => {
+            let a = b.w("slt", &[s, l]);
+            let z = b.k(0);
+            let c = b.w("slt", &[r, z]);
+            b.w("xor", &[a, c])
+        }
+        (true, false) => outside_signed(b, s, sc),
+    }
+}
+
+pub fn sub_overflow(b: &mut Builder, l: V, r: V, d: V, sc: Sc) -> V {
+    match (sc.signed, sc.width >= 256) {
+        (false, _) => b.w("lt", &[l, r]),
+        (true, true) => {
+            let z = b.k(0);
+            let p = b.w("sgt", &[r, z]);
+            let q = b.w("slt", &[d, l]);
+            b.w("xor", &[p, q])
+        }
+        (true, false) => outside_signed(b, d, sc),
+    }
+}
+
+pub fn mul_overflow(b: &mut Builder, l: V, r: V, m: V, sc: Sc) -> V {
+    match (sc.signed, sc.width >= 256) {
+        (false, true) => {
+            let lz = b.w("iszero", &[l]);
+            let nz = b.w("iszero", &[lz]);
+            let q = b.w("div", &[m, l]);
+            let same = b.w("eq", &[q, r]);
+            let differ = b.w("iszero", &[same]);
+            b.w("and", &[nz, differ])
+        }
+        (false, false) => {
+            let max = b.konst(sc.max());
+            b.w("gt", &[m, max])
+        }
+        (true, true) => {
+            let minus_one = b.konst(U256::MAX);
+            let min = b.konst(sc.signed_min());
+            let a = b.w("eq", &[l, minus_one]);
+            let c = b.w("eq", &[r, min]);
+            let first = b.w("and", &[a, c]);
+            let lz = b.w("iszero", &[l]);
+            let nz = b.w("iszero", &[lz]);
+            let q = b.w("sdiv", &[m, l]);
+            let same = b.w("eq", &[q, r]);
+            let differ = b.w("iszero", &[same]);
+            let second = b.w("and", &[nz, differ]);
+            b.w("or", &[first, second])
+        }
+        (true, false) => outside_signed(b, m, sc),
+    }
+}
+
 
 fn be(bytes: &[u8]) -> U256 {
     let mut word = [0u8; 32];

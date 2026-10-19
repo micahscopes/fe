@@ -87,6 +87,20 @@ pub fn lower_tests(db: Db<'_>, top_mod: TopLevelMod<'_>) -> Result<Vec<Result<Lo
     Ok(out)
 }
 
+/// The rMIR of every function of the package (the test package with
+/// `tests`) whose symbol contains `filter`, as Fe prints it.
+pub fn dump(db: Db<'_>, top_mod: TopLevelMod<'_>, tests: bool, filter: &str) -> Result<String, String> {
+    let package = if tests { mir::build_test_runtime_package(db, top_mod, None) } else { mir::build_runtime_package(db, top_mod) }
+        .map_err(|e| format!("{e:?}"))?;
+    let mut out = String::new();
+    for f in package.functions(db) {
+        if f.symbol(db).contains(filter) {
+            out.push_str(&format!("==== {}\n{}\n", f.symbol(db), mir::format_runtime_body(db, &f.instance(db).body(db))));
+        }
+    }
+    Ok(out)
+}
+
 /// Fe's expectation of a test, from its `#[test]` attribute.
 fn test_expectation(db: Db<'_>, owner: &RuntimeFunctionOwner<'_>) -> Result<String, String> {
     let RuntimeFunctionOwner::Synthetic(RuntimeSyntheticSpec::TestRoot { callee, .. }) = owner else {
@@ -287,10 +301,16 @@ pub fn lower_program<'db>(
     }
     let prog = lower::Program { db, plans: &plans };
     let mut functions = Vec::new();
+    let mut helpers = BTreeSet::new();
     for f in &order {
         let cfg = Cfg::new(&bodies[f]).map_err(|e| format!("@{}: {e}", names[f]))?;
         let l = lower::Lower::new(&prog, bodies[f].clone(), cfg, &facts[f], &plans[f]);
-        functions.push(l.lower().map_err(|e| format!("@{}: {e}", names[f]))?);
+        let (function, used) = l.lower().map_err(|e| format!("@{}: {e}", names[f]))?;
+        functions.push(function);
+        helpers.extend(used);
+    }
+    for (width, signed) in helpers {
+        functions.push(lower::pow_helper(class::Sc { width, signed }));
     }
     let mut comments = vec![
         format!("lowered by fe-leadsheet from Fe's runtime MIR (fe {FE_PIN})"),

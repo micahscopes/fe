@@ -5,6 +5,8 @@
 //!   dispatcher.
 //! - With `--tests`: one module per `#[test]`, its entry the test root; the
 //!   module's comments say what Fe expects of it.
+//! - `--dump FILTER` prints the rMIR of the functions whose symbol contains
+//!   FILTER instead.
 //!
 //! With `--out DIR` each module is written to `DIR/NAME.vsdg`; otherwise the
 //! modules are printed one after another. A summary goes to stderr; the exit
@@ -21,20 +23,22 @@ fn main() -> ExitCode {
     let mut path = None;
     let mut tests = false;
     let mut out = None;
+    let mut dump = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--tests" => tests = true,
             "--out" => out = it.next().cloned(),
+            "--dump" => dump = it.next().cloned(),
             _ if path.is_none() && !a.starts_with('-') => path = Some(a.clone()),
             _ => {
-                eprintln!("usage: fe-leadsheet FILE.fe [--tests] [--out DIR]");
+                eprintln!("usage: fe-leadsheet FILE.fe [--tests] [--out DIR | --dump FILTER]");
                 return ExitCode::from(2);
             }
         }
     }
     let Some(path) = path else {
-        eprintln!("usage: fe-leadsheet FILE.fe [--tests] [--out DIR]");
+        eprintln!("usage: fe-leadsheet FILE.fe [--tests] [--out DIR | --dump FILTER]");
         return ExitCode::from(2);
     };
     let canonical = match std::fs::canonicalize(&path) {
@@ -59,6 +63,18 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     let top_mod = db.top_mod(file);
+    if let Some(filter) = dump {
+        return match fe_leadsheet::dump(&db, top_mod, tests, &filter) {
+            Ok(text) => {
+                print!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{path}: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let results: Vec<Result<fe_leadsheet::Lowered, (String, String)>> = if tests {
         match fe_leadsheet::lower_tests(&db, top_mod) {
             Ok(r) => r,
