@@ -39,7 +39,7 @@ use rustc_hash::FxHashMap;
 use crate::Db;
 use crate::cfg::{Cfg, Join};
 use crate::class::{Sc, coerce, convert, element_class, element_word, flat_len, obj_size, variant_field_word};
-use crate::plan::{Facts, MemHolder, Mode, OSet, Org, Piece, Plan, StorHolder};
+use crate::plan::{Facts, Kind, MemHolder, Mode, OSet, Org, Piece, Plan, StorHolder};
 use crate::text::{Builder, End, Function, Operand, Owns, Region, Space, Ty, V};
 
 const PANIC_OVERFLOW: u64 = 0x11;
@@ -65,6 +65,7 @@ enum Key {
     ObjAddr(u32),
     Pool,
     Piece(u16),
+    MapPiece(u16),
     Obj(u32),
     Stor,
     Tstor,
@@ -232,14 +233,14 @@ impl<'p, 'db> Lower<'p, 'db> {
         match space {
             AddressSpace::Memory => Holder::Mem(self.mem_holder(o)),
             AddressSpace::Storage => {
-                Holder::Stor(match (self.plan.stor, Facts::stor_piece_of(o, space)) {
-                    (Mode::Pieces, Some(i)) => StorHolder::Piece(i),
+                Holder::Stor(match (self.plan.stor, Facts::stor_holder_of(o, space)) {
+                    (Mode::Pieces, Some(h)) => h,
                     _ => StorHolder::Whole,
                 })
             }
             AddressSpace::Transient => {
-                Holder::Tstor(match (self.plan.tstor, Facts::stor_piece_of(o, space)) {
-                    (Mode::Pieces, Some(i)) => StorHolder::Piece(i),
+                Holder::Tstor(match (self.plan.tstor, Facts::stor_holder_of(o, space)) {
+                    (Mode::Pieces, Some(h)) => h,
                     _ => StorHolder::Whole,
                 })
             }
@@ -255,6 +256,7 @@ impl<'p, 'db> Lower<'p, 'db> {
             Holder::Stor(StorHolder::Whole) => Key::Stor,
             Holder::Tstor(StorHolder::Whole) => Key::Tstor,
             Holder::Stor(StorHolder::Piece(i)) | Holder::Tstor(StorHolder::Piece(i)) => Key::Piece(i),
+            Holder::Stor(StorHolder::Map(i)) | Holder::Tstor(StorHolder::Map(i)) => Key::MapPiece(i),
             Holder::None => return Err("no state for this space".into()),
         })
     }
@@ -281,7 +283,7 @@ impl<'p, 'db> Lower<'p, 'db> {
         let mut owns: Vec<Option<Owns>> = Vec::new();
         // (rMIR param index, first word index) for annotations.
         let mut word_at: Vec<usize> = Vec::new();
-        let mut piece_slots: Vec<(usize, usize, Piece)> = Vec::new();
+        let mut piece_slots: Vec<(usize, usize, Kind, u64)> = Vec::new();
         if plan.ctor {
             tys.push(Ty::Word);
             owns.push(None);
@@ -296,15 +298,13 @@ impl<'p, 'db> Lower<'p, 'db> {
                 tys.push(Ty::Word);
                 owns.push(None);
             }
-            let piece = plan.carries(j).clone();
-            let space = match piece {
-                Piece::None => None,
-                Piece::Mem(_) => Some(Space::Mem),
-                Piece::Stor(_) => Some(Space::Stor),
-                Piece::Tstor(_) => Some(Space::Tstor),
-            };
-            if let Some(s) = space {
-                piece_slots.push((j, tys.len(), piece));
+            for (kind, len) in plan.pieces_of(j) {
+                let s = match kind {
+                    Kind::Mem => Space::Mem,
+                    Kind::StorRange | Kind::StorMap => Space::Stor,
+                    Kind::TstorRange | Kind::TstorMap => Space::Tstor,
+                };
+                piece_slots.push((j, tys.len(), kind, len));
                 tys.push(Ty::State(s));
                 owns.push(None); // filled once the word values exist
             }
@@ -335,13 +335,13 @@ impl<'p, 'db> Lower<'p, 'db> {
             tys.len() - 1
         });
         let params = self.b.open(&tys);
-        for (j, at, piece) in &piece_slots {
+        for (j, at, kind, len) in &piece_slots {
             let base = Operand::Value(params[word_at[*j]]);
-            let len = match piece {
-                Piece::Mem(n) | Piece::Stor(n) | Piece::Tstor(n) => *n,
-                Piece::None => 0,
-            };
-            owns[*at] = Some(Owns::Range(base, Operand::Word(U256::from(len))));
+            let len = Operand::Word(U256::from(*len));
+            owns[*at] = Some(match kind {
+                Kind::Mem | Kind::StorRange | Kind::TstorRange => Owns::Range(base, len),
+                Kind::StorMap | Kind::TstorMap => Owns::Map(base, len),
+            });
         }
         // Results: words, then the same states with the same footprints.
         let ret_class = self.body.signature.ret.clone();
@@ -349,7 +349,7 @@ impl<'p, 'db> Lower<'p, 'db> {
         if plan.entry {
             results.push((Ty::State(Space::Mem), None));
         }
-        for (_, at, _) in &piece_slots {
+        for (_, at, _, _) in &piece_slots {
             results.push((tys[*at], owns[*at].clone()));
         }
         for at in [pool_at, stor_at, tstor_at, world_at, ctl_at].into_iter().flatten() {
@@ -386,15 +386,19 @@ impl<'p, 'db> Lower<'p, 'db> {
                 self.env.vals.insert(p.local, words);
             }
         }
-        for (j, at, piece) in &piece_slots {
+        for (j, at, kind, _) in &piece_slots {
             let j16 = *j as u16;
-            if matches!(piece, Piece::Mem(_)) && self.facts.pooled_params.contains(&j16) {
+            if *kind == Kind::Mem && self.facts.pooled_params.contains(&j16) {
                 let pool = self.pool()?;
                 let joined = self.b.join(params[*at], pool);
                 self.set(Key::Pool, joined);
                 self.set(Key::ParamAddr(j16), params[word_at[*j]]);
             } else {
-                self.set(Key::Piece(j16), params[*at]);
+                let key = match kind {
+                    Kind::Mem | Kind::StorRange | Kind::TstorRange => Key::Piece(j16),
+                    Kind::StorMap | Kind::TstorMap => Key::MapPiece(j16),
+                };
+                self.set(key, params[*at]);
                 if self.has_loops {
                     self.set(Key::ParamAddr(j16), params[word_at[*j]]);
                 }
@@ -647,20 +651,28 @@ impl<'p, 'db> Lower<'p, 'db> {
         let mut owns: Vec<(usize, Owns)> = Vec::new();
         for (i, k) in keys.iter().enumerate() {
             let addr_of = |want: Key| keys.iter().position(|x| *x == want).map(|j| params[key_at[j]]);
-            let range = match k {
-                Key::Pool => {
-                    owns.push((key_at[i], Owns::Free));
-                    continue;
-                }
-                Key::Piece(j) => match (self.plan.carries(*j as usize), addr_of(Key::ParamAddr(*j))) {
-                    (Piece::Mem(n) | Piece::Stor(n) | Piece::Tstor(n), Some(a)) => Some((a, *n)),
+            let param_len = |j: u16| match &self.plan.params[j as usize].1 {
+                Piece::Mem(n) | Piece::Stor { len: n, .. } | Piece::Tstor { len: n, .. } => Some(*n),
+                Piece::None => None,
+            };
+            let own = match k {
+                Key::Pool => Some(Owns::Free),
+                Key::Piece(j) => match (param_len(*j), addr_of(Key::ParamAddr(*j))) {
+                    (Some(n), Some(a)) => Some(Owns::Range(Operand::Value(a), Operand::Word(U256::from(n)))),
                     _ => None,
                 },
-                Key::Obj(site) => addr_of(Key::ObjAddr(*site)).map(|a| (a, obj_size(self.db, &self.facts.site_class[*site as usize]))),
+                Key::MapPiece(j) => match (param_len(*j), addr_of(Key::ParamAddr(*j))) {
+                    (Some(n), Some(a)) => Some(Owns::Map(Operand::Value(a), Operand::Word(U256::from(n)))),
+                    _ => None,
+                },
+                Key::Obj(site) => addr_of(Key::ObjAddr(*site)).map(|a| {
+                    let n = obj_size(self.db, &self.facts.site_class[*site as usize]);
+                    Owns::Range(Operand::Value(a), Operand::Word(U256::from(n)))
+                }),
                 _ => None,
             };
-            if let Some((a, n)) = range {
-                owns.push((key_at[i], Owns::Range(Operand::Value(a), Operand::Word(U256::from(n)))));
+            if let Some(o) = own {
+                owns.push((key_at[i], o));
             }
         }
         let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone() };
@@ -1051,19 +1063,20 @@ impl<'p, 'db> Lower<'p, 'db> {
             out.push(self.pool()?);
         }
         for j in 0..self.plan.params.len() {
-            let piece = self.plan.carries(j).clone();
             let j16 = j as u16;
-            match piece {
-                Piece::None => {}
-                Piece::Mem(n) if self.facts.pooled_params.contains(&j16) => {
-                    let addr = self.state(Key::ParamAddr(j16))?;
-                    let len = self.b.k(n);
-                    let pool = self.pool()?;
-                    let (p, rest) = self.b.split(pool, addr, len);
-                    self.set(Key::Pool, rest);
-                    out.push(p);
+            for (kind, n) in self.plan.pieces_of(j) {
+                match kind {
+                    Kind::Mem if self.facts.pooled_params.contains(&j16) => {
+                        let addr = self.state(Key::ParamAddr(j16))?;
+                        let len = self.b.k(n);
+                        let pool = self.pool()?;
+                        let (p, rest) = self.b.split(pool, addr, len);
+                        self.set(Key::Pool, rest);
+                        out.push(p);
+                    }
+                    Kind::Mem | Kind::StorRange | Kind::TstorRange => out.push(self.state(Key::Piece(j16))?),
+                    Kind::StorMap | Kind::TstorMap => out.push(self.state(Key::MapPiece(j16))?),
                 }
-                _ => out.push(self.state(Key::Piece(j16))?),
             }
         }
         if self.plan.pool && !self.plan.entry {
@@ -2627,83 +2640,100 @@ impl<'p, 'db> Lower<'p, 'db> {
             }
             ins.extend(&ws);
             tys.extend(ws.iter().map(|_| Ty::Word));
-            match plan.carries(j).clone() {
-                Piece::None => {}
-                Piece::Mem(n) => {
-                    let h = self.mem_holder(&self.org(*a));
-                    let key = Self::key_of(Holder::Mem(h))?;
-                    // A second view of a place already passed to this call
-                    // (Fe lets views overlap) gets a copy: the callee cannot
-                    // write a view, so a copy reads the same.
-                    let held = self.env.held.contains_key(&key);
-                    let aliased = passed.iter().find(|(k, addr, ..)| *k == key && (!held || *addr == ws[0])).copied();
-                    if let Some((_, _, _, state)) = aliased {
-                        let local = callee_body.signature.params[j].local;
-                        let mutable = matches!(
-                            callee_body.locals[local.index()].semantic_ty.as_capability(self.db),
-                            Some((hir::analysis::ty::ty_def::CapabilityKind::Mut, _))
-                        );
-                        if mutable {
-                            return Err(format!("a `mut` argument of @{} overlaps another", plan.name));
+            for (kind, n) in plan.pieces_of(j) {
+                match kind {
+                    Kind::Mem => {
+                        let h = self.mem_holder(&self.org(*a));
+                        let key = Self::key_of(Holder::Mem(h))?;
+                        // A second view of a place already passed to this call
+                        // (Fe lets views overlap) gets a copy: the callee cannot
+                        // write a view, so a copy reads the same.
+                        let held = self.env.held.contains_key(&key);
+                        let aliased = passed.iter().find(|(k, addr, ..)| *k == key && (!held || *addr == ws[0])).copied();
+                        if let Some((_, _, _, state)) = aliased {
+                            let local = callee_body.signature.params[j].local;
+                            let mutable = matches!(
+                                callee_body.locals[local.index()].semantic_ty.as_capability(self.db),
+                                Some((hir::analysis::ty::ty_def::CapabilityKind::Mut, _))
+                            );
+                            if mutable {
+                                return Err(format!("a `mut` argument of @{} overlaps another", plan.name));
+                            }
+                            let words: Vec<V> = (0..n / 32)
+                                .map(|i| {
+                                    let at = self.offset(ws[0], 32 * i);
+                                    self.b.op("mload", &[state, at], 1, &[])[0]
+                                })
+                                .collect();
+                            let pool = self.pool()?;
+                            let ctl = self.state(Key::Ctl)?;
+                            let size = self.b.k(n);
+                            let (p, obj, rest, ctl) = self.b.alloc(pool, ctl, size);
+                            self.set(Key::Pool, rest);
+                            self.set(Key::Ctl, ctl);
+                            let mut o = obj;
+                            for (i, w) in words.iter().enumerate() {
+                                let off = self.offset(p, 32 * i as u64);
+                                o = self.b.op("mstore", &[o, off, *w], 0, &[Space::Mem])[0];
+                            }
+                            let at = ins.len() - ws.len();
+                            ins[at] = p;
+                            copies.push(taken.len());
+                            ins.push(o);
+                            taken.push((Key::Pool, false));
+                            tys.push(Ty::State(Space::Mem));
+                            continue;
                         }
-                        let words: Vec<V> = (0..n / 32)
-                            .map(|i| {
-                                let at = self.offset(ws[0], 32 * i);
-                                self.b.op("mload", &[state, at], 1, &[])[0]
-                            })
-                            .collect();
-                        let pool = self.pool()?;
-                        let ctl = self.state(Key::Ctl)?;
-                        let size = self.b.k(n);
-                        let (p, obj, rest, ctl) = self.b.alloc(pool, ctl, size);
-                        self.set(Key::Pool, rest);
-                        self.set(Key::Ctl, ctl);
-                        let mut o = obj;
-                        for (i, w) in words.iter().enumerate() {
-                            let off = self.offset(p, 32 * i as u64);
-                            o = self.b.op("mstore", &[o, off, *w], 0, &[Space::Mem])[0];
+                        let whole = match h {
+                            MemHolder::Obj(k) => {
+                                obj_size(self.db, &self.facts.site_class[k as usize]) == n && self.bases.get(&ws[0]) == Some(&k)
+                            }
+                            _ => false,
+                        };
+                        if whole {
+                            let s = self.state(key)?;
+                            self.env.held.remove(&key);
+                            ins.push(s);
+                            taken.push((key, true));
+                            passed.push((key, ws[0], n, s));
+                        } else {
+                            let s = self.state(key)?;
+                            let len = self.b.k(n);
+                            let (piece, rest) = self.b.split(s, ws[0], len);
+                            self.set(key, rest);
+                            ins.push(piece);
+                            taken.push((key, false));
+                            passed.push((key, ws[0], n, piece));
                         }
-                        let at = ins.len() - ws.len();
-                        ins[at] = p;
-                        copies.push(taken.len());
-                        ins.push(o);
-                        taken.push((Key::Pool, false));
                         tys.push(Ty::State(Space::Mem));
-                        continue;
                     }
-                    let whole = match h {
-                        MemHolder::Obj(k) => {
-                            obj_size(self.db, &self.facts.site_class[k as usize]) == n && self.bases.get(&ws[0]) == Some(&k)
-                        }
-                        _ => false,
-                    };
-                    if whole {
-                        let s = self.state(key)?;
-                        self.env.held.remove(&key);
-                        ins.push(s);
-                        taken.push((key, true));
-                        passed.push((key, ws[0], n, s));
-                    } else {
+                    Kind::StorRange | Kind::TstorRange => {
+                        let space = if kind == Kind::StorRange { AddressSpace::Storage } else { AddressSpace::Transient };
+                        let key = Self::key_of(self.holder(space, &self.org(*a)))?;
                         let s = self.state(key)?;
                         let len = self.b.k(n);
                         let (piece, rest) = self.b.split(s, ws[0], len);
                         self.set(key, rest);
                         ins.push(piece);
                         taken.push((key, false));
-                        passed.push((key, ws[0], n, piece));
+                        tys.push(self.b.ty(piece));
                     }
-                    tys.push(Ty::State(Space::Mem));
-                }
-                Piece::Stor(n) | Piece::Tstor(n) => {
-                    let space = if matches!(plan.carries(j), Piece::Stor(_)) { AddressSpace::Storage } else { AddressSpace::Transient };
-                    let key = Self::key_of(self.holder(space, &self.org(*a)))?;
-                    let s = self.state(key)?;
-                    let len = self.b.k(n);
-                    let (piece, rest) = self.b.split(s, ws[0], len);
-                    self.set(key, rest);
-                    ins.push(piece);
-                    taken.push((key, false));
-                    tys.push(self.b.ty(piece));
+                    Kind::StorMap | Kind::TstorMap => {
+                        let space = if kind == Kind::StorMap { AddressSpace::Storage } else { AddressSpace::Transient };
+                        let mode = if kind == Kind::StorMap { self.plan.stor } else { self.plan.tstor };
+                        let key = match (mode, Facts::stor_holder_of(&self.org(*a), space)) {
+                            (Mode::Pieces, Some(StorHolder::Piece(i) | StorHolder::Map(i))) => Key::MapPiece(i),
+                            _ if kind == Kind::StorMap => Key::Stor,
+                            _ => Key::Tstor,
+                        };
+                        let s = self.state(key)?;
+                        let len = self.b.k(n);
+                        let (piece, rest) = self.b.split_map(s, ws[0], len);
+                        self.set(key, rest);
+                        ins.push(piece);
+                        taken.push((key, false));
+                        tys.push(self.b.ty(piece));
+                    }
                 }
             }
         }

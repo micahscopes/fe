@@ -49,8 +49,10 @@ pub enum Org {
     MemParam(u16),
     Pool,
     StorParam(u16),
+    StorMap(u16),
     StorLit,
     TstorParam(u16),
+    TstorMap(u16),
     TstorLit,
 }
 
@@ -69,6 +71,7 @@ pub enum MemHolder {
 pub enum StorHolder {
     Whole,
     Piece(u16),
+    Map(u16),
 }
 
 /// How a function holds storage (or transient storage).
@@ -129,7 +132,11 @@ pub struct Facts<'db> {
     pub ret_params: BTreeSet<u16>,
     pub pool: bool,
     pub stor_whole: bool,
+    pub stor_pieces: BTreeSet<u16>,
+    pub stor_maps: BTreeSet<u16>,
     pub tstor_whole: bool,
+    pub tstor_pieces: BTreeSet<u16>,
+    pub tstor_maps: BTreeSet<u16>,
     pub world: bool,
     /// The body takes the control token: it may halt (a revert, a panic, a
     /// failed check, an allocation's bound), or changes storage, transient
@@ -150,11 +157,16 @@ impl<'db> Facts<'db> {
     }
 
     /// The storage holder an access with these origins needs: a parameter's
-    /// piece, or (`None`) all of the space.
-    pub fn stor_piece_of(o: &OSet, space: AddressSpace) -> Option<u16> {
+    /// piece or map region, or (`None`) all of the space.
+    pub fn stor_holder_of(o: &OSet, space: AddressSpace) -> Option<StorHolder> {
         let mut it = o.iter();
         match (it.next(), it.next(), space) {
-            (Some(Org::StorParam(i)), None, AddressSpace::Storage) | (Some(Org::TstorParam(i)), None, AddressSpace::Transient) => Some(*i),
+            (Some(Org::StorParam(i)), None, AddressSpace::Storage) | (Some(Org::TstorParam(i)), None, AddressSpace::Transient) => {
+                Some(StorHolder::Piece(*i))
+            }
+            (Some(Org::StorMap(i)), None, AddressSpace::Storage) | (Some(Org::TstorMap(i)), None, AddressSpace::Transient) => {
+                Some(StorHolder::Map(*i))
+            }
             _ => None,
         }
     }
@@ -255,8 +267,18 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 },
                 _ => OSet::new(),
             },
-            // A map entry's slot, hashed from the root: no address of ours.
-            RExpr::Call { callee, .. } if crate::maps::locate(self.db, *callee).is_some() => OSet::new(),
+            // A map entry's slot, hashed from the root: in the root's map region.
+            RExpr::Call { callee, args } if crate::maps::locate(self.db, *callee).is_some() => match args.get(1) {
+                Some(root) => org(root)
+                    .into_iter()
+                    .map(|x| match x {
+                        Org::StorParam(i) | Org::StorMap(i) => Org::StorMap(i),
+                        Org::TstorParam(i) | Org::TstorMap(i) => Org::TstorMap(i),
+                        other => other,
+                    })
+                    .collect(),
+                None => OSet::new(),
+            },
             RExpr::Call { callee, args } => {
                 let mut o = OSet::new();
                 if self.class(dst).is_some() {
@@ -290,7 +312,11 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             ret_params: BTreeSet::new(),
             pool: false,
             stor_whole: false,
+            stor_pieces: BTreeSet::new(),
+            stor_maps: BTreeSet::new(),
             tstor_whole: false,
+            tstor_pieces: BTreeSet::new(),
+            tstor_maps: BTreeSet::new(),
             world: false,
             ctl: false,
             calls: Vec::new(),
@@ -526,12 +552,21 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 }
             }
             Area::Raw(space @ AddressSpace::Storage) | Area::Raw(space @ AddressSpace::Transient) => {
-                if Facts::stor_piece_of(&info.origin, space).is_none() {
-                    if space == AddressSpace::Storage {
-                        facts.stor_whole = true;
-                    } else {
-                        facts.tstor_whole = true;
+                match (space, Facts::stor_holder_of(&info.origin, space)) {
+                    (AddressSpace::Storage, Some(StorHolder::Piece(i))) => {
+                        facts.stor_pieces.insert(i);
                     }
+                    (AddressSpace::Storage, Some(StorHolder::Map(i))) => {
+                        facts.stor_maps.insert(i);
+                    }
+                    (AddressSpace::Storage, _) => facts.stor_whole = true,
+                    (_, Some(StorHolder::Piece(i))) => {
+                        facts.tstor_pieces.insert(i);
+                    }
+                    (_, Some(StorHolder::Map(i))) => {
+                        facts.tstor_maps.insert(i);
+                    }
+                    (_, _) => facts.tstor_whole = true,
                 }
             }
             Area::Raw(AddressSpace::Calldata) => {}
@@ -586,8 +621,14 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     facts.ctl |= matches!(b, B::ReturnDataCopy { .. });
                 }
                 B::Sload { slot } | B::Sstore { slot, .. } => {
-                    if Facts::stor_piece_of(&facts.origins[slot.index()], AddressSpace::Storage).is_none() {
-                        facts.stor_whole = true;
+                    match Facts::stor_holder_of(&facts.origins[slot.index()], AddressSpace::Storage) {
+                        Some(StorHolder::Piece(i)) => {
+                            facts.stor_pieces.insert(i);
+                        }
+                        Some(StorHolder::Map(i)) => {
+                            facts.stor_maps.insert(i);
+                        }
+                        _ => facts.stor_whole = true,
                     }
                     facts.ctl |= matches!(b, B::Sstore { .. });
                 }
@@ -623,13 +664,23 @@ impl<'a, 'db> Analyzer<'a, 'db> {
     }
 }
 
-/// A parameter in a signature: its words and the piece it carries.
-#[derive(Clone, Debug)]
+/// What kind of state piece a parameter carries in the signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Mem,
+    StorRange,
+    StorMap,
+    TstorRange,
+    TstorMap,
+}
+
+/// A parameter in a signature: its words and the piece(s) it carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Piece {
     None,
     Mem(u64),
-    Stor(u64),
-    Tstor(u64),
+    Stor { len: u64, slots: bool, maps: bool },
+    Tstor { len: u64, slots: bool, maps: bool },
 }
 
 #[derive(Clone, Debug)]
@@ -653,13 +704,33 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// The pieces this function's signature carries: a storage piece only in
-    /// pieces mode.
-    pub fn carries(&self, j: usize) -> &Piece {
+    /// The state pieces parameter `j` carries in this function's signature:
+    /// storage pieces only in pieces mode, plain slots before map regions.
+    pub fn pieces_of(&self, j: usize) -> Vec<(Kind, u64)> {
         match &self.params[j].1 {
-            Piece::Stor(_) if self.stor != Mode::Pieces => &Piece::None,
-            Piece::Tstor(_) if self.tstor != Mode::Pieces => &Piece::None,
-            p => p,
+            Piece::None => Vec::new(),
+            Piece::Mem(n) => vec![(Kind::Mem, *n)],
+            Piece::Stor { len, slots, maps } if self.stor == Mode::Pieces => {
+                let mut out = Vec::new();
+                if *slots {
+                    out.push((Kind::StorRange, *len));
+                }
+                if *maps {
+                    out.push((Kind::StorMap, *len));
+                }
+                out
+            }
+            Piece::Tstor { len, slots, maps } if self.tstor == Mode::Pieces => {
+                let mut out = Vec::new();
+                if *slots {
+                    out.push((Kind::TstorRange, *len));
+                }
+                if *maps {
+                    out.push((Kind::TstorMap, *len));
+                }
+                out
+            }
+            Piece::Stor { .. } | Piece::Tstor { .. } => Vec::new(),
         }
     }
 }

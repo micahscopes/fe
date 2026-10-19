@@ -63,6 +63,7 @@ pub enum Operand {
 pub enum Owns {
     Free,
     Range(Operand, Operand),
+    Map(Operand, Operand),
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +71,7 @@ pub enum Node {
     Const(V, U256),
     Op { outs: Vec<V>, op: &'static str, ins: Vec<V> },
     Split { outs: [V; 2], ins: [V; 3] },
+    SplitMap { outs: [V; 2], ins: [V; 3] },
     Join { out: V, ins: [V; 2] },
     Alloc { outs: [V; 4], ins: [V; 3] },
     Apply { outs: Vec<V>, callee: String, ins: Vec<V> },
@@ -202,6 +204,13 @@ impl Builder {
         let ty = self.ty(s);
         let (a, b) = (self.fresh(ty), self.fresh(ty));
         self.push(Node::Split { outs: [a, b], ins: [s, base, len] });
+        (a, b)
+    }
+
+    pub fn split_map(&mut self, s: V, base: V, len: V) -> (V, V) {
+        let ty = self.ty(s);
+        let (a, b) = (self.fresh(ty), self.fresh(ty));
+        self.push(Node::SplitMap { outs: [a, b], ins: [s, base, len] });
         (a, b)
     }
 
@@ -343,6 +352,7 @@ fn owns(o: &Option<Owns>) -> String {
         None => String::new(),
         Some(Owns::Free) => "[free]".into(),
         Some(Owns::Range(b, l)) => format!("[{}, +{}]", operand(b), operand(l)),
+        Some(Owns::Map(b, l)) => format!("[map {}, +{}]", operand(b), operand(l)),
     }
 }
 
@@ -368,6 +378,9 @@ fn print_region_body(out: &mut String, r: &Region, depth: usize, yield_word: &st
             }
             Node::Split { outs, ins } => {
                 let _ = writeln!(out, "{pad}{} = split {}", vals(outs), vals(ins));
+            }
+            Node::SplitMap { outs, ins } => {
+                let _ = writeln!(out, "{pad}{} = split_map {}", vals(outs), vals(ins));
             }
             Node::Join { out: o, ins } => {
                 let _ = writeln!(out, "{pad}{} = join {}", val(*o), vals(ins));

@@ -33,7 +33,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::cfg::Cfg;
 use crate::class::flat_len;
-use crate::plan::{Analyzer, Facts, Mode, Piece, Plan, mem_piece, stor_piece};
+use crate::plan::{Analyzer, Facts, Mode, Piece, Plan, StorHolder, mem_piece, stor_piece};
 
 pub type Db<'db> = &'db DriverDataBase;
 
@@ -236,6 +236,9 @@ pub fn lower_program<'db>(
         }
     };
     // Plans, until what callees hold settles.
+    let mode = |whole: bool, pieces: bool| if whole { Mode::Whole } else if pieces { Mode::Pieces } else { Mode::None };
+    let has_stor = |params: &[(usize, Piece)]| params.iter().any(|(_, p)| matches!(p, Piece::Stor { slots, maps, .. } if *slots || *maps));
+    let has_tstor = |params: &[(usize, Piece)]| params.iter().any(|(_, p)| matches!(p, Piece::Tstor { slots, maps, .. } if *slots || *maps));
     let mut plans: FxHashMap<RuntimeInstance<'db>, Plan> = FxHashMap::default();
     for f in &order {
         let body = &bodies[f];
@@ -244,22 +247,22 @@ pub fn lower_program<'db>(
             .signature
             .params
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(j, p)| {
+                let j16 = j as u16;
                 let words = flat_len(db, &p.class);
                 let piece = if let Some(n) = mem_piece(db, &p.class) {
                     Piece::Mem(n)
                 } else if let Some(n) = stor_piece(db, &p.class, AddressSpace::Storage) {
-                    Piece::Stor(n)
+                    Piece::Stor { len: n, slots: fx.stor_pieces.contains(&j16), maps: fx.stor_maps.contains(&j16) }
                 } else if let Some(n) = stor_piece(db, &p.class, AddressSpace::Transient) {
-                    Piece::Tstor(n)
+                    Piece::Tstor { len: n, slots: fx.tstor_pieces.contains(&j16), maps: fx.tstor_maps.contains(&j16) }
                 } else {
                     Piece::None
                 };
                 (words, piece)
             })
             .collect();
-        let has = |want: fn(&Piece) -> bool| params.iter().any(|(_, p)| want(p));
-        let mode = |whole: bool, pieces: bool| if whole { Mode::Whole } else if pieces { Mode::Pieces } else { Mode::None };
         let entry_fn = *f == entry || Some(*f) == ctor;
         plans.insert(
             *f,
@@ -267,8 +270,8 @@ pub fn lower_program<'db>(
                 name: names[f].clone(),
                 ret_words: body.signature.ret.as_ref().map_or(0, |c| flat_len(db, c)),
                 pool: fx.pool || entry_fn,
-                stor: mode(fx.stor_whole, has(|p| matches!(p, Piece::Stor(_)))),
-                tstor: mode(fx.tstor_whole, has(|p| matches!(p, Piece::Tstor(_)))),
+                stor: mode(fx.stor_whole, has_stor(&params)),
+                tstor: mode(fx.tstor_whole, has_tstor(&params)),
                 world: fx.world,
                 ctl: fx.ctl || entry_fn,
                 entry: entry_fn,
@@ -286,30 +289,69 @@ pub fn lower_program<'db>(
                 p.pool |= q.pool;
                 p.world |= q.world;
                 p.ctl |= q.ctl;
-                for (space, mine, theirs) in [(AddressSpace::Storage, p.stor, q.stor), (AddressSpace::Transient, p.tstor, q.tstor)] {
-                    let need_whole = match theirs {
-                        Mode::Whole => mine != Mode::Whole,
-                        Mode::Pieces => {
-                            mine == Mode::None
-                                || (mine == Mode::Pieces
-                                    && q.params.iter().zip(args).any(|((_, piece), a)| {
-                                        let is = match space {
-                                            AddressSpace::Storage => matches!(piece, Piece::Stor(_)),
-                                            _ => matches!(piece, Piece::Tstor(_)),
-                                        };
-                                        is && Facts::stor_piece_of(&facts[f].origins[a.index()], space).is_none()
-                                    }))
-                        }
-                        Mode::None => false,
-                    };
-                    if need_whole {
-                        match space {
-                            AddressSpace::Storage => p.stor = Mode::Whole,
-                            _ => p.tstor = Mode::Whole,
+                match q.stor {
+                    Mode::Whole => p.stor = Mode::Whole,
+                    Mode::Pieces => {
+                        for ((_, piece), a) in q.params.iter().zip(args) {
+                            let Piece::Stor { slots: qs, maps: qm, .. } = piece else { continue };
+                            if !*qs && !*qm {
+                                continue;
+                            }
+                            match Facts::stor_holder_of(&facts[f].origins[a.index()], AddressSpace::Storage) {
+                                Some(StorHolder::Piece(i)) => {
+                                    if let Some((_, Piece::Stor { slots, maps, .. })) = p.params.get_mut(i as usize) {
+                                        *slots |= *qs;
+                                        *maps |= *qm;
+                                    } else {
+                                        p.stor = Mode::Whole;
+                                    }
+                                }
+                                Some(StorHolder::Map(i)) => {
+                                    if let Some((_, Piece::Stor { maps, .. })) = p.params.get_mut(i as usize) {
+                                        *maps = true;
+                                    } else {
+                                        p.stor = Mode::Whole;
+                                    }
+                                }
+                                _ => p.stor = Mode::Whole,
+                            }
                         }
                     }
+                    Mode::None => {}
+                }
+                match q.tstor {
+                    Mode::Whole => p.tstor = Mode::Whole,
+                    Mode::Pieces => {
+                        for ((_, piece), a) in q.params.iter().zip(args) {
+                            let Piece::Tstor { slots: qs, maps: qm, .. } = piece else { continue };
+                            if !*qs && !*qm {
+                                continue;
+                            }
+                            match Facts::stor_holder_of(&facts[f].origins[a.index()], AddressSpace::Transient) {
+                                Some(StorHolder::Piece(i)) => {
+                                    if let Some((_, Piece::Tstor { slots, maps, .. })) = p.params.get_mut(i as usize) {
+                                        *slots |= *qs;
+                                        *maps |= *qm;
+                                    } else {
+                                        p.tstor = Mode::Whole;
+                                    }
+                                }
+                                Some(StorHolder::Map(i)) => {
+                                    if let Some((_, Piece::Tstor { maps, .. })) = p.params.get_mut(i as usize) {
+                                        *maps = true;
+                                    } else {
+                                        p.tstor = Mode::Whole;
+                                    }
+                                }
+                                _ => p.tstor = Mode::Whole,
+                            }
+                        }
+                    }
+                    Mode::None => {}
                 }
             }
+            p.stor = mode(p.stor == Mode::Whole, has_stor(&p.params));
+            p.tstor = mode(p.tstor == Mode::Whole, has_tstor(&p.params));
             if p.entry {
                 if p.stor != Mode::None {
                     p.stor = Mode::Whole;
@@ -319,7 +361,9 @@ pub fn lower_program<'db>(
                 }
             }
             let old = &plans[f];
-            if (old.pool, old.world, old.ctl, old.stor, old.tstor) != (p.pool, p.world, p.ctl, p.stor, p.tstor) {
+            if (old.pool, old.world, old.ctl, old.stor, old.tstor, &old.params)
+                != (p.pool, p.world, p.ctl, p.stor, p.tstor, &p.params)
+            {
                 changed = true;
                 plans.insert(*f, p);
             }
