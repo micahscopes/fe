@@ -198,7 +198,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         let resolved = mir::resolve_runtime_place(self.db, &program, self.body, place).map_err(|e| format!("place: {e:?}"))?;
         let carrier = |class: &RuntimeClass<'db>| -> Result<Area, String> {
             match class {
-                RuntimeClass::Ref { kind: RefKind::Object | RefKind::Const | RefKind::Provider { space: AddressSpace::Memory, .. }, .. } => Ok(Area::Obj),
+                RuntimeClass::Ref { kind: RefKind::Object | RefKind::Const | RefKind::Native | RefKind::Provider { space: AddressSpace::Memory, .. }, .. } => Ok(Area::Obj),
                 RuntimeClass::Ref { kind: RefKind::Provider { space, .. }, .. } => Ok(Area::Raw(*space)),
                 RuntimeClass::RawAddr { space, .. } => Ok(Area::Raw(*space)),
                 other => Err(format!("unsupported place carrier {other:?}")),
@@ -674,7 +674,10 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     facts.ctl = true;
                 }
                 B::CurrentCodeRegionLen if self.ctor => {}
-                B::CodeRegionOffset { .. } | B::CodeRegionLen { .. } | B::CurrentCodeRegionLen => {
+                B::CodeRegionOffset { region } | B::CodeRegionLen { region } => {
+                    return Err(format!("code region {region:?} is not in this contract"));
+                }
+                B::CurrentCodeRegionLen => {
                     return Err("code regions are not lowered yet".into());
                 }
                 _ => {}

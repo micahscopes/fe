@@ -57,6 +57,7 @@ impl Sc {
     pub fn of_class(class: &RuntimeClass<'_>) -> Option<Sc> {
         match class {
             RuntimeClass::Scalar(s) => Some(Sc::of(s)),
+            RuntimeClass::Ref { kind: mir::RefKind::Native, .. } => None,
             RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => Some(Sc::WORD),
             RuntimeClass::AggregateValue { .. } => None,
         }
@@ -154,6 +155,7 @@ pub fn coerce(b: &mut Builder, x: V, from: Sc, to: Sc) -> V {
 /// The number of words a value of `class` is.
 pub fn flat_len(db: &dyn MirDb, class: &RuntimeClass<'_>) -> usize {
     match class {
+        RuntimeClass::Ref { kind: mir::RefKind::Native, .. } => 2,
         RuntimeClass::Scalar(_) | RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => 1,
         RuntimeClass::AggregateValue { layout } => match layout.data(db) {
             Layout::Struct(s) => s.fields.iter().map(|f| flat_len(db, f)).sum(),

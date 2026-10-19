@@ -89,6 +89,8 @@ enum Term<'db> {
     Obj { addr: V, class: RuntimeClass<'db>, holder: MemHolder },
     /// Fe's own layout in `space`.
     Raw { addr: V, space: AddressSpace, class: RuntimeClass<'db>, lane: Option<FieldPlacement>, holder: Holder },
+    /// A reference that may be in raw memory (`tag == 0`) or an object (`tag == 1`).
+    Native { addr: V, tag: V, class: RuntimeClass<'db>, holder: MemHolder },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1277,8 +1279,17 @@ impl<'p, 'db> Lower<'p, 'db> {
         let program = self.db as &dyn mir::MirDb;
         let resolved = mir::resolve_runtime_place(self.db, &program, &self.body, place).map_err(|e| format!("place: {e:?}"))?;
         let carrier = |this: &mut Self, value: RLocalId, carrier_class: &RuntimeClass<'db>, class: RuntimeClass<'db>| -> R<Term<'db>> {
-            let addr = this.addr_word(value)?;
             let o = this.org(value);
+            if matches!(carrier_class, RuntimeClass::Ref { kind: RefKind::Native, .. }) {
+                let ws = this.words(value)?;
+                let holder = this.mem_holder(&o);
+                return Ok(match this.b.known(ws[1]) {
+                    Some(c) if c.is_zero() => Term::Raw { addr: ws[0], space: AddressSpace::Memory, class, lane: None, holder: Holder::Mem(holder) },
+                    Some(_) => Term::Obj { addr: ws[0], class, holder },
+                    None => Term::Native { addr: ws[0], tag: ws[1], class, holder },
+                });
+            }
+            let addr = this.addr_word(value)?;
             Ok(match carrier_class {
                 RuntimeClass::Ref { kind: RefKind::Object | RefKind::Const | RefKind::Provider { space: AddressSpace::Memory, .. }, .. } => {
                     Term::Obj { addr, class, holder: this.mem_holder(&o) }
@@ -1349,15 +1360,42 @@ impl<'p, 'db> Lower<'p, 'db> {
                     let a = self.offset(addr, off);
                     Term::Raw { addr: a, space, class: class.clone(), lane: None, holder }
                 }
+                (Term::Native { addr, tag, class: base, holder }, ResolvedPlaceElem::Field { field, class }) => {
+                    let p = RuntimeMemoryLayout::for_space(self.db, AddressSpace::Memory).field_placement(&base, *field).map_err(|e| format!("{e:?}"))?;
+                    let obj_off = 32 * element_word(self.db, &base, field.0 as usize) as u64;
+                    let off = self.select_u64(tag, p.offset, obj_off);
+                    let a = self.b.w("add", &[addr, off]);
+                    Term::Native { addr: a, tag, class: class.clone(), holder }
+                }
+                (Term::Native { addr, tag, class: base, holder }, ResolvedPlaceElem::Index { index, class }) => {
+                    let len = base.array_len(self.db).ok_or("an index into a non-array")?;
+                    let i = self.checked_index(len, index)?;
+                    let raw_s = RuntimeMemoryLayout::for_space(self.db, AddressSpace::Memory).index_stride(&base).map_err(|e| format!("{e:?}"))?;
+                    let obj_s = 32 * flat_len(self.db, class) as u64;
+                    let stride = self.select_u64(tag, raw_s, obj_s);
+                    let scaled = self.b.w("mul", &[i, stride]);
+                    let a = self.b.w("add", &[addr, scaled]);
+                    Term::Native { addr: a, tag, class: class.clone(), holder }
+                }
+                (Term::Native { addr, tag, holder, .. }, ResolvedPlaceElem::VariantField { variant, field, class }) => {
+                    let raw_off = RuntimeMemoryLayout::for_space(self.db, AddressSpace::Memory).variant_field_offset(*variant, *field).map_err(|e| format!("{e:?}"))?;
+                    let obj_off = 32 * variant_field_word(self.db, *variant, field.0 as usize) as u64;
+                    let off = self.select_u64(tag, raw_off, obj_off);
+                    let a = self.b.w("add", &[addr, off]);
+                    Term::Native { addr: a, tag, class: class.clone(), holder }
+                }
                 (t, ResolvedPlaceElem::Deref { carrier_class, class }) => {
-                    let v = self.load(&t, carrier_class)?[0];
+                    let ws = self.load(&t, carrier_class)?;
                     match carrier_class {
+                        RuntimeClass::Ref { kind: RefKind::Native, .. } => {
+                            Term::Native { addr: ws[0], tag: ws[1], class: class.clone(), holder: MemHolder::Pool }
+                        }
                         RuntimeClass::Ref { kind: RefKind::Object | RefKind::Const | RefKind::Provider { space: AddressSpace::Memory, .. }, .. } => {
-                            Term::Obj { addr: v, class: class.clone(), holder: MemHolder::Pool }
+                            Term::Obj { addr: ws[0], class: class.clone(), holder: MemHolder::Pool }
                         }
                         RuntimeClass::Ref { kind: RefKind::Provider { space, .. }, .. } | RuntimeClass::RawAddr { space, .. } => {
                             let holder = self.holder(*space, &OSet::from([Org::Pool]));
-                            Term::Raw { addr: v, space: *space, class: class.clone(), lane: None, holder }
+                            Term::Raw { addr: ws[0], space: *space, class: class.clone(), lane: None, holder }
                         }
                         other => return Err(format!("unsupported deref carrier {other:?}")),
                     }
@@ -1366,6 +1404,22 @@ impl<'p, 'db> Lower<'p, 'db> {
             };
         }
         Ok(term)
+    }
+
+    fn select_u64(&mut self, tag: V, when_zero: u64, when_one: u64) -> V {
+        if when_zero == when_one {
+            return self.b.k(when_zero);
+        }
+        let z = self.b.k(when_zero);
+        if when_one > when_zero {
+            let d = self.b.k(when_one - when_zero);
+            let scaled = self.b.w("mul", &[tag, d]);
+            self.b.w("add", &[z, scaled])
+        } else {
+            let d = self.b.k(when_zero - when_one);
+            let scaled = self.b.w("mul", &[tag, d]);
+            self.b.w("sub", &[z, scaled])
+        }
     }
 
     fn offset(&mut self, addr: V, off: u64) -> V {
@@ -1378,7 +1432,7 @@ impl<'p, 'db> Lower<'p, 'db> {
 
     fn term_addr(t: &Term<'db>) -> V {
         match t {
-            Term::Obj { addr, .. } | Term::Raw { addr, .. } => *addr,
+            Term::Obj { addr, .. } | Term::Raw { addr, .. } | Term::Native { addr, .. } => *addr,
         }
     }
 
@@ -1456,6 +1510,17 @@ impl<'p, 'db> Lower<'p, 'db> {
                     .collect())
             }
             Term::Raw { addr, space, lane, holder, .. } => self.load_raw(*addr, *space, class, *lane, *holder),
+            Term::Native { addr, tag, holder, .. } => {
+                let (addr, tag, holder) = (*addr, *tag, *holder);
+                let mut arm = |this: &mut Self, v: u16, ws: &[V]| -> R<Vec<V>> {
+                    if v == 0 {
+                        this.load_raw(ws[0], AddressSpace::Memory, class, None, Holder::Mem(holder))
+                    } else {
+                        this.load(&Term::Obj { addr: ws[0], class: class.clone(), holder }, class)
+                    }
+                };
+                self.by_native(tag, &[addr], flat_len(self.db, class), &mut arm)
+            }
         }
     }
 
@@ -1511,6 +1576,12 @@ impl<'p, 'db> Lower<'p, 'db> {
         }
         match class {
             RuntimeClass::Scalar(s) => Ok(vec![self.load_scalar(addr, space, s, holder)?]),
+            RuntimeClass::Ref { kind: RefKind::Native, .. } => {
+                let w0 = self.load_word(addr, space, holder)?;
+                let a1 = self.offset(addr, if space.is_byte_addressed() { 32 } else { 1 });
+                let w1 = self.load_word(a1, space, holder)?;
+                Ok(vec![w0, w1])
+            }
             RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => Ok(vec![self.load_word(addr, space, holder)?]),
             RuntimeClass::AggregateValue { layout } => match layout.data(self.db) {
                 Layout::Struct(data) => {
@@ -1552,6 +1623,45 @@ impl<'p, 'db> Lower<'p, 'db> {
                 }
             },
         }
+    }
+
+    /// Branch on a native reference's representation tag (`0` = raw memory,
+    /// `1` = word-per-leaf object). A known tag collapses without a gamma.
+    fn by_native(&mut self, tag: V, words: &[V], n_out: usize, arm: &mut VariantArm<'_, 'p, 'db>) -> R<Vec<V>> {
+        if let Some(c) = self.b.known(tag) {
+            return arm(self, u16::from(!c.is_zero()), words);
+        }
+        let keys: Vec<Key> = self.env.held.keys().copied().collect();
+        let mut ins = words.to_vec();
+        ins.extend(keys.iter().map(|k| self.env.held[k]));
+        let tys: Vec<Ty> = ins.iter().map(|v| self.b.ty(*v)).collect();
+        let snapshot = self.env.clone();
+        let mut regions: Vec<Region> = Vec::new();
+        let mut out_tys: Vec<Ty> = Vec::new();
+        for v in [0u16, 1u16] {
+            let p = self.b.open(&tys);
+            let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone() };
+            for (i, k) in keys.iter().enumerate() {
+                env.held.insert(*k, p[words.len() + i]);
+            }
+            self.env = env;
+            self.rebase();
+            let mut ys = arm(self, v, &p[..words.len()])?;
+            for k in &keys {
+                ys.push(self.state(*k)?);
+            }
+            out_tys = ys.iter().map(|v| self.b.ty(*v)).collect();
+            regions.push(self.b.close(p, End::Yield(ys)));
+        }
+        let default = regions.pop().expect("two arms");
+        let case0 = regions.pop().expect("two arms");
+        self.env = snapshot;
+        let outs = self.b.gamma(tag, &ins, vec![(U256::ZERO, case0)], default, &out_tys);
+        for (i, k) in keys.iter().enumerate() {
+            self.env.held.insert(*k, outs[n_out + i]);
+        }
+        self.rebase();
+        Ok(outs[..n_out].to_vec())
     }
 
     /// Sonatina's branch on an enum's tag (`load_enum_from_ptr`,
@@ -1639,6 +1749,22 @@ impl<'p, 'db> Lower<'p, 'db> {
             Term::Raw { addr, space, class, lane, holder } => {
                 let ws = self.coerce_val(words, src, class);
                 self.store_raw(*addr, *space, class, *lane, *holder, &ws)
+            }
+            Term::Native { addr, tag, class, holder } => {
+                let ws = self.coerce_val(words, src, class);
+                let (addr, tag, holder, class) = (*addr, *tag, *holder, class.clone());
+                let mut ins = vec![addr];
+                ins.extend_from_slice(&ws);
+                let mut arm = |this: &mut Self, v: u16, w: &[V]| -> R<Vec<V>> {
+                    if v == 0 {
+                        this.store_raw(w[0], AddressSpace::Memory, &class, None, Holder::Mem(holder), &w[1..])?;
+                    } else {
+                        this.store_obj_words(holder, w[0], &w[1..])?;
+                    }
+                    Ok(Vec::new())
+                };
+                self.by_native(tag, &ins, 0, &mut arm)?;
+                Ok(())
             }
         }
     }
@@ -1728,6 +1854,11 @@ impl<'p, 'db> Lower<'p, 'db> {
                 } else {
                     self.store_word(addr, space, holder, w)
                 }
+            }
+            RuntimeClass::Ref { kind: RefKind::Native, .. } => {
+                self.store_word(addr, space, holder, words[0])?;
+                let a1 = self.offset(addr, if space.is_byte_addressed() { 32 } else { 1 });
+                self.store_word(a1, space, holder, words[1])
             }
             RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => self.store_word(addr, space, holder, words[0]),
             RuntimeClass::AggregateValue { layout } => match layout.data(self.db) {
@@ -1827,7 +1958,13 @@ impl<'p, 'db> Lower<'p, 'db> {
                 let ws = self.load_raw(addr, *space, pointee, None, holder)?;
                 Ok((ws, Src::Class((**pointee).clone())))
             }
-            RuntimeClass::Ref { kind: RefKind::Native, .. } => Err("native references are not lowered yet".into()),
+            RuntimeClass::Ref { kind: RefKind::Native, pointee, .. } => {
+                let ws = self.words(src)?;
+                let (addr, tag) = (ws[0], ws.get(1).copied().unwrap_or_else(|| self.b.k(1)));
+                let holder = self.mem_holder(&self.org(src));
+                let out = self.load(&Term::Native { addr, tag, class: (**pointee).clone(), holder }, pointee)?;
+                Ok((out, Src::Class((**pointee).clone())))
+            }
             _ => Ok((self.words(src)?, Src::Class(sc.clone()))),
         }
     }
@@ -1854,7 +1991,7 @@ impl<'p, 'db> Lower<'p, 'db> {
             RStmt::CopyInto { dst, src } => {
                 let t = self.place(dst)?;
                 let class = match &t {
-                    Term::Obj { class, .. } | Term::Raw { class, .. } => class.clone(),
+                    Term::Obj { class, .. } | Term::Raw { class, .. } | Term::Native { class, .. } => class.clone(),
                 };
                 let (ws, s) = self.copy_source(*src, &class)?;
                 self.store(&t, ws, &s)
@@ -1999,7 +2136,21 @@ impl<'p, 'db> Lower<'p, 'db> {
                 self.store_obj_words(holder, addr, &ws)?;
                 (vec![addr], Src::Word)
             }
-            RExpr::NativeRef { .. } => return Err("native references are not lowered yet".into()),
+            RExpr::NativeRef { value } => {
+                let sc = self.class(*value).ok_or("a native reference from an erased source")?;
+                match &sc {
+                    RuntimeClass::Ref { kind: RefKind::Object | RefKind::Const | RefKind::Provider { space: AddressSpace::Memory, .. }, .. } => {
+                        let addr = self.addr_word(*value)?;
+                        (vec![addr, self.b.k(1)], dst_class.map_or(Src::Word, Src::Class))
+                    }
+                    RuntimeClass::RawAddr { space: AddressSpace::Memory, .. } => {
+                        let addr = self.addr_word(*value)?;
+                        (vec![addr, self.b.k(0)], dst_class.map_or(Src::Word, Src::Class))
+                    }
+                    RuntimeClass::Ref { kind: RefKind::Native, .. } => (self.words(*value)?, dst_class.map_or(Src::Word, Src::Class)),
+                    _ => return Err("a native reference from a non-memory source".into()),
+                }
+            }
             RExpr::ProviderRefFromRaw { raw, space, .. } => {
                 if *space == AddressSpace::Memory {
                     return Err("memory providers from raw addresses".into());
@@ -2007,7 +2158,11 @@ impl<'p, 'db> Lower<'p, 'db> {
                 (vec![self.word_of(*raw)?], Src::Word)
             }
             RExpr::WordToRawAddr { value, .. } | RExpr::ProviderRefToRaw { value } | RExpr::RetagRef { value } => {
-                (vec![self.addr_word(*value)?], Src::Word)
+                if self.is_slot(*value) {
+                    (vec![self.addr_word(*value)?], Src::Word)
+                } else {
+                    (self.words(*value)?, dst_class.map_or(Src::Word, Src::Class))
+                }
             }
             RExpr::AddrOf { place } => {
                 let t = self.place(place)?;
@@ -2016,12 +2171,23 @@ impl<'p, 'db> Lower<'p, 'db> {
                 {
                     return Err("the address of a packed storage field".into());
                 }
-                (vec![Self::term_addr(&t)], Src::Word)
+                match &dst_class {
+                    Some(RuntimeClass::Ref { kind: RefKind::Native, .. }) => {
+                        let tag = match &t {
+                            Term::Obj { .. } => self.b.k(1),
+                            Term::Raw { space: AddressSpace::Memory, .. } => self.b.k(0),
+                            Term::Native { tag, .. } => *tag,
+                            _ => return Err("a native reference to a non-memory place".into()),
+                        };
+                        (vec![Self::term_addr(&t), tag], dst_class.map_or(Src::Word, Src::Class))
+                    }
+                    _ => (vec![Self::term_addr(&t)], Src::Word),
+                }
             }
             RExpr::Load { place } => {
                 let t = self.place(place)?;
                 let class = match &t {
-                    Term::Obj { class, .. } | Term::Raw { class, .. } => class.clone(),
+                    Term::Obj { class, .. } | Term::Raw { class, .. } | Term::Native { class, .. } => class.clone(),
                 };
                 (self.load(&t, &class)?, Src::Class(class))
             }
@@ -2093,10 +2259,30 @@ impl<'p, 'db> Lower<'p, 'db> {
                         let Layout::Enum(e) = layout.data(self.db) else { return Err("a tag of a non-enum".into()) };
                         self.load_scalar(*addr, *space, &e.tag, *holder)?
                     }
+                    Term::Native { addr, tag, class, holder } => {
+                        let RuntimeClass::AggregateValue { layout } = class else { return Err("a tag of a non-enum".into()) };
+                        let Layout::Enum(e) = layout.data(self.db) else { return Err("a tag of a non-enum".into()) };
+                        let (addr, tag, holder, tag_sc) = (*addr, *tag, *holder, e.tag.clone());
+                        let mut arm = |this: &mut Self, v: u16, ws: &[V]| -> R<Vec<V>> {
+                            if v == 0 {
+                                Ok(vec![this.load_scalar(ws[0], AddressSpace::Memory, &tag_sc, Holder::Mem(holder))?])
+                            } else {
+                                let s = this.mem_state(holder)?;
+                                Ok(vec![this.b.op("mload", &[s, ws[0]], 1, &[])[0]])
+                            }
+                        };
+                        self.by_native(tag, &[addr], 1, &mut arm)?[0]
+                    }
                 };
                 (vec![w], Src::Word)
             }
-            RExpr::EnumAssertVariantRef { root, .. } => (vec![self.addr_word(*root)?], Src::Word),
+            RExpr::EnumAssertVariantRef { root, .. } => {
+                if self.is_slot(*root) {
+                    (vec![self.addr_word(*root)?], Src::Word)
+                } else {
+                    (self.words(*root)?, dst_class.map_or(Src::Word, Src::Class))
+                }
+            }
         })
     }
 
