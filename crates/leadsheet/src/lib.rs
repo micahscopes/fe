@@ -304,16 +304,10 @@ pub fn lower_program<'db>(
     }
     let prog = lower::Program { db, plans: &plans };
     let mut functions = Vec::new();
-    let mut helpers = BTreeSet::new();
     for f in &order {
         let cfg = Cfg::new(&bodies[f]).map_err(|e| format!("@{}: {e}", names[f]))?;
         let l = lower::Lower::new(&prog, bodies[f].clone(), cfg, &facts[f], &plans[f]);
-        let (function, used) = l.lower().map_err(|e| format!("@{}: {e}", names[f]))?;
-        functions.push(function);
-        helpers.extend(used);
-    }
-    for (width, signed) in helpers {
-        functions.push(lower::pow_helper(class::Sc { width, signed }));
+        functions.push(l.lower().map_err(|e| format!("@{}: {e}", names[f]))?);
     }
     let mut comments = vec![
         format!("lowered by fe-leadsheet from Fe's runtime MIR (fe {FE_PIN})"),

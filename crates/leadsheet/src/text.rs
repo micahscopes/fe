@@ -2,8 +2,8 @@
 //! (`crates/leadsheet-vsdg/SPEC.md` in the Leadsheet repository).
 //!
 //! A [`Builder`] makes one function: it numbers values, remembers their types
-//! and keeps a stack of open regions, so a gamma's branches are built as nested
-//! regions and closed when they end.
+//! and keeps a stack of open regions, so a gamma's branches and a theta's body
+//! are built as nested regions and closed when they end.
 
 use std::fmt::Write as _;
 
@@ -74,12 +74,16 @@ pub enum Node {
     Alloc { outs: [V; 4], ins: [V; 3] },
     Apply { outs: Vec<V>, callee: String, ins: Vec<V> },
     Gamma { outs: Vec<V>, sel: V, ins: Vec<V>, cases: Vec<(U256, Region)>, default: Box<Region> },
+    /// A loop; `owns` annotates its body's state parameters, by index.
+    Theta { outs: Vec<V>, ins: Vec<V>, body: Box<Region>, owns: Vec<(usize, Owns)> },
 }
 
 #[derive(Clone, Debug)]
 pub enum End {
     /// `ret` at a function's body, `yield` in a branch.
     Yield(Vec<V>),
+    /// A loop body's end: run again while the first value is not zero.
+    Repeat(V, Vec<V>),
     Halt(&'static str, Vec<V>),
 }
 
@@ -221,6 +225,15 @@ impl Builder {
     pub fn apply(&mut self, callee: &str, ins: &[V], results: &[Ty]) -> Vec<V> {
         let outs: Vec<V> = results.iter().map(|t| self.fresh(*t)).collect();
         self.push(Node::Apply { outs: outs.clone(), callee: callee.to_string(), ins: ins.to_vec() });
+        outs
+    }
+
+    /// A theta whose body is already built; its outputs have its body's
+    /// parameter types.
+    pub fn theta(&mut self, ins: &[V], body: Region, owns: Vec<(usize, Owns)>) -> Vec<V> {
+        let tys: Vec<Ty> = body.params.iter().map(|(_, t)| *t).collect();
+        let outs: Vec<V> = tys.iter().map(|t| self.fresh(*t)).collect();
+        self.push(Node::Theta { outs: outs.clone(), ins: ins.to_vec(), body: Box::new(body), owns });
         outs
     }
 
@@ -375,12 +388,32 @@ fn print_region_body(out: &mut String, r: &Region, depth: usize, yield_word: &st
                 print_branch(out, "default", default, depth + 1);
                 let _ = writeln!(out, "{pad}}}");
             }
+            Node::Theta { outs, ins, body, owns: annotations } => {
+                let lhs = if outs.is_empty() { String::new() } else { format!("{} = ", vals(outs)) };
+                let params: Vec<String> = body
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (v, t))| {
+                        let o = annotations.iter().find(|(j, _)| *j == i).map(|(_, o)| o.clone());
+                        format!("{}: {}{}", val(*v), t.show(), owns(&o))
+                    })
+                    .collect();
+                let _ = writeln!(out, "{pad}{lhs}theta [{}] ({}) {{", vals(ins), params.join(", "));
+                print_region_body(out, body, depth + 1, "yield");
+                let _ = writeln!(out, "{pad}}}");
+            }
         }
     }
     match &r.end {
         End::Yield(vs) => {
             let sep = if vs.is_empty() { "" } else { " " };
             let _ = writeln!(out, "{pad}{yield_word}{sep}{}", vals(vs));
+        }
+        End::Repeat(c, vs) => {
+            let mut all = vec![*c];
+            all.extend(vs);
+            let _ = writeln!(out, "{pad}repeat {}", vals(&all));
         }
         End::Halt(op, vs) => {
             let sep = if vs.is_empty() { "" } else { " " };

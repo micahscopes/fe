@@ -5,6 +5,17 @@
 //! parameter pieces, objects apart from the pool, storage, world) in an
 //! environment; a branch becomes a gamma over the locals live in its arms and
 //! every state held, and the arms meet at the branch's join (see `cfg`).
+//!
+//! A loop becomes a theta, the RVSDG way: tail-controlled, so its body runs
+//! from the header and every path ends where the loop goes on or leaves it.
+//! Its loop variables are the locals live at the header or at any exit, every
+//! state held (the pool `[free]`, pieces and objects with their whole
+//! footprints, storage, the world, the control token) and, when it can leave
+//! to more than one place, an exit selector. A back edge repeats with the
+//! words it has; an edge out repeats with 0 and its exit's number, and after
+//! the theta a gamma on that number continues at the exit (a `break`'s block,
+//! an early `return`'s).
+//!
 //! Each operation's meaning follows the Sonatina lowering it stands in for
 //! (`codegen/src/sonatina/lower_runtime.rs`), including checked arithmetic's
 //! `Panic(uint256)` reverts, the empty revert of an index out of bounds and
@@ -13,13 +24,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cranelift_entity::EntityRef;
+use hir::analysis::semantic::FieldIndex;
 use hir::analysis::ty::AddressSpace;
 use hir::hir_def::{ArithBinOp, BinOp, CompBinOp, LogicalBinOp, UnOp};
 use hir::projection::IndexSource;
 use mir::{
     ConstNode, ConstScalar, FieldPlacement, IntrinsicArithBinOp, Layout, RBlockId, RExpr, RLocalId, RStmt, RTerminator,
     RefKind, ResolvedPlaceElem, ResolvedPlaceRootKind, RuntimeBody, RuntimeBuiltin, RuntimeClass, RuntimeInstance,
-    RuntimeLocalRoot, RuntimeMemoryLayout, RuntimePlace, SaturatingBinOp, ScalarClass, ScalarRepr,
+    RuntimeLocalRoot, RuntimeMemoryLayout, RuntimePlace, SaturatingBinOp, ScalarClass, ScalarRepr, VariantId,
 };
 use ruint::aliases::U256;
 use rustc_hash::FxHashMap;
@@ -40,9 +52,14 @@ type R<T> = Result<T, String>;
 /// A state the environment holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
-    Pool,
-    /// A pooled memory parameter's address, kept for giving its piece back.
+    /// A memory parameter's address: kept for giving its piece back when
+    /// the piece is pooled, and for a loop to name a piece's footprint.
+    /// Addresses come first, so a loop's annotations name earlier words.
     ParamAddr(u16),
+    /// An object's address, held in a function with loops so that a loop can
+    /// name the object's footprint.
+    ObjAddr(u32),
+    Pool,
     Piece(u16),
     Obj(u32),
     Stor,
@@ -87,8 +104,39 @@ enum Src<'db> {
 
 enum Flow {
     AtJoin,
+    /// The level's end reached with what it needs: the function's results,
+    /// or a loop body's `repeat` values.
     Returned(Vec<V>),
     Halted,
+}
+
+/// Where a walk goes after a branch or a loop.
+enum Next {
+    Block(RBlockId),
+    Done(Flow),
+}
+
+/// Where a loop variable's next value comes from.
+#[derive(Clone, Copy)]
+enum From {
+    /// The exit selector.
+    Sel,
+    /// A held state or address.
+    Key(Key),
+    /// A word of a local.
+    Word(RLocalId, usize),
+}
+
+/// A loop whose body is being built.
+#[derive(Clone)]
+struct LoopCtx {
+    idx: usize,
+    /// Each loop variable's sources, the first one held at a run's end
+    /// giving its next value. An invariant word that several sources hold
+    /// (an object's address in a local and as a key) is one loop variable.
+    from: Vec<Vec<From>>,
+    /// The states and addresses held at its entry.
+    keys: Vec<Key>,
 }
 
 #[derive(Clone, Copy)]
@@ -116,14 +164,31 @@ pub struct Lower<'p, 'db> {
     budget: usize,
     /// Addresses known to be an object's base, by its site.
     bases: FxHashMap<V, u32>,
-    /// Checked-exponentiation helpers this function calls, by type.
-    pub helpers: BTreeSet<(u16, bool)>,
+    /// The loops whose bodies are being built, innermost last.
+    loops: Vec<LoopCtx>,
+    /// The function has loops: objects' and pieces' addresses are held.
+    has_loops: bool,
 }
 
 impl<'p, 'db> Lower<'p, 'db> {
     pub fn new(prog: &'p Program<'p, 'db>, body: RuntimeBody<'db>, cfg: Cfg, facts: &'p Facts<'db>, plan: &'p Plan) -> Self {
         let budget = 64 * body.blocks.len().max(4);
-        Lower { db: prog.db, prog, body, cfg, facts, plan, b: Builder::new(), env: Env::default(), halt_end: None, budget, bases: FxHashMap::default(), helpers: BTreeSet::new() }
+        let has_loops = !cfg.loops.is_empty();
+        Lower {
+            db: prog.db,
+            prog,
+            body,
+            cfg,
+            facts,
+            plan,
+            b: Builder::new(),
+            env: Env::default(),
+            halt_end: None,
+            budget,
+            bases: FxHashMap::default(),
+            loops: Vec::new(),
+            has_loops,
+        }
     }
 
     fn class(&self, l: RLocalId) -> Option<RuntimeClass<'db>> {
@@ -197,9 +262,8 @@ impl<'p, 'db> Lower<'p, 'db> {
 
     // ------------------------------------------------------------ signature
 
-    /// Builds the function: signature, prologue, body; and the helpers it
-    /// calls.
-    pub fn lower(mut self) -> R<(Function, BTreeSet<(u16, bool)>)> {
+    /// Builds the function: signature, prologue, body.
+    pub fn lower(mut self) -> R<Function> {
         let plan = self.plan;
         let params_rmir = self.body.signature.params.clone();
         let mut tys: Vec<Ty> = Vec::new();
@@ -312,6 +376,9 @@ impl<'p, 'db> Lower<'p, 'db> {
                 self.set(Key::ParamAddr(j16), params[word_at[*j]]);
             } else {
                 self.set(Key::Piece(j16), params[*at]);
+                if self.has_loops {
+                    self.set(Key::ParamAddr(j16), params[word_at[*j]]);
+                }
             }
         }
         // Slot roots: an object each, from the pool.
@@ -321,6 +388,13 @@ impl<'p, 'db> Lower<'p, 'db> {
             let size = obj_size(self.db, &self.facts.site_class[site as usize]);
             let addr = self.new_object(site, size)?;
             self.env.vals.insert(l, vec![addr]);
+        }
+        // Objects of loops' sites, made once and used by every run.
+        let mut reused: Vec<u32> = self.facts.reused.iter().copied().collect();
+        reused.sort();
+        for site in reused {
+            let size = obj_size(self.db, &self.facts.site_class[site as usize]);
+            self.new_object(site, size)?;
         }
         for (j, p) in params_rmir.iter().enumerate() {
             if self.is_slot(p.local) {
@@ -334,7 +408,7 @@ impl<'p, 'db> Lower<'p, 'db> {
         let body = self.b.close(params.clone(), end);
         let _ = ret_class;
         let fparams = params.iter().zip(tys.iter()).zip(owns).map(|((v, t), o)| (*v, *t, o)).collect();
-        Ok((Function { name: plan.name.clone(), params: fparams, results, body }, self.helpers))
+        Ok(Function { name: plan.name.clone(), params: fparams, results, body })
     }
 
     // ------------------------------------------------------------ control
@@ -347,11 +421,34 @@ impl<'p, 'db> Lower<'p, 'db> {
         })
     }
 
-    fn run(&mut self, mut block: RBlockId, stop: Option<RBlockId>) -> R<Flow> {
+    fn run(&mut self, block: RBlockId, stop: Option<RBlockId>) -> R<Flow> {
+        self.run_from(block, stop, false)
+    }
+
+    /// Walks from `block` until `stop`, the level's end or a halt; `body`
+    /// when `block` is the header of the loop whose body this walk builds.
+    fn run_from(&mut self, mut block: RBlockId, stop: Option<RBlockId>, mut body: bool) -> R<Flow> {
         loop {
             if Some(block) == stop {
                 return Ok(Flow::AtJoin);
             }
+            if !body {
+                if let Some(end) = self.loop_end(block)? {
+                    return Ok(Flow::Returned(end));
+                }
+                let level = self.loops.last().map(|c| c.idx);
+                if let Some(l) = self.cfg.loop_headed(block, level) {
+                    let sel = self.theta(l)?;
+                    match self.after_loop(l, sel, stop)? {
+                        Next::Block(b) => {
+                            block = b;
+                            continue;
+                        }
+                        Next::Done(flow) => return Ok(flow),
+                    }
+                }
+            }
+            body = false;
             if self.budget == 0 {
                 return Err("control flow too tangled to duplicate".into());
             }
@@ -375,7 +472,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                     continue;
                 }
                 RTerminator::Return(v) => {
-                    if stop.is_some() {
+                    if stop.is_some() || !self.loops.is_empty() {
                         return Err("a return before its branch's join".into());
                     }
                     return Ok(Flow::Returned(self.finish_return(*v)?));
@@ -402,35 +499,268 @@ impl<'p, 'db> Lower<'p, 'db> {
                     return Ok(Flow::Halted);
                 }
             };
-            match self.cfg.join(block) {
-                Join::Block(j) => {
-                    self.branch(sel, cases, default, Some(j))?;
-                    block = j;
+            let join = self.cfg.join(block);
+            match self.dispatch(join, sel, cases, default, stop)? {
+                Next::Block(b) => block = b,
+                Next::Done(flow) => return Ok(flow),
+            }
+        }
+    }
+
+    /// A branch to `cases` (by `sel`) and `default`, whose arms meet at
+    /// `join`: where the walk goes on, or how it ended.
+    fn dispatch(&mut self, join: Join, sel: V, cases: Vec<(U256, RBlockId)>, default: Option<RBlockId>, stop: Option<RBlockId>) -> R<Next> {
+        Ok(match join {
+            Join::Block(j) => {
+                self.branch(sel, cases, default, Some(j))?;
+                Next::Block(j)
+            }
+            Join::Exit => {
+                if stop.is_some() {
+                    return Err("branches meeting only at the end inside a branch".into());
                 }
-                Join::Exit => {
-                    if stop.is_some() {
-                        return Err("branches meeting only at the return inside a branch".into());
+                Next::Done(Flow::Returned(self.branch(sel, cases, default, None)?))
+            }
+            Join::Never => {
+                // Every arm halts: the others in a gamma whose default passes
+                // its inputs through, and the last after it, as SPEC.md asks
+                // of a gamma every branch of which halts.
+                let (cases, last) = match default {
+                    Some(d) => (cases, d),
+                    None => {
+                        let mut cases = cases;
+                        let (_, last) = cases.pop().ok_or("a match without arms")?;
+                        (cases, last)
                     }
-                    let outs = self.branch(sel, cases, default, None)?;
-                    return Ok(Flow::Returned(outs));
+                };
+                if !cases.is_empty() {
+                    self.halting_arms(sel, cases, last)?;
                 }
-                Join::Never => {
-                    // Every arm halts: the others in a gamma whose default
-                    // passes its inputs through, and the last after it, as
-                    // SPEC.md asks of a gamma every branch of which halts.
-                    let (cases, last) = match default {
-                        Some(d) => (cases, d),
-                        None => {
-                            let mut cases = cases;
-                            let (_, last) = cases.pop().ok_or("a match without arms")?;
-                            (cases, last)
+                Next::Block(last)
+            }
+        })
+    }
+
+    // ------------------------------------------------------------ loops
+
+    /// Builds the theta of loop `l`, entered with the current environment,
+    /// which then holds its outputs. Gives the exit selector's output, when
+    /// it has one.
+    fn theta(&mut self, l: usize) -> R<Option<V>> {
+        let lp = self.cfg.loops[l].clone();
+        let multi = lp.exits.len() > 1;
+        let mut live: BTreeSet<RLocalId> = self.cfg.live_in[lp.header.index()].iter().copied().collect();
+        for e in &lp.exits {
+            live.extend(self.cfg.live_in[e.index()].iter().copied());
+        }
+        let vars: Vec<RLocalId> = live.into_iter().filter(|l| self.word_count(*l) > 0).collect();
+        // The locals the loop assigns; any other keeps its words, and a
+        // constant one is made again inside.
+        let mut assigned: rustc_hash::FxHashSet<RLocalId> = rustc_hash::FxHashSet::default();
+        for &b in &lp.blocks {
+            for stmt in &self.body.blocks[b].stmts {
+                if let (_, Some(d)) = crate::cfg::stmt_uses_defs(&self.body, stmt) {
+                    assigned.insert(d);
+                }
+            }
+        }
+        let mut inputs: Vec<V> = Vec::new();
+        let mut from: Vec<Vec<From>> = Vec::new();
+        if multi {
+            inputs.push(self.b.k(0));
+            from.push(vec![From::Sel]);
+        }
+        // Invariant words already loop variables, by value.
+        let mut invariant: FxHashMap<V, usize> = FxHashMap::default();
+        let keys: Vec<Key> = self.env.held.keys().copied().collect();
+        let mut key_at: Vec<usize> = Vec::new();
+        for k in &keys {
+            let v = self.env.held[k];
+            let address = matches!(k, Key::ParamAddr(_) | Key::ObjAddr(_));
+            match invariant.get(&v) {
+                Some(i) if address => {
+                    key_at.push(*i);
+                    from[*i].push(From::Key(*k));
+                }
+                _ => {
+                    if address {
+                        invariant.insert(v, inputs.len());
+                    }
+                    key_at.push(inputs.len());
+                    inputs.push(v);
+                    from.push(vec![From::Key(*k)]);
+                }
+            }
+        }
+        let mut layout: Vec<(RLocalId, Vec<Result<usize, U256>>)> = Vec::new();
+        for v in &vars {
+            let n = self.word_count(*v);
+            let ws: Vec<V> = match self.env.vals.get(v) {
+                Some(ws) if ws.len() == n => ws.clone(),
+                _ => (0..n).map(|_| self.b.k(0)).collect(),
+            };
+            let fixed = !assigned.contains(v);
+            let mut slots = Vec::new();
+            for (j, w) in ws.into_iter().enumerate() {
+                match (self.b.known(w), invariant.get(&w)) {
+                    (Some(c), _) if fixed => slots.push(Err(c)),
+                    (_, Some(i)) if fixed => {
+                        slots.push(Ok(*i));
+                        from[*i].push(From::Word(*v, j));
+                    }
+                    _ => {
+                        if fixed {
+                            invariant.insert(w, inputs.len());
                         }
-                    };
-                    if !cases.is_empty() {
-                        self.halting_arms(sel, cases, last)?;
+                        slots.push(Ok(inputs.len()));
+                        inputs.push(w);
+                        from.push(vec![From::Word(*v, j)]);
                     }
-                    block = last;
                 }
+            }
+            layout.push((*v, slots));
+        }
+        let tys: Vec<Ty> = inputs.iter().map(|v| self.b.ty(*v)).collect();
+        let snapshot = self.env.clone();
+        let params = self.b.open(&tys);
+        // The loop's specification: the pool is `[free]`; a piece or an
+        // object whose address is a loop variable owns all of itself.
+        let mut owns: Vec<(usize, Owns)> = Vec::new();
+        for (i, k) in keys.iter().enumerate() {
+            let addr_of = |want: Key| keys.iter().position(|x| *x == want).map(|j| params[key_at[j]]);
+            let range = match k {
+                Key::Pool => {
+                    owns.push((key_at[i], Owns::Free));
+                    continue;
+                }
+                Key::Piece(j) => match (self.plan.carries(*j as usize), addr_of(Key::ParamAddr(*j))) {
+                    (Piece::Mem(n) | Piece::Stor(n) | Piece::Tstor(n), Some(a)) => Some((a, *n)),
+                    _ => None,
+                },
+                Key::Obj(site) => addr_of(Key::ObjAddr(*site)).map(|a| (a, obj_size(self.db, &self.facts.site_class[*site as usize]))),
+                _ => None,
+            };
+            if let Some((a, n)) = range {
+                owns.push((key_at[i], Owns::Range(Operand::Value(a), Operand::Word(U256::from(n)))));
+            }
+        }
+        let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone() };
+        for (v, slots) in &layout {
+            let ws = slots
+                .iter()
+                .map(|s| match s {
+                    Ok(i) => params[*i],
+                    Err(c) => self.b.konst(*c),
+                })
+                .collect();
+            env.vals.insert(*v, ws);
+        }
+        for (i, k) in keys.iter().enumerate() {
+            env.held.insert(*k, params[key_at[i]]);
+        }
+        self.env = env;
+        self.rebase();
+        self.loops.push(LoopCtx { idx: l, from, keys: keys.clone() });
+        let flow = self.run_from(lp.header, None, true);
+        self.loops.pop();
+        let end = match flow? {
+            Flow::Returned(vs) => End::Repeat(vs[0], vs[1..].to_vec()),
+            Flow::Halted => self.halt_end.take().ok_or("a halted loop body without an end")?,
+            Flow::AtJoin => return Err("a loop body that stops at a join".into()),
+        };
+        let region = self.b.close(params, end);
+        self.env = snapshot;
+        let outs = self.b.theta(&inputs, region, owns);
+        for (v, slots) in &layout {
+            let ws = slots
+                .iter()
+                .map(|s| match s {
+                    Ok(i) => outs[*i],
+                    Err(c) => self.b.konst(*c),
+                })
+                .collect();
+            self.env.vals.insert(*v, ws);
+        }
+        for (i, k) in keys.iter().enumerate() {
+            self.env.held.insert(*k, outs[key_at[i]]);
+        }
+        self.rebase();
+        Ok(multi.then(|| outs[0]))
+    }
+
+    /// After loop `l`'s theta: on to its one exit, or a branch on its exit
+    /// selector `sel` to each.
+    fn after_loop(&mut self, l: usize, sel: Option<V>, stop: Option<RBlockId>) -> R<Next> {
+        let exits = self.cfg.loops[l].exits.clone();
+        match (exits.len(), sel) {
+            (0, _) => {
+                // It never leaves but by halting.
+                let c = self.state(Key::Ctl).map_err(|_| "a loop that never ends, without the control token")?;
+                self.halt_end = Some(End::Halt("invalid", vec![c]));
+                Ok(Next::Done(Flow::Halted))
+            }
+            (1, _) => Ok(Next::Block(exits[0])),
+            (n, Some(q)) => {
+                let cases = exits[..n - 1].iter().enumerate().map(|(k, b)| (U256::from(k), *b)).collect();
+                let join = self.cfg.join_loop(l);
+                self.dispatch(join, q, cases, Some(exits[n - 1]), stop)
+            }
+            (_, None) => Err("a loop with exits but no selector".into()),
+        }
+    }
+
+    /// At `block`: the `repeat` values, if it ends the body being built (a
+    /// back edge to its header, or an edge out of its loop).
+    fn loop_end(&mut self, block: RBlockId) -> R<Option<Vec<V>>> {
+        let Some(ctx) = self.loops.last().cloned() else { return Ok(None) };
+        let lp = &self.cfg.loops[ctx.idx];
+        let exit = if block == lp.header {
+            None
+        } else if !lp.blocks.contains(&block.index()) {
+            Some(lp.exits.iter().position(|e| *e == block).ok_or("an exit the loop does not have")?)
+        } else {
+            return Ok(None);
+        };
+        // Objects made in this run and still apart go back to the pool.
+        let extra: Vec<Key> = self.env.held.keys().filter(|k| matches!(k, Key::Obj(_)) && !ctx.keys.contains(k)).copied().collect();
+        for k in extra {
+            let s = self.env.held.remove(&k).expect("held");
+            let pool = self.pool()?;
+            let j = self.b.join(s, pool);
+            self.set(Key::Pool, j);
+        }
+        for k in &ctx.keys {
+            if !self.env.held.contains_key(k) {
+                return Err(format!("the state {k:?} is not held at the loop's end"));
+            }
+        }
+        let mut out = vec![self.b.k(u64::from(exit.is_none()))];
+        for sources in &ctx.from {
+            let mut next = None;
+            for f in sources {
+                next = match f {
+                    From::Sel => Some(self.b.k(exit.unwrap_or(0) as u64)),
+                    From::Key(k) => self.env.held.get(k).copied(),
+                    From::Word(v, i) => self.env.vals.get(v).and_then(|ws| ws.get(*i)).copied(),
+                };
+                if next.is_some() {
+                    break;
+                }
+            }
+            // A local no path here set is dead here.
+            out.push(match next {
+                Some(w) => w,
+                None => self.b.k(0),
+            });
+        }
+        Ok(Some(out))
+    }
+
+    /// Records the objects whose addresses the environment holds.
+    fn rebase(&mut self) {
+        for (k, v) in &self.env.held {
+            if let Key::ObjAddr(site) = k {
+                self.bases.insert(*v, *site);
             }
         }
     }
@@ -479,6 +809,16 @@ impl<'p, 'db> Lower<'p, 'db> {
     /// A gamma for a branch: its arms run to `join` (or, with none, to the
     /// function's end). Gives the outputs.
     fn branch(&mut self, sel: V, cases: Vec<(U256, RBlockId)>, default: Option<RBlockId>, join: Option<RBlockId>) -> R<Vec<V>> {
+        // A match over every variant has no default; without the control
+        // token to halt on a tag no variant has, its last case is the default.
+        let (cases, default) = match default {
+            None if !self.env.held.contains_key(&Key::Ctl) => {
+                let mut cases = cases;
+                let (_, last) = cases.pop().ok_or("a match without arms")?;
+                (cases, Some(last))
+            }
+            d => (cases, d),
+        };
         let mut succs: Vec<RBlockId> = cases.iter().map(|(_, b)| *b).collect();
         succs.extend(default);
         // Live locals the arms need, and constants to make again inside.
@@ -528,6 +868,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                 env.held.insert(*k, params[state_at + i]);
             }
             self.env = env;
+            self.rebase();
             let flow = self.run(*s, join)?;
             let end = self.end_of(flow, join, &keys)?;
             if let End::Yield(vs) = &end {
@@ -574,6 +915,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                     at += 1;
                 }
                 self.env = env;
+                self.rebase();
             }
             _ => {}
         }
@@ -628,6 +970,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                 env.held.insert(*k, params[state_at + i]);
             }
             self.env = env;
+            self.rebase();
             let flow = self.run(*s, None)?;
             let end = match flow {
                 Flow::Halted => self.halt_end.take().ok_or("a halted region without an end")?,
@@ -653,6 +996,7 @@ impl<'p, 'db> Lower<'p, 'db> {
         for (i, k) in keys.iter().enumerate() {
             self.env.held.insert(*k, outs[state_at + i]);
         }
+        self.rebase();
         Ok(())
     }
 
@@ -852,6 +1196,15 @@ impl<'p, 'db> Lower<'p, 'db> {
 
     // ------------------------------------------------------------ objects
 
+    /// The object of the statement site `site`: a new one, or a loop's,
+    /// made at the entry and used again.
+    fn site_object(&mut self, site: u32, size: u64) -> R<V> {
+        if self.facts.reused.contains(&site) {
+            return self.state(Key::ObjAddr(site));
+        }
+        self.new_object(site, size)
+    }
+
     /// A new object of `size` bytes from the pool; apart from the pool unless
     /// its site is pooled or it is empty.
     fn new_object(&mut self, site: u32, size: u64) -> R<V> {
@@ -867,6 +1220,9 @@ impl<'p, 'db> Lower<'p, 'db> {
             self.set(Key::Pool, rest);
             self.set(Key::Obj(site), obj);
             self.bases.insert(p, site);
+            if self.has_loops {
+                self.set(Key::ObjAddr(site), p);
+            }
         }
         Ok(p)
     }
@@ -1045,6 +1401,7 @@ impl<'p, 'db> Lower<'p, 'db> {
         for (k, v) in keys.iter().zip(outs) {
             self.env.held.insert(*k, v);
         }
+        self.rebase();
         Ok(())
     }
 
@@ -1089,14 +1446,28 @@ impl<'p, 'db> Lower<'p, 'db> {
         })
     }
 
+    /// A scalar of Fe's raw layout. A narrow one in the pool's memory is
+    /// copied into the scratch word at 0 and read from there: a word read at
+    /// its address (as Sonatina reads it, then shifts) would also touch the
+    /// bytes after it, which may be another object's when it ends a buffer,
+    /// and so would one ending with it at a buffer's start. The pool owns the
+    /// scratch words, which Fe's panics write too.
     fn load_scalar(&mut self, addr: V, space: AddressSpace, scalar: &ScalarClass<'db>, holder: Holder) -> R<V> {
-        let word = self.load_word(addr, space, holder)?;
         let width = mir::scalar_raw_memory_size_bytes(scalar);
-        let value = if space.is_byte_addressed() && width < 32 {
+        let value = if space == AddressSpace::Memory && width < 32 && matches!(holder, Holder::Mem(MemHolder::Pool)) {
+            let m = self.pool()?;
+            let (dst, n, z) = (self.b.k(32 - width), self.b.k(width), self.b.k(0));
+            let m = self.b.op("mcopy", &[m, dst, addr, n], 0, &[Space::Mem])[0];
+            self.set(Key::Pool, m);
+            let word = self.b.op("mload", &[m, z], 1, &[])[0];
+            let mask = self.b.konst(Self::lane_mask(0, width as u32));
+            self.b.w("and", &[word, mask])
+        } else if space.is_byte_addressed() && width < 32 {
+            let word = self.load_word(addr, space, holder)?;
             let s = self.b.k((32 - width) * 8);
             self.b.w("shr", &[s, word])
         } else {
-            word
+            self.load_word(addr, space, holder)?
         };
         Ok(convert(&mut self.b, value, Sc::WORD, Sc::of(scalar), scalar.is_signed_int()))
     }
@@ -1128,9 +1499,79 @@ impl<'p, 'db> Lower<'p, 'db> {
                     }
                     Ok(out)
                 }
-                Layout::Enum(_) => Err("enums in raw memory or storage are not lowered yet".into()),
+                Layout::Enum(data) => {
+                    let n = flat_len(self.db, class);
+                    let tag = self.load_scalar(addr, space, &data.tag, holder)?;
+                    let layout = *layout;
+                    let mut arm = |this: &mut Self, v: u16, ws: &[V]| -> R<Vec<V>> {
+                        let variant = VariantId { enum_layout: layout, index: v };
+                        let mut out = vec![this.b.k(u64::from(v))];
+                        for (f, fc) in data.variants[v as usize].fields.iter().enumerate() {
+                            let off = RuntimeMemoryLayout::for_space(this.db, space).variant_field_offset(variant, FieldIndex(f as u16)).map_err(|e| format!("{e:?}"))?;
+                            let a = this.offset(ws[0], off);
+                            out.extend(this.load_raw(a, space, fc, None, holder)?);
+                        }
+                        while out.len() < n {
+                            out.push(this.b.k(0));
+                        }
+                        Ok(out)
+                    };
+                    self.by_variant(tag, &[addr], n, data.variants.len() as u16, &mut arm)
+                }
             },
         }
+    }
+
+    /// Sonatina's branch on an enum's tag (`load_enum_from_ptr`,
+    /// `copy_enum_to_ptr`): `arm` builds each variant's case from `words`
+    /// and gives `n_out` words; a tag no variant has halts as `invalid`, as
+    /// Sonatina's `unreachable` does. A known tag needs no branch. Every held
+    /// state goes through the cases.
+    fn by_variant(&mut self, tag: V, words: &[V], n_out: usize, variants: u16, arm: &mut dyn FnMut(&mut Self, u16, &[V]) -> R<Vec<V>>) -> R<Vec<V>> {
+        if let Some(c) = self.b.known(tag) {
+            if c < U256::from(variants) {
+                return arm(self, c.as_limbs()[0] as u16, words);
+            }
+            return Err("a tag no variant has".into());
+        }
+        let keys: Vec<Key> = self.env.held.keys().copied().collect();
+        let mut ins = words.to_vec();
+        ins.extend(keys.iter().map(|k| self.env.held[k]));
+        let tys: Vec<Ty> = ins.iter().map(|v| self.b.ty(*v)).collect();
+        let snapshot = self.env.clone();
+        let mut regions: Vec<Region> = Vec::new();
+        let mut out_tys: Vec<Ty> = Vec::new();
+        for v in 0..variants {
+            let p = self.b.open(&tys);
+            let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone() };
+            for (i, k) in keys.iter().enumerate() {
+                env.held.insert(*k, p[words.len() + i]);
+            }
+            self.env = env;
+            self.rebase();
+            let mut ys = arm(self, v, &p[..words.len()])?;
+            for k in &keys {
+                ys.push(self.state(*k)?);
+            }
+            out_tys = ys.iter().map(|v| self.b.ty(*v)).collect();
+            regions.push(self.b.close(p, End::Yield(ys)));
+        }
+        let default = match keys.iter().position(|k| *k == Key::Ctl) {
+            Some(c) => {
+                let p = self.b.open(&tys);
+                let ctl = p[words.len() + c];
+                self.b.close(p, End::Halt("invalid", vec![ctl]))
+            }
+            None => regions.pop().ok_or("an enum without variants")?,
+        };
+        let cases: Vec<(U256, Region)> = regions.into_iter().enumerate().map(|(i, r)| (U256::from(i), r)).collect();
+        self.env = snapshot;
+        let outs = self.b.gamma(tag, &ins, cases, default, &out_tys);
+        for (i, k) in keys.iter().enumerate() {
+            self.env.held.insert(*k, outs[n_out + i]);
+        }
+        self.rebase();
+        Ok(outs[..n_out].to_vec())
     }
 
     fn lane_mask(byte_offset: u32, byte_width: u32) -> U256 {
@@ -1305,7 +1746,28 @@ impl<'p, 'db> Lower<'p, 'db> {
                     }
                     Ok(())
                 }
-                Layout::Enum(_) => Err("enums in raw memory or storage are not lowered yet".into()),
+                Layout::Enum(data) => {
+                    let layout = *layout;
+                    let tag_class = RuntimeClass::Scalar(data.tag.clone());
+                    let mut ins = vec![addr];
+                    ins.extend_from_slice(&words[1..]);
+                    let mut arm = |this: &mut Self, v: u16, ws: &[V]| -> R<Vec<V>> {
+                        let variant = VariantId { enum_layout: layout, index: v };
+                        let t = this.b.k(u64::from(v));
+                        this.store_raw(ws[0], space, &tag_class, None, holder, &[t])?;
+                        for (f, fc) in data.variants[v as usize].fields.iter().enumerate() {
+                            let off = RuntimeMemoryLayout::for_space(this.db, space).variant_field_offset(variant, FieldIndex(f as u16)).map_err(|e| format!("{e:?}"))?;
+                            let a = this.offset(ws[0], off);
+                            let at = variant_field_word(this.db, variant, f);
+                            let n = flat_len(this.db, fc);
+                            let fws = ws[at..at + n].to_vec();
+                            this.store_raw(a, space, fc, None, holder, &fws)?;
+                        }
+                        Ok(Vec::new())
+                    };
+                    self.by_variant(words[0], &ins, 0, data.variants.len() as u16, &mut arm)?;
+                    Ok(())
+                }
             },
         }
     }
@@ -1471,7 +1933,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                 let site = self.facts.stmt_site[&at];
                 let class = RuntimeClass::AggregateValue { layout: *layout };
                 let size = obj_size(self.db, &class);
-                let addr = self.new_object(site, size)?;
+                let addr = self.site_object(site, size)?;
                 let data = region.data(self.db);
                 let mut ws = Vec::new();
                 self.const_words(&data.value, &class, &mut ws);
@@ -1483,14 +1945,14 @@ impl<'p, 'db> Lower<'p, 'db> {
             RExpr::AllocObject { layout } => {
                 let site = self.facts.stmt_site[&at];
                 let size = obj_size(self.db, &RuntimeClass::AggregateValue { layout: *layout });
-                (vec![self.new_object(site, size)?], Src::Word)
+                (vec![self.site_object(site, size)?], Src::Word)
             }
             RExpr::MaterializeToObject { src } => {
                 let site = self.facts.stmt_site[&at];
                 let pointee = self.facts.site_class[site as usize].clone();
                 let (ws, s) = self.copy_source(*src, &pointee)?;
                 let ws = self.coerce_val(ws, &s, &pointee);
-                let addr = self.new_object(site, obj_size(self.db, &pointee))?;
+                let addr = self.site_object(site, obj_size(self.db, &pointee))?;
                 let holder = self.mem_holder(&OSet::from([Org::Obj(site)]));
                 self.store_obj_words(holder, addr, &ws)?;
                 (vec![addr], Src::Word)
@@ -1500,7 +1962,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                 let pointee = self.facts.site_class[site as usize].clone();
                 let t = self.place(place)?;
                 let ws = self.load(&t, &pointee)?;
-                let addr = self.new_object(site, obj_size(self.db, &pointee))?;
+                let addr = self.site_object(site, obj_size(self.db, &pointee))?;
                 let holder = self.mem_holder(&OSet::from([Org::Obj(site)]));
                 self.store_obj_words(holder, addr, &ws)?;
                 (vec![addr], Src::Word)
@@ -1726,39 +2188,29 @@ impl<'p, 'db> Lower<'p, 'db> {
     }
 
     /// Sonatina's checked `lower_pow`: a negative signed exponent reverts
-    /// empty; then exponentiation by squaring, every product checked. A base
-    /// of 0, 1 or -1 never overflows and is computed directly; any other base
-    /// overflows within a few squarings, so the helper's recursion is shallow.
+    /// empty; then its loop (see `pow_loop`), over the pool and the control
+    /// token. A base of 0, 1 or -1 never overflows, so its power is computed
+    /// directly (the loop would take a run per exponent bit); any other base
+    /// overflows or runs out of exponent bits within a few runs.
     fn checked_pow(&mut self, l: V, r: V, sc: Sc) -> R<V> {
         if sc.signed {
             let z = self.b.k(0);
             let neg = self.b.w("slt", &[r, z]);
             self.guard(neg, Halt::Empty)?;
         }
-        self.helpers.insert((sc.width, sc.signed));
-        let (zero, one, two) = (self.b.k(0), self.b.k(1), self.b.k(2));
+        let two = self.b.k(2);
         let mut small = self.b.w("lt", &[l, two]);
         if sc.signed {
             let minus_one = self.b.konst(U256::MAX);
             let m = self.b.w("eq", &[l, minus_one]);
             small = self.b.w("or", &[small, m]);
         }
-        let keys: Vec<Key> = self.env.held.keys().copied().collect();
-        let mut ins = vec![l, r];
-        ins.extend(keys.iter().map(|k| self.env.held[k]));
-        let tys: Vec<Ty> = ins.iter().map(|v| self.b.ty(*v)).collect();
-        let pool_at = 2 + keys.iter().position(|k| *k == Key::Pool).ok_or("a power without the pool")?;
-        let ctl_at = 2 + keys.iter().position(|k| *k == Key::Ctl).ok_or("a power without the control token")?;
-        let _ = (zero, one);
-        // Any other base: the helper.
+        let (m, c) = (self.pool()?, self.state(Key::Ctl)?);
+        let tys = [Ty::Word, Ty::Word, Ty::State(Space::Mem), Ty::State(Space::Ctl)];
+        // Any other base: the loop.
         let p = self.b.open(&tys);
-        let one_in = self.b.k(1);
-        let outs = self.b.apply(&pow_name(sc), &[one_in, p[0], p[1], p[pool_at], p[ctl_at]], &[Ty::Word, Ty::State(Space::Mem), Ty::State(Space::Ctl)]);
-        let mut ys = vec![outs[0]];
-        for (i, v) in p[2..].iter().enumerate() {
-            ys.push(if i + 2 == pool_at { outs[1] } else if i + 2 == ctl_at { outs[2] } else { *v });
-        }
-        let big = self.b.close(p, End::Yield(ys));
+        let (v, m1, c1) = pow_loop(&mut self.b, p[0], p[1], p[2], p[3], sc);
+        let big = self.b.close(p, End::Yield(vec![v, m1, c1]));
         // 0, 1 or -1.
         let p = self.b.open(&tys);
         let (base, e) = (p[0], p[1]);
@@ -1772,15 +2224,10 @@ impl<'p, 'db> Lower<'p, 'db> {
         let dm = select(&mut self.b, odd, minus_one, one);
         let d = select(&mut self.b, is1, one, dm);
         let d = select(&mut self.b, is0, d0, d);
-        let mut ys = vec![d];
-        ys.extend_from_slice(&p[2..]);
-        let direct = self.b.close(p, End::Yield(ys));
-        let mut out_tys = vec![Ty::Word];
-        out_tys.extend_from_slice(&tys[2..]);
-        let outs = self.b.gamma(small, &ins, vec![(U256::ZERO, big)], direct, &out_tys);
-        for (k, v) in keys.iter().zip(&outs[1..]) {
-            self.env.held.insert(*k, *v);
-        }
+        let direct = self.b.close(p.clone(), End::Yield(vec![d, p[2], p[3]]));
+        let outs = self.b.gamma(small, &[l, r, m, c], vec![(U256::ZERO, big)], direct, &[Ty::Word, tys[2], tys[3]]);
+        self.set(Key::Pool, outs[1]);
+        self.set(Key::Ctl, outs[2]);
         Ok(outs[0])
     }
 
@@ -2263,11 +2710,6 @@ fn halt_end(b: &mut Builder, m: V, c: V, halt: Halt) -> End {
     }
 }
 
-/// The name of the checked-exponentiation helper for a type.
-pub fn pow_name(sc: Sc) -> String {
-    format!("__fe_checked_pow_{}{}", if sc.signed { "i" } else { "u" }, sc.width)
-}
-
 /// A gamma that halts with a panic when `flag` is 1, over the pool and the
 /// control token; gives them back.
 fn panic_if(b: &mut Builder, flag: V, m: V, c: V, code: u64) -> (V, V) {
@@ -2281,47 +2723,45 @@ fn panic_if(b: &mut Builder, flag: V, m: V, c: V, code: u64) -> (V, V) {
     (o[0], o[1])
 }
 
-/// The helper `acc * f^e` with every product checked, by squaring, as
-/// Sonatina's `lower_pow` loops: `(acc, f, e, pool, ctl) -> (acc, pool, ctl)`.
-pub fn pow_helper(sc: Sc) -> Function {
-    let name = pow_name(sc);
-    let mut b = Builder::new();
-    let (w, m, c) = (Ty::Word, Ty::State(Space::Mem), Ty::State(Space::Ctl));
-    let params = b.open(&[w, w, w, m, c]);
-    let z = b.w("iszero", &[params[2]]);
-    // e != 0: one step, then the rest.
-    let p = b.open(&[w, w, w, m, c]);
-    let (acc, f, e) = (p[0], p[1], p[2]);
+/// Sonatina's checked `lower_pow` loop: exponentiation by squaring, one
+/// exponent bit per run, every product checked (`Panic(0x11)`), and the
+/// square only while bits remain, since a last, unused square could overflow
+/// when the result fits. Both checks of a run panic alike, so one guard
+/// covers them. A loop that may run zero times is a gamma (on `exp == 0`)
+/// around a theta. `(base, exp, pool, ctl) -> (base ** exp, pool, ctl)`.
+pub fn pow_loop(b: &mut Builder, base: V, exp: V, m: V, c: V, sc: Sc) -> (V, V, V) {
+    let (w, mt, ct) = (Ty::Word, Ty::State(Space::Mem), Ty::State(Space::Ctl));
+    let zero = b.w("iszero", &[exp]);
+    // exp != 0: the loop, from 1.
+    let p = b.open(&[w, w, mt, ct]);
     let one = b.k(1);
-    let bit = b.w("and", &[e, one]);
-    let q = b.open(&[w, w, m, c]);
-    let keep = b.close(q.clone(), End::Yield(vec![q[0], q[2], q[3]]));
-    let q = b.open(&[w, w, m, c]);
-    let prod = b.w("mul", &[q[0], q[1]]);
-    let o = mul_overflow(&mut b, q[0], q[1], prod, sc);
-    let (m1, c1) = panic_if(&mut b, o, q[2], q[3], PANIC_OVERFLOW);
-    let prod = sc.canon(&mut b, prod);
-    let times = b.close(q, End::Yield(vec![prod, m1, c1]));
-    let a1 = b.gamma(bit, &[acc, f, p[3], p[4]], vec![(U256::ZERO, keep)], times, &[w, m, c]);
-    let next = b.w("shr", &[one, e]);
-    let done = b.w("iszero", &[next]);
-    let q = b.open(&[w, w, w, m, c]);
-    let sq = b.w("mul", &[q[1], q[1]]);
-    let o = mul_overflow(&mut b, q[1], q[1], sq, sc);
-    let (m2, c2) = panic_if(&mut b, o, q[3], q[4], PANIC_OVERFLOW);
-    let f2 = sc.canon(&mut b, sq);
-    let r = b.apply(&name, &[q[0], f2, q[2], m2, c2], &[w, m, c]);
-    let more = b.close(q, End::Yield(r));
-    let q = b.open(&[w, w, w, m, c]);
-    let stop = b.close(q.clone(), End::Yield(vec![q[0], q[3], q[4]]));
-    let a2 = b.gamma(done, &[a1[0], f, next, a1[1], a1[2]], vec![(U256::ZERO, more)], stop, &[w, m, c]);
-    let step = b.close(p, End::Yield(a2));
-    let p = b.open(&[w, w, w, m, c]);
-    let finished = b.close(p.clone(), End::Yield(vec![p[0], p[3], p[4]]));
-    let out = b.gamma(z, &params, vec![(U256::ZERO, step)], finished, &[w, m, c]);
-    let body = b.close(params.clone(), End::Yield(out));
-    let fparams = params.iter().zip([w, w, w, m, c]).enumerate().map(|(i, (v, t))| (*v, t, (i == 3).then_some(Owns::Free))).collect();
-    Function { name, params: fparams, results: vec![(w, None), (m, Some(Owns::Free)), (c, None)], body }
+    let q = b.open(&[w, w, w, mt, ct]);
+    let (acc, f, e) = (q[0], q[1], q[2]);
+    let one_in = b.k(1);
+    let bit = b.w("and", &[e, one_in]);
+    let prod = b.w("mul", &[acc, f]);
+    let o1 = mul_overflow(b, acc, f, prod, sc);
+    let bad1 = b.w("and", &[bit, o1]);
+    let next = b.w("shr", &[one_in, e]);
+    let last = b.w("iszero", &[next]);
+    let more = b.w("iszero", &[last]);
+    let sq = b.w("mul", &[f, f]);
+    let o2 = mul_overflow(b, f, f, sq, sc);
+    let bad2 = b.w("and", &[more, o2]);
+    let bad = b.w("or", &[bad1, bad2]);
+    let (m1, c1) = panic_if(b, bad, q[3], q[4], PANIC_OVERFLOW);
+    let prod = sc.canon(b, prod);
+    let acc1 = select(b, bit, prod, acc);
+    let f1 = sc.canon(b, sq);
+    let body = b.close(q, End::Repeat(more, vec![acc1, f1, next, m1, c1]));
+    let outs = b.theta(&[one, p[0], p[1], p[2], p[3]], body, vec![(3, Owns::Free)]);
+    let looped = b.close(p, End::Yield(vec![outs[0], outs[3], outs[4]]));
+    // exp == 0: 1.
+    let p = b.open(&[w, w, mt, ct]);
+    let one = b.k(1);
+    let done = b.close(p.clone(), End::Yield(vec![one, p[2], p[3]]));
+    let o = b.gamma(zero, &[base, exp, m, c], vec![(U256::ZERO, looped)], done, &[w, mt, ct]);
+    (o[0], o[1], o[2])
 }
 
 pub fn select(b: &mut Builder, c: V, x: V, y: V) -> V {

@@ -23,7 +23,9 @@
 //! local's possible origins (an object made here, a memory parameter, the
 //! pool, a storage parameter, a literal slot). An object whose address mixes
 //! with another origin, or leaves the function other than as a piece argument
-//! (stored, passed as a word, returned), is joined into the pool.
+//! (stored, passed as a word, returned), is joined into the pool, and so is an
+//! object made inside a loop whose address a local carries into the next
+//! run; any other object a loop makes is made once and used by every run.
 
 use std::collections::BTreeSet;
 
@@ -119,6 +121,9 @@ pub struct Facts<'db> {
     pub stmt_site: FxHashMap<(usize, usize), u32>,
     pub site_class: Vec<RuntimeClass<'db>>,
     pub pooled_objs: FxHashSet<u32>,
+    /// Sites inside a loop whose object is made once, at the function's
+    /// entry, and used again by every run.
+    pub reused: FxHashSet<u32>,
     pub pooled_params: FxHashSet<u16>,
     /// Memory parameters whose address may be in the returned value.
     pub ret_params: BTreeSet<u16>,
@@ -275,6 +280,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             stmt_site: FxHashMap::default(),
             site_class: Vec::new(),
             pooled_objs: FxHashSet::default(),
+            reused: FxHashSet::default(),
             pooled_params: FxHashSet::default(),
             ret_params: BTreeSet::new(),
             pool: false,
@@ -413,6 +419,32 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     facts.calls.push((*callee, args.to_vec()));
                 }
                 _ => {}
+            }
+        }
+        // A site inside a loop makes its object again in every run. One that
+        // stays apart, and whose address no local carries into the next run,
+        // is made once at the entry and used again, as Sonatina's static
+        // arena is; any other joins the pool as it is made.
+        let mut sites: Vec<((usize, usize), u32)> = facts.stmt_site.iter().map(|(k, v)| (*k, *v)).collect();
+        sites.sort();
+        for ((b, _), site) in sites {
+            let Some(mut l) = self.cfg.innermost[b] else { continue };
+            if facts.pooled_objs.contains(&site) {
+                continue;
+            }
+            let mut carried = obj_size(db, &facts.site_class[site as usize]) == 0;
+            loop {
+                let header = self.cfg.loops[l].header.index();
+                carried |= self.cfg.live_in[header].iter().any(|v| facts.origins[v.index()].contains(&Org::Obj(site)));
+                match self.cfg.loops[l].parent {
+                    Some(p) => l = p,
+                    None => break,
+                }
+            }
+            if carried {
+                facts.pooled_objs.insert(site);
+            } else {
+                facts.reused.insert(site);
             }
         }
         // What the body needs by itself, now that the pooled objects are known.
