@@ -262,6 +262,8 @@ impl<'db> TyChecker<'db> {
             } => Some(LitKind::Bool(*flag)),
             SemConstValue::Evidence { .. }
             | SemConstValue::Unit
+            | SemConstValue::ItemCode { .. }
+            | SemConstValue::Meta { .. }
             | SemConstValue::Description(..)
             | SemConstValue::Tuple { .. }
             | SemConstValue::Struct { .. }

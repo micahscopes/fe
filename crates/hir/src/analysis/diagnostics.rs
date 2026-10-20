@@ -2623,6 +2623,13 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 primary.resolve(db),
                 error_code,
             ),
+            Self::CompileTimePhase { primary, message } => primary_diag(
+                severity,
+                message,
+                "compile-time-only value cannot be used in this runtime context",
+                primary.resolve(db),
+                error_code,
+            ),
             Self::ObligationOpening { primary, reason } => primary_diag(
                 severity,
                 "trait evidence opening failed",

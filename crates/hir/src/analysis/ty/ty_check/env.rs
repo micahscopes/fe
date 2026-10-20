@@ -2972,6 +2972,11 @@ pub(crate) fn body_lexical_env<'db>(
                     }
                     self.walk_expr(*body);
                 }
+                Expr::ItemQuote(holes) => {
+                    for hole in holes {
+                        self.walk_expr(*hole);
+                    }
+                }
             }
         }
     }

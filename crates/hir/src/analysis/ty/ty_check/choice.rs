@@ -1090,7 +1090,8 @@ impl<'db> TyChecker<'db> {
                     | Expr::If(..)
                     | Expr::Match(..)
                     | Expr::Assign(..)
-                    | Expr::AugAssign(..) => Vec::new(),
+                    | Expr::AugAssign(..)
+                    | Expr::ItemQuote(_) => Vec::new(),
                 };
                 (reads, expr.span(self.body()).into())
             }

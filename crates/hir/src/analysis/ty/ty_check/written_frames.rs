@@ -745,7 +745,7 @@ fn ty_bodies<'db>(db: &'db dyn HirAnalysisDb, ty: Partial<HirTyId<'db>>, out: &m
                 path_bodies(db, *path, out);
             }
         }
-        HirTyKind::Never => {}
+        HirTyKind::Primitive(_) | HirTyKind::Never => {}
     }
 }
 

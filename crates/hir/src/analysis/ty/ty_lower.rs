@@ -96,6 +96,9 @@ fn lower_hir_ty_impl<'db>(
             TyId::app(db, array, len_ty)
         }
 
+        HirTyKind::Primitive(primitive) => {
+            TyId::new(db, TyData::TyBase(super::ty_def::TyBase::from(*primitive)))
+        }
         HirTyKind::Never => TyId::never(db),
     };
     // A `#[view]` type exists only behind accesses, never inside a value.
@@ -268,7 +271,7 @@ fn const_ty_reads<'db>(
                 named_const_reads(db, *path, position, scope, assumptions, reads);
             }
         }
-        HirTyKind::Never => {}
+        HirTyKind::Primitive(_) | HirTyKind::Never => {}
     }
 }
 /// The reads of the constant a path written in a type `position` names

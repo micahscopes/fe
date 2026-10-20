@@ -31,17 +31,8 @@ pub fn resolve_core_trait<'db>(
     // Operator syntax names a compiler library requirement, not a lexical
     // `core` binding. Reuse the dependency roots used by name resolution;
     // resolving from the user's scope would let `mod core {}` intercept it.
-    let own_ingot = scope.top_mod(db).ingot(db);
-    let core = if own_ingot.is_core(db) {
-        own_ingot
-    } else {
-        own_ingot
-            .resolved_external_ingots(db)
-            .iter()
-            .find_map(|(name, ingot)| (name.data(db) == "core").then_some(*ingot))?
-    };
-    let core_scope = core.root_mod(db).scope();
-    let mut module_path = PathId::from_ident(db, IdentId::make_ingot(db));
+    let core_scope = canonical_library_scope(db, scope, "core")?;
+    let mut module_path = lib_root_path(db, core_scope, "core");
 
     for segment in module_segments {
         module_path = module_path.push_str(db, segment);
@@ -312,6 +303,9 @@ pub(crate) enum NumericExternIntrinsic {
 
 #[derive(Clone, Copy)]
 pub(crate) enum CtfeExternIntrinsic {
+    MetaFieldCount,
+    MetaField,
+    MetaFieldType,
     SizeOf,
     StorageSlots,
     AsBytes,
@@ -340,7 +334,13 @@ pub(crate) fn ctfe_extern_intrinsic_kind<'db>(
         Some(RuntimeBuiltinFuncKind::PanicCode) => return Some(CtfeExternIntrinsic::PanicCode),
         _ => {}
     }
-    if lib_func_matches(db, func, "core::intrinsic::size_of") {
+    if lib_func_matches(db, func, "core::meta::field_count") {
+        Some(CtfeExternIntrinsic::MetaFieldCount)
+    } else if lib_func_matches(db, func, "core::meta::field") {
+        Some(CtfeExternIntrinsic::MetaField)
+    } else if lib_func_matches(db, func, "core::meta::field_type") {
+        Some(CtfeExternIntrinsic::MetaFieldType)
+    } else if lib_func_matches(db, func, "core::intrinsic::size_of") {
         Some(CtfeExternIntrinsic::SizeOf)
     } else if lib_func_matches(db, func, "core::intrinsic::storage_slots") {
         Some(CtfeExternIntrinsic::StorageSlots)
@@ -783,7 +783,9 @@ fn resolve_lib_path<'db>(
     path: LibPath<'db>,
 ) -> Option<TyId<'db>> {
     let mut segments = path.string(db).split("::");
-    let mut path = lib_root_path(db, scope, segments.next()?);
+    let root = segments.next()?;
+    let scope = canonical_library_scope(db, scope, root)?;
+    let mut path = lib_root_path(db, scope, root);
 
     for segment in segments {
         path = path.push_str(db, segment);
@@ -803,7 +805,9 @@ fn resolve_lib_func<'db>(
     path: LibPath<'db>,
 ) -> Option<Func<'db>> {
     let mut segments = path.string(db).split("::");
-    let mut path = lib_root_path(db, scope, segments.next()?);
+    let root = segments.next()?;
+    let scope = canonical_library_scope(db, scope, root)?;
+    let mut path = lib_root_path(db, scope, root);
 
     for segment in segments {
         path = path.push_str(db, segment);
@@ -829,7 +833,9 @@ fn resolve_lib_trait<'db>(
     path: LibPath<'db>,
 ) -> Option<Trait<'db>> {
     let mut segments = path.string(db).split("::");
-    let mut path = lib_root_path(db, scope, segments.next()?);
+    let root = segments.next()?;
+    let scope = canonical_library_scope(db, scope, root)?;
+    let mut path = lib_root_path(db, scope, root);
 
     for segment in segments {
         path = path.push_str(db, segment);
@@ -840,6 +846,29 @@ fn resolve_lib_trait<'db>(
         PathRes::Trait(trait_) => Some(trait_.def(db)),
         _ => None,
     }
+}
+
+/// Compiler library authority comes from the dependency ingot, never from a
+/// lexical module named `core` or `std`. Other paths remain ordinary user paths.
+fn canonical_library_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    root: &str,
+) -> Option<ScopeId<'db>> {
+    let kind = match root {
+        "core" => IngotKind::Core,
+        "std" => IngotKind::Std,
+        _ => return Some(scope),
+    };
+    let ingot = scope.top_mod(db).ingot(db);
+    if ingot.kind(db) == kind {
+        return Some(ingot.root_mod(db).scope());
+    }
+    ingot
+        .resolved_external_ingots(db)
+        .iter()
+        .find(|(alias, dependency)| alias.data(db) == root && dependency.kind(db) == kind)
+        .map(|(_, dependency)| dependency.root_mod(db).scope())
 }
 
 pub(crate) fn lib_root_path<'db>(

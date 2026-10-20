@@ -1233,7 +1233,9 @@ fn sem_const_has_type_level_leaf(db: &HirAnalysisTestDb, value: SemConstId<'_>) 
         SemConstValue::Unit | SemConstValue::Scalar { .. } | SemConstValue::Evidence { .. } => {
             false
         }
-        SemConstValue::Description(..) => true,
+        SemConstValue::Description(..)
+        | SemConstValue::Meta { .. }
+        | SemConstValue::ItemCode { .. } => true,
         SemConstValue::Tuple { elems, .. } | SemConstValue::Array { elems, .. } => elems
             .iter()
             .copied()
@@ -1250,6 +1252,12 @@ fn sem_const_has_abstract_scalar_leaf(db: &HirAnalysisTestDb, value: SemConstId<
         SemConstValue::Unit | SemConstValue::Description(..) | SemConstValue::Evidence { .. } => {
             false
         }
+        SemConstValue::Meta { .. } => false,
+        SemConstValue::ItemCode { code, .. } => code
+            .holes()
+            .iter()
+            .copied()
+            .any(|hole| sem_const_has_abstract_scalar_leaf(db, hole)),
         SemConstValue::Scalar { ty, .. } => ty.pretty_print(db) == "{integer}",
         SemConstValue::Tuple { elems, .. } | SemConstValue::Array { elems, .. } => elems
             .iter()
