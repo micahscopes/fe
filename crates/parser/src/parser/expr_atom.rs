@@ -55,9 +55,23 @@ pub(super) fn parse_expr_atom<S: TokenStream>(
                     let opens_body = match p.current_kind() {
                         Some(SyntaxKind::LBrace) => true,
                         Some(SyntaxKind::LParen) => {
-                            p.parse_ok(QuoteOpenListScope::default())
-                                .is_ok_and(identity)
-                                && p.current_kind() == Some(SyntaxKind::LBrace)
+                            let mut depth = 0usize;
+                            while let Some(kind) = p.current_kind() {
+                                match kind {
+                                    SyntaxKind::LParen => depth += 1,
+                                    SyntaxKind::RParen => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            p.bump();
+                                            break;
+                                        }
+                                    }
+                                    SyntaxKind::Newline => break,
+                                    _ => {}
+                                }
+                                p.bump();
+                            }
+                            depth == 0 && p.current_kind() == Some(SyntaxKind::LBrace)
                         }
                         _ => false,
                     };

@@ -169,13 +169,23 @@ pub(super) fn validate_module_inner_attrs<'db>(
     );
 }
 
-fn validate_func_attrs<'db>(
+pub(super) fn validate_func_attrs<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
     attrs: Option<ast::AttrList>,
     kind: &'static str,
     name: Option<String>,
     arithmetic_supported: bool,
 ) {
+    if !ctxt.quote_frames.is_empty()
+        && let Some(ref attr_list) = attrs
+    {
+        for attr in attr_list.normal_attrs_named("generate") {
+            ctxt.record_generation_error(
+                attr.syntax().text_range(),
+                "quoted functions cannot carry #[generate] attributes",
+            );
+        }
+    }
     let arithmetic = if arithmetic_supported {
         AttrRule::supported("arithmetic", ARITHMETIC_FORM, ARITHMETIC_EXPECTED)
     } else {
@@ -272,12 +282,22 @@ fn validate_type_alias_attrs<'db>(
     );
 }
 
-fn validate_unsupported_item_attrs<'db>(
+pub(super) fn validate_unsupported_item_attrs<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
     attrs: Option<ast::AttrList>,
     kind: &'static str,
     name: Option<String>,
 ) {
+    if !ctxt.quote_frames.is_empty()
+        && let Some(ref attr_list) = attrs
+    {
+        for attr in attr_list.normal_attrs_named("generate") {
+            ctxt.record_generation_error(
+                attr.syntax().text_range(),
+                "generated items cannot carry #[generate] attributes",
+            );
+        }
+    }
     validate_attr_rules(
         ctxt,
         attrs,
@@ -524,7 +544,7 @@ impl<'db> Func<'db> {
         let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
         let generic_params = GenericParamListId::lower_ast_opt(ctxt, sig.generic_params());
         let where_clause = WhereClauseId::lower_ast_opt(ctxt, sig.where_clause());
-        let params = sig
+        let params: Partial<FuncParamListId<'db>> = sig
             .params()
             .map(|params| FuncParamListId::lower_ast(ctxt, params))
             .into();
@@ -534,9 +554,28 @@ impl<'db> Func<'db> {
         let is_unsafe = super::lower_is_unsafe(&ast);
         let is_const = ast.const_kw().is_some();
         let modifiers = FuncModifiers::new(vis, is_unsafe, is_const, is_extern);
-        let body = ast
-            .body()
-            .map(|body| Body::lower_ast(ctxt, ast::Expr::cast(body.syntax().clone()).unwrap()));
+        let mut initial_binders = Vec::new();
+        if let Some(param_list) = params.to_opt() {
+            for param in param_list.data(ctxt.db()) {
+                if let Some(ident) = param.name() {
+                    ctxt.record_bound_name(ident.data(ctxt.db()));
+                    initial_binders.push(ident);
+                }
+            }
+        }
+        for effect in effects.data(ctxt.db()) {
+            if let Some(ident) = effect.name {
+                ctxt.record_bound_name(ident.data(ctxt.db()));
+                initial_binders.push(ident);
+            }
+        }
+        let body = ast.body().map(|body| {
+            Body::lower_func_body(
+                ctxt,
+                ast::Expr::cast(body.syntax().clone()).unwrap(),
+                initial_binders,
+            )
+        });
         let origin = HirOrigin::raw(&ast);
         let top_mod = ctxt.top_mod();
 
@@ -746,13 +785,23 @@ fn merge_target_record_generics<'db>(
     if record_params.data(db).is_empty() && record_where.predicates(db).is_empty() {
         return (explicit_params, explicit_where);
     }
-    let mut params = record_params.data(db).clone();
+    let mut params: Vec<_> = record_params
+        .data(db)
+        .iter()
+        .cloned()
+        .map(|p| super::types::bind_generic_param_to_scope(db, p, item))
+        .collect();
     for param in explicit_params.data(db) {
         if !params.iter().any(|p| p.name() == param.name()) {
             params.push(param.clone());
         }
     }
-    let mut predicates = record_where.predicates(db).clone();
+    let mut predicates: Vec<_> = record_where
+        .predicates(db)
+        .iter()
+        .cloned()
+        .map(|pred| super::types::bind_where_predicate_to_scope(db, pred, item))
+        .collect();
     predicates.extend(explicit_where.predicates(db).iter().cloned());
     (
         GenericParamListId::new(db, params),

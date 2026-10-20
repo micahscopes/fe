@@ -81,3 +81,29 @@ fn expr_arm_where_and_open_binder_quotes_parse_without_errors() {
     let quotes: Vec<_> = root.descendants().filter_map(QuoteExpr::cast).collect();
     assert_eq!(quotes.len(), 4);
 }
+
+#[test]
+fn ordinary_quote_call_with_following_block_is_not_parsed_as_quote_open_list() {
+    let source = r#"fn quote(_ a: u256, _ b: u256) -> u256 { a + b }
+fn caller() -> u256 {
+    let x = quote(1, 2)
+    if quote(x, 3) == 6 {
+        42
+    } else {
+        0
+    }
+}"#;
+    let (green, errors) = parse_source_file(source, RecoveryMode::Recover);
+    assert!(errors.is_empty(), "{errors:?}");
+    let root = SyntaxNode::new_root(green);
+    assert_eq!(root.descendants().filter_map(QuoteExpr::cast).count(), 0);
+
+    let bad_open = "const fn p() { quote(1 + 2) { 3 } }";
+    let (_, bad_errors) = parse_source_file(bad_open, RecoveryMode::Recover);
+    assert!(
+        bad_errors
+            .iter()
+            .any(|e| e.msg().contains("expected an open name")),
+        "{bad_errors:?}"
+    );
+}

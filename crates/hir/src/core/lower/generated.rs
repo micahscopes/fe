@@ -14,7 +14,13 @@ pub struct GenerationLoweringError {
 }
 
 pub(crate) struct ActiveQuoteFrame<'db> {
+    pub(super) frame_id: usize,
     pub(super) quote_top_mod: TopLevelMod<'db>,
+    pub(super) quote_range: parser::TextRange,
+    pub(super) producer_scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    pub(super) is_sub_quote: bool,
+    pub(super) open_names: Vec<(String, parser::TextRange)>,
+    pub(super) bound_names: rustc_hash::FxHashSet<String>,
     pub(super) holes: Vec<(parser::TextRange, FrozenHoleValue)>,
 }
 
@@ -45,8 +51,26 @@ pub(super) fn append_functions<'db>(ctxt: &mut FileLowerCtxt<'db>) {
             .map(|hole| hole.syntax().text_range())
             .zip(plan.holes.into_iter().map(FrozenHoleValue::Scalar))
             .collect();
+        let open_names = quote
+            .open_list()
+            .map(|list| {
+                list.names()
+                    .map(|n| (n.text().to_string(), n.text_range()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let producer_scope =
+            ctxt.builder
+                .resolve_producer_scope(top_mod, plan.producer_module, plan.producer_block);
+        let frame_id = ctxt.next_quote_frame_id();
         ctxt.quote_frames.push(ActiveQuoteFrame {
+            frame_id,
             quote_top_mod: top_mod,
+            quote_range: plan.quote_range,
+            producer_scope,
+            is_sub_quote: false,
+            open_names,
+            bound_names: rustc_hash::FxHashSet::default(),
             holes,
         });
         let function = if let Some(items) = quote.item_list() {
@@ -68,8 +92,15 @@ pub(super) fn append_functions<'db>(ctxt: &mut FileLowerCtxt<'db>) {
             };
             function
         };
+        super::item::validate_func_attrs(
+            ctxt,
+            function.attr_list(),
+            "fn",
+            function.sig().name().map(|name| name.text().to_string()),
+            true,
+        );
         let generated = Func::lower_ast(ctxt, function);
-        ctxt.quote_frames.pop();
+        ctxt.pop_quote_frame();
         ctxt.builder.set_quoted_function_origin(
             generated,
             plan.producer_module,
@@ -94,10 +125,36 @@ fn lower_quoted_ast_item<'db>(
     item: ast::Item,
 ) -> Option<ItemKind<'db>> {
     match item.kind()? {
-        ast::ItemKind::Func(func) => Some(Func::lower_ast(ctxt, func).into()),
-        ast::ItemKind::Impl(impl_) => Some(Impl::lower_ast(ctxt, impl_).into()),
-        ast::ItemKind::ImplTrait(impl_trait) => Some(ImplTrait::lower_ast(ctxt, impl_trait).into()),
-        _ => None,
+        ast::ItemKind::Func(func) => {
+            super::item::validate_func_attrs(
+                ctxt,
+                func.attr_list(),
+                "fn",
+                func.sig().name().map(|name| name.text().to_string()),
+                true,
+            );
+            Some(Func::lower_ast(ctxt, func).into())
+        }
+        ast::ItemKind::Impl(impl_) => {
+            super::item::validate_unsupported_item_attrs(ctxt, impl_.attr_list(), "impl", None);
+            Some(Impl::lower_ast(ctxt, impl_).into())
+        }
+        ast::ItemKind::ImplTrait(impl_trait) => {
+            super::item::validate_unsupported_item_attrs(
+                ctxt,
+                impl_trait.attr_list(),
+                "impl trait",
+                None,
+            );
+            Some(ImplTrait::lower_ast(ctxt, impl_trait).into())
+        }
+        _ => {
+            ctxt.record_generation_error(
+                item.syntax().text_range(),
+                "item quotation supports function, impl, and trait impl declarations",
+            );
+            None
+        }
     }
 }
 
@@ -112,8 +169,14 @@ pub(super) fn lower_generated_item_code<'db>(ctxt: &mut FileLowerCtxt<'db>, code
             producer_block,
             holes,
         } => {
-            let (quote, frame) =
-                ctxt.resolve_quote_template(quote_file, *quote_range, holes.clone());
+            let (quote, frame) = ctxt.resolve_quote_template(
+                quote_file,
+                *quote_range,
+                *producer_module,
+                *producer_block,
+                false,
+                holes.clone(),
+            );
             let quote_top_mod = frame.quote_top_mod;
             ctxt.quote_frames.push(frame);
             if let Some(item_list) = quote.item_list() {
@@ -127,11 +190,17 @@ pub(super) fn lower_generated_item_code<'db>(ctxt: &mut FileLowerCtxt<'db>, code
                                 *producer_block,
                             );
                         }
-                    } else if let Some(hole) = ast::QuoteHole::cast(child)
-                        && let Some(FrozenHoleValue::Code(nested)) =
+                    } else if let Some(hole) = ast::QuoteHole::cast(child) {
+                        if let Some(FrozenHoleValue::Code(nested)) =
                             ctxt.current_hole(hole.syntax().text_range())
-                    {
-                        lower_generated_item_code(ctxt, &nested);
+                        {
+                            lower_generated_item_code(ctxt, &nested);
+                        } else {
+                            ctxt.record_generation_error(
+                                hole.syntax().text_range(),
+                                "item-level quotation hole requires Code<Item> splice",
+                            );
+                        }
                     }
                 }
             } else if let Some(block) = quote.body() {
@@ -149,15 +218,38 @@ pub(super) fn lower_generated_item_code<'db>(ctxt: &mut FileLowerCtxt<'db>, code
                     if let ast::StmtKind::Expr(expr_stmt) = stmt.kind()
                         && let Some(expr) = expr_stmt.expr()
                         && let ast::ExprKind::QuoteHole(hole) = expr.kind()
-                        && let Some(FrozenHoleValue::Code(nested)) =
-                            ctxt.current_hole(hole.syntax().text_range())
                     {
-                        lower_generated_item_code(ctxt, &nested);
+                        if let Some(FrozenHoleValue::Code(nested)) =
+                            ctxt.current_hole(hole.syntax().text_range())
+                        {
+                            lower_generated_item_code(ctxt, &nested);
+                        } else {
+                            ctxt.record_generation_error(
+                                hole.syntax().text_range(),
+                                "item-level quotation hole requires Code<Item> splice",
+                            );
+                        }
+                    } else {
+                        ctxt.record_generation_error(
+                            stmt.syntax().text_range(),
+                            "item quotation requires item declarations",
+                        );
                     }
                 }
+            } else {
+                ctxt.record_generation_error(
+                    *quote_range,
+                    "item quotation requires item declarations",
+                );
             }
-            ctxt.quote_frames.pop();
+            ctxt.pop_quote_frame();
         }
-        _ => {}
+        _ => {
+            let range = ctxt
+                .quote_frames
+                .last()
+                .map_or_else(|| parser::TextRange::empty(0.into()), |f| f.quote_range);
+            ctxt.record_generation_error(range, "item-level quotation splice requires Code<Item>");
+        }
     }
 }

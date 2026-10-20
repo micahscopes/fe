@@ -2401,7 +2401,19 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 let [target_ty] = key.subst(self.db).generic_args(self.db) else {
                     return Err(CtfeError::NotConstEvaluable { origin }.into());
                 };
-                Ok(CtfeConstValue::bool(field.ty(self.db) == *target_ty))
+                let field_ty = field.ty(self.db);
+                if field_ty.has_invalid(self.db)
+                    || target_ty.has_invalid(self.db)
+                    || !crate::analysis::ty::const_ty::ty_is_fully_ground(self.db, field_ty)
+                    || !crate::analysis::ty::const_ty::ty_is_fully_ground(self.db, *target_ty)
+                {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "type_is requires concrete ground types".into(),
+                    }
+                    .into());
+                }
+                Ok(CtfeConstValue::bool(field_ty == *target_ty))
             }
             CtfeExternIntrinsic::MetaQueryField => {
                 let [arg] = args else {
@@ -2423,7 +2435,30 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 let [family, query_result] = key.subst(self.db).generic_args(self.db) else {
                     return Err(CtfeError::NotConstEvaluable { origin }.into());
                 };
-                let applied = TyId::app(self.db, *family, field.ty(self.db));
+                let field_ty = field.ty(self.db);
+                if field_ty.has_invalid(self.db)
+                    || family.has_invalid(self.db)
+                    || query_result.has_invalid(self.db)
+                    || !crate::analysis::ty::const_ty::ty_is_fully_ground(self.db, field_ty)
+                    || !crate::analysis::ty::const_ty::ty_is_fully_ground(self.db, *family)
+                    || !crate::analysis::ty::const_ty::ty_is_fully_ground(self.db, *query_result)
+                {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "query_field requires concrete ground types".into(),
+                    }
+                    .into());
+                }
+                let applied = TyId::app(self.db, *family, field_ty);
+                if applied.has_invalid(self.db)
+                    || !crate::analysis::ty::const_ty::ty_is_fully_ground(self.db, applied)
+                {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "query_field requires concrete ground types".into(),
+                    }
+                    .into());
+                }
                 let scope = field.record().scope();
                 let assumptions =
                     crate::analysis::ty::trait_resolution::PredicateListId::empty_list(self.db);
@@ -2500,9 +2535,51 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     crate::analysis::ty::evidence::EvidenceList::none(self.db),
                 );
                 let callee_instance = self.instance_for_key(callee_key);
-                let CtfeValue::Value(result) =
-                    self.eval_instance(callee_instance, vec![], vec![], origin)?
-                else {
+                let mut pending_access = vec![callee_key];
+                let mut seen_access = rustc_hash::FxHashSet::default();
+                while let Some(check_key) = pending_access.pop() {
+                    if !seen_access.insert(check_key) {
+                        continue;
+                    }
+                    if let BodyOwner::Func(f, _) = check_key.owner(self.db)
+                        && !crate::analysis::ty::ty_check::check_func_body(self.db, f)
+                            .0
+                            .is_empty()
+                    {
+                        return Err(CtfeError::InvalidBody { origin }.into());
+                    }
+                    let check_inst = self.instance_for_key(check_key);
+                    if !matches!(
+                        crate::analysis::semantic::access::semantic_access_check_query(
+                            self.db, check_inst,
+                        ),
+                        crate::analysis::semantic::access::SemanticAccessCheckResult::Ok { .. }
+                    ) {
+                        return Err(CtfeError::InvalidBody { origin }.into());
+                    }
+                    if let Ok(admitted) = check_inst.admitted_body(self.db) {
+                        for callee in admitted.callees() {
+                            pending_access.push(callee.key);
+                        }
+                    }
+                }
+                let eval_res = match self.eval_instance(callee_instance, vec![], vec![], origin) {
+                    Ok(value) => value,
+                    Err(EvalStop::Blocked(mut info)) => {
+                        info.trace.push(callee_instance.key(self.db));
+                        return Err(EvalStop::Blocked(info));
+                    }
+                    Err(EvalStop::Failed(EvalFailure::Ctfe(err))) => {
+                        return Err(CtfeError::CalleeError {
+                            origin,
+                            callee: callee_instance,
+                            source: Box::new(err),
+                        }
+                        .into());
+                    }
+                    Err(stop) => return Err(stop),
+                };
+                let CtfeValue::Value(result) = eval_res else {
                     return Err(CtfeError::InvalidBorrow { origin }.into());
                 };
                 Ok(result)

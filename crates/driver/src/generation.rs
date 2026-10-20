@@ -112,9 +112,35 @@ fn evaluation_error<'db>(
         CtfeError::DivisionByZero { origin } => {
             (*origin, "division by zero in const context".to_string())
         }
+        CtfeError::ArithmeticOverflow { origin } => {
+            (*origin, "arithmetic overflow in const context".to_string())
+        }
         CtfeError::InvalidOperation { origin, message } => (*origin, message.clone()),
         CtfeError::OutOfBounds { origin } => {
             (*origin, "constant index outside record or aggregate".into())
+        }
+        CtfeError::NonConstCall { origin } => (
+            *origin,
+            "cannot call non-const function in const context".to_string(),
+        ),
+        CtfeError::InvalidBorrow { origin } => (
+            *origin,
+            "invalid borrow in const evaluation context".to_string(),
+        ),
+        CtfeError::InvalidProviderUse { origin } => (
+            *origin,
+            "invalid effect provider use in const context".to_string(),
+        ),
+        CtfeError::InvalidBody { origin } => (
+            *origin,
+            "invalid body in const evaluation context".to_string(),
+        ),
+        CtfeError::NotConstEvaluable { origin } => (
+            *origin,
+            "expression cannot be evaluated at compile time".to_string(),
+        ),
+        CtfeError::RecursiveConst { origin } => {
+            (*origin, "recursive const evaluation detected".to_string())
         }
         CtfeError::StepLimitExceeded { origin } => {
             (*origin, "existing CTFE step limit exceeded".into())
@@ -348,26 +374,51 @@ pub fn prepare_file(
             let mut unresolved = Vec::new();
             {
                 use hir::analysis::semantic::access::SemanticAccessCheckResult;
-                match hir::analysis::semantic::access::semantic_access_check_query(db, instance) {
-                    SemanticAccessCheckResult::Ok { .. } => {}
-                    SemanticAccessCheckResult::Err(diagnostic) => {
-                        let diagnostic = diagnostic.diag(db);
-                        let origin_owner = diagnostic.instance.key(db).owner(db);
-                        if let BodyOwner::Func(function, _) = origin_owner
-                            && !check_func_body(db, function).0.is_empty()
-                        {
-                            validation_diagnostics.extend(
-                                check_func_body(db, function)
-                                    .0
-                                    .iter()
-                                    .map(|cause| cause.to_complete(db)),
-                            );
-                        } else {
-                            validation_diagnostics.push(diagnostic.to_complete(db));
+                let mut pending = vec![instance];
+                let mut seen = std::collections::HashSet::new();
+                while let Some(current) = pending.pop() {
+                    if !seen.insert(current) {
+                        continue;
+                    }
+                    match hir::analysis::semantic::access::semantic_access_check_query(db, current)
+                    {
+                        SemanticAccessCheckResult::Ok { .. } => {}
+                        SemanticAccessCheckResult::Err(diagnostic) => {
+                            let diagnostic = diagnostic.diag(db);
+                            let origin_owner = diagnostic.instance.key(db).owner(db);
+                            if let BodyOwner::Func(function, _) = origin_owner
+                                && !check_func_body(db, function).0.is_empty()
+                            {
+                                validation_diagnostics.extend(
+                                    check_func_body(db, function)
+                                        .0
+                                        .iter()
+                                        .map(|cause| cause.to_complete(db)),
+                                );
+                            } else {
+                                validation_diagnostics.push(diagnostic.to_complete(db));
+                            }
+                        }
+                        SemanticAccessCheckResult::Blocked(cause) => {
+                            let origin_owner = current.key(db).owner(db);
+                            if let BodyOwner::Func(function, _) = origin_owner
+                                && !check_func_body(db, function).0.is_empty()
+                            {
+                                validation_diagnostics.extend(
+                                    check_func_body(db, function)
+                                        .0
+                                        .iter()
+                                        .map(|cause| cause.to_complete(db)),
+                                );
+                            } else {
+                                unresolved.push(format!("Blocked: {cause:?}"));
+                            }
                         }
                     }
-                    SemanticAccessCheckResult::Blocked(cause) => {
-                        unresolved.push(format!("Blocked: {cause:?}"))
+                    for callee in current.callees(db) {
+                        pending.push(hir::analysis::semantic::get_or_build_semantic_instance(
+                            db, callee.key,
+                        ));
                     }
                 }
             }

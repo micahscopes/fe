@@ -5708,6 +5708,16 @@ pub(super) fn resolve_ident_expr<'db>(
         let Ok(res) = bucket.pick_any(&[NameDomain::VALUE, NameDomain::TYPE]) else {
             return ResolvedPathInBody::Invalid;
         };
+        if path.hygiene_scope(db).is_some()
+            && matches!(
+                res.kind,
+                crate::analysis::name_resolution::NameResKind::Scope(
+                    ScopeId::FuncParam(..) | ScopeId::GenericParam(ItemKind::Func(_), _)
+                )
+            )
+        {
+            return ResolvedPathInBody::Invalid;
+        }
         let Ok(reso) = resolve_name_res_with_minter(
             db,
             res,
@@ -5722,7 +5732,7 @@ pub(super) fn resolve_ident_expr<'db>(
         ResolvedPathInBody::Reso(reso)
     };
 
-    match env.resolve_ident_in_blocks(ident, |bucket, scope| match resolve_bucket(bucket, scope) {
+    match env.resolve_ident_in_blocks(path, |bucket, scope| match resolve_bucket(bucket, scope) {
         ResolvedPathInBody::Invalid => None,
         resolved => Some(resolved),
     }) {

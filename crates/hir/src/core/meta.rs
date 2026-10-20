@@ -13,35 +13,6 @@ use crate::{
     span::HirOrigin,
 };
 
-/// Classification for the runtime emission domain only. Never suppress
-/// ownership, capability boundary, or ordinary HIR checking with this query.
-pub fn is_compile_time_function<'db>(
-    db: &'db dyn HirAnalysisDb,
-    function: crate::hir_def::Func<'db>,
-) -> bool {
-    if !function.is_const(db) {
-        return false;
-    }
-    if ty_contains_meta_carrier(db, function.return_ty(db)).is_some()
-        || function
-            .arg_tys(db)
-            .iter()
-            .any(|ty| ty_contains_meta_carrier(db, ty.instantiate_identity()).is_some())
-    {
-        return true;
-    }
-    let Some(body) = function.body(db) else {
-        return false;
-    };
-    let typed = &crate::analysis::ty::ty_check::check_func_body(db, function).1;
-    body.exprs(db).iter().any(|(id, expression)| {
-        matches!(
-            expression,
-            crate::hir_def::Partial::Present(crate::hir_def::Expr::ItemQuote(_))
-        ) || ty_contains_meta_carrier(db, typed.expr_ty(db, id)).is_some()
-    })
-}
-
 /// Search existing semantic type arguments and instantiated fields. Repeated
 /// nominal expansion is stopped independently from argument traversal.
 pub fn ty_contains_meta_carrier<'db>(
@@ -484,12 +455,62 @@ impl QuoteHoleNode {
     }
 }
 
+pub const MAX_QUOTE_TEMPLATE_BYTES: usize = 4096;
+pub const MAX_QUOTE_HOLES: usize = 64;
+pub const MAX_GENERATED_AST_NODES: usize = 4096;
+
+fn producer_block_range(quote: &ast::QuoteExpr) -> Option<parser::TextRange> {
+    let block = quote.syntax().ancestors().find_map(ast::BlockExpr::cast)?;
+    let block_node = block
+        .syntax()
+        .parent()
+        .filter(|parent| ast::UnsafeExpr::can_cast(parent.kind()))
+        .unwrap_or_else(|| block.syntax().clone());
+    Some(block_node.text_range())
+}
+
+fn is_all_code_hole_block<'db>(
+    db: &'db dyn HirAnalysisDb,
+    quote: &ast::QuoteExpr,
+    holes: &[crate::analysis::semantic::SemConstId<'db>],
+    expected_kind: common::generation::FrozenCodeKind,
+) -> bool {
+    let Some(block) = quote.body() else {
+        return false;
+    };
+    let stmts = block.stmts().collect::<Vec<_>>();
+    !stmts.is_empty()
+        && block.items().next().is_none()
+        && stmts.len() == holes.len()
+        && stmts.iter().all(|stmt| {
+            matches!(
+                stmt.kind(),
+                ast::StmtKind::Expr(expr)
+                    if expr
+                        .expr()
+                        .is_some_and(|e| matches!(e.kind(), ast::ExprKind::QuoteHole(_)))
+            )
+        })
+        && holes.iter().all(|hole| {
+            matches!(
+                hole.value(db),
+                crate::analysis::semantic::SemConstValue::ItemCode { code, .. }
+                    if code.kind() == expected_kind
+            )
+        })
+}
+
 /// One bounded source walk shared by producer lowering, construction and
 /// output copying. Unsupported nested constructors never lower missing holes.
 pub(crate) fn quote_holes(quote: &ast::QuoteExpr) -> Result<Vec<QuoteHoleNode>, &'static str> {
     let mut holes = Vec::new();
-    for (index, node) in quote.syntax().descendants().take(4097).enumerate() {
-        if index == 4096 {
+    for (index, node) in quote
+        .syntax()
+        .descendants()
+        .take(MAX_GENERATED_AST_NODES + 1)
+        .enumerate()
+    {
+        if index == MAX_GENERATED_AST_NODES {
             return Err("item quotation exceeds the construction node limit of 4096");
         }
         if ast::QuoteExpr::can_cast(node.kind()) && node != *quote.syntax() {
@@ -506,8 +527,14 @@ pub(crate) fn quote_holes(quote: &ast::QuoteExpr) -> Result<Vec<QuoteHoleNode>, 
             {
                 return Err("nested quotation holes are not supported");
             }
+            if holes.len() == MAX_QUOTE_HOLES {
+                return Err("item quotation exceeds the hole limit of 64");
+            }
             holes.push(QuoteHoleNode { node });
         }
+    }
+    if usize::from(quote.syntax().text_range().len()) > MAX_QUOTE_TEMPLATE_BYTES {
+        return Err("item quotation exceeds the template byte limit of 4096");
     }
     Ok(holes)
 }
@@ -743,6 +770,16 @@ impl<'db> ItemCode<'db> {
         let Some(ast::ItemKind::Func(function)) = items[0].kind() else {
             return Err("this bounded item quotation requires one function declaration");
         };
+        if function.attr_list().is_some_and(|attrs| {
+            attrs.into_iter().any(|attr| match attr.kind() {
+                ast::AttrKind::Normal(normal) => {
+                    normal.path().is_some_and(|path| path.text() == "generate")
+                }
+                ast::AttrKind::DocComment(_) => false,
+            })
+        }) {
+            return Err("quoted functions cannot carry #[generate] attributes");
+        }
         let signature = function.sig();
         if signature
             .params()
@@ -755,11 +792,7 @@ impl<'db> ItemCode<'db> {
                 "bounded output copying requires a zero-argument nongeneric function without requirements or effects",
             );
         }
-        let producer_block = quote
-            .syntax()
-            .ancestors()
-            .find_map(ast::BlockExpr::cast)
-            .map(|block| block.syntax().text_range());
+        let producer_block = producer_block_range(&quote);
         let producer_module = quote
             .syntax()
             .ancestors()
@@ -787,24 +820,45 @@ impl<'db> ItemCode<'db> {
         &self,
         db: &'db dyn HirAnalysisDb,
     ) -> Result<common::generation::FrozenCode, &'static str> {
+        self.validate(db)?;
+        let mut remaining_nodes = MAX_GENERATED_AST_NODES;
+        self.freeze_with_budget(db, &mut remaining_nodes)
+    }
+
+    fn freeze_with_budget(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        remaining_nodes: &mut usize,
+    ) -> Result<common::generation::FrozenCode, &'static str> {
         use crate::analysis::semantic::SemConstValue;
         use common::generation::{FrozenCode, FrozenHoleValue};
-        self.validate(db)?;
         match &self.data {
             CodeData::Empty { kind } => Ok(FrozenCode::Empty { kind: *kind }),
-            CodeData::VariantBinders { record, group } => Ok(FrozenCode::VariantBinders {
-                record: record.freeze(db)?,
-                group: *group,
-            }),
+            CodeData::VariantBinders { record, group } => {
+                if *remaining_nodes == 0 {
+                    return Err("generated code tree exceeds the expanded AST node limit of 4096");
+                }
+                *remaining_nodes -= 1;
+                Ok(FrozenCode::VariantBinders {
+                    record: record.freeze(db)?,
+                    group: *group,
+                })
+            }
             CodeData::VariantBinderField {
                 record,
                 group,
                 field_index,
-            } => Ok(FrozenCode::VariantBinderField {
-                record: record.freeze(db)?,
-                group: *group,
-                field_index: *field_index,
-            }),
+            } => {
+                if *remaining_nodes == 0 {
+                    return Err("generated code tree exceeds the expanded AST node limit of 4096");
+                }
+                *remaining_nodes -= 1;
+                Ok(FrozenCode::VariantBinderField {
+                    record: record.freeze(db)?,
+                    group: *group,
+                    field_index: *field_index,
+                })
+            }
             CodeData::Template {
                 kind, key, holes, ..
             } => {
@@ -815,11 +869,16 @@ impl<'db> ItemCode<'db> {
                     .url(db)
                     .ok_or("quote producer has no source URL")?;
                 let quote = self.syntax(db)?;
-                let producer_block = quote
+                let node_count = quote
                     .syntax()
-                    .ancestors()
-                    .find_map(ast::BlockExpr::cast)
-                    .map(|block| block.syntax().text_range());
+                    .descendants()
+                    .take(MAX_GENERATED_AST_NODES + 1)
+                    .count();
+                if node_count > *remaining_nodes {
+                    return Err("generated code tree exceeds the expanded AST node limit of 4096");
+                }
+                *remaining_nodes -= node_count;
+                let producer_block = producer_block_range(&quote);
                 let producer_module = quote
                     .syntax()
                     .ancestors()
@@ -842,9 +901,9 @@ impl<'db> ItemCode<'db> {
                                 Ok(FrozenHoleValue::FieldType(field.freeze(db)?))
                             }
                         },
-                        SemConstValue::ItemCode { code, .. } => {
-                            Ok(FrozenHoleValue::Code(code.freeze(db)?))
-                        }
+                        SemConstValue::ItemCode { code, .. } => Ok(FrozenHoleValue::Code(
+                            code.freeze_with_budget(db, remaining_nodes)?,
+                        )),
                         _ => Err("unsupported quotation splice value"),
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -895,8 +954,28 @@ impl<'db> ItemCode<'db> {
     }
 
     pub(crate) fn validate(&self, db: &'db dyn HirAnalysisDb) -> Result<(), &'static str> {
+        let mut remaining_nodes = MAX_GENERATED_AST_NODES;
+        self.validate_with_budget(db, &mut remaining_nodes)
+    }
+
+    fn validate_with_budget(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        remaining_nodes: &mut usize,
+    ) -> Result<(), &'static str> {
         use crate::analysis::semantic::SemConstValue;
         use common::generation::FrozenCodeKind;
+        match &self.data {
+            CodeData::Empty { .. } => return Ok(()),
+            CodeData::VariantBinders { .. } | CodeData::VariantBinderField { .. } => {
+                if *remaining_nodes == 0 {
+                    return Err("generated code tree exceeds the expanded AST node limit of 4096");
+                }
+                *remaining_nodes -= 1;
+                return Ok(());
+            }
+            CodeData::Template { .. } => {}
+        }
         let CodeData::Template {
             kind,
             key,
@@ -904,7 +983,7 @@ impl<'db> ItemCode<'db> {
             holes,
         } = &self.data
         else {
-            return Ok(());
+            unreachable!();
         };
         let body = key.owner(db).body(db).ok_or("quote producer has no body")?;
         let crate::hir_def::Partial::Present(crate::hir_def::Expr::ItemQuote(source_holes)) =
@@ -915,11 +994,138 @@ impl<'db> ItemCode<'db> {
         if source_holes.len() != holes.len() {
             return Err("item code splice arity differs from its source");
         }
-        for value in holes.iter() {
+        let quote = self.syntax(db)?;
+        let syntax_holes = quote_holes(&quote)?;
+        if syntax_holes.len() != holes.len() {
+            return Err("item code splice arity differs from its source");
+        }
+        let node_count = quote
+            .syntax()
+            .descendants()
+            .take(MAX_GENERATED_AST_NODES + 1)
+            .count();
+        if node_count > *remaining_nodes {
+            return Err("generated code tree exceeds the expanded AST node limit of 4096");
+        }
+        *remaining_nodes -= node_count;
+
+        let all_code_hole_block = matches!(
+            *kind,
+            FrozenCodeKind::Item | FrozenCodeKind::Arm | FrozenCodeKind::Where
+        ) && is_all_code_hole_block(db, &quote, holes, *kind);
+
+        for (syntax_hole, value) in syntax_holes.iter().zip(holes.iter()) {
             crate::analysis::semantic::consts::verify_sem_const_shape(db, *value)?;
+            if !all_code_hole_block {
+                match syntax_hole.syntax().kind() {
+                    parser::SyntaxKind::QuoteHoleType => match value.value(db) {
+                        SemConstValue::Meta {
+                            value: MetaValue::Record(_) | MetaValue::FieldType(_),
+                            ..
+                        } => {}
+                        _ => {
+                            return Err(
+                                "type quotation hole requires Type<T> or FieldType<T, F> splice",
+                            );
+                        }
+                    },
+                    parser::SyntaxKind::QuoteHolePat => match value.value(db) {
+                        SemConstValue::Scalar { .. }
+                        | SemConstValue::Meta {
+                            value: MetaValue::Record(_) | MetaValue::Field(_),
+                            ..
+                        } => {}
+                        SemConstValue::ItemCode { code, .. }
+                            if code.kind() == FrozenCodeKind::Pat => {}
+                        _ => {
+                            return Err(
+                                "pattern quotation hole requires Code<Pat>, Type<T>, Field<T, F>, or scalar splice",
+                            );
+                        }
+                    },
+                    parser::SyntaxKind::QuoteHoleArm => match value.value(db) {
+                        SemConstValue::ItemCode { code, .. }
+                            if code.kind() == FrozenCodeKind::Arm => {}
+                        _ => return Err("match-arm quotation hole requires Code<Arm> splice"),
+                    },
+                    parser::SyntaxKind::QuoteHole => {
+                        let parent_kind = syntax_hole.syntax().parent().map(|p| p.kind());
+                        match parent_kind {
+                            Some(parser::SyntaxKind::WhereClause) => match value.value(db) {
+                                SemConstValue::ItemCode { code, .. }
+                                    if code.kind() == FrozenCodeKind::Where => {}
+                                _ => {
+                                    return Err(
+                                        "where-clause quotation hole requires Code<Where> splice",
+                                    );
+                                }
+                            },
+                            Some(
+                                parser::SyntaxKind::QuoteItemList
+                                | parser::SyntaxKind::ImplItemList
+                                | parser::SyntaxKind::TraitItemList,
+                            ) => match value.value(db) {
+                                SemConstValue::ItemCode { code, .. }
+                                    if code.kind() == FrozenCodeKind::Item => {}
+                                _ => {
+                                    return Err("item quotation hole requires Code<Item> splice");
+                                }
+                            },
+                            _ => match value.value(db) {
+                                SemConstValue::Meta {
+                                    value: MetaValue::Field(_),
+                                    ..
+                                } => {}
+                                _ => {
+                                    return Err(
+                                        "field or member quotation hole requires Field<T, F> splice",
+                                    );
+                                }
+                            },
+                        }
+                    }
+                    parser::SyntaxKind::QuoteHoleExpr => {
+                        if *kind == FrozenCodeKind::Pat {
+                            match value.value(db) {
+                                SemConstValue::Scalar { .. }
+                                | SemConstValue::Meta {
+                                    value: MetaValue::Record(_) | MetaValue::Field(_),
+                                    ..
+                                } => {}
+                                SemConstValue::ItemCode { code, .. }
+                                    if code.kind() == FrozenCodeKind::Pat => {}
+                                _ => {
+                                    return Err(
+                                        "pattern quotation hole requires Code<Pat>, Type<T>, Field<T, F>, or scalar splice",
+                                    );
+                                }
+                            }
+                        } else {
+                            match value.value(db) {
+                                SemConstValue::Scalar { .. }
+                                | SemConstValue::Meta {
+                                    value: MetaValue::Record(_) | MetaValue::Field(_),
+                                    ..
+                                } => {}
+                                SemConstValue::ItemCode { code, .. }
+                                    if code.kind() == FrozenCodeKind::Expr => {}
+                                _ => {
+                                    return Err(
+                                        "expression quotation hole requires Code<Expr>, Type<T>, Field<T, F>, or scalar splice",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ => return Err("unsupported quotation hole syntax"),
+                }
+            }
+
             match value.value(db) {
                 SemConstValue::Scalar { .. } | SemConstValue::Meta { .. } => {}
-                SemConstValue::ItemCode { code, .. } => code.validate(db)?,
+                SemConstValue::ItemCode { code, .. } => {
+                    code.validate_with_budget(db, remaining_nodes)?;
+                }
                 _ => {
                     return Err(
                         "this bounded item quotation requires scalar or metadata splice values",
@@ -927,10 +1133,39 @@ impl<'db> ItemCode<'db> {
                 }
             }
         }
-        let quote = self.syntax(db)?;
-        quote_holes(&quote)?;
-        if *kind == FrozenCodeKind::Item {
-            if let Some(items) = quote.item_list() {
+
+        match *kind {
+            FrozenCodeKind::Item => {
+                if let Some(items) = quote.item_list() {
+                    for item in items {
+                        if !matches!(
+                            item.kind(),
+                            Some(
+                                ast::ItemKind::Func(_)
+                                    | ast::ItemKind::Impl(_)
+                                    | ast::ItemKind::ImplTrait(_)
+                            )
+                        ) {
+                            return Err(
+                                "item quotation supports function, impl, and trait impl declarations",
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
+                if all_code_hole_block {
+                    return Ok(());
+                }
+                let block = quote
+                    .body()
+                    .ok_or("item quotation requires item declarations")?;
+                if block.stmts().next().is_some() {
+                    return Err("item quotation requires item declarations");
+                }
+                let items = block.items().collect::<Vec<_>>();
+                if items.is_empty() {
+                    return Err("item quotation requires item declarations");
+                }
                 for item in items {
                     if !matches!(
                         item.kind(),
@@ -945,49 +1180,32 @@ impl<'db> ItemCode<'db> {
                         );
                     }
                 }
-                return Ok(());
             }
-            let block = quote
-                .body()
-                .ok_or("item quotation requires item declarations")?;
-            let stmts = block.stmts().collect::<Vec<_>>();
-            if !stmts.is_empty() {
-                let all_item_splices = block.items().next().is_none()
-                    && stmts.iter().all(|stmt| {
-                        matches!(
-                            stmt.kind(),
-                            ast::StmtKind::Expr(expr)
-                                if expr.expr().is_some_and(|e| matches!(e.kind(), ast::ExprKind::QuoteHole(_)))
-                        )
-                    })
-                    && holes.len() == stmts.len()
-                    && holes.iter().all(|hole| {
-                        matches!(
-                            hole.value(db),
-                            SemConstValue::ItemCode { code, .. } if code.kind() == FrozenCodeKind::Item
-                        )
-                    });
-                if !all_item_splices {
-                    return Err("item quotation requires item declarations");
+            FrozenCodeKind::Arm => {
+                if quote.arm_list().is_none() && !all_code_hole_block {
+                    return Err("match-arm quotation requires match arms");
                 }
-                return Ok(());
             }
-            let items = block.items().collect::<Vec<_>>();
-            if items.is_empty() {
-                return Err("item quotation requires item declarations");
+            FrozenCodeKind::Where => {
+                if quote.where_clause().is_none() && !all_code_hole_block {
+                    return Err("where-clause quotation requires where predicates");
+                }
             }
-            for item in items {
-                if !matches!(
-                    item.kind(),
-                    Some(
-                        ast::ItemKind::Func(_)
-                            | ast::ItemKind::Impl(_)
-                            | ast::ItemKind::ImplTrait(_)
-                    )
-                ) {
-                    return Err(
-                        "item quotation supports function, impl, and trait impl declarations",
-                    );
+            FrozenCodeKind::Expr => {
+                if quote.item_list().is_some()
+                    || quote.arm_list().is_some()
+                    || quote.where_clause().is_some()
+                    || quote.body().is_none()
+                {
+                    return Err("expression quotation requires a block expression body");
+                }
+            }
+            FrozenCodeKind::Pat => {
+                let valid_pat_block = quote.body().is_some_and(|block| {
+                    block.items().next().is_none() && block.stmts().count() == 1
+                });
+                if !valid_pat_block {
+                    return Err("pattern quotation requires a pattern");
                 }
             }
         }

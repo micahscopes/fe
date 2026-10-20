@@ -200,6 +200,7 @@ pub(super) struct FileLowerCtxt<'db> {
     next_impl_idx: u32,
     next_impl_trait_idx: u32,
     next_static_assert_idx: u32,
+    next_quote_frame_id: usize,
     pub(super) quote_frames: Vec<generated::ActiveQuoteFrame<'db>>,
 }
 
@@ -210,7 +211,55 @@ impl<'db> FileLowerCtxt<'db> {
             next_impl_idx: 0,
             next_impl_trait_idx: 0,
             next_static_assert_idx: 0,
+            next_quote_frame_id: 0,
             quote_frames: Vec::new(),
+        }
+    }
+
+    pub(super) fn next_quote_frame_id(&mut self) -> usize {
+        let id = self.next_quote_frame_id;
+        self.next_quote_frame_id += 1;
+        id
+    }
+
+    pub(super) fn resolve_sub_quote_local_ident(&self, text: &str) -> IdentId<'db> {
+        let db = self.db();
+        for frame in self.quote_frames.iter().rev() {
+            if !frame.is_sub_quote {
+                break;
+            }
+            if !frame.open_names.iter().any(|(name, _)| name == text) {
+                return IdentId::new(db, format!("\0q{}_{text}", frame.frame_id));
+            }
+        }
+        IdentId::new(db, text.to_string())
+    }
+
+    pub(super) fn record_bound_name(&mut self, name: &str) {
+        for frame in self.quote_frames.iter_mut().rev() {
+            frame.bound_names.insert(name.to_string());
+            if !frame.is_sub_quote {
+                break;
+            }
+        }
+    }
+
+    pub(super) fn pop_quote_frame(&mut self) {
+        let Some(frame) = self.quote_frames.pop() else {
+            return;
+        };
+        if !frame.is_sub_quote {
+            let db = self.db();
+            let file = frame.quote_top_mod.file(db);
+            for (name, range) in frame.open_names {
+                if !frame.bound_names.contains(&name) {
+                    self.file_scoped_error(
+                        file,
+                        range,
+                        format!("quoted open name `{name}` has no enclosing binder"),
+                    );
+                }
+            }
         }
     }
 
@@ -234,9 +283,12 @@ impl<'db> FileLowerCtxt<'db> {
     }
 
     pub(super) fn resolve_quote_template(
-        &self,
+        &mut self,
         quote_file: &url::Url,
         quote_range: parser::TextRange,
+        producer_module: Option<parser::TextRange>,
+        producer_block: Option<parser::TextRange>,
+        is_sub_quote: bool,
         holes: Vec<common::generation::FrozenHoleValue>,
     ) -> (ast::QuoteExpr, generated::ActiveQuoteFrame<'db>) {
         let db = self.db();
@@ -258,10 +310,28 @@ impl<'db> FileLowerCtxt<'db> {
             .map(|hole| hole.syntax().text_range())
             .zip(holes)
             .collect();
+        let open_names = quote
+            .open_list()
+            .map(|list| {
+                list.names()
+                    .map(|n| (n.text().to_string(), n.text_range()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let producer_scope =
+            self.builder
+                .resolve_producer_scope(quote_top_mod, producer_module, producer_block);
+        let frame_id = self.next_quote_frame_id();
         (
             quote,
             generated::ActiveQuoteFrame {
+                frame_id,
                 quote_top_mod,
+                quote_range,
+                producer_scope,
+                is_sub_quote,
+                open_names,
+                bound_names: rustc_hash::FxHashSet::default(),
                 holes,
             },
         )
@@ -311,6 +381,10 @@ impl<'db> FileLowerCtxt<'db> {
     pub(super) fn lower_field_hole_ident(&self, range: parser::TextRange) -> Partial<IdentId<'db>> {
         let Some(common::generation::FrozenHoleValue::Field(field_ref)) = self.current_hole(range)
         else {
+            self.record_generation_error(
+                range,
+                "record field label hole requires a Field<T, F> splice",
+            );
             return Partial::Absent;
         };
         let db = self.db();
@@ -318,24 +392,50 @@ impl<'db> FileLowerCtxt<'db> {
             self.resolve_record_item(&field_ref.record),
             field_ref.record.variant_index,
         ) {
-            (ItemKind::Struct(s), None) => s
-                .fields(db)
-                .data(db)
-                .get(field_ref.index)
-                .map_or(Partial::Absent, |f| f.name),
+            (ItemKind::Struct(s), None) => match s.fields(db).data(db).get(field_ref.index) {
+                Some(f) => f.name,
+                None => {
+                    self.record_generation_error(
+                        range,
+                        "invalid field splice in record field label",
+                    );
+                    Partial::Absent
+                }
+            },
             (ItemKind::Enum(e), Some(v)) => {
                 match e.variants_list(db).data(db).get(v).map(|v| &v.kind) {
-                    Some(crate::hir_def::VariantKind::Record(fields)) => fields
-                        .data(db)
-                        .get(field_ref.index)
-                        .map_or(Partial::Absent, |f| f.name),
-                    Some(crate::hir_def::VariantKind::Tuple(_)) => {
-                        Partial::Present(IdentId::new(db, field_ref.index.to_string()))
+                    Some(crate::hir_def::VariantKind::Record(fields)) => {
+                        match fields.data(db).get(field_ref.index) {
+                            Some(f) => f.name,
+                            None => {
+                                self.record_generation_error(
+                                    range,
+                                    "invalid field splice in record field label",
+                                );
+                                Partial::Absent
+                            }
+                        }
                     }
-                    _ => Partial::Absent,
+                    Some(crate::hir_def::VariantKind::Tuple(_)) => {
+                        self.record_generation_error(
+                            range,
+                            "tuple variant field cannot be used as a named record field label",
+                        );
+                        Partial::Absent
+                    }
+                    _ => {
+                        self.record_generation_error(
+                            range,
+                            "invalid field splice in record field label",
+                        );
+                        Partial::Absent
+                    }
                 }
             }
-            _ => Partial::Absent,
+            _ => {
+                self.record_generation_error(range, "invalid field splice in record field label");
+                Partial::Absent
+            }
         }
     }
 
@@ -346,10 +446,11 @@ impl<'db> FileLowerCtxt<'db> {
         use crate::hir_def::expr::FieldIndex;
         let Some(common::generation::FrozenHoleValue::Field(field_ref)) = self.current_hole(range)
         else {
+            self.record_generation_error(range, "field access hole requires a Field<T, F> splice");
             return Partial::Absent;
         };
         let db = self.db();
-        match (
+        let res: Partial<FieldIndex<'db>> = match (
             self.resolve_record_item(&field_ref.record),
             field_ref.record.variant_index,
         ) {
@@ -375,7 +476,11 @@ impl<'db> FileLowerCtxt<'db> {
                 }
             }
             _ => Partial::Absent,
+        };
+        if res.to_opt().is_none() {
+            self.record_generation_error(range, "invalid field splice in field projection");
         }
+        res
     }
 
     pub(super) fn record_generation_error(
@@ -383,12 +488,22 @@ impl<'db> FileLowerCtxt<'db> {
         range: parser::TextRange,
         message: impl Into<String>,
     ) {
-        use salsa::Accumulator as _;
         let db = self.db();
         let file = self.quote_frames.last().map_or_else(
             || self.top_mod().file(db),
             |frame| frame.quote_top_mod.file(db),
         );
+        self.file_scoped_error(file, range, message);
+    }
+
+    pub(super) fn file_scoped_error(
+        &self,
+        file: common::file::File,
+        range: parser::TextRange,
+        message: impl Into<String>,
+    ) {
+        use salsa::Accumulator as _;
+        let db = self.db();
         GenerationLoweringError {
             file,
             primary_range: range,

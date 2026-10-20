@@ -87,7 +87,18 @@ impl<'db> WhereClauseId<'db> {
                     if let Some(common::generation::FrozenHoleValue::Code(code)) =
                         ctxt.current_hole(hole.syntax().text_range())
                     {
-                        Self::lower_code_into(ctxt, &code, const_idx, out);
+                        Self::lower_code_into(
+                            ctxt,
+                            &code,
+                            hole.syntax().text_range(),
+                            const_idx,
+                            out,
+                        );
+                    } else {
+                        ctxt.record_generation_error(
+                            hole.syntax().text_range(),
+                            "where-clause quotation hole requires Code<Where> splice",
+                        );
                     }
                 }
             }
@@ -97,6 +108,7 @@ impl<'db> WhereClauseId<'db> {
     fn lower_code_into(
         ctxt: &mut FileLowerCtxt<'db>,
         code: &common::generation::FrozenCode,
+        origin_range: parser::TextRange,
         const_idx: &mut usize,
         out: &mut Vec<WhereClausePredicate<'db>>,
     ) {
@@ -108,11 +120,25 @@ impl<'db> WhereClauseId<'db> {
                 kind: FrozenCodeKind::Where,
                 quote_file,
                 quote_range,
+                producer_module,
+                producer_block,
                 holes,
-                ..
             } => {
-                let (quote, frame) =
-                    ctxt.resolve_quote_template(quote_file, *quote_range, holes.clone());
+                let (quote, frame) = ctxt.resolve_quote_template(
+                    quote_file,
+                    *quote_range,
+                    *producer_module,
+                    *producer_block,
+                    true,
+                    holes.clone(),
+                );
+                for (name, range) in &frame.open_names {
+                    ctxt.file_scoped_error(
+                        frame.quote_top_mod.file(ctxt.db()),
+                        *range,
+                        format!("quoted open name `{name}` has no enclosing binder"),
+                    );
+                }
                 ctxt.quote_frames.push(frame);
                 if let Some(where_clause) = quote.where_clause().and_then(|w| w.clause()) {
                     Self::lower_ast_into(ctxt, where_clause, const_idx, out);
@@ -124,13 +150,34 @@ impl<'db> WhereClauseId<'db> {
                             && let Some(FrozenHoleValue::Code(nested)) =
                                 ctxt.current_hole(hole.syntax().text_range())
                         {
-                            Self::lower_code_into(ctxt, &nested, const_idx, out);
+                            Self::lower_code_into(
+                                ctxt,
+                                &nested,
+                                hole.syntax().text_range(),
+                                const_idx,
+                                out,
+                            );
+                        } else {
+                            ctxt.record_generation_error(
+                                stmt.syntax().text_range(),
+                                "where-clause quotation requires where predicates",
+                            );
                         }
                     }
+                } else {
+                    ctxt.record_generation_error(
+                        *quote_range,
+                        "where-clause quotation requires where predicates",
+                    );
                 }
                 ctxt.quote_frames.pop();
             }
-            _ => {}
+            _ => {
+                ctxt.record_generation_error(
+                    origin_range,
+                    "where-clause quotation hole requires Code<Where> splice",
+                );
+            }
         }
     }
 

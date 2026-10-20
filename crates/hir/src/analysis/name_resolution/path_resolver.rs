@@ -2,9 +2,9 @@ use crate::core::hir_def::GenericArg;
 use crate::hir_def::{CallableDef, Func};
 use crate::{
     core::hir_def::{
-        Const, Enum, EnumVariant, GenericArgListId, GenericParamOwner, HirIngot, IdentId, Impl,
-        ImplTrait, ItemKind, Partial, PathId, PathKind, Trait, TypeBound, TypeId, TypeKind,
-        VariantKind, scope_graph::ScopeId,
+        Const, Enum, EnumVariant, GenericParamOwner, HirIngot, IdentId, Impl, ImplTrait, ItemKind,
+        Partial, PathId, PathKind, Trait, TypeBound, TypeId, TypeKind, VariantKind,
+        scope_graph::ScopeId,
     },
     core::semantic::trait_self_predicate,
     span::{DynLazySpan, path::LazyPathSpan, types::LazyTySpan},
@@ -545,16 +545,30 @@ pub(crate) fn resolve_type_path_definition<'db>(
             parent_scope = Some(ingot.root_mod(db).scope());
             continue;
         }
-        if !matches!(segment.kind(db), PathKind::Ident { .. }) {
+        if !matches!(
+            segment.kind(db),
+            PathKind::Ident { .. } | PathKind::InScope { .. }
+        ) {
             return None;
         }
-        let query_scope = parent_scope.unwrap_or(scope);
+        let query_scope =
+            parent_scope.unwrap_or_else(|| segment.hygiene_scope(db).unwrap_or(scope));
         let directive = QueryDirective::for_scope(db, query_scope);
         let query = make_query(db, segment, query_scope, directive);
         let resolved = resolve_query(db, query)
             .pick(NameDomain::TYPE)
             .as_ref()
             .ok()?;
+        if segment.hygiene_scope(db).is_some()
+            && matches!(
+                resolved.kind,
+                NameResKind::Scope(
+                    ScopeId::FuncParam(..) | ScopeId::GenericParam(ItemKind::Func(_), _)
+                )
+            )
+        {
+            return None;
+        }
         if segment_idx + 1 == path.len(db) {
             return Some(resolved.kind);
         }
@@ -585,16 +599,19 @@ pub(crate) fn resolve_impl_name<'db>(
     scope: ScopeId<'db>,
 ) -> ImplNameRes<'db> {
     let mut parent_scope = None;
+    let vis_scope = path.hygiene_scope(db).unwrap_or(scope);
     for segment_idx in 0..path.len(db) {
         let Some(segment) = path.segment(db, segment_idx) else {
             return ImplNameRes::NotFound;
         };
-        if !matches!(segment.kind(db), PathKind::Ident { .. })
-            || !segment.generic_args(db).is_empty(db)
+        if !matches!(
+            segment.kind(db),
+            PathKind::Ident { .. } | PathKind::InScope { .. }
+        ) || !segment.generic_args(db).is_empty(db)
         {
             return ImplNameRes::NotFound;
         }
-        let query_scope = parent_scope.unwrap_or(scope);
+        let query_scope = parent_scope.unwrap_or(vis_scope);
         let directive = QueryDirective::for_scope(db, query_scope);
         let query = make_query(db, segment, query_scope, directive);
         let bucket = resolve_query(db, query);
@@ -602,7 +619,7 @@ pub(crate) fn resolve_impl_name<'db>(
             return match bucket.pick(NameDomain::IMPL) {
                 Ok(res) => match res.kind {
                     NameResKind::Scope(ScopeId::Item(ItemKind::ImplTrait(implementation))) => {
-                        if res.is_visible(db, scope) {
+                        if res.is_visible(db, vis_scope) {
                             ImplNameRes::Found(implementation)
                         } else {
                             ImplNameRes::NotVisible
@@ -622,7 +639,7 @@ pub(crate) fn resolve_impl_name<'db>(
             Err(NameResolutionError::Invisible(_)) => return ImplNameRes::NotVisible,
             Err(_) => return ImplNameRes::NotFound,
         };
-        if !res.is_visible(db, scope) {
+        if !res.is_visible(db, vis_scope) {
             return ImplNameRes::NotVisible;
         }
         let Some(next) = res.scope() else {
@@ -973,11 +990,12 @@ where
     F: FnMut(PathId<'db>, &PathRes<'db>),
 {
     let is_trait = |kind| matches!(kind, NameResKind::Scope(ScopeId::Item(ItemKind::Trait(_))));
-    let definition = resolve_type_path_definition(db, path, scope);
+    let query_scope = path.hygiene_scope(db).unwrap_or(scope);
+    let definition = resolve_type_path_definition(db, path, query_scope);
     if let Some(NameResKind::Scope(ScopeId::TraitType(shadowing_trait, _))) = definition
         && path.parent(db).is_none()
         // The shadow can only come from a trait that encloses the use site.
-        && scope.is_transitive_child_of(db, shadowing_trait.scope())
+        && query_scope.is_transitive_child_of(db, shadowing_trait.scope())
         && let Some(outer_scope) = shadowing_trait.scope().parent(db)
         && let Ok(outer) = resolve_ident_to_bucket(db, path, outer_scope).pick(NameDomain::TYPE)
         && is_trait(outer.kind)
@@ -990,14 +1008,7 @@ where
     }
 
     let path = match definition {
-        Some(kind) if !is_trait(kind) => PathId::new(
-            db,
-            PathKind::Ident {
-                ident: path.ident(db),
-                generic_args: GenericArgListId::none(db),
-            },
-            path.parent(db),
-        ),
+        Some(kind) if !is_trait(kind) => path.strip_generic_args(db),
         _ => path,
     };
     resolve_path_with_observer_and_minter(
@@ -1172,7 +1183,8 @@ fn find_written_path<'db, R>(
                     ),
                     PathKind::Ident { .. }
                     | PathKind::BoundIngot { .. }
-                    | PathKind::BoundItem { .. } => segment
+                    | PathKind::BoundItem { .. }
+                    | PathKind::InScope { .. } => segment
                         .generic_args(db)
                         .data(db)
                         .iter()
@@ -1369,10 +1381,13 @@ where
         return Err(PathResError::parse_err(path));
     };
 
-    let parent_scope = parent_res
-        .as_ref()
-        .and_then(|r| r.as_scope(db))
-        .unwrap_or(scope);
+    let (parent_scope, base_directive) = if let Some(r) = parent_res.as_ref() {
+        (r.as_scope(db).unwrap_or(scope), base_directive)
+    } else if let Some(h_scope) = path.hygiene_scope(db) {
+        (h_scope, QueryDirective::for_scope(db, h_scope))
+    } else {
+        (scope, base_directive)
+    };
 
     match parent_res {
         Some(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => {
@@ -1699,14 +1714,35 @@ where
         _ => None,
     });
 
+    let is_disallowed_hygiene_res = |res: &NameRes<'db>| {
+        path.hygiene_scope(db).is_some()
+            && matches!(
+                res.kind,
+                NameResKind::Scope(
+                    ScopeId::FuncParam(..) | ScopeId::GenericParam(ItemKind::Func(_), _)
+                )
+            )
+    };
+
     let res = if is_tail
         && resolve_tail_as_value
         && let Ok(res) = bucket.pick(NameDomain::VALUE)
+        && !is_disallowed_hygiene_res(res)
     {
         *decided_by_value = true;
         res.clone()
     } else {
-        pick_type_domain_from_bucket(parent_res, bucket, path, path.parent(db))?
+        let res = pick_type_domain_from_bucket(parent_res.clone(), bucket, path, path.parent(db))?;
+        if is_disallowed_hygiene_res(&res) {
+            return Err(PathResError::new(
+                PathResErrorKind::NotFound {
+                    parent: parent_res,
+                    bucket: NameResBucket::default(),
+                },
+                path,
+            ));
+        }
+        res
     };
 
     let r =

@@ -57,7 +57,13 @@ impl<'db> Expr<'db> {
                     Some(FrozenHoleValue::Code(code)) => {
                         return Self::lower_code(ctxt, &code, &ast);
                     }
-                    _ => return ctxt.push_invalid_expr(HirOrigin::raw(&ast)),
+                    _ => {
+                        ctxt.f_ctxt.record_generation_error(
+                            hole.syntax().text_range(),
+                            "expression quotation hole requires Code<Expr> or scalar splice",
+                        );
+                        return ctxt.push_invalid_expr(HirOrigin::raw(&ast));
+                    }
                 }
             }
             ast::ExprKind::Lit(lit) => {
@@ -83,7 +89,17 @@ impl<'db> Expr<'db> {
                 let ret_ty = closure
                     .ret_ty()
                     .map(|ret_ty| TypeId::lower_ast(ctxt.f_ctxt, ret_ty));
+                let saved_local_len = ctxt.local_binders.len();
+                let param_idents: Vec<_> = params
+                    .data(ctxt.f_ctxt.db())
+                    .iter()
+                    .filter_map(|p| p.name())
+                    .collect();
+                for ident in param_idents {
+                    ctxt.record_local_binder(ident, Some(ident));
+                }
                 let body = Self::push_to_body_opt(ctxt, closure.body());
+                ctxt.local_binders.truncate(saved_local_len);
                 Self::Closure {
                     params,
                     ret_ty,
@@ -234,6 +250,7 @@ impl<'db> Expr<'db> {
 
             ast::ExprKind::If(if_) => {
                 let saved_binder_len = ctxt.active_binder_groups.len();
+                let saved_local_len = ctxt.local_binders.len();
                 let cond = Cond::push_to_body_opt(ctxt, if_.cond());
                 let then = Expr::push_to_body_opt(
                     ctxt,
@@ -241,6 +258,7 @@ impl<'db> Expr<'db> {
                         .and_then(|body| ast::Expr::cast(body.syntax().clone())),
                 );
                 ctxt.active_binder_groups.truncate(saved_binder_len);
+                ctxt.local_binders.truncate(saved_local_len);
                 let else_ = if_.else_().map(|ast| Self::lower_ast(ctxt, ast));
                 Self::If(cond, then, else_)
             }
@@ -317,10 +335,14 @@ impl<'db> Expr<'db> {
         kind: BlockKind,
     ) -> ExprId {
         ctxt.f_ctxt.enter_block_scope();
+        let saved_binder_len = ctxt.active_binder_groups.len();
+        let saved_local_len = ctxt.local_binders.len();
         let stmts = block
             .stmts()
             .map(|stmt| Stmt::push_to_body(ctxt, stmt))
             .collect();
+        ctxt.active_binder_groups.truncate(saved_binder_len);
+        ctxt.local_binders.truncate(saved_local_len);
         let expr_id = ctxt.push_expr(Self::Block(stmts, kind), HirOrigin::raw(ast));
 
         for item in block.items() {
@@ -364,10 +386,8 @@ impl<'db> Expr<'db> {
                     );
                     return ctxt.push_invalid_expr(HirOrigin::raw(origin_ast));
                 }
-                let ident = IdentId::new(
-                    ctxt.f_ctxt.db(),
-                    format!("__fe_binder_{group}_{field_index}"),
-                );
+                let ident =
+                    IdentId::new(ctxt.f_ctxt.db(), format!("\0binder_{group}_{field_index}"));
                 let path = PathId::from_ident(ctxt.f_ctxt.db(), ident);
                 ctxt.push_expr(
                     Self::Path(crate::hir_def::Partial::Present(path)),
@@ -378,12 +398,19 @@ impl<'db> Expr<'db> {
                 kind: FrozenCodeKind::Expr,
                 quote_file,
                 quote_range,
+                producer_module,
+                producer_block,
                 holes,
-                ..
             } => {
-                let (quote, frame) =
-                    ctxt.f_ctxt
-                        .resolve_quote_template(quote_file, *quote_range, holes.clone());
+                let (quote, frame) = ctxt.f_ctxt.resolve_quote_template(
+                    quote_file,
+                    *quote_range,
+                    *producer_module,
+                    *producer_block,
+                    true,
+                    holes.clone(),
+                );
+                ctxt.validate_frame_open_names(&frame);
                 ctxt.f_ctxt.quote_frames.push(frame);
                 let expr_id = if let Some(block) = quote.body() {
                     let stmts = block.stmts().collect::<Vec<_>>();
@@ -397,12 +424,22 @@ impl<'db> Expr<'db> {
                         Self::lower_block(ctxt, origin_ast, block, BlockKind::Normal)
                     }
                 } else {
+                    ctxt.f_ctxt.record_generation_error(
+                        *quote_range,
+                        "expression quotation requires a block expression body",
+                    );
                     ctxt.push_invalid_expr(HirOrigin::raw(origin_ast))
                 };
                 ctxt.f_ctxt.quote_frames.pop();
                 expr_id
             }
-            _ => ctxt.push_invalid_expr(HirOrigin::raw(origin_ast)),
+            _ => {
+                ctxt.f_ctxt.record_generation_error(
+                    origin_ast.syntax().text_range(),
+                    "expression quotation hole requires Code<Expr> splice",
+                );
+                ctxt.push_invalid_expr(HirOrigin::raw(origin_ast))
+            }
         }
     }
 }
@@ -442,8 +479,17 @@ impl Cond {
     fn lower_ast<'db>(ctxt: &mut BodyCtxt<'_, 'db>, ast: ast::Expr) -> CondId {
         let cond = match ast.kind() {
             ast::ExprKind::Let(let_expr) => {
+                let saved_binder_len = ctxt.active_binder_groups.len();
+                let saved_local_len = ctxt.local_binders.len();
                 let pat = Pat::lower_ast_opt(ctxt, let_expr.pat());
+                let new_binders: Vec<_> = ctxt
+                    .active_binder_groups
+                    .drain(saved_binder_len..)
+                    .collect();
+                let new_locals: Vec<_> = ctxt.local_binders.drain(saved_local_len..).collect();
                 let scrutinee = Expr::push_to_body_opt(ctxt, let_expr.expr());
+                ctxt.active_binder_groups.extend(new_binders);
+                ctxt.local_binders.extend(new_locals);
                 Self::Let(pat, scrutinee)
             }
 
@@ -454,13 +500,25 @@ impl Cond {
                         | Some(ast::BinOp::Logical(ast::LogicalBinOp::Or(_)))
                 ) =>
             {
-                let lhs = Cond::push_to_body_opt(ctxt, bin.lhs());
-                let rhs = Cond::push_to_body_opt(ctxt, bin.rhs());
                 let op = LogicalBinOp::lower_ast(match bin.op().expect("parser guarantees op") {
                     ast::BinOp::Logical(op) => op,
                     _ => unreachable!(),
                 });
-                Self::Bin(lhs, rhs, op)
+                if matches!(op, LogicalBinOp::Or) {
+                    let saved_binder_len = ctxt.active_binder_groups.len();
+                    let saved_local_len = ctxt.local_binders.len();
+                    let lhs = Cond::push_to_body_opt(ctxt, bin.lhs());
+                    ctxt.active_binder_groups.truncate(saved_binder_len);
+                    ctxt.local_binders.truncate(saved_local_len);
+                    let rhs = Cond::push_to_body_opt(ctxt, bin.rhs());
+                    ctxt.active_binder_groups.truncate(saved_binder_len);
+                    ctxt.local_binders.truncate(saved_local_len);
+                    Self::Bin(lhs, rhs, op)
+                } else {
+                    let lhs = Cond::push_to_body_opt(ctxt, bin.lhs());
+                    let rhs = Cond::push_to_body_opt(ctxt, bin.rhs());
+                    Self::Bin(lhs, rhs, op)
+                }
             }
 
             ast::ExprKind::Paren(paren) => {
@@ -546,9 +604,11 @@ impl UnOp {
 impl MatchArm {
     fn lower_ast(ctxt: &mut BodyCtxt<'_, '_>, ast: ast::MatchArm) -> Self {
         let saved_binder_len = ctxt.active_binder_groups.len();
+        let saved_local_len = ctxt.local_binders.len();
         let pat = Pat::lower_ast_opt(ctxt, ast.pat());
         let body = Expr::push_to_body_opt(ctxt, ast.body());
         ctxt.active_binder_groups.truncate(saved_binder_len);
+        ctxt.local_binders.truncate(saved_local_len);
         Self { pat, body }
     }
 
@@ -556,11 +616,17 @@ impl MatchArm {
         for child in arms.syntax().children() {
             if let Some(arm) = ast::MatchArm::cast(child.clone()) {
                 out.push(Self::lower_ast(ctxt, arm));
-            } else if let Some(hole) = ast::QuoteHoleArm::cast(child)
-                && let Some(common::generation::FrozenHoleValue::Code(code)) =
+            } else if let Some(hole) = ast::QuoteHoleArm::cast(child) {
+                if let Some(common::generation::FrozenHoleValue::Code(code)) =
                     ctxt.f_ctxt.current_hole(hole.syntax().text_range())
-            {
-                Self::lower_code_into(ctxt, &code, out);
+                {
+                    Self::lower_code_into(ctxt, &code, hole.syntax().text_range(), out);
+                } else {
+                    ctxt.f_ctxt.record_generation_error(
+                        hole.syntax().text_range(),
+                        "match-arm quotation hole requires Code<Arm> splice",
+                    );
+                }
             }
         }
     }
@@ -568,6 +634,7 @@ impl MatchArm {
     fn lower_code_into(
         ctxt: &mut BodyCtxt<'_, '_>,
         code: &common::generation::FrozenCode,
+        origin_range: parser::TextRange,
         out: &mut Vec<Self>,
     ) {
         use common::generation::{FrozenCode, FrozenCodeKind, FrozenHoleValue};
@@ -577,12 +644,19 @@ impl MatchArm {
                 kind: FrozenCodeKind::Arm,
                 quote_file,
                 quote_range,
+                producer_module,
+                producer_block,
                 holes,
-                ..
             } => {
-                let (quote, frame) =
-                    ctxt.f_ctxt
-                        .resolve_quote_template(quote_file, *quote_range, holes.clone());
+                let (quote, frame) = ctxt.f_ctxt.resolve_quote_template(
+                    quote_file,
+                    *quote_range,
+                    *producer_module,
+                    *producer_block,
+                    true,
+                    holes.clone(),
+                );
+                ctxt.validate_frame_open_names(&frame);
                 ctxt.f_ctxt.quote_frames.push(frame);
                 if let Some(arm_list) = quote.arm_list() {
                     Self::lower_arm_list(ctxt, arm_list, out);
@@ -594,13 +668,28 @@ impl MatchArm {
                             && let Some(FrozenHoleValue::Code(nested)) =
                                 ctxt.f_ctxt.current_hole(hole.syntax().text_range())
                         {
-                            Self::lower_code_into(ctxt, &nested, out);
+                            Self::lower_code_into(ctxt, &nested, hole.syntax().text_range(), out);
+                        } else {
+                            ctxt.f_ctxt.record_generation_error(
+                                stmt.syntax().text_range(),
+                                "match-arm quotation requires match arms",
+                            );
                         }
                     }
+                } else {
+                    ctxt.f_ctxt.record_generation_error(
+                        *quote_range,
+                        "match-arm quotation requires match arms",
+                    );
                 }
                 ctxt.f_ctxt.quote_frames.pop();
             }
-            _ => {}
+            _ => {
+                ctxt.f_ctxt.record_generation_error(
+                    origin_range,
+                    "match-arm quotation hole requires Code<Arm> splice",
+                );
+            }
         }
     }
 }
