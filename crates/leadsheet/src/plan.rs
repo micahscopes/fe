@@ -50,10 +50,10 @@ pub enum Org {
     Pool,
     StorParam(u16),
     StorMap(u16),
-    StorLit,
+    StorLit(u64, u64),
     TstorParam(u16),
     TstorMap(u16),
-    TstorLit,
+    TstorLit(u64, u64),
 }
 
 pub type OSet = BTreeSet<Org>;
@@ -299,13 +299,25 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             RExpr::Builtin(b) => match b {
                 RuntimeBuiltin::Malloc { .. } | RuntimeBuiltin::Mload { .. } => OSet::from([Org::Pool]),
                 RuntimeBuiltin::PtrOffsetBytes { ptr, .. } => org(ptr),
-                RuntimeBuiltin::MakeContractFieldRef { kind, .. } => match kind {
-                    RefKind::Provider { space: AddressSpace::Storage, .. } => OSet::from([Org::StorLit]),
-                    RefKind::Provider { space: AddressSpace::Transient, .. } => OSet::from([Org::TstorLit]),
-                    RefKind::Provider { space: AddressSpace::Memory, .. } => OSet::from([Org::Obj(facts.stmt_site[&at])]),
-                    RefKind::Provider { space: AddressSpace::Code, .. } => OSet::new(),
-                    _ => OSet::from([Org::Pool]),
-                },
+                RuntimeBuiltin::MakeContractFieldRef { slot, class, kind } => {
+                    let word_slot = match slot {
+                        mir::ContractFieldSlot::Words(n) => u64::try_from(*n).unwrap_or(u64::MAX),
+                        _ => u64::MAX,
+                    };
+                    match kind {
+                        RefKind::Provider { space: AddressSpace::Storage, .. } => {
+                            let len = stor_piece(self.db, class, AddressSpace::Storage).unwrap_or(0);
+                            OSet::from([Org::StorLit(word_slot, len)])
+                        }
+                        RefKind::Provider { space: AddressSpace::Transient, .. } => {
+                            let len = stor_piece(self.db, class, AddressSpace::Transient).unwrap_or(0);
+                            OSet::from([Org::TstorLit(word_slot, len)])
+                        }
+                        RefKind::Provider { space: AddressSpace::Memory, .. } => OSet::from([Org::Obj(facts.stmt_site[&at])]),
+                        RefKind::Provider { space: AddressSpace::Code, .. } => OSet::new(),
+                        _ => OSet::from([Org::Pool]),
+                    }
+                }
                 _ => OSet::new(),
             },
             // A map entry's slot, hashed from the root: in the root's map region.

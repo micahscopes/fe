@@ -450,15 +450,52 @@ fn lower_program_with_balance<'db>(
                         if oi.is_empty() || oi.is_disjoint(oj) {
                             continue;
                         }
-                        let same_piece = (mem_piece(db, &g_params[i].class).is_some()
-                            && mem_piece(db, &g_params[i].class) == mem_piece(db, &g_params[j].class))
-                            || (stor_piece(db, &g_params[i].class, AddressSpace::Storage).is_some()
-                                && stor_piece(db, &g_params[i].class, AddressSpace::Storage)
-                                    == stor_piece(db, &g_params[j].class, AddressSpace::Storage))
-                            || (stor_piece(db, &g_params[i].class, AddressSpace::Transient).is_some()
-                                && stor_piece(db, &g_params[i].class, AddressSpace::Transient)
-                                    == stor_piece(db, &g_params[j].class, AddressSpace::Transient));
-                        if same_piece && (plan::param_is_mut(db, *g, g_body, i) || plan::param_is_mut(db, *g, g_body, j)) {
+                        let f_body = &bodies[f];
+                        let whole_shared = oi.intersection(oj).any(|o| match o {
+                            plan::Org::Obj(k) => {
+                                let sz = class::obj_size(db, &facts[f].site_class[*k as usize]);
+                                mem_piece(db, &g_params[i].class) == Some(sz)
+                                    && mem_piece(db, &g_params[j].class) == Some(sz)
+                            }
+                            plan::Org::MemParam(p) => {
+                                let sz = f_body.signature.params.get(*p as usize).and_then(|param| mem_piece(db, &param.class));
+                                sz.is_some()
+                                    && mem_piece(db, &g_params[i].class) == sz
+                                    && mem_piece(db, &g_params[j].class) == sz
+                            }
+                            plan::Org::StorParam(p) => {
+                                let sz = f_body
+                                    .signature
+                                    .params
+                                    .get(*p as usize)
+                                    .and_then(|param| stor_piece(db, &param.class, AddressSpace::Storage));
+                                sz.is_some()
+                                    && stor_piece(db, &g_params[i].class, AddressSpace::Storage) == sz
+                                    && stor_piece(db, &g_params[j].class, AddressSpace::Storage) == sz
+                            }
+                            plan::Org::StorLit(_, len) => {
+                                *len > 0
+                                    && stor_piece(db, &g_params[i].class, AddressSpace::Storage) == Some(*len)
+                                    && stor_piece(db, &g_params[j].class, AddressSpace::Storage) == Some(*len)
+                            }
+                            plan::Org::TstorParam(p) => {
+                                let sz = f_body
+                                    .signature
+                                    .params
+                                    .get(*p as usize)
+                                    .and_then(|param| stor_piece(db, &param.class, AddressSpace::Transient));
+                                sz.is_some()
+                                    && stor_piece(db, &g_params[i].class, AddressSpace::Transient) == sz
+                                    && stor_piece(db, &g_params[j].class, AddressSpace::Transient) == sz
+                            }
+                            plan::Org::TstorLit(_, len) => {
+                                *len > 0
+                                    && stor_piece(db, &g_params[i].class, AddressSpace::Transient) == Some(*len)
+                                    && stor_piece(db, &g_params[j].class, AddressSpace::Transient) == Some(*len)
+                            }
+                            plan::Org::Pool | plan::Org::StorMap(_) | plan::Org::TstorMap(_) => false,
+                        });
+                        if whole_shared && (plan::param_is_mut(db, *g, g_body, i) || plan::param_is_mut(db, *g, g_body, j)) {
                             let entry = alias_params.entry(*g).or_default();
                             let root = entry.get(&(i as u16)).copied().unwrap_or(i as u16);
                             if entry.insert(j as u16, root) != Some(root) {
