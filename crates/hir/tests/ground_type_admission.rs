@@ -195,3 +195,111 @@ fn existing_declaration_and_cycle_checks_remain_in_force() {
         });
     }
 }
+
+#[test]
+fn named_canonical_impl_and_unfulfilled_derive_request_cannot_bypass_lower_impl_trait() {
+    use fe_hir::{
+        analysis::ty::{
+            trait_def::{TraitInstId, prove_selected_hir_application},
+            trait_resolution::TraitSolveCx,
+        },
+        test_db::initialize_test_analysis_pass,
+    };
+
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "canonical-named-and-unfulfilled-gates.fe".into(),
+        r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+use core::permits::PermitAuthority
+
+#[canonical]
+trait Score {
+    const fn score() -> usize
+}
+
+pub struct Key {}
+pub struct Other {}
+
+struct Provider {}
+impl Derive<Score> for Provider {
+    const fn derive(_ r: Record) -> Code<Item> {
+        quote {
+            const fn score() -> usize { 1 }
+        }
+    }
+}
+
+#[permit_root]
+const ROOT_KEY: PermitAuthority<Score<Key>> = PermitAuthority {}
+
+#[permit(ROOT_KEY)]
+impl Score for Key as NamedCanonical {
+    const fn score() -> usize { 1 }
+}
+
+fn use_named_canonical() -> usize {
+    with (NamedCanonical) {
+        Key::score()
+    }
+}
+
+#[permit_root]
+const ROOT_OTHER: PermitAuthority<Score<Other>> = PermitAuthority {}
+
+#[permit(ROOT_OTHER)]
+impl Score for Other with (Provider)
+"#,
+    );
+    let (module, _) = db.top_mod(file);
+    let mut pass_manager = initialize_test_analysis_pass();
+    let diags = pass_manager.run_on_module(&db, module);
+    assert!(
+        !diags.is_empty(),
+        "named impl of #[canonical] trait and opening it via `with (NamedCanonical)` must report diagnostics"
+    );
+
+    let score_trait = module
+        .all_traits(&db)
+        .iter()
+        .copied()
+        .find(|t| t.name(&db).to_opt().unwrap().data(&db) == "Score")
+        .unwrap();
+
+    // Neither the named canonical impl nor the unfulfilled derive request may pass prove_selected_hir_application.
+    for &impl_trait in module.all_impl_traits(&db) {
+        let Some(goal) = impl_trait.trait_inst(&db) else {
+            continue;
+        };
+        if goal.def(&db) == score_trait {
+            let res = prove_selected_hir_application(
+                &db,
+                TraitSolveCx::new(&db, module.scope()),
+                impl_trait,
+                TraitInstId::new_simple(&db, score_trait, goal.args(&db).to_vec()),
+            );
+            assert!(
+                res.is_err(),
+                "expected prove_selected_hir_application to reject unauthorized/unfulfilled impl, got {res:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn local_shadowing_of_constraint_rejects_arrow_constraint_kind_bound() {
+    use fe_hir::test_db::initialize_test_analysis_pass;
+
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "shadowed-constraint-kind.fe".into(),
+        "trait Constraint {}\ntrait CustomDerive<G: * -> Constraint> {}\n",
+    );
+    let (module, _) = db.top_mod(file);
+    let mut pass_manager = initialize_test_analysis_pass();
+    let diags = pass_manager.run_on_module(&db, module);
+    assert!(
+        !diags.is_empty(),
+        "shadowed Constraint in `* -> Constraint` must be rejected by kind lowering"
+    );
+}

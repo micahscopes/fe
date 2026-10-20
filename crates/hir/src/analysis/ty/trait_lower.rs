@@ -146,7 +146,13 @@ pub(crate) fn lower_impl_trait<'db>(
     db: &'db dyn HirAnalysisDb,
     impl_trait: ImplTrait<'db>,
 ) -> Option<ImplementorId<'db>> {
+    if crate::core::meta::is_unfulfilled_derive_request(db, impl_trait) {
+        return None;
+    }
     let trait_inst = impl_trait.trait_inst_result(db).ok()?;
+    if super::permits::establishment_for_goal(db, impl_trait, trait_inst).is_err() {
+        return None;
+    }
     let params = impl_trait.impl_params(db);
 
     // This is the checked item-signature path used after candidate lookup or by
@@ -342,6 +348,9 @@ pub(crate) fn lower_impl_trait_header<'db>(
     db: &'db dyn HirAnalysisDb,
     impl_trait: ImplTrait<'db>,
 ) -> Option<ImplementorId<'db>> {
+    if crate::core::meta::is_unfulfilled_derive_request(db, impl_trait) {
+        return None;
+    }
     // Delegate trait-ref lowering and ingot checks to the semantic helper on
     // `ImplTrait`. If lowering fails or the ingot rule is violated, this
     // returns `None`.

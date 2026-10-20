@@ -48,3 +48,29 @@ fn native_declared_and_named_multiline_headers_keep_provider_paths() {
             .all(|header| header.derive_provider().is_some())
     );
 }
+
+#[test]
+fn constraint_kind_bounds_only_parse_as_unparenthesized_codomain_or_bare_bound() {
+    for valid in [
+        "trait Foo<G: Constraint> {}\n",
+        "trait Foo<G: * -> Constraint> {}\n",
+        "trait Foo<G: * -> * -> Constraint> {}\n",
+        "trait Foo<G: (* -> *) -> Constraint> {}\n",
+    ] {
+        let (_, errors) = fe_parser::parse_source_file(valid, RecoveryMode::Recover);
+        assert!(
+            errors.is_empty(),
+            "expected valid kind bound for `{valid}`, got {errors:?}"
+        );
+    }
+
+    for invalid in [
+        "trait Foo<G: Constraint -> *> {}\n",
+        "trait Foo<G: (Constraint)> {}\n",
+        "trait Foo<G: (Constraint) -> Constraint> {}\n",
+        "trait Foo<G: * -> Constraint -> *> {}\n",
+    ] {
+        let (_, errors) = fe_parser::parse_source_file(invalid, RecoveryMode::Recover);
+        assert!(!errors.is_empty(), "expected parse error for `{invalid}`");
+    }
+}

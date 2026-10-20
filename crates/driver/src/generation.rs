@@ -165,7 +165,13 @@ pub fn prepare_file(
         .syntax()
         .descendants()
         .filter_map(ast::ImplTrait::cast)
-        .any(|request| request.derive_provider().is_some())
+        .any(|request| {
+            request.derive_provider().is_some()
+                && !request
+                    .syntax()
+                    .ancestors()
+                    .any(|node| ast::QuoteExpr::cast(node).is_some())
+        })
         && !root
             .syntax()
             .descendants()
@@ -273,6 +279,39 @@ pub fn prepare_file(
                 error(
                     range,
                     format!("cannot issue concrete authored record: {cause:?}"),
+                )
+            })?;
+            let (target_item, target_span) = match input.declaration() {
+                hir::analysis::ty::adt_def::AdtRef::Struct(record) => {
+                    (hir::hir_def::ItemKind::Struct(record), record.span().into())
+                }
+                hir::analysis::ty::adt_def::AdtRef::Enum(enumeration) => (
+                    hir::hir_def::ItemKind::Enum(enumeration),
+                    enumeration.span().into(),
+                ),
+            };
+            hir::analysis::ty::ty_check::admit_ground_type_application(
+                db,
+                input.ty(),
+                target_item,
+                target_span,
+            )
+            .map_err(|failure| {
+                let diagnostics = failure
+                    .vouchers()
+                    .iter()
+                    .map(|voucher| voucher.to_complete(db))
+                    .collect::<Vec<_>>();
+                diagnostic_error(
+                    db,
+                    &diagnostics,
+                    error(
+                        range,
+                        format!(
+                            "generation target admission failed: {}",
+                            failure.description()
+                        ),
+                    ),
                 )
             })?;
             plans.push(evaluate_provider(db, file, provider, input, range)?);
@@ -541,26 +580,51 @@ fn evaluate_provider<'db>(
     let mut unresolved = Vec::new();
     {
         use hir::analysis::semantic::access::SemanticAccessCheckResult;
-        match hir::analysis::semantic::access::semantic_access_check_query(db, instance) {
-            SemanticAccessCheckResult::Ok { .. } => {}
-            SemanticAccessCheckResult::Err(diagnostic) => {
-                let diagnostic = diagnostic.diag(db);
-                let origin_owner = diagnostic.instance.key(db).owner(db);
-                if let BodyOwner::Func(function, _) = origin_owner
-                    && !check_func_body(db, function).0.is_empty()
-                {
-                    validation_diagnostics.extend(
-                        check_func_body(db, function)
-                            .0
-                            .iter()
-                            .map(|cause| cause.to_complete(db)),
-                    );
-                } else {
-                    validation_diagnostics.push(diagnostic.to_complete(db));
-                }
+        let mut pending = std::collections::VecDeque::from([instance]);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = pending.pop_front() {
+            if !seen.insert(current) {
+                continue;
             }
-            SemanticAccessCheckResult::Blocked(cause) => {
-                unresolved.push(format!("Blocked: {cause:?}"))
+            match hir::analysis::semantic::access::semantic_access_check_query(db, current) {
+                SemanticAccessCheckResult::Ok { .. } => {
+                    for callee in current.callees(db) {
+                        pending.push_back(hir::analysis::semantic::get_or_build_semantic_instance(
+                            db, callee.key,
+                        ));
+                    }
+                }
+                SemanticAccessCheckResult::Err(diagnostic) => {
+                    let diagnostic = diagnostic.diag(db);
+                    let origin_owner = diagnostic.instance.key(db).owner(db);
+                    if let BodyOwner::Func(function, _) = origin_owner
+                        && !check_func_body(db, function).0.is_empty()
+                    {
+                        validation_diagnostics.extend(
+                            check_func_body(db, function)
+                                .0
+                                .iter()
+                                .map(|cause| cause.to_complete(db)),
+                        );
+                    } else {
+                        validation_diagnostics.push(diagnostic.to_complete(db));
+                    }
+                }
+                SemanticAccessCheckResult::Blocked(cause) => {
+                    let origin_owner = current.key(db).owner(db);
+                    if let BodyOwner::Func(function, _) = origin_owner
+                        && !check_func_body(db, function).0.is_empty()
+                    {
+                        validation_diagnostics.extend(
+                            check_func_body(db, function)
+                                .0
+                                .iter()
+                                .map(|cause| cause.to_complete(db)),
+                        );
+                    } else {
+                        unresolved.push(format!("Blocked: {cause:?}"));
+                    }
+                }
             }
         }
     }

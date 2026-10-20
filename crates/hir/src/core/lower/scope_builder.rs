@@ -354,7 +354,15 @@ impl<'db> ScopeGraphBuilder<'db> {
                 else {
                     return None;
                 };
-                (ptr.to_node(root.syntax()).syntax().text_range() == range).then_some(node)
+                let expr_node = ptr.to_node(root.syntax());
+                let matches_range = expr_node.syntax().text_range() == range
+                    || match expr_node.kind() {
+                        parser::ast::ExprKind::Unsafe(unsafe_expr) => unsafe_expr
+                            .block()
+                            .is_some_and(|block| block.syntax().text_range() == range),
+                        _ => false,
+                    };
+                matches_range.then_some(node)
             })
         });
         let producer_node = self

@@ -13,35 +13,6 @@ use crate::{
     span::HirOrigin,
 };
 
-/// Classification for the runtime emission domain only. Never suppress
-/// ownership, capability boundary, or ordinary HIR checking with this query.
-pub fn is_compile_time_function<'db>(
-    db: &'db dyn HirAnalysisDb,
-    function: crate::hir_def::Func<'db>,
-) -> bool {
-    if !function.is_const(db) {
-        return false;
-    }
-    if ty_contains_meta_carrier(db, function.return_ty(db)).is_some()
-        || function
-            .arg_tys(db)
-            .iter()
-            .any(|ty| ty_contains_meta_carrier(db, ty.instantiate_identity()).is_some())
-    {
-        return true;
-    }
-    let Some(body) = function.body(db) else {
-        return false;
-    };
-    let typed = &crate::analysis::ty::ty_check::check_func_body(db, function).1;
-    body.exprs(db).iter().any(|(id, expression)| {
-        matches!(
-            expression,
-            crate::hir_def::Partial::Present(crate::hir_def::Expr::ItemQuote(_))
-        ) || ty_contains_meta_carrier(db, typed.expr_ty(db, id)).is_some()
-    })
-}
-
 /// Search existing semantic type arguments and instantiated fields. Repeated
 /// nominal expansion is stopped independently from argument traversal.
 pub fn ty_contains_meta_carrier<'db>(
@@ -477,7 +448,16 @@ impl<'db> ItemCode<'db> {
             .syntax()
             .ancestors()
             .find_map(ast::BlockExpr::cast)
-            .map(|block| block.syntax().text_range());
+            .map(|block| {
+                block
+                    .syntax()
+                    .parent()
+                    .and_then(ast::UnsafeExpr::cast)
+                    .map_or_else(
+                        || block.syntax().text_range(),
+                        |unsafe_expr| unsafe_expr.syntax().text_range(),
+                    )
+            });
         let producer_module = quote
             .syntax()
             .ancestors()
@@ -581,8 +561,17 @@ impl<'db> ItemCode<'db> {
             return Err("item quotation requires item declarations");
         }
         let items = block.items().collect::<Vec<_>>();
-        if items.len() != 1 || !matches!(items[0].kind(), Some(ast::ItemKind::Func(_))) {
+        let [item] = items.as_slice() else {
             return Err("this bounded item quotation requires one function declaration");
+        };
+        let Some(ast::ItemKind::Func(function)) = item.kind() else {
+            return Err("this bounded item quotation requires one function declaration");
+        };
+        if function
+            .attr_list()
+            .is_some_and(|attrs| attrs.normal_attrs_named("generate").next().is_some())
+        {
+            return Err("quoted functions cannot carry #[generate] attributes");
         }
         Ok(())
     }
@@ -656,6 +645,13 @@ pub fn native_derive_provider<'db>(
     if provider_ty.has_param(db) || provider_ty.has_invalid(db) || !provider_ty.is_star_kind(db) {
         return Err("native derive requires a concrete provider type".into());
     }
+    crate::analysis::ty::ty_check::admit_ground_type_application(
+        db,
+        provider_ty,
+        request.into(),
+        request.span().into(),
+    )
+    .map_err(NativeDeriveProviderError::Target)?;
     let derive = resolve_core_trait(db, request.scope(), &["derive", "Derive"])
         .ok_or("missing canonical Derive protocol")?;
     let constructor = TyId::new(db, TyData::TyBase(TyBase::TraitCtor(goal.def(db))));

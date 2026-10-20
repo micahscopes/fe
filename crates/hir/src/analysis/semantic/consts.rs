@@ -48,9 +48,21 @@ impl<'db> SemConstId<'db> {
             },
             SemConstValue::Description(term) => term.pretty_print_concrete(db),
             SemConstValue::ItemCode { .. } => "<checked item code>".into(),
-            SemConstValue::Meta { value, .. } => {
-                format!("<record {}>", value.input().ty().pretty_print(db))
-            }
+            SemConstValue::Meta { value, .. } => match value {
+                crate::core::meta::MetaValue::Record(record) => {
+                    format!("<record {}>", record.ty().pretty_print(db))
+                }
+                crate::core::meta::MetaValue::Field(field) => {
+                    let name = field.name(db).map_or_else(
+                        || field.index().to_string(),
+                        |ident| ident.data(db).to_string(),
+                    );
+                    format!("<field {}.{name}>", field.record().ty().pretty_print(db))
+                }
+                crate::core::meta::MetaValue::FieldType(field) => {
+                    format!("<field_type {}>", field.ty(db).pretty_print(db))
+                }
+            },
             SemConstValue::Tuple { elems, .. } => {
                 let elems = elems
                     .iter()
@@ -773,7 +785,9 @@ fn reify_runtime_const_impl<'db>(
             if ty.is_func(db) && fields.is_empty() {
                 return Some(struct_const(db, ty, Box::new([])));
             }
-            if !ty.is_struct(db) && ty.as_closure(db).is_none() {
+            if (!ty.is_struct(db) && ty.as_closure(db).is_none())
+                || crate::core::meta::is_canonical_meta_carrier_ty(db, ty)
+            {
                 return None;
             }
             let field_tys = ty.field_types(db);

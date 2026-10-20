@@ -3291,22 +3291,11 @@ impl<'db> WherePredicateView<'db> {
 
     /// Lowered kind bound sourced from the where-clause, if present.
     pub fn kind(self, db: &'db dyn HirAnalysisDb) -> Option<Kind> {
-        use crate::hir_def::Partial;
-        for b in &self.hir_pred(db).bounds {
-            if let TypeBound::Kind(Partial::Present(kb)) = b {
-                return Some(lower_hir_kind_local(kb));
-            }
-            if let TypeBound::Trait(reference, _) = b
-                && crate::analysis::ty::ty_lower::is_core_constraint_bound(
-                    db,
-                    self.owner_item().scope(),
-                    *reference,
-                )
-            {
-                return Some(Kind::Constraint);
-            }
-        }
-        None
+        crate::analysis::ty::ty_lower::lower_kind_in_bounds(
+            db,
+            self.owner_item().scope(),
+            &self.hir_pred(db).bounds,
+        )
     }
 
     pub fn span(self) -> crate::span::params::LazyWherePredicateSpan<'db> {

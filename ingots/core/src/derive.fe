@@ -1,4 +1,5 @@
 use ingot::meta::{Record, Code, Item}
+use ingot::obligations::Constraint
 
 /// Authored structural input, checked output through the ordinary establish gate.
 pub trait Derive<G: * -> Constraint> {

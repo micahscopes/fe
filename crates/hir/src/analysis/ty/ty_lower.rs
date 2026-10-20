@@ -2064,15 +2064,12 @@ impl<'db> TyParamPrecursor<'db> {
 }
 
 /// Recognize the designated kind marker by declaration identity, not spelling.
-pub(crate) fn is_core_constraint_bound<'db>(
+pub(crate) fn is_core_constraint_path<'db>(
     db: &'db dyn HirAnalysisDb,
     scope: ScopeId<'db>,
-    reference: crate::hir_def::TraitRefId<'db>,
+    path: PathId<'db>,
 ) -> bool {
     use crate::analysis::name_resolution::resolve_type_path_definition;
-    let Some(path) = reference.path(db).to_opt() else {
-        return false;
-    };
     // The designated marker is nullary. Definition lookup deliberately ignores
     // arguments, so it must not turn malformed applications into a kind bound.
     if (0..path.len(db)).any(|index| {
@@ -2089,35 +2086,74 @@ pub(crate) fn is_core_constraint_bound<'db>(
         (Some(NameResKind::Scope(found)), Some(NameResKind::Scope(marker))) if found == marker)
 }
 
-pub(super) fn lower_kind(kind: &HirKindBound) -> Kind {
+pub(crate) fn is_core_constraint_bound<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    reference: crate::hir_def::TraitRefId<'db>,
+) -> bool {
+    reference
+        .path(db)
+        .to_opt()
+        .is_some_and(|path| is_core_constraint_path(db, scope, path))
+}
+
+pub(crate) fn is_unshadowed_core_constraint<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+) -> bool {
+    use crate::analysis::name_resolution::resolve_type_path_definition;
+    let path = PathId::from_str(db, "Constraint");
+    let marker_path = super::corelib::lib_root_path(db, scope, "core")
+        .push_str(db, "obligations")
+        .push_str(db, "Constraint");
+    match (
+        resolve_type_path_definition(db, path, scope),
+        resolve_type_path_definition(db, marker_path, scope),
+    ) {
+        (None, Some(NameResKind::Scope(_))) => true,
+        (Some(NameResKind::Scope(found)), Some(NameResKind::Scope(marker))) => found == marker,
+        _ => false,
+    }
+}
+
+pub(super) fn lower_kind<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    kind: &HirKindBound,
+) -> Option<Kind> {
     match kind {
-        HirKindBound::Mono => Kind::Star,
-        HirKindBound::Constraint => Kind::Constraint,
+        HirKindBound::Mono => Some(Kind::Star),
+        HirKindBound::Constraint => {
+            is_unshadowed_core_constraint(db, scope).then_some(Kind::Constraint)
+        }
         HirKindBound::Abs(lhs, rhs) => match (lhs, rhs) {
-            (Partial::Present(lhs), Partial::Present(rhs)) => {
-                Kind::Abs(Box::new((lower_kind(lhs), lower_kind(rhs))))
-            }
-            (Partial::Present(lhs), Partial::Absent) => {
-                Kind::Abs(Box::new((lower_kind(lhs), Kind::Any)))
-            }
-            (Partial::Absent, Partial::Present(rhs)) => {
-                Kind::Abs(Box::new((Kind::Any, lower_kind(rhs))))
-            }
-            (Partial::Absent, Partial::Absent) => Kind::Abs(Box::new((Kind::Any, Kind::Any))),
+            (Partial::Present(lhs), Partial::Present(rhs)) => Some(Kind::Abs(Box::new((
+                lower_kind(db, scope, lhs)?,
+                lower_kind(db, scope, rhs)?,
+            )))),
+            (Partial::Present(lhs), Partial::Absent) => Some(Kind::Abs(Box::new((
+                lower_kind(db, scope, lhs)?,
+                Kind::Any,
+            )))),
+            (Partial::Absent, Partial::Present(rhs)) => Some(Kind::Abs(Box::new((
+                Kind::Any,
+                lower_kind(db, scope, rhs)?,
+            )))),
+            (Partial::Absent, Partial::Absent) => Some(Kind::Abs(Box::new((Kind::Any, Kind::Any)))),
         },
     }
 }
 
 /// Helper for extracting a lowered kind from a slice of HIR `TypeBound`s.
 /// Returns the first kind bound if present.
-pub(super) fn lower_kind_in_bounds<'db>(
+pub(crate) fn lower_kind_in_bounds<'db>(
     db: &'db dyn HirAnalysisDb,
     scope: ScopeId<'db>,
     bounds: &[TypeBound<'db>],
 ) -> Option<Kind> {
     for bound in bounds {
         if let TypeBound::Kind(Partial::Present(k)) = bound {
-            return Some(lower_kind(k));
+            return lower_kind(db, scope, k);
         }
         if let TypeBound::Trait(reference, _) = bound
             && is_core_constraint_bound(db, scope, *reference)

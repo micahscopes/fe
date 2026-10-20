@@ -169,7 +169,7 @@ pub(super) fn validate_module_inner_attrs<'db>(
     );
 }
 
-fn validate_func_attrs<'db>(
+pub(super) fn validate_func_attrs<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
     attrs: Option<ast::AttrList>,
     kind: &'static str,
@@ -195,6 +195,7 @@ fn validate_func_attrs<'db>(
             AttrRule::unsupported("error", ERROR_TARGETS),
             AttrRule::unsupported("abi", ABI_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
+            AttrRule::unsupported("generate", "structs"),
         ],
     );
 }
@@ -1010,6 +1011,13 @@ impl<'db> ImplTrait<'db> {
             else {
                 unreachable!("checked single function template")
             };
+            validate_func_attrs(
+                ctxt,
+                function.attr_list(),
+                "fn",
+                function.sig().name().map(|name| name.text().to_string()),
+                true,
+            );
             let generated = Func::lower_ast(ctxt, function);
             ctxt.generation_holes.clear();
             ctxt.builder.defer_quoted_function_origin(

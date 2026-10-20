@@ -131,5 +131,13 @@ pub fn establishment_for_goal<'db>(
     {
         return Err("root authority authorizes a different resolved trait goal");
     }
+    if root.body(db).to_opt().is_none()
+        || !crate::analysis::ty::ty_check::check_const_body(db, root)
+            .0
+            .is_empty()
+        || !crate::analysis::ty::ty_check::check_const_value(db, root).is_empty()
+    {
+        return Err("root authority constant must be a valid compile-time value");
+    }
     Ok(Some(CanonicalEstablishment { goal, home, root }))
 }
