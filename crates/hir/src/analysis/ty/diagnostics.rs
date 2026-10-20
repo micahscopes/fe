@@ -424,6 +424,10 @@ pub enum MarkerPosition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
 pub enum BodyDiag<'db> {
+    CompileTimePhase {
+        primary: DynLazySpan<'db>,
+        message: String,
+    },
     /// `prove<G>()` cannot provide `G` here.
     ObligationIntroduction {
         primary: DynLazySpan<'db>,
@@ -1258,6 +1262,7 @@ impl<'db> BodyDiag<'db> {
 
     pub(crate) fn local_code(&self) -> u16 {
         match self {
+            Self::CompileTimePhase { .. } => 122,
             Self::ObligationIntroduction { .. } => 97,
             Self::ObligationOpening { .. } | Self::ItemReadsChoice { .. } => 98,
             Self::EvidenceChoiceNotCompileTime { .. } => 120,

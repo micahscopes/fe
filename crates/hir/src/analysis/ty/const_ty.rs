@@ -456,6 +456,8 @@ fn trait_inst_is_fully_ground<'db>(db: &'db dyn HirAnalysisDb, inst: TraitInstId
 
 fn sem_const_is_fully_ground<'db>(db: &'db dyn HirAnalysisDb, value: SemConstId<'db>) -> bool {
     match value.value(db) {
+        SemConstValue::ItemCode { ty, .. } => ty_is_fully_ground(db, *ty),
+        SemConstValue::Meta { ty, .. } => ty_is_fully_ground(db, *ty),
         SemConstValue::Evidence { ty, choice } => {
             ty_is_fully_ground(db, *ty) && trait_inst_is_fully_ground(db, choice.goal())
         }
@@ -1218,6 +1220,14 @@ fn canonicalize_sem_const_for_mode<'db>(
             .into_boxed_slice()
     };
     let value = match value.value(db) {
+        SemConstValue::ItemCode { ty, code } => SemConstValue::ItemCode {
+            ty: canonicalize(*ty),
+            code: code.clone(),
+        },
+        SemConstValue::Meta { ty, value } => SemConstValue::Meta {
+            ty: canonicalize(*ty),
+            value: *value,
+        },
         SemConstValue::Evidence { ty, choice } => SemConstValue::Evidence {
             ty: canonicalize_ty_for_mode(db, *ty, env, mode),
             choice: *choice,

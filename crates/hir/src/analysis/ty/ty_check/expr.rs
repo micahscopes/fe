@@ -369,6 +369,84 @@ impl<'db> TyChecker<'db> {
         self.env.enter_expr(expr);
         self.refuse_written_const_args(super::choice::WrittenNode::Expr(expr));
         let mut actual = match expr_data {
+            Expr::ItemQuote(holes) => {
+                let hole_tys = holes
+                    .iter()
+                    .map(|&hole| self.check_expr_unknown(hole).ty)
+                    .collect::<Vec<_>>();
+                let expected_resolved = expected.fold_with(self.db, &mut self.table);
+                let kind = crate::core::meta::code_kind_from_ty(self.db, expected_resolved)
+                    .unwrap_or_else(|| {
+                        use common::generation::FrozenCodeKind;
+                        use parser::ast::{self, prelude::*};
+                        let body = self.env.body();
+                        if let crate::span::HirOrigin::Raw(ptr) =
+                            body.source_map(self.db).expr_map.node_to_source(expr)
+                        {
+                            let root = crate::lower::top_mod_ast(self.db, body.top_mod(self.db));
+                            if let ast::ExprKind::Quote(quote) = ptr.to_node(root.syntax()).kind() {
+                                if quote.item_list().is_some() {
+                                    return FrozenCodeKind::Item;
+                                }
+                                if quote.where_clause().is_some() {
+                                    return FrozenCodeKind::Where;
+                                }
+                                if quote.arm_list().is_some() {
+                                    return FrozenCodeKind::Arm;
+                                }
+                                if let Some(block) = quote.body() {
+                                    let stmts = block.stmts().collect::<Vec<_>>();
+                                    if stmts.is_empty() && block.items().next().is_some() {
+                                        return FrozenCodeKind::Item;
+                                    }
+                                    if !stmts.is_empty()
+                                        && block.items().next().is_none()
+                                        && stmts.iter().all(|stmt| {
+                                            matches!(
+                                                stmt.kind(),
+                                                ast::StmtKind::Expr(inner)
+                                                    if inner.expr().is_some_and(|e| matches!(e.kind(), ast::ExprKind::QuoteHole(_)))
+                                            )
+                                        })
+                                        && !hole_tys.is_empty()
+                                        && let Some(hole_kind) =
+                                            crate::core::meta::code_kind_from_ty(
+                                                self.db,
+                                                hole_tys[0].fold_with(self.db, &mut self.table),
+                                            )
+                                    {
+                                        return hole_kind;
+                                    }
+                                }
+                            }
+                        }
+                        FrozenCodeKind::Expr
+                    });
+                let marker_path = match kind {
+                    common::generation::FrozenCodeKind::Item => "core::meta::Item",
+                    common::generation::FrozenCodeKind::Expr => "core::meta::Expr",
+                    common::generation::FrozenCodeKind::Pat => "core::meta::Pat",
+                    common::generation::FrozenCodeKind::Arm => "core::meta::Arm",
+                    common::generation::FrozenCodeKind::Where => "core::meta::Where",
+                };
+                let code = crate::analysis::ty::corelib::resolve_lib_type_path(
+                    self.db,
+                    self.env.scope(),
+                    "core::meta::Code",
+                );
+                let marker = crate::analysis::ty::corelib::resolve_lib_type_path(
+                    self.db,
+                    self.env.scope(),
+                    marker_path,
+                );
+                match (code, marker) {
+                    (Some(code), Some(marker)) => {
+                        ExprProp::new(TyId::app(self.db, code, marker), true)
+                    }
+                    _ => ExprProp::invalid(self.db),
+                }
+            }
+
             Expr::Lit(LitKind::String(string_id)) => {
                 ExprProp::new(self.string_literal_ty(*string_id, expected), true)
             }
@@ -435,6 +513,23 @@ impl<'db> TyChecker<'db> {
 
         actual.ty = normalize_ty(self.db, actual.ty, self.env.scope(), self.env.assumptions());
         self.report_normalization_limit(expr, actual.ty, expected);
+        let compile_time = match self.env.owner() {
+            BodyOwner::Func(function, _) => function.is_const(self.db),
+            BodyOwner::Const(_) | BodyOwner::AnonConstBody { .. } => true,
+            _ => false,
+        };
+        if !compile_time
+            && let Some(meta) = crate::core::meta::ty_contains_meta_carrier(self.db, actual.ty)
+        {
+            self.push_diag(BodyDiag::CompileTimePhase {
+                primary: expr.span(self.body()).into(),
+                message: format!(
+                    "`{}` is compile-time-only in a runtime expression",
+                    meta.pretty_print(self.db)
+                ),
+            });
+            actual = ExprProp::invalid(self.db);
+        }
         let typeable = Typeable::Expr(expr, actual.clone());
         actual.ty = self.unify_ty(typeable, actual.ty, expected);
         actual
@@ -1076,17 +1171,32 @@ impl<'db> TyChecker<'db> {
             return ExprProp::new(to, true);
         }
 
-        if let Partial::Present(Expr::Lit(LitKind::Int(int_id))) =
-            inner_expr.data(self.db, self.body())
-        {
+        let literal = match inner_expr.data(self.db, self.body()) {
+            Partial::Present(Expr::Lit(LitKind::Int(integer))) => Some((*integer, false)),
+            Partial::Present(Expr::Un(inner, UnOp::Minus)) => {
+                match inner.data(self.db, self.body()) {
+                    Partial::Present(Expr::Lit(LitKind::Int(integer))) => Some((*integer, true)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some((int_id, negative)) = literal {
             let value = int_id.data(self.db);
             let leaf = self.peel_transparent_newtypes(to);
-            if to.is_string(self.db) && self.int_literal_fits_in_ty(value, TyId::u256(self.db)) {
+            if !negative
+                && to.is_string(self.db)
+                && self.int_literal_fits_in_ty(value, TyId::u256(self.db))
+            {
                 let _ = self.table.unify(from, TyId::u256(self.db));
                 return ExprProp::new(to, true);
             }
 
-            if self.int_literal_fits_in_ty(value, to) {
+            if if negative {
+                self.negated_int_literal_fits_in_ty(value, to)
+            } else {
+                self.int_literal_fits_in_ty(value, to)
+            } {
                 // Unify the literal's type variable with the target leaf type
                 // so it doesn't remain unresolved.
                 let _ = self.table.unify(from, leaf);
@@ -1100,7 +1210,8 @@ impl<'db> TyChecker<'db> {
                 from,
                 to,
                 hint: Some(format!(
-                    "integer literal `{}` is not representable in `{}`",
+                    "integer literal `{}{}` is not representable in `{}`",
+                    if negative { "-" } else { "" },
                     value,
                     leaf.pretty_print(self.db),
                 )),
@@ -5639,6 +5750,16 @@ pub(super) fn resolve_ident_expr<'db>(
         let Ok(res) = bucket.pick_any(&[NameDomain::VALUE, NameDomain::TYPE]) else {
             return ResolvedPathInBody::Invalid;
         };
+        if path.hygiene_scope(db).is_some()
+            && matches!(
+                res.kind,
+                crate::analysis::name_resolution::NameResKind::Scope(
+                    ScopeId::FuncParam(..) | ScopeId::GenericParam(ItemKind::Func(_), _)
+                )
+            )
+        {
+            return ResolvedPathInBody::Invalid;
+        }
         let Ok(reso) = resolve_name_res_with_minter(
             db,
             res,
@@ -5653,7 +5774,7 @@ pub(super) fn resolve_ident_expr<'db>(
         ResolvedPathInBody::Reso(reso)
     };
 
-    match env.resolve_ident_in_blocks(ident, |bucket, scope| match resolve_bucket(bucket, scope) {
+    match env.resolve_ident_in_blocks(path, |bucket, scope| match resolve_bucket(bucket, scope) {
         ResolvedPathInBody::Invalid => None,
         resolved => Some(resolved),
     }) {

@@ -264,6 +264,8 @@ impl<'db> TyChecker<'db> {
             } => Some(LitKind::Bool(*flag)),
             SemConstValue::Evidence { .. }
             | SemConstValue::Unit
+            | SemConstValue::ItemCode { .. }
+            | SemConstValue::Meta { .. }
             | SemConstValue::Description(..)
             | SemConstValue::Tuple { .. }
             | SemConstValue::Struct { .. }
@@ -426,8 +428,9 @@ impl<'db> TyChecker<'db> {
         // unless the expected type is a msg type, in which case we try to resolve
         // the identifier as a msg variant first.
         if let Some(name) = path.as_ident(self.db)
-            && self.env.is_pat_local_binding(name)
+            && self.env.is_pat_local_binding(*path)
         {
+            let bind_name = path.local_ident(self.db).unwrap_or(name);
             let binding = LocalBinding::local(
                 pat,
                 matches!(
@@ -438,7 +441,7 @@ impl<'db> TyChecker<'db> {
             let mut is_valid = true;
             if let Some(LocalBinding::Local {
                 pat: conflict_with, ..
-            }) = self.env.register_pending_binding(name, binding)
+            }) = self.env.register_pending_binding(bind_name, binding)
             {
                 let diag = BodyDiag::DuplicatedBinding {
                     primary: span.into(),
@@ -450,7 +453,7 @@ impl<'db> TyChecker<'db> {
             }
             let actual = self.fresh_ty();
             let analysis = if is_valid {
-                self.ready_wildcard(expected, Some(self.binding_ref(pat, name)))
+                self.ready_wildcard(expected, Some(self.binding_ref(pat, bind_name)))
             } else {
                 PatternAnalysisStatus::Invalid
             };

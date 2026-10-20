@@ -1,8 +1,8 @@
 use crate::{
     analysis::place::{Place, is_grant_place_expr, is_pointer_place_expr},
     hir_def::{
-        BinOp, Body, ClosureDef, Contract, Expr, ExprId, Func, IdentId, Partial, Pat, PatId, Stmt,
-        StmtId, TypeId as HirTypeId, UnOp, scope_graph::ScopeId,
+        BinOp, Body, ClosureDef, Contract, Expr, ExprId, Func, IdentId, Partial, Pat, PatId,
+        PathId, Stmt, StmtId, TypeId as HirTypeId, UnOp, scope_graph::ScopeId,
     },
     span::DynLazySpan,
 };
@@ -2498,28 +2498,34 @@ pub(super) fn resolve_ident_in_blocks<'db, B: Copy, R>(
     blocks: &[BlockEnv<'db, B>],
     body_scope: ScopeId<'db>,
     current_scope: ScopeId<'db>,
-    ident: IdentId<'db>,
+    path: PathId<'db>,
     mut resolve_bucket: impl FnMut(
         &'db crate::analysis::name_resolution::NameResBucket<'db>,
         ScopeId<'db>,
     ) -> Option<R>,
 ) -> IdentInBlocks<B, R> {
     use crate::analysis::name_resolution::{EarlyNameQueryId, QueryDirective, resolve_query};
+    let ident = path.ident(db).unwrap();
+    let local_ident = path.local_ident(db).unwrap_or(ident);
+    let hygiene_scope = path.hygiene_scope(db);
     for block in blocks.iter().rev() {
-        if let Some(binding) = block.lookup_var(ident) {
+        if let Some(binding) = block.lookup_var(local_ident) {
             return IdentInBlocks::Binding(binding);
         }
-        let directive = QueryDirective::for_scope(db, block.scope).disallow_lex();
-        let query = EarlyNameQueryId::new(db, ident, block.scope, directive);
-        let bucket = resolve_query(db, query);
-        if let Some(resolved) = resolve_bucket(bucket, block.scope) {
-            return IdentInBlocks::Scope(resolved);
+        if hygiene_scope.is_none() {
+            let directive = QueryDirective::for_scope(db, block.scope).disallow_lex();
+            let query = EarlyNameQueryId::new(db, ident, block.scope, directive);
+            let bucket = resolve_query(db, query);
+            if let Some(resolved) = resolve_bucket(bucket, block.scope) {
+                return IdentInBlocks::Scope(resolved);
+            }
         }
     }
-    let directive = QueryDirective::for_scope(db, body_scope);
-    let query = EarlyNameQueryId::new(db, ident, body_scope, directive);
+    let fallback_scope = hygiene_scope.unwrap_or(body_scope);
+    let directive = QueryDirective::for_scope(db, fallback_scope);
+    let query = EarlyNameQueryId::new(db, ident, fallback_scope, directive);
     let bucket = resolve_query(db, query);
-    match resolve_bucket(bucket, current_scope) {
+    match resolve_bucket(bucket, hygiene_scope.unwrap_or(current_scope)) {
         Some(resolved) => IdentInBlocks::Scope(resolved),
         None => IdentInBlocks::Unresolved,
     }
@@ -2579,14 +2585,46 @@ pub(super) fn is_pat_local_binding<'db>(
     }
 }
 
+pub(super) fn is_pat_local_binding_path<'db>(
+    db: &'db dyn HirAnalysisDb,
+    current_scope: ScopeId<'db>,
+    path: PathId<'db>,
+) -> bool {
+    let Some(name) = path.as_ident(db) else {
+        return false;
+    };
+    if let Some(h_scope) = path.hygiene_scope(db) {
+        use crate::analysis::name_resolution::{
+            EarlyNameQueryId, NameDomain, NameResKind, QueryDirective, resolve_query,
+        };
+        let directive = QueryDirective::for_scope(db, h_scope);
+        let query = EarlyNameQueryId::new(db, name, h_scope, directive);
+        let bucket = resolve_query(db, query);
+        if let Ok(res) = bucket
+            .pick(NameDomain::VALUE)
+            .as_ref()
+            .or_else(|_| bucket.pick(NameDomain::TYPE).as_ref())
+            && matches!(
+                res.kind,
+                NameResKind::Scope(ScopeId::GenericParam(ItemKind::Func(_), _))
+            )
+        {
+            return true;
+        }
+        is_pat_local_binding(db, h_scope, name)
+    } else {
+        is_pat_local_binding(db, current_scope, name)
+    }
+}
+
 impl<'db> TyCheckEnv<'db> {
-    pub(super) fn is_pat_local_binding(&self, name: IdentId<'db>) -> bool {
-        is_pat_local_binding(self.db, self.scope(), name)
+    pub(super) fn is_pat_local_binding(&self, path: PathId<'db>) -> bool {
+        is_pat_local_binding_path(self.db, self.scope(), path)
     }
 
     pub(super) fn resolve_ident_in_blocks<R>(
         &self,
-        ident: IdentId<'db>,
+        path: PathId<'db>,
         resolve_bucket: impl FnMut(
             &'db crate::analysis::name_resolution::NameResBucket<'db>,
             ScopeId<'db>,
@@ -2597,7 +2635,7 @@ impl<'db> TyCheckEnv<'db> {
             &self.var_env,
             self.body.scope(),
             self.scope(),
-            ident,
+            path,
             resolve_bucket,
         )
     }
@@ -2759,14 +2797,14 @@ pub(crate) fn body_lexical_env<'db>(
                     self.in_or_pat = prev;
                 }
                 Pat::Path(Partial::Present(path), _) => {
-                    if let Some(name) = path.as_ident(self.db)
-                        && is_pat_local_binding(self.db, self.current_scope(), name)
+                    if let Some(bind_name) = path.local_ident(self.db)
+                        && is_pat_local_binding_path(self.db, self.current_scope(), *path)
                     {
                         let binding = LexicalBinding::Local { pat };
                         if !self.in_or_pat {
                             self.out.pat_bindings.push((pat, binding));
                         }
-                        self.register_pending(name, binding);
+                        self.register_pending(bind_name, binding);
                     }
                 }
                 Pat::Path(Partial::Absent, _) => {}
@@ -2854,21 +2892,27 @@ pub(crate) fn body_lexical_env<'db>(
             match expr_data {
                 Expr::Lit(_) | Expr::UnsupportedMacroCall | Expr::Path(Partial::Absent) => {}
                 Expr::Path(Partial::Present(path)) => {
-                    if path.is_bare_ident(self.db)
-                        && let Some(ident) = path.ident(self.db).to_opt()
-                    {
+                    if path.is_bare_ident(self.db) && path.ident(self.db).is_present() {
                         let resolved = match resolve_ident_in_blocks(
                             self.db,
                             &self.blocks,
                             self.func_body.scope(),
                             self.current_scope(),
-                            ident,
+                            *path,
                             |bucket, _| {
                                 bucket
                                     .pick_any(&[NameDomain::VALUE, NameDomain::TYPE])
                                     .as_ref()
                                     .ok()
                                     .and_then(|res| res.scope())
+                                    .filter(|scope| {
+                                        !(path.hygiene_scope(self.db).is_some()
+                                            && matches!(
+                                                scope,
+                                                ScopeId::FuncParam(..)
+                                                    | ScopeId::GenericParam(ItemKind::Func(_), _)
+                                            ))
+                                    })
                             },
                         ) {
                             IdentInBlocks::Binding(binding) => Some(binding),
@@ -2977,6 +3021,11 @@ pub(crate) fn body_lexical_env<'db>(
                         self.walk_expr(binding.value);
                     }
                     self.walk_expr(*body);
+                }
+                Expr::ItemQuote(holes) => {
+                    for hole in holes {
+                        self.walk_expr(*hole);
+                    }
                 }
             }
         }

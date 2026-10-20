@@ -339,7 +339,7 @@ pub fn mentions_mode<'db>(db: &'db dyn HirAnalysisDb, ty: HirTyId<'db>) -> bool 
                 })
             })
         }),
-        TypeKind::Never => false,
+        TypeKind::Primitive(_) | TypeKind::Never => false,
     }
 }
 

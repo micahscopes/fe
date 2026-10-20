@@ -210,6 +210,15 @@ where
 {
     let db = visitor.db();
     match value.value(db) {
+        SemConstValue::ItemCode { ty, code } => {
+            ty.visit_with(visitor);
+            for hole in code.holes() {
+                walk_sem_const(visitor, *hole);
+            }
+        }
+        SemConstValue::Meta { ty, .. } => {
+            ty.visit_with(visitor);
+        }
         SemConstValue::Evidence { ty, choice } => {
             visitor.visit_ty(*ty);
             choice.visit_with(visitor);
