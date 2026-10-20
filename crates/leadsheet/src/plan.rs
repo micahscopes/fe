@@ -263,6 +263,8 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 RuntimeBuiltin::MakeContractFieldRef { kind, .. } => match kind {
                     RefKind::Provider { space: AddressSpace::Storage, .. } => OSet::from([Org::StorLit]),
                     RefKind::Provider { space: AddressSpace::Transient, .. } => OSet::from([Org::TstorLit]),
+                    RefKind::Provider { space: AddressSpace::Memory, .. } => OSet::from([Org::Obj(facts.stmt_site[&at])]),
+                    RefKind::Provider { space: AddressSpace::Code, .. } => OSet::new(),
                     _ => OSet::from([Org::Pool]),
                 },
                 _ => OSet::new(),
@@ -338,6 +340,10 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                         RExpr::MaterializeToObject { .. } | RExpr::MaterializePlaceToObject { .. } => {
                             self.class(*dst).and_then(|c| c.ref_pointee().cloned())
                         }
+                        RExpr::Builtin(RuntimeBuiltin::MakeContractFieldRef {
+                            class: RuntimeClass::Ref { pointee, kind: RefKind::Provider { space: AddressSpace::Memory, .. }, .. },
+                            ..
+                        }) => Some((**pointee).clone()),
                         _ => None,
                     };
                     if let Some(c) = class {
@@ -674,9 +680,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     facts.ctl = true;
                 }
                 B::CurrentCodeRegionLen if self.ctor => {}
-                B::CodeRegionOffset { region } | B::CodeRegionLen { region } => {
-                    return Err(format!("code region {region:?} is not in this contract"));
-                }
+                B::CodeRegionOffset { .. } | B::CodeRegionLen { .. } => {}
                 B::CurrentCodeRegionLen => {
                     return Err("code regions are not lowered yet".into());
                 }

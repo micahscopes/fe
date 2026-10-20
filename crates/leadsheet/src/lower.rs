@@ -156,6 +156,7 @@ enum Halt {
 pub struct Program<'p, 'db> {
     pub db: Db<'db>,
     pub plans: &'p FxHashMap<RuntimeInstance<'db>, Plan>,
+    pub regions: &'p FxHashMap<mir::RuntimeCodeRegion<'db>, usize>,
     /// Map-entry lookups made hashes, by key type: where the module rests on
     /// the hash assumption.
     pub hashed: std::cell::RefCell<BTreeMap<String, usize>>,
@@ -1539,7 +1540,13 @@ impl<'p, 'db> Lower<'p, 'db> {
                 self.b.op("tload", &[s, addr], 1, &[])[0]
             }
             AddressSpace::Calldata => self.b.w("calldataload", &[addr]),
-            AddressSpace::Code => return Err("code-space loads are not lowered yet".into()),
+            AddressSpace::Code => {
+                let m = self.pool()?;
+                let (z, n) = (self.b.k(0), self.b.k(32));
+                let m = self.b.op("codecopy", &[m, z, addr, n], 0, &[Space::Mem])[0];
+                self.set(Key::Pool, m);
+                self.b.op("mload", &[m, z], 1, &[])[0]
+            }
         })
     }
 
@@ -2041,6 +2048,14 @@ impl<'p, 'db> Lower<'p, 'db> {
             RExpr::Placeholder { class } => {
                 let n = flat_len(self.db, class);
                 ((0..n).map(|_| self.b.k(0)).collect(), Src::Class(class.clone()))
+            }
+            RExpr::Builtin(RuntimeBuiltin::MakeContractFieldRef {
+                class: RuntimeClass::Ref { pointee, kind: RefKind::Provider { space: AddressSpace::Memory, .. }, .. },
+                ..
+            }) => {
+                let site = self.facts.stmt_site[&at];
+                let size = obj_size(self.db, pointee);
+                (vec![self.site_object(site, size)?], Src::Word)
             }
             RExpr::Builtin(b) => (self.builtin(b, dst_class.as_ref())?, Src::Word),
             RExpr::Unary { op, value } => {
@@ -2616,11 +2631,10 @@ impl<'p, 'db> Lower<'p, 'db> {
                 let (d, o, l) = (w(self, dst)?, as_word(self, offset)?, as_word(self, len)?);
                 self.mem_op("calldatacopy", *dst, &[d, o, l], 0, true)?
             }
-            B::CodeCopy { dst, offset, len } if self.plan.ctor => {
+            B::CodeCopy { dst, offset, len } => {
                 let (d, o, l) = (w(self, dst)?, as_word(self, offset)?, as_word(self, len)?);
                 self.mem_op("codecopy", *dst, &[d, o, l], 0, true)?
             }
-            B::CodeCopy { .. } => return Err("codecopy differs between two compilers' code".into()),
             B::Keccak256 { offset, len } => {
                 let (o, l) = (w(self, offset)?, as_word(self, len)?);
                 self.mem_op("keccak256", *offset, &[o, l], 1, false)?
@@ -2707,8 +2721,23 @@ impl<'p, 'db> Lower<'p, 'db> {
                 (mir::ContractFieldSlot::Words(n), RefKind::Provider { space: AddressSpace::Storage | AddressSpace::Transient, .. }) => {
                     vec![self.b.konst(U256::from_be_bytes(n.to_be_bytes::<32>()))]
                 }
+                (mir::ContractFieldSlot::CodeTailBytes(tail_offset), RefKind::Provider { space: AddressSpace::Code, .. }) => {
+                    let cs = self.b.w("codesize", &[]);
+                    let neg = self.b.konst(U256::from((-tail_offset) as u128));
+                    vec![self.b.w("sub", &[cs, neg])]
+                }
                 _ => return Err("immutable and code-backed contract fields are not lowered yet".into()),
             },
+            B::CodeRegionOffset { region } => {
+                let idx = *self.prog.regions.get(region).ok_or_else(|| format!("code region {region:?} is not in this module"))?;
+                let k = self.b.k(idx as u64);
+                vec![self.b.w("code_region_offset", &[k])]
+            }
+            B::CodeRegionLen { region } => {
+                let idx = *self.prog.regions.get(region).ok_or_else(|| format!("code region {region:?} is not in this module"))?;
+                let k = self.b.k(idx as u64);
+                vec![self.b.w("code_region_len", &[k])]
+            }
             B::Log0 { offset, len } | B::Log1 { offset, len, .. } | B::Log2 { offset, len, .. } | B::Log3 { offset, len, .. } | B::Log4 { offset, len, .. } => {
                 let topics: Vec<RLocalId> = match b {
                     B::Log1 { topic0, .. } => vec![*topic0],

@@ -56,8 +56,9 @@ pub struct Lowered {
     pub functions: usize,
 }
 
-/// Lowers every contract of `top_mod`: one module per contract.
-pub fn lower_contracts(db: Db<'_>, top_mod: TopLevelMod<'_>) -> Result<Vec<Lowered>, String> {
+/// Lowers every contract of `top_mod`: one module per contract, or the reason
+/// a contract could not be lowered.
+pub fn lower_contracts(db: Db<'_>, top_mod: TopLevelMod<'_>) -> Result<Vec<TestModule>, String> {
     let package = mir::build_runtime_package(db, top_mod).map_err(|e| format!("{e:?}"))?;
     let mut out = Vec::new();
     for object in package.objects(db) {
@@ -66,7 +67,9 @@ pub fn lower_contracts(db: Db<'_>, top_mod: TopLevelMod<'_>) -> Result<Vec<Lower
         for section in &sections {
             if section.name == RuntimeSectionName::Runtime {
                 let name = object.name(db).clone();
-                out.push(lower_program(db, package, section.entry.instance(db), ctor, &name, None)?);
+                let lowered = lower_program_with_balance(db, package, section.entry.instance(db), ctor, &name, None, None)
+                    .map_err(|e| (name, e));
+                out.push(lowered);
             }
         }
     }
@@ -100,8 +103,9 @@ pub fn lower_tests(db: Db<'_>, top_mod: TopLevelMod<'_>) -> Result<Vec<TestModul
             if let RuntimeSectionName::Test(name) = &section.name {
                 let owner = section.entry.owner(db);
                 let expect = test_expectation(db, &owner);
+                let balance = test_balance(db, &owner);
                 let lowered = expect
-                    .and_then(|e| lower_program(db, package, section.entry.instance(db), None, name, Some(e)))
+                    .and_then(|e| lower_program_with_balance(db, package, section.entry.instance(db), None, name, Some(e), balance))
                     .map_err(|e| (name.clone(), e));
                 out.push(lowered);
             }
@@ -150,6 +154,30 @@ fn test_expectation(db: Db<'_>, owner: &RuntimeFunctionOwner<'_>) -> Result<Stri
     Ok("revert".into())
 }
 
+/// Optional initial balance (in wei) from `#[test(balance = N)]`.
+fn test_balance(db: Db<'_>, owner: &RuntimeFunctionOwner<'_>) -> Option<String> {
+    let RuntimeFunctionOwner::Synthetic(RuntimeSyntheticSpec::TestRoot { callee, .. }) = owner else {
+        return None;
+    };
+    let semantic = callee.key(db).semantic(db)?;
+    let hir::analysis::ty::ty_check::BodyOwner::Func(func) = semantic.key(db).owner(db) else {
+        return None;
+    };
+    let attrs = ItemKind::from(func).attrs(db)?;
+    let attr = attrs.get_attr(db, "test")?;
+    for arg in &attr.args {
+        if arg.key_str(db) == Some("balance")
+            && let Some(AttrArgValue::Lit(LitKind::Int(i))) = arg.value.as_ref()
+        {
+            let s = i.data(db).to_str_radix(10);
+            if s != "0" {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
 /// The calls a body makes (but map-entry lookups the lowering makes hashes
 /// of, `maps`).
 fn callees<'db>(db: Db<'db>, f: RuntimeInstance<'db>) -> Vec<RuntimeInstance<'db>> {
@@ -170,6 +198,133 @@ fn callees<'db>(db: Db<'db>, f: RuntimeInstance<'db>) -> Vec<RuntimeInstance<'db
     out
 }
 
+fn referenced_regions<'db>(db: Db<'db>, f: RuntimeInstance<'db>) -> Vec<mir::RuntimeCodeRegion<'db>> {
+    let body = f.body(db);
+    let mut out = Vec::new();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let RStmt::Assign {
+                expr:
+                    RExpr::Builtin(
+                        mir::RuntimeBuiltin::CodeRegionOffset { region }
+                        | mir::RuntimeBuiltin::CodeRegionLen { region },
+                    ),
+                ..
+            } = stmt
+                && !out.contains(region)
+            {
+                out.push(*region);
+            }
+        }
+    }
+    out
+}
+
+struct RegionSpec<'db> {
+    region: mir::RuntimeCodeRegion<'db>,
+    entry: RuntimeInstance<'db>,
+    ctor: Option<RuntimeInstance<'db>>,
+    immutables: u64,
+}
+
+fn resolve_region<'db>(
+    db: Db<'db>,
+    package: RuntimePackage<'db>,
+    region: mir::RuntimeCodeRegion<'db>,
+) -> Result<(RuntimeInstance<'db>, Option<RuntimeInstance<'db>>, u64), String> {
+    match region.key(db) {
+        mir::RuntimeCodeRegionKey::ContractInit { contract } => {
+            let mut r_entry = None;
+            let mut r_ctor = None;
+            for f in package.functions(db) {
+                match f.owner(db) {
+                    RuntimeFunctionOwner::Synthetic(RuntimeSyntheticSpec::ContractRuntimeRoot {
+                        contract: c,
+                        ..
+                    }) if c == contract => r_entry = Some(f.instance(db)),
+                    RuntimeFunctionOwner::Synthetic(RuntimeSyntheticSpec::ContractInitAbi {
+                        plan,
+                    }) if plan.contract == contract => r_ctor = Some(f.instance(db)),
+                    _ => {}
+                }
+            }
+            let entry = r_entry.ok_or_else(|| format!("missing runtime root for {region:?}"))?;
+            let immutables = (contract.code_address_space_slot_count(db) as u64) * 32;
+            Ok((entry, r_ctor, immutables))
+        }
+        mir::RuntimeCodeRegionKey::ContractRuntime { contract } => {
+            for f in package.functions(db) {
+                if let RuntimeFunctionOwner::Synthetic(RuntimeSyntheticSpec::ContractRuntimeRoot {
+                    contract: c,
+                    ..
+                }) = f.owner(db)
+                    && c == contract
+                {
+                    return Ok((f.instance(db), None, 0));
+                }
+            }
+            Err(format!("missing runtime root for {region:?}"))
+        }
+        mir::RuntimeCodeRegionKey::ManualContractRoot { .. } => {
+            for r in package.code_regions(db) {
+                if r.region(db) == region {
+                    return Ok((r.root(db).instance(db), None, 0));
+                }
+            }
+            Err(format!("missing manual contract root for {region:?}"))
+        }
+    }
+}
+
+fn reachable_from<'db>(
+    db: Db<'db>,
+    roots: impl IntoIterator<Item = RuntimeInstance<'db>>,
+) -> Vec<RuntimeInstance<'db>> {
+    let mut order = Vec::new();
+    let mut seen = FxHashSet::default();
+    let mut queue: VecDeque<RuntimeInstance<'db>> = roots.into_iter().collect();
+    while let Some(f) = queue.pop_front() {
+        if !seen.insert(f) {
+            continue;
+        }
+        order.push(f);
+        queue.extend(callees(db, f));
+    }
+    order
+}
+
+fn collect_regions_dfs<'db>(
+    db: Db<'db>,
+    package: RuntimePackage<'db>,
+    region: mir::RuntimeCodeRegion<'db>,
+    visited: &mut FxHashSet<mir::RuntimeCodeRegion<'db>>,
+    topo: &mut Vec<RegionSpec<'db>>,
+) -> Result<(), String> {
+    if !visited.insert(region) {
+        return Ok(());
+    }
+    let (r_entry, r_ctor, immutables) = resolve_region(db, package, region)?;
+    let funcs = reachable_from(db, std::iter::once(r_entry).chain(r_ctor));
+    for f in funcs {
+        for sub in referenced_regions(db, f) {
+            collect_regions_dfs(db, package, sub, visited, topo)?;
+        }
+    }
+    topo.push(RegionSpec { region, entry: r_entry, ctor: r_ctor, immutables });
+    Ok(())
+}
+
+fn contract_immutables_bytes<'db>(db: Db<'db>, package: RuntimePackage<'db>, entry: RuntimeInstance<'db>) -> u64 {
+    for f in package.functions(db) {
+        if f.instance(db) == entry
+            && let RuntimeFunctionOwner::Synthetic(RuntimeSyntheticSpec::ContractRuntimeRoot { contract, .. }) = f.owner(db)
+        {
+            return (contract.code_address_space_slot_count(db) as u64) * 32;
+        }
+    }
+    0
+}
+
 fn sanitize(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$' { c } else { '_' }).collect()
 }
@@ -184,21 +339,53 @@ pub fn lower_program<'db>(
     name: &str,
     expect: Option<String>,
 ) -> Result<Lowered, String> {
+    lower_program_with_balance(db, package, entry, ctor, name, expect, None)
+}
+
+fn lower_program_with_balance<'db>(
+    db: Db<'db>,
+    package: RuntimePackage<'db>,
+    entry: RuntimeInstance<'db>,
+    ctor: Option<RuntimeInstance<'db>>,
+    name: &str,
+    expect: Option<String>,
+    balance: Option<String>,
+) -> Result<Lowered, String> {
     let mut symbols: FxHashMap<RuntimeInstance<'db>, String> = FxHashMap::default();
     for f in package.functions(db) {
         symbols.insert(f.instance(db), sanitize(&f.symbol(db)));
     }
-    // Reachable functions, the entry first.
-    let mut order = Vec::new();
-    let mut seen = FxHashSet::default();
-    let mut queue: VecDeque<RuntimeInstance<'db>> = std::iter::once(entry).chain(ctor).collect();
-    while let Some(f) = queue.pop_front() {
-        if !seen.insert(f) {
-            continue;
+    let root_funcs = reachable_from(db, std::iter::once(entry).chain(ctor));
+    let mut visited_regions = FxHashSet::default();
+    let mut topo_regions = Vec::new();
+    for f in &root_funcs {
+        for r in referenced_regions(db, *f) {
+            collect_regions_dfs(db, package, r, &mut visited_regions, &mut topo_regions)?;
         }
-        order.push(f);
-        queue.extend(callees(db, f));
     }
+    let region_ids: FxHashMap<mir::RuntimeCodeRegion<'db>, usize> =
+        topo_regions.iter().enumerate().map(|(i, s)| (s.region, i)).collect();
+
+    let mut entry_fns: FxHashSet<RuntimeInstance<'db>> = FxHashSet::default();
+    let mut ctor_fns: FxHashSet<RuntimeInstance<'db>> = FxHashSet::default();
+    let mut roots: Vec<RuntimeInstance<'db>> = Vec::new();
+    entry_fns.insert(entry);
+    roots.push(entry);
+    if let Some(c) = ctor {
+        entry_fns.insert(c);
+        ctor_fns.insert(c);
+        roots.push(c);
+    }
+    for spec in &topo_regions {
+        entry_fns.insert(spec.entry);
+        roots.push(spec.entry);
+        if let Some(c) = spec.ctor {
+            entry_fns.insert(c);
+            ctor_fns.insert(c);
+            roots.push(c);
+        }
+    }
+    let order = reachable_from(db, roots);
     let exports = contract_exports(db, package, entry);
     let mut used: FxHashSet<String> = exports.iter().map(|e| e.name.clone()).collect();
     let mut names: FxHashMap<RuntimeInstance<'db>, String> = FxHashMap::default();
@@ -221,7 +408,7 @@ pub fn lower_program<'db>(
         let mut facts = FxHashMap::default();
         let mut changed = false;
         for f in &order {
-            let a = Analyzer { db, body: &bodies[f], cfg: &cfgs[f], ret_params: &ret_params, ctor: Some(*f) == ctor };
+            let a = Analyzer { db, body: &bodies[f], cfg: &cfgs[f], ret_params: &ret_params, ctor: ctor_fns.contains(f) };
             let fx = a.analyze(*f).map_err(|e| format!("@{}: {e}", names[f]))?;
             facts.insert(*f, fx);
         }
@@ -264,7 +451,7 @@ pub fn lower_program<'db>(
                 (words, piece)
             })
             .collect();
-        let entry_fn = *f == entry || Some(*f) == ctor;
+        let entry_fn = entry_fns.contains(f);
         plans.insert(
             *f,
             Plan {
@@ -276,7 +463,7 @@ pub fn lower_program<'db>(
                 world: fx.world,
                 ctl: fx.ctl || entry_fn,
                 entry: entry_fn,
-                ctor: Some(*f) == ctor,
+                ctor: ctor_fns.contains(f),
                 params,
             },
         );
@@ -373,7 +560,7 @@ pub fn lower_program<'db>(
             break;
         }
     }
-    let prog = lower::Program { db, plans: &plans, hashed: Default::default() };
+    let prog = lower::Program { db, plans: &plans, regions: &region_ids, hashed: Default::default() };
     let mut functions = Vec::new();
     for f in &order {
         let cfg = Cfg::new(&bodies[f]).map_err(|e| format!("@{}: {e}", names[f]))?;
@@ -392,6 +579,22 @@ pub fn lower_program<'db>(
     ];
     if let Some(e) = &expect {
         comments.push(format!("expect {e}"));
+    }
+    if let Some(b) = &balance {
+        comments.push(format!("balance {b}"));
+    }
+    let immut_bytes = contract_immutables_bytes(db, package, entry);
+    if immut_bytes > 0 {
+        comments.push(format!("immutables {immut_bytes}"));
+    }
+    for (idx, spec) in topo_regions.iter().enumerate() {
+        let ctor_part = spec.ctor.map_or(String::new(), |c| format!(" constructor @{}", names[&c]));
+        let immut_part = if spec.immutables > 0 {
+            format!(" immutables {}", spec.immutables)
+        } else {
+            String::new()
+        };
+        comments.push(format!("code_region {idx}: entry @{}{ctor_part}{immut_part}", names[&spec.entry]));
     }
     for (key, sites) in prog.hashed.borrow().iter() {
         comments.push(format!(

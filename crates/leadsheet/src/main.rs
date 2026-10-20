@@ -57,7 +57,13 @@ fn main() -> ExitCode {
     };
     let url = Url::from_file_path(&canonical).expect("an absolute path");
     let mut db = DriverDataBase::default();
-    db.workspace().touch(&mut db, url.clone(), Some(content));
+    if let Some(ingot_dir) = canonical.parent().and_then(|p| p.parent()).filter(|d| d.join("fe.toml").is_file())
+        && let Ok(ingot_url) = Url::from_directory_path(ingot_dir)
+    {
+        driver::init_ingot(&mut db, &ingot_url);
+    } else {
+        db.workspace().touch(&mut db, url.clone(), Some(content));
+    }
     let Some(file) = db.workspace().get(&db, &url) else {
         eprintln!("{path}: not loaded");
         return ExitCode::FAILURE;
@@ -85,7 +91,7 @@ fn main() -> ExitCode {
         }
     } else {
         match fe_leadsheet::lower_contracts(&db, top_mod) {
-            Ok(r) => r.into_iter().map(Ok).collect(),
+            Ok(r) => r,
             Err(e) => {
                 eprintln!("{path}: {e}");
                 return ExitCode::FAILURE;
