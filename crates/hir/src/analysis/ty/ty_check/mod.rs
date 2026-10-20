@@ -67,6 +67,7 @@ use env::TyCheckEnv;
 pub use env::{
     BindingAccess, ClosureCapture, ClosureInfo, EffectParamSite, ExprProp, LocalBinding, ParamSite,
     PatBindingMode, PathReadSemantics, ScopedDeriveDemand, ScopedDeriveOpening,
+    UNFULFILLED_SCOPED_DERIVE_REASON,
 };
 pub(super) use expr::TraitOps;
 use num_traits::ToPrimitive;

@@ -624,3 +624,440 @@ const fn array_len_under_provider() -> usize {
     let err = prepare_err(source);
     assert!(err.contains("generated output admission failed"), "{err}");
 }
+
+#[test]
+fn non_derivable_targets_under_with_provider_refuse_instead_of_falling_back() {
+    let primitive_method = r#"
+use core::derive::Derive
+use core::meta::{Record, Code, Item}
+
+trait Score {
+    const fn score(self) -> u256
+}
+
+impl Score for u256 {
+    const fn score(self) -> u256 { 10 }
+}
+
+struct Provider {}
+impl Derive<Score> for Provider {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let zero: u256 = 0
+        let fault = 1 / zero
+        quote {
+            const fn score(self) -> u256 { ${fault} }
+        }
+    }
+}
+
+const fn run() -> u256 {
+    let x: u256 = 5
+    with (Provider) {
+        x.score()
+    }
+}
+"#;
+    let err1 = prepare_err(primitive_method);
+    assert!(
+        err1.contains(
+            "on-demand derive provider in `with (...)` requires a concrete struct or enum target"
+        ) && !err1.contains("division by zero"),
+        "{err1}"
+    );
+
+    let primitive_bound_call = r#"
+use core::derive::Derive
+use core::meta::{Record, Code, Item}
+
+trait Score {
+    const fn score(self) -> u256
+}
+
+impl Score for u256 {
+    const fn score(self) -> u256 { 10 }
+}
+
+struct Provider {}
+impl Derive<Score> for Provider {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote {
+            const fn score(self) -> u256 { 42 }
+        }
+    }
+}
+
+const fn score_of<T: Score>(_ x: T) -> u256 {
+    x.score()
+}
+
+const fn run() -> u256 {
+    let x: u256 = 5
+    with (Provider) {
+        score_of(x)
+    }
+}
+"#;
+    let err2 = prepare_err(primitive_bound_call);
+    assert!(
+        err2.contains(
+            "on-demand derive provider in `with (...)` requires a concrete struct or enum target"
+        ),
+        "{err2}"
+    );
+
+    let primitive_prove = r#"
+use core::derive::Derive
+use core::meta::{Record, Code, Item}
+use core::obligations::prove
+
+trait Score {
+    const fn score(self) -> u256
+}
+
+impl Score for u256 {
+    const fn score(self) -> u256 { 10 }
+}
+
+struct Provider {}
+impl Derive<Score> for Provider {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote {
+            const fn score(self) -> u256 { 42 }
+        }
+    }
+}
+
+const fn run() -> u256 {
+    with (Provider) {
+        let _ev = prove<Score<u256>>()
+        0
+    }
+}
+"#;
+    let err3 = prepare_err(primitive_prove);
+    assert!(
+        err3.contains(
+            "on-demand derive provider in `with (...)` requires a concrete struct or enum target"
+        ),
+        "{err3}"
+    );
+
+    let generic_bound_fallback = r#"
+use core::derive::Derive
+use core::meta::{Record, Code, Item}
+
+trait Score {
+    const fn score(self) -> u256
+}
+
+struct Provider {}
+impl Derive<Score> for Provider {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote {
+            const fn score(self) -> u256 { 42 }
+        }
+    }
+}
+
+const fn generic_caller<T: Score>(_ x: T) -> u256 {
+    with (Provider) {
+        x.score()
+    }
+}
+"#;
+    let err4 = prepare_err(generic_bound_fallback);
+    assert!(
+        err4.contains(
+            "on-demand derive provider in `with (...)` requires a concrete struct or enum target"
+        ),
+        "{err4}"
+    );
+}
+
+#[test]
+fn unmaterialized_scoped_derive_demand_fails_closed() {
+    let source = r#"
+use core::derive::Derive
+use core::meta::{Record, Code, Item}
+
+trait Score {
+    const fn score(self) -> u256
+}
+
+pub struct Pair {
+    pub a: u256,
+}
+
+impl Score for Pair {
+    const fn score(self) -> u256 { 10 }
+}
+
+struct Provider {}
+impl Derive<Score> for Provider {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote {
+            const fn score(self) -> u256 { 42 }
+        }
+    }
+}
+
+const fn run() -> u256 {
+    let p = Pair { a: 1 }
+    with (Provider) {
+        p.score()
+    }
+}
+"#;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///unmaterialized_scoped_derive.fe").unwrap();
+    let file = db.workspace().touch(&mut db, url, Some(source.to_owned()));
+    let top_mod = db.top_mod(file);
+    let func = top_mod
+        .all_funcs(&db)
+        .iter()
+        .copied()
+        .find(|func| func.name(&db).to_opt().map(|id| id.data(&db).as_str()) == Some("run"))
+        .expect("expected `run` function");
+    let (diags, _) = hir::analysis::ty::ty_check::check_func_body(&db, func);
+    assert!(
+        diags.iter().any(|diag| matches!(
+            diag,
+            hir::analysis::ty::diagnostics::FuncBodyDiag::Body(
+                hir::analysis::ty::diagnostics::BodyDiag::ObligationOpening { reason, .. }
+            ) if *reason == hir::analysis::ty::ty_check::UNFULFILLED_SCOPED_DERIVE_REASON
+        )),
+        "expected unfulfilled scoped derive diagnostic when checking without prepare_file, got: {diags:#?}"
+    );
+
+    let pass2_generated_demand = r#"
+use core::derive::Derive
+use core::meta::{Record, Code, Item}
+
+trait Score {
+    const fn score() -> u256
+}
+
+pub struct Seed {}
+
+pub struct LateTarget {}
+
+impl Score for LateTarget {
+    const fn score() -> u256 { 10 }
+}
+
+struct Provider {}
+impl Derive<Score> for Provider {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote {
+            const fn score() -> u256 { 42 }
+        }
+    }
+}
+
+const fn gen_fn(_ record: Record) -> Code<Item> {
+    quote {
+        const fn late_caller() -> u256 {
+            with (Provider) {
+                LateTarget::score()
+            }
+        }
+    }
+}
+
+#[generate(gen_fn)]
+pub struct Trigger {
+    pub seed: Seed,
+}
+"#;
+    let err = prepare_err(pass2_generated_demand);
+    assert!(
+        err.contains("generated output admission failed")
+            && err.contains(hir::analysis::ty::ty_check::UNFULFILLED_SCOPED_DERIVE_REASON),
+        "{err}"
+    );
+}
+
+#[test]
+fn scoped_derive_demands_in_contract_and_assoc_const_bodies_are_materialized() {
+    let source = r#"
+use core::derive::Derive
+use core::meta::{Record, Code, Item, field_count}
+
+trait Score {
+    const fn score() -> u256
+}
+
+struct Provider {}
+impl Derive<Score> for Provider {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n = field_count(record) as u256
+        quote {
+            const fn score() -> u256 { 100 + ${n} }
+        }
+    }
+}
+
+pub struct InImplConst {
+    pub a: u256,
+}
+
+pub struct InImplTraitConst {
+    pub a: u256,
+    pub b: u256,
+}
+
+pub struct InContractRecv {
+    pub a: u256,
+    pub b: u256,
+    pub c: u256,
+}
+
+pub struct Holder {}
+
+impl Holder {
+    const C: u256 = with (Provider) {
+        InImplConst::score()
+    }
+}
+
+trait HasConst {
+    const TC: u256
+}
+
+impl HasConst for Holder {
+    const TC: u256 = with (Provider) {
+        InImplTraitConst::score()
+    }
+}
+
+msg AppMsg {
+    #[selector = 0x01]
+    Ping -> u256,
+}
+
+pub contract App {
+    recv AppMsg {
+        Ping -> u256 {
+            with (Provider) {
+                InContractRecv::score()
+            }
+        }
+    }
+}
+
+const fn total() -> u256 {
+    Holder::C + <Holder as HasConst>::TC
+}
+"#;
+    let output = prepare(source).expect("contract and assoc-const scoped derive should succeed");
+    let url = Url::parse("file:///tmp/scoped-on-demand-derive.fe").unwrap();
+    let file = output.workspace().get(&output, &url).unwrap();
+    let top_mod = output.top_mod(file);
+    let selection_names = top_mod
+        .all_impl_traits(&output)
+        .iter()
+        .filter_map(|impl_trait| impl_trait.selection_name(&output))
+        .map(|ident| ident.data(&output).clone())
+        .collect::<Vec<_>>();
+    assert!(
+        selection_names
+            .iter()
+            .any(|name| name.contains("InContractRecv")),
+        "{selection_names:?}"
+    );
+    // Holder::C = 101, <Holder as HasConst>::TC = 102 -> 203
+    assert_eq!(eval_const_fn_u256(&output, "total"), "203");
+}
+
+#[test]
+fn scoped_derive_selection_name_avoids_module_delimiter_collision() {
+    let source = r#"
+use core::derive::Derive
+use core::meta::{Record, Code, Item, field_count}
+
+pub trait Score {
+    const fn score() -> u256
+}
+
+pub struct Provider {}
+impl Derive<Score> for Provider {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n = field_count(record) as u256
+        quote {
+            const fn score() -> u256 { 10 + ${n} }
+        }
+    }
+}
+
+pub struct a_Pair {
+    pub x: u256,
+}
+
+mod a {
+    pub struct Pair {
+        pub x: u256,
+        pub y: u256,
+    }
+}
+
+const fn check_both() -> u256 {
+    with (Provider) {
+        a_Pair::score() * 100 + a::Pair::score()
+    }
+}
+"#;
+    let output = prepare(source).expect("distinct module paths should not collide");
+    assert_eq!(eval_const_fn_u256(&output, "check_both"), "1112");
+}
+
+#[test]
+fn prove_intrinsic_under_with_provider_binds_and_reopens_derived_evidence() {
+    let source = r#"
+use core::derive::Derive
+use core::meta::{Record, Code, Item, field_count}
+use core::obligations::prove
+
+trait Score {
+    const fn score(self) -> u256
+}
+
+pub struct Pair {
+    pub a: u256,
+    pub b: u256,
+}
+
+impl Score for Pair {
+    const fn score(self) -> u256 { 10 }
+}
+
+struct Provider {}
+impl Derive<Score> for Provider {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n = field_count(record) as u256
+        quote {
+            const fn score(self) -> u256 { 50 + ${n} }
+        }
+    }
+}
+
+const fn score_of<T: Score>(_ x: T) -> u256 {
+    x.score()
+}
+
+const fn run() -> u256 {
+    let p = Pair { a: 1, b: 2 }
+    let ev = with (Provider) {
+        prove<Score<Pair>>()
+    }
+    let inside = with (ev) {
+        score_of(p) + p.score()
+    }
+    let outside = p.score()
+    inside * 100 + outside
+}
+"#;
+    let output =
+        prepare(source).expect("prove<Trait<Target>>() under with (Provider) should succeed");
+    // inside = 52 + 52 = 104; outside = 10 -> 10410
+    assert_eq!(eval_const_fn_u256(&output, "run"), "10410");
+}

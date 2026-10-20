@@ -786,7 +786,7 @@ fn ty_selection_component<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> Str
         && let Some(item) = adt.adt_ref(db).scope().to_item()
         && let Some(segments) = item_module_relative_path(db, item)
     {
-        return segments.join("_");
+        return segments.join("::");
     }
     ty.pretty_print(db).to_string()
 }
@@ -798,7 +798,7 @@ pub fn scoped_derive_selection_name<'db>(
     provider_ty: TyId<'db>,
 ) -> IdentId<'db> {
     let trait_comp = item_module_relative_path(db, trait_.into())
-        .map(|segments| segments.join("_"))
+        .map(|segments| segments.join("::"))
         .or_else(|| trait_.name(db).to_opt().map(|id| id.data(db).to_string()))
         .unwrap_or_else(|| "Trait".to_string());
     let target_comp = ty_selection_component(db, target_ty);

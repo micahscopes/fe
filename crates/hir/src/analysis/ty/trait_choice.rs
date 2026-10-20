@@ -802,6 +802,9 @@ pub enum ChoiceRefusal {
     /// where it is called: the choice is read where the closure is written,
     /// the provider where it is called, and the two could disagree.
     ClosureChoiceAndProvider,
+    /// A goal under an opened `with (Provider)` is not a concrete struct or
+    /// enum target eligible for scoped on-demand derive.
+    InvalidScopedDeriveTarget,
 }
 
 /// What a trait use means: a known implementation, or whatever the enclosing

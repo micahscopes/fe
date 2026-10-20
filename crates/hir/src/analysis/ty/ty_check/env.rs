@@ -245,6 +245,9 @@ pub(crate) struct TyCheckEnv<'db> {
     pub(super) scoped_derive_demands: std::cell::RefCell<Vec<ScopedDeriveDemand<'db>>>,
 }
 
+pub const UNFULFILLED_SCOPED_DERIVE_REASON: &str =
+    "scoped on-demand derive in `with (...)` requires generation preparation before checking";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub struct ScopedDeriveOpening<'db> {
     pub value_expr: ExprId,

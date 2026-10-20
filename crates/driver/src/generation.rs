@@ -460,28 +460,55 @@ pub fn prepare_file(
     let mut scoped_demands = Vec::new();
     let mut opening_diags = Vec::new();
     if has_unkeyed_with {
-        for &func in module.all_funcs(db) {
-            if func.body(db).is_none() {
-                continue;
-            }
-            let (diags, typed_body) = hir::analysis::ty::ty_check::check_func_body(db, func);
+        fn collect_from_checked_body<'db>(
+            db: &'db DriverDataBase,
+            diags: &[hir::analysis::ty::diagnostics::FuncBodyDiag<'db>],
+            typed_body: &hir::analysis::ty::ty_check::TypedBody<'db>,
+            opening_diags: &mut Vec<common::diagnostics::CompleteDiagnostic>,
+            scoped_openings: &mut Vec<hir::analysis::ty::ty_check::ScopedDeriveOpening<'db>>,
+            scoped_demands: &mut Vec<hir::analysis::ty::ty_check::ScopedDeriveDemand<'db>>,
+        ) {
             if !typed_body.scoped_derive_openings().is_empty() {
                 for diag in diags {
-                    if let hir::analysis::ty::diagnostics::FuncBodyDiag::Body(
-                        hir::analysis::ty::diagnostics::BodyDiag::ObligationOpening {
-                            reason, ..
-                        },
-                    ) = diag
-                        && (reason.starts_with("one `with` header")
-                            || reason.contains("canonical goal")
-                            || reason.contains("not visible"))
-                    {
-                        opening_diags.push(diag.to_complete(db));
+                    match diag {
+                        hir::analysis::ty::diagnostics::FuncBodyDiag::Body(
+                            hir::analysis::ty::diagnostics::BodyDiag::ObligationOpening {
+                                reason,
+                                ..
+                            },
+                        ) if *reason
+                            != hir::analysis::ty::ty_check::UNFULFILLED_SCOPED_DERIVE_REASON =>
+                        {
+                            opening_diags.push(diag.to_complete(db));
+                        }
+                        hir::analysis::ty::diagnostics::FuncBodyDiag::Body(
+                            hir::analysis::ty::diagnostics::BodyDiag::ObligationIntroduction {
+                                reason,
+                                ..
+                            },
+                        ) if reason.contains("on-demand derive provider") => {
+                            opening_diags.push(diag.to_complete(db));
+                        }
+                        _ => {}
                     }
                 }
             }
             scoped_openings.extend(typed_body.scoped_derive_openings().iter().copied());
             scoped_demands.extend(typed_body.scoped_derive_demands().iter().copied());
+        }
+        for &func in module.all_funcs(db) {
+            if func.body(db).is_none() {
+                continue;
+            }
+            let (diags, typed_body) = hir::analysis::ty::ty_check::check_func_body(db, func);
+            collect_from_checked_body(
+                db,
+                diags,
+                typed_body,
+                &mut opening_diags,
+                &mut scoped_openings,
+                &mut scoped_demands,
+            );
         }
         for &item in module.all_items(db) {
             let hir::hir_def::ItemKind::Const(const_def) = item else {
@@ -491,23 +518,116 @@ pub fn prepare_file(
                 continue;
             }
             let (diags, typed_body) = hir::analysis::ty::ty_check::check_const_body(db, const_def);
-            if !typed_body.scoped_derive_openings().is_empty() {
-                for diag in diags {
-                    if let hir::analysis::ty::diagnostics::FuncBodyDiag::Body(
-                        hir::analysis::ty::diagnostics::BodyDiag::ObligationOpening {
-                            reason, ..
-                        },
-                    ) = diag
-                        && (reason.starts_with("one `with` header")
-                            || reason.contains("canonical goal")
-                            || reason.contains("not visible"))
-                    {
-                        opening_diags.push(diag.to_complete(db));
-                    }
+            collect_from_checked_body(
+                db,
+                diags,
+                typed_body,
+                &mut opening_diags,
+                &mut scoped_openings,
+                &mut scoped_demands,
+            );
+        }
+        for &impl_ in module.all_impls(db) {
+            for const_view in impl_.assoc_consts(db) {
+                let Some(body) = const_view.value_body(db) else {
+                    continue;
+                };
+                let Some(expected) = const_view.ty(db) else {
+                    continue;
+                };
+                let (diags, typed_body) =
+                    hir::analysis::ty::ty_check::check_anon_const_body(db, body, expected);
+                collect_from_checked_body(
+                    db,
+                    diags,
+                    typed_body,
+                    &mut opening_diags,
+                    &mut scoped_openings,
+                    &mut scoped_demands,
+                );
+            }
+        }
+        for &impl_trait in module.all_impl_traits(db) {
+            let trait_inst = impl_trait.trait_inst(db);
+            for const_view in impl_trait.assoc_consts(db) {
+                let Some(body) = const_view.value_body(db) else {
+                    continue;
+                };
+                let expected = trait_inst
+                    .and_then(|inst| {
+                        let name = const_view.name(db)?;
+                        let binder = inst.def(db).const_(db, name)?.ty_binder(db)?;
+                        Some(binder.instantiate(db, inst.args(db)))
+                    })
+                    .or_else(|| const_view.ty(db));
+                let Some(expected) = expected else {
+                    continue;
+                };
+                let (diags, typed_body) =
+                    hir::analysis::ty::ty_check::check_anon_const_body(db, body, expected);
+                collect_from_checked_body(
+                    db,
+                    diags,
+                    typed_body,
+                    &mut opening_diags,
+                    &mut scoped_openings,
+                    &mut scoped_demands,
+                );
+            }
+        }
+        for &trait_ in module.all_traits(db) {
+            for const_view in trait_.assoc_consts(db) {
+                let Some(body) = const_view.default_body(db) else {
+                    continue;
+                };
+                let Some(expected) = const_view.ty(db) else {
+                    continue;
+                };
+                let (diags, typed_body) =
+                    hir::analysis::ty::ty_check::check_anon_const_body(db, body, expected);
+                collect_from_checked_body(
+                    db,
+                    diags,
+                    typed_body,
+                    &mut opening_diags,
+                    &mut scoped_openings,
+                    &mut scoped_demands,
+                );
+            }
+        }
+        for &contract in module.all_contracts(db) {
+            if contract.init(db).is_some() {
+                let (diags, typed_body) =
+                    hir::analysis::ty::ty_check::check_contract_init_body(db, contract);
+                collect_from_checked_body(
+                    db,
+                    diags,
+                    typed_body,
+                    &mut opening_diags,
+                    &mut scoped_openings,
+                    &mut scoped_demands,
+                );
+            }
+            let recvs = contract.recvs(db);
+            for (recv_idx, recv) in recvs.data(db).iter().enumerate() {
+                for (arm_idx, _) in recv.arms.data(db).iter().enumerate() {
+                    let (diags, typed_body) =
+                        hir::analysis::ty::ty_check::check_contract_recv_arm_body(
+                            db,
+                            contract,
+                            recv_idx as u32,
+                            arm_idx as u32,
+                        );
+                    collect_from_checked_body(
+                        db,
+                        diags,
+                        typed_body,
+                        &mut opening_diags,
+                        &mut scoped_openings,
+                        &mut scoped_demands,
+                    );
                 }
             }
-            scoped_openings.extend(typed_body.scoped_derive_openings().iter().copied());
-            scoped_demands.extend(typed_body.scoped_derive_demands().iter().copied());
         }
     }
     if !has_derive_impl

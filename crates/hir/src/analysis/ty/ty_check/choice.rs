@@ -2192,67 +2192,72 @@ impl<'db> TyChecker<'db> {
         let result = match goal {
             None => Err("expected one trait goal"),
             Some(goal) => {
+                let frame = self.env.choice_frames.current();
                 let slot = self.env.normalized_slot(goal).inst();
-                match self
-                    .env
-                    .frame_choice(self.env.choice_frames.current(), goal)
-                {
-                    Some(choice) if self.choice_answers(choice, goal) => Ok(choice),
-                    Some(_) => Err("the opened implementation does not prove the requested goal"),
-                    // Proved through a condition on an opened slot, or by a
-                    // proof that cannot be followed: refused as the call form
-                    // of the same goal is.
-                    None => {
-                        let frame = self.env.choice_frames.current();
-                        let mut undecided = Vec::new();
-                        let mut active = rustc_hash::FxHashSet::default();
-                        let choice = match self.env.ordinary_choice(
-                            frame,
-                            goal,
-                            0,
-                            Some(&mut undecided),
-                            &mut active,
-                        ) {
-                            Some(Choice::Known(known)) => KnownChoice::prove(
-                                self.db,
-                                self.env.frame_proof_context(frame),
-                                known.implementation(),
+                if self.env.is_invalid_provider_target(frame, goal) {
+                    Err(
+                        "on-demand derive provider in `with (...)` requires a concrete struct or enum target",
+                    )
+                } else {
+                    match self.env.frame_choice(frame, goal) {
+                        Some(choice) if self.choice_answers(choice, goal) => Ok(choice),
+                        Some(_) => {
+                            Err("the opened implementation does not prove the requested goal")
+                        }
+                        // Proved through a condition on an opened slot, or by a
+                        // proof that cannot be followed: refused as the call form
+                        // of the same goal is.
+                        None => {
+                            let mut undecided = Vec::new();
+                            let mut active = rustc_hash::FxHashSet::default();
+                            let choice = match self.env.ordinary_choice(
+                                frame,
                                 goal,
-                            )
-                            .map(|proved| {
-                                Choice::Known(proved.with_bounds(self.db, known.bounds()))
-                            })
-                            .map_err(|_| {
-                                undecided.push(goal);
-                                "the requested trait goal was not proved"
-                            }),
-                            _ if slot.args(self.db).iter().any(|ty| ty.has_param(self.db)) => {
-                                undecided.push(goal);
-                                Err(
-                                    "a generic goal can be proved only under a `with` that opens it",
+                                0,
+                                Some(&mut undecided),
+                                &mut active,
+                            ) {
+                                Some(Choice::Known(known)) => KnownChoice::prove(
+                                    self.db,
+                                    self.env.frame_proof_context(frame),
+                                    known.implementation(),
+                                    goal,
                                 )
+                                .map(|proved| {
+                                    Choice::Known(proved.with_bounds(self.db, known.bounds()))
+                                })
+                                .map_err(|_| {
+                                    undecided.push(goal);
+                                    "the requested trait goal was not proved"
+                                }),
+                                _ if slot.args(self.db).iter().any(|ty| ty.has_param(self.db)) => {
+                                    undecided.push(goal);
+                                    Err(
+                                        "a generic goal can be proved only under a `with` that opens it",
+                                    )
+                                }
+                                _ => {
+                                    undecided.push(goal);
+                                    Err("the requested trait goal was not proved")
+                                }
+                            };
+                            match self.env.reads_opened_condition(frame, undecided, None) {
+                                Some(refusal) => {
+                                    self.push_diag(BodyDiag::ObligationOpening {
+                                        primary: expr.span(self.body()).into(),
+                                        reason: match refusal {
+                                            ChoiceRefusal::OpenedCondition => {
+                                                "the goal is proved through an implementation with a condition on a slot opened here; conditional implementations under `with` are not supported yet"
+                                            }
+                                            _ => {
+                                                "the goal's proof cannot be followed to one implementation while a slot is opened here, so it is not known to avoid that slot; this is not supported yet"
+                                            }
+                                        },
+                                    });
+                                    return false;
+                                }
+                                None => choice,
                             }
-                            _ => {
-                                undecided.push(goal);
-                                Err("the requested trait goal was not proved")
-                            }
-                        };
-                        match self.env.reads_opened_condition(frame, undecided, None) {
-                            Some(refusal) => {
-                                self.push_diag(BodyDiag::ObligationOpening {
-                                    primary: expr.span(self.body()).into(),
-                                    reason: match refusal {
-                                        ChoiceRefusal::OpenedCondition => {
-                                            "the goal is proved through an implementation with a condition on a slot opened here; conditional implementations under `with` are not supported yet"
-                                        }
-                                        _ => {
-                                            "the goal's proof cannot be followed to one implementation while a slot is opened here, so it is not known to avoid that slot; this is not supported yet"
-                                        }
-                                    },
-                                });
-                                return false;
-                            }
-                            None => choice,
                         }
                     }
                 }
@@ -2417,7 +2422,7 @@ impl<'db> TyCheckEnv<'db> {
         match entry {
             FrameChoice::Choice(choice) => Some(choice),
             FrameChoice::Provider(provider_ty) => {
-                self.resolve_provider_choice(slot.inst(), provider_ty)
+                Some(self.resolve_provider_choice(slot.inst(), provider_ty))
             }
         }
     }
@@ -2601,12 +2606,20 @@ impl<'db> TyCheckEnv<'db> {
         provider_ty: TyId<'db>,
     ) -> bool {
         let db = self.db();
-        if let Some(Choice::Known(known)) = self.resolve_provider_choice(slot_inst, provider_ty) {
-            return known.answers(db, goal);
-        }
         if !goal.assoc_type_bindings(db).is_empty() {
             return false;
         }
+        if !self.is_eligible_scoped_derive_slot(slot_inst) {
+            return false;
+        }
+        if let Choice::Known(known) = self.resolve_provider_choice(slot_inst, provider_ty) {
+            return known.answers(db, goal);
+        }
+        true
+    }
+
+    fn is_eligible_scoped_derive_slot(&self, slot_inst: TraitInstId<'db>) -> bool {
+        let db = self.db();
         if slot_inst.args(db).len() != 1 {
             return false;
         }
@@ -2625,32 +2638,57 @@ impl<'db> TyCheckEnv<'db> {
             return false;
         }
         let trait_def = slot_inst.def(db);
-        if crate::analysis::ty::permits::is_canonical_trait(db, trait_def) {
+        !crate::analysis::ty::permits::is_canonical_trait(db, trait_def)
+    }
+
+    pub(super) fn is_invalid_provider_target(
+        &self,
+        frame: Option<FrameId>,
+        goal: TraitInstId<'db>,
+    ) -> bool {
+        let db = self.db();
+        let Some((slot, FrameChoice::Provider(provider_ty))) = self.frame_entry(frame, goal) else {
+            return false;
+        };
+        let slot_inst = slot.inst();
+        if slot_inst
+            .args(db)
+            .iter()
+            .any(|ty| ty.has_var(db) || ty.has_invalid(db))
+        {
             return false;
         }
-        self.record_scoped_derive_demand(super::env::ScopedDeriveDemand {
-            trait_def,
-            target_ty,
-            provider_ty,
-            scope: self.scope(),
-        });
-        true
+        !self.can_derive_goal_with_provider(slot_inst, goal, provider_ty)
+    }
+
+    fn choice_has_invalid_provider_target(
+        &self,
+        frame: Option<FrameId>,
+        choice: Choice<'db>,
+    ) -> bool {
+        let db = self.db();
+        match choice {
+            Choice::Slot(_) => false,
+            Choice::Known(known) => known.impl_goals(db).into_iter().any(|(bound, at_use)| {
+                self.is_invalid_provider_target(frame, at_use)
+                    || known
+                        .bound_choice(db, bound)
+                        .is_some_and(|sub| self.choice_has_invalid_provider_target(frame, sub))
+            }),
+        }
     }
 
     fn resolve_provider_choice(
         &self,
         slot_inst: TraitInstId<'db>,
         provider_ty: TyId<'db>,
-    ) -> Option<Choice<'db>> {
+    ) -> Choice<'db> {
         use crate::analysis::name_resolution::path_resolver::{ImplNameRes, resolve_impl_name};
         let db = self.db();
-        if slot_inst.args(db).len() != 1 {
-            return None;
+        if !self.is_eligible_scoped_derive_slot(slot_inst) {
+            return Choice::Slot(SlotRef::Unsupplied);
         }
         let target_ty = slot_inst.self_ty(db);
-        if target_ty.has_var(db) || target_ty.has_param(db) || target_ty.has_invalid(db) {
-            return None;
-        }
         let trait_def = slot_inst.def(db);
         let selection_name =
             crate::core::meta::scoped_derive_selection_name(db, trait_def, target_ty, provider_ty);
@@ -2658,25 +2696,19 @@ impl<'db> TyCheckEnv<'db> {
         let ImplNameRes::Found(implementation) =
             resolve_impl_name(db, path, self.scope().top_mod(db).scope())
         else {
-            if let Some(adt_def) = target_ty.adt_def(db)
-                && matches!(
-                    adt_def.adt_ref(db),
-                    crate::analysis::ty::adt_def::AdtRef::Struct(_)
-                        | crate::analysis::ty::adt_def::AdtRef::Enum(_)
-                )
-                && !crate::analysis::ty::permits::is_canonical_trait(db, trait_def)
-            {
-                self.record_scoped_derive_demand(super::env::ScopedDeriveDemand {
-                    trait_def,
-                    target_ty,
-                    provider_ty,
-                    scope: self.scope(),
-                });
-            }
-            return None;
+            self.record_scoped_derive_demand(super::env::ScopedDeriveDemand {
+                trait_def,
+                target_ty,
+                provider_ty,
+                scope: self.scope(),
+            });
+            return Choice::Slot(SlotRef::Unsupplied);
         };
-        let known = KnownChoice::prove(db, self.proof_context(), implementation, slot_inst).ok()?;
-        Some(Choice::Known(known))
+        let Ok(known) = KnownChoice::prove(db, self.proof_context(), implementation, slot_inst)
+        else {
+            return Choice::Slot(SlotRef::Unsupplied);
+        };
+        Choice::Known(known)
     }
 
     /// Augment `assumptions()` with synthetic trait predicates for any `receiver_tys`
@@ -2907,11 +2939,21 @@ impl<'db> TyCheckEnv<'db> {
     ) -> Result<CallDecisions<'db>, ChoiceRefusal> {
         let db = self.db();
         let own_slot = callable.trait_inst.map(|inst| slot_goal(db, inst));
+        if let Some(inst) = callable.trait_inst
+            && self.is_invalid_provider_target(frame, inst)
+        {
+            return Err(ChoiceRefusal::InvalidScopedDeriveTarget);
+        }
         let mut undecided_own = Vec::new();
         let own = callable.trait_inst.and_then(|inst| {
             let mut active = rustc_hash::FxHashSet::default();
             self.ordinary_choice(frame, inst, 0, Some(&mut undecided_own), &mut active)
         });
+        if let Some(own) = own
+            && self.choice_has_invalid_provider_target(frame, own)
+        {
+            return Err(ChoiceRefusal::InvalidScopedDeriveTarget);
+        }
         let generic = !self.own_bounds().is_empty();
         let CallableDef::Func(func) = callable.callable_def() else {
             return Ok((own, Vec::new()));
@@ -2926,6 +2968,9 @@ impl<'db> TyCheckEnv<'db> {
         let mut decided = Vec::new();
         let mut undecided_bounds = Vec::new();
         for (bound, at_call) in declared_goals(db, body, body_args) {
+            if self.is_invalid_provider_target(frame, at_call) {
+                return Err(ChoiceRefusal::InvalidScopedDeriveTarget);
+            }
             let choice = self.decide_bound_at_use(
                 frame,
                 bound,
@@ -2936,6 +2981,11 @@ impl<'db> TyCheckEnv<'db> {
                 false,
                 &mut undecided_bounds,
             );
+            if let Some(choice) = choice
+                && self.choice_has_invalid_provider_target(frame, choice)
+            {
+                return Err(ChoiceRefusal::InvalidScopedDeriveTarget);
+            }
             decided.push((bound, at_call, choice));
         }
         // A body chosen later is one of the trait's implementations of the
@@ -2956,8 +3006,16 @@ impl<'db> TyCheckEnv<'db> {
                     {
                         continue;
                     }
+                    if self.is_invalid_provider_target(frame, at_call) {
+                        return Err(ChoiceRefusal::InvalidScopedDeriveTarget);
+                    }
                     match self.decide(frame, at_call) {
-                        Some(choice) => candidate_deliveries.push((Delivery::Bound(bound), choice)),
+                        Some(choice) => {
+                            if self.choice_has_invalid_provider_target(frame, choice) {
+                                return Err(ChoiceRefusal::InvalidScopedDeriveTarget);
+                            }
+                            candidate_deliveries.push((Delivery::Bound(bound), choice));
+                        }
                         None => undecided_candidates.push(at_call),
                     }
                 }
@@ -3294,6 +3352,16 @@ impl<'db> TyCheckEnv<'db> {
             let mut captured = Vec::new();
             let mut undecided = Vec::new();
             for goal in self.call_uses(&callable) {
+                if self.is_invalid_provider_target(frame, goal) {
+                    if !self
+                        .choice_refusals
+                        .contains(&(expr, ChoiceRefusal::InvalidScopedDeriveTarget))
+                    {
+                        self.choice_refusals
+                            .push((expr, ChoiceRefusal::InvalidScopedDeriveTarget));
+                    }
+                    continue;
+                }
                 let mut active = rustc_hash::FxHashSet::default();
                 let choice =
                     self.ordinary_choice(frame, goal, 0, Some(&mut undecided), &mut active);
@@ -3301,6 +3369,14 @@ impl<'db> TyCheckEnv<'db> {
                     undecided.push(goal);
                 }
                 if let Some(choice) = choice {
+                    if self.choice_has_invalid_provider_target(frame, choice)
+                        && !self
+                            .choice_refusals
+                            .contains(&(expr, ChoiceRefusal::InvalidScopedDeriveTarget))
+                    {
+                        self.choice_refusals
+                            .push((expr, ChoiceRefusal::InvalidScopedDeriveTarget));
+                    }
                     choice.for_each_choice(db, &mut |item| {
                         if !item.is_ordinary() && !captured.contains(&item) {
                             captured.push(item);
@@ -3546,11 +3622,19 @@ impl<'db> TyCheckEnv<'db> {
     ) -> Result<crate::analysis::ty::assoc_const::AssocConstUse<'db>, ChoiceRefusal> {
         let db = self.db();
         let own_slot = slot_goal(db, use_.inst());
+        if self.is_invalid_provider_target(frame, use_.inst()) {
+            return Err(ChoiceRefusal::InvalidScopedDeriveTarget);
+        }
         let mut undecided = Vec::new();
         let own = {
             let mut active = rustc_hash::FxHashSet::default();
             self.ordinary_choice(frame, use_.inst(), 0, Some(&mut undecided), &mut active)
         };
+        if let Some(own) = own
+            && self.choice_has_invalid_provider_target(frame, own)
+        {
+            return Err(ChoiceRefusal::InvalidScopedDeriveTarget);
+        }
         let use_ = use_.with_choice(own);
         let own_decision = own.map(|choice| (own_slot, choice));
         let items = match use_.body_that_runs(db) {
@@ -3686,6 +3770,9 @@ impl<'db> TyCheckEnv<'db> {
         let db = self.db();
         let mut items = Vec::new();
         for (bound, at_use) in const_declared_goals(db, body, &subst) {
+            if self.is_invalid_provider_target(frame, at_use) {
+                return Err(ChoiceRefusal::InvalidScopedDeriveTarget);
+            }
             let Some(choice) = self.decide_bound_at_use(
                 frame,
                 bound,
@@ -3698,6 +3785,9 @@ impl<'db> TyCheckEnv<'db> {
             ) else {
                 continue;
             };
+            if self.choice_has_invalid_provider_target(frame, choice) {
+                return Err(ChoiceRefusal::InvalidScopedDeriveTarget);
+            }
             if const_type_reads(db, body, ty).contains(&bound) {
                 let mut dependent = false;
                 choice.for_each_choice(db, &mut |item| match item {
@@ -3953,7 +4043,21 @@ pub(super) fn check_choice_uses<'db>(
                 reason: "a closure that reads a `with` choice and needs an effect provider is not supported yet",
             }
             .into(),
+            ChoiceRefusal::InvalidScopedDeriveTarget => BodyDiag::ObligationOpening {
+                primary,
+                reason: "on-demand derive provider in `with (...)` requires a concrete struct or enum target",
+            }
+            .into(),
         });
+    }
+    if !typed.scoped_derive_demands().is_empty() {
+        diags.push(
+            BodyDiag::ObligationOpening {
+                primary: body.expr(db).span(body).into(),
+                reason: super::env::UNFULFILLED_SCOPED_DERIVE_REASON,
+            }
+            .into(),
+        );
     }
     for (expr, read) in typed.closure_choices() {
         if read.iter().any(|choice| !choice.is_ordinary_or_bound()) {
