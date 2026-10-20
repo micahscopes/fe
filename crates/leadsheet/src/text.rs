@@ -136,6 +136,23 @@ impl Builder {
         self.known.get(&v).copied()
     }
 
+    /// When `v` is defined in the innermost open region as `lt %lhs, N` with a
+    /// known constant `N`, gives `(%lhs, N)`.
+    pub fn lt_const(&self, v: V) -> Option<(V, u64)> {
+        let (nodes, _) = self.open.last()?;
+        for n in nodes.iter().rev() {
+            if let Node::Op { outs, op: "lt", ins } = n
+                && outs.first() == Some(&v)
+                && let [lhs, rhs] = ins.as_slice()
+                && let Some(c) = self.known(*rhs)
+                && let Ok(bound) = u64::try_from(c)
+            {
+                return Some((*lhs, bound));
+            }
+        }
+        None
+    }
+
     pub fn fresh(&mut self, ty: Ty) -> V {
         let v = V(self.next);
         self.next += 1;

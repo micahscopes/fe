@@ -80,6 +80,8 @@ struct Env {
     held: BTreeMap<Key, V>,
     /// Objects joined into the pool at the end of a gamma arm.
     in_pool: BTreeSet<u32>,
+    /// Index words already proven `< len` on the current path.
+    checked_lt: BTreeSet<(V, u64)>,
 }
 
 /// Where a place's bytes or slots are.
@@ -680,7 +682,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                 owns.push((key_at[i], o));
             }
         }
-        let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone() };
+        let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone(), checked_lt: BTreeSet::new() };
         for (v, slots) in &layout {
             let ws = slots
                 .iter()
@@ -700,7 +702,13 @@ impl<'p, 'db> Lower<'p, 'db> {
         let flow = self.run_from(lp.header, None, true);
         self.loops.pop();
         let end = match flow? {
-            Flow::Returned(vs) => End::Repeat(vs[0], vs[1..].to_vec()),
+            Flow::Returned(vs) => {
+                let mut rest = vs[1..].to_vec();
+                for &i in invariant.values() {
+                    rest[i] = params[i];
+                }
+                End::Repeat(vs[0], rest)
+            }
             Flow::Halted => self.halt_end.take().ok_or("a halted loop body without an end")?,
             Flow::AtJoin => return Err("a loop body that stops at a join".into()),
         };
@@ -894,12 +902,26 @@ impl<'p, 'db> Lower<'p, 'db> {
         let key_at: Vec<usize> = keys.iter().map(|k| push_in(self.env.held[k], &mut inputs)).collect();
         let in_tys: Vec<Ty> = inputs.iter().map(|v| self.b.ty(*v)).collect();
         let snapshot = self.env.clone();
+        let branch_lt = self.b.lt_const(sel);
         let mut regions: Vec<Region> = Vec::new();
         let mut arm_envs: Vec<Env> = Vec::new();
         let mut out_tys: Option<Vec<Ty>> = None;
-        for s in &succs {
+        for (arm_idx, s) in succs.iter().enumerate() {
             let params = self.b.open(&in_tys);
-            let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone() };
+            let mut checked_lt: BTreeSet<(V, u64)> = snapshot
+                .checked_lt
+                .iter()
+                .filter_map(|&(v, b)| seen.get(&v).map(|&i| (params[i], b)))
+                .collect();
+            let is_default_arm = default.is_some() && arm_idx + 1 == succs.len();
+            if is_default_arm
+                && cases.iter().any(|(w, _)| w.is_zero())
+                && let Some((lhs, bound)) = branch_lt
+                && let Some(&i) = seen.get(&lhs)
+            {
+                checked_lt.insert((params[i], bound));
+            }
+            let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone(), checked_lt };
             for (l, slots) in &layout {
                 let ws = slots
                     .iter()
@@ -946,7 +968,7 @@ impl<'p, 'db> Lower<'p, 'db> {
         match join {
             Some(j) if !arm_envs.is_empty() => {
                 // The environment at the join.
-                let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: BTreeSet::new() };
+                let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: BTreeSet::new(), checked_lt: BTreeSet::new() };
                 for e in &arm_envs {
                     env.in_pool.extend(e.in_pool.iter().copied());
                 }
@@ -1011,10 +1033,16 @@ impl<'p, 'db> Lower<'p, 'db> {
         let key_at: Vec<usize> = keys.iter().map(|k| push_in(self.env.held[k], &mut inputs)).collect();
         let tys: Vec<Ty> = inputs.iter().map(|v| self.b.ty(*v)).collect();
         let snapshot = self.env.clone();
+        let branch_lt = self.b.lt_const(sel);
         let mut regions = Vec::new();
         for (_, s) in &cases {
             let params = self.b.open(&tys);
-            let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone() };
+            let checked_lt: BTreeSet<(V, u64)> = snapshot
+                .checked_lt
+                .iter()
+                .filter_map(|&(v, b)| seen.get(&v).map(|&i| (params[i], b)))
+                .collect();
+            let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone(), checked_lt };
             for (l, slots) in &layout {
                 let ws = slots
                     .iter()
@@ -1042,6 +1070,19 @@ impl<'p, 'db> Lower<'p, 'db> {
         let case_regions: Vec<(U256, Region)> = cases.iter().map(|(w, _)| *w).zip(regions).collect();
         self.env = snapshot;
         let outs = self.b.gamma(sel, &inputs, case_regions, pass, &tys);
+        let mut checked_lt: BTreeSet<(V, u64)> = self
+            .env
+            .checked_lt
+            .iter()
+            .filter_map(|&(v, b)| seen.get(&v).map(|&i| (outs[i], b)))
+            .collect();
+        if cases.iter().any(|(w, _)| w.is_zero())
+            && let Some((lhs, bound)) = branch_lt
+            && let Some(&i) = seen.get(&lhs)
+        {
+            checked_lt.insert((outs[i], bound));
+        }
+        self.env.checked_lt = checked_lt;
         for (l, slots) in &layout {
             let ws = slots
                 .iter()
@@ -1484,10 +1525,14 @@ impl<'p, 'db> Lower<'p, 'db> {
             }
             IndexSource::Any => return Err("a wildcard index".into()),
         };
+        if self.env.checked_lt.contains(&(i, len)) {
+            return Ok(i);
+        }
         let n = self.b.k(len);
         let inb = self.b.w("lt", &[i, n]);
         let out = self.b.w("iszero", &[inb]);
         self.guard(out, Halt::Empty)?;
+        self.env.checked_lt.insert((i, len));
         Ok(i)
     }
 
@@ -1678,7 +1723,7 @@ impl<'p, 'db> Lower<'p, 'db> {
         let mut out_tys: Vec<Ty> = Vec::new();
         for v in [0u16, 1u16] {
             let p = self.b.open(&tys);
-            let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone() };
+            let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone(), checked_lt: BTreeSet::new() };
             for (i, k) in keys.iter().enumerate() {
                 env.held.insert(*k, p[words.len() + i]);
             }
@@ -1723,7 +1768,7 @@ impl<'p, 'db> Lower<'p, 'db> {
         let mut out_tys: Vec<Ty> = Vec::new();
         for v in 0..variants {
             let p = self.b.open(&tys);
-            let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone() };
+            let mut env = Env { vals: FxHashMap::default(), held: BTreeMap::new(), in_pool: snapshot.in_pool.clone(), checked_lt: BTreeSet::new() };
             for (i, k) in keys.iter().enumerate() {
                 env.held.insert(*k, p[words.len() + i]);
             }
@@ -2290,6 +2335,9 @@ impl<'p, 'db> Lower<'p, 'db> {
             }
             RExpr::Call { callee, args } if let Some(l) = crate::maps::locate(self.db, *callee) => {
                 (self.map_entry(*callee, args, &l)?, Src::Word)
+            }
+            RExpr::Call { callee, args } if let Some(s) = crate::maps::step(self.db, *callee) => {
+                self.step_call(*callee, args, s)?
             }
             RExpr::Call { callee, args } => {
                 let ws = self.call(*callee, args)?;
@@ -3004,17 +3052,16 @@ impl<'p, 'db> Lower<'p, 'db> {
 
     // ------------------------------------------------------------ calls
 
-    /// `StorageMap::locate(map, root, key)` with a word key: the entry's
-    /// `Location`, its slot the hash of the key's words and the root, its
-    /// offset 0 (see `maps`). The words are hashed where the pool's free
-    /// memory starts, without allocating: leadsheet-evm does not compile
-    /// `keccak_words` yet, and the pool owns everything from the free
-    /// pointer up.
+    /// `StorageMap::locate(map, root, key)` or `mapping_slot(root, key)` with a
+    /// word key: the entry's slot is `keccak_words(key_words.., root)` (and for
+    /// `locate`, offset 0; see `maps`). Emitting `keccak_words` directly keeps
+    /// map lookups pure of the memory pool.
     fn map_entry(&mut self, callee: RuntimeInstance<'db>, args: &[RLocalId], l: &crate::maps::Locate) -> R<Vec<V>> {
         let sig = callee.interface_signature(self.db);
-        let [_, root, key] = args else { return Err("a map lookup without its three arguments".into()) };
+        let root = args.get(l.root_arg).ok_or("a map lookup without its root argument")?;
+        let key = args.get(l.key_arg).ok_or("a map lookup without its key argument")?;
         let mut words = Vec::new();
-        for (a, p) in [(key, &sig.params[2]), (root, &sig.params[1])] {
+        for (a, p) in [(key, &sig.params[l.key_arg]), (root, &sig.params[l.root_arg])] {
             let ws = self.words(*a)?;
             let ws = match self.class(*a) {
                 Some(c) => self.coerce_val(ws, &Src::Class(c), &p.class),
@@ -3022,21 +3069,59 @@ impl<'p, 'db> Lower<'p, 'db> {
             };
             words.extend(ws);
         }
-        if sig.ret.as_ref().map(|c| flat_len(self.db, c)) != Some(2) {
-            return Err("a map lookup whose location is not two words".into());
+        let expected_ret = if l.has_offset { 2 } else { 1 };
+        if sig.ret.as_ref().map(|c| flat_len(self.db, c)) != Some(expected_ret) {
+            return Err("a map lookup with an unexpected return width".into());
         }
         *self.prog.hashed.borrow_mut().entry(l.key.clone()).or_default() += 1;
-        let fp = self.b.k(0x40);
-        let mut m = self.pool()?;
-        let p = self.b.op("mload", &[m, fp], 1, &[])[0];
-        for (i, w) in words.iter().enumerate() {
-            let a = self.offset(p, 32 * i as u64);
-            m = self.b.op("mstore", &[m, a, *w], 0, &[Space::Mem])[0];
-        }
-        self.set(Key::Pool, m);
-        let len = self.b.k(32 * words.len() as u64);
-        let slot = self.b.op("keccak256", &[m, p, len], 1, &[])[0];
-        Ok(vec![slot, self.b.k(0)])
+        let slot = self.b.w("keccak_words", &words);
+        Ok(if l.has_offset { vec![slot, self.b.k(0)] } else { vec![slot] })
+    }
+
+    /// A collection cursor step (`start`, `has`, `next`, `last`, `prev`) on a
+    /// fixed array or zero-based range, or wrapping scalar arithmetic.
+    fn step_call(&mut self, callee: RuntimeInstance<'db>, args: &[RLocalId], s: crate::maps::Step) -> R<(Vec<V>, Src<'db>)> {
+        use crate::maps::Step;
+        let sig = callee.interface_signature(self.db);
+        let ret = sig.ret.map_or(Src::Word, Src::Class);
+        Ok(match s {
+            Step::Start(k) => (vec![self.b.k(k)], ret),
+            Step::HasConst(n) => {
+                let c = self.word_of(*args.last().ok_or("a cursor step without a cursor")?)?;
+                let bound = self.b.k(n);
+                (vec![self.b.w("lt", &[c, bound])], Src::Bool)
+            }
+            Step::HasArg => {
+                if args.len() < 2 {
+                    return Err("a range step without range and cursor arguments".into());
+                }
+                let end = self.word_of(args[args.len() - 2])?;
+                let c = self.word_of(args[args.len() - 1])?;
+                (vec![self.b.w("lt", &[c, end])], Src::Bool)
+            }
+            Step::Next(step) | Step::Prev(step) => {
+                let c = self.word_of(*args.last().ok_or("a cursor step without a cursor")?)?;
+                let d = self.b.k(step);
+                let op = if matches!(s, Step::Next(_)) { "add" } else { "sub" };
+                let next = self.b.w(op, &[c, d]);
+                (vec![next], ret)
+            }
+            Step::WrappingAdd | Step::WrappingSub => {
+                let a = self.word_of(args[0])?;
+                let b = self.word_of(args[1])?;
+                let sc = match &ret {
+                    Src::Class(rc) => Sc::of_class(rc).unwrap_or(Sc::WORD),
+                    _ => Sc::WORD,
+                };
+                let asc = self.class(args[0]).as_ref().and_then(Sc::of_class).unwrap_or(Sc::WORD);
+                let bsc = self.class(args[1]).as_ref().and_then(Sc::of_class).unwrap_or(Sc::WORD);
+                let a = coerce(&mut self.b, a, asc, sc);
+                let b = coerce(&mut self.b, b, bsc, sc);
+                let op = if matches!(s, Step::WrappingAdd) { "add" } else { "sub" };
+                let r = self.b.w(op, &[a, b]);
+                (vec![sc.canon(&mut self.b, r)], ret)
+            }
+        })
     }
 
     /// A call: arguments, the pieces each needs, the states the callee holds;

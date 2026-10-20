@@ -188,8 +188,8 @@ fn test_balance(db: Db<'_>, owner: &RuntimeFunctionOwner<'_>) -> Option<String> 
     None
 }
 
-/// The calls a body makes (but map-entry lookups the lowering makes hashes
-/// of, `maps`).
+/// The calls a body makes (but map-entry lookups and cursor steps the
+/// lowering emits inline, `maps`).
 fn callees<'db>(db: Db<'db>, f: RuntimeInstance<'db>) -> Vec<RuntimeInstance<'db>> {
     let body = f.body(db);
     let mut out = Vec::new();
@@ -197,6 +197,7 @@ fn callees<'db>(db: Db<'db>, f: RuntimeInstance<'db>) -> Vec<RuntimeInstance<'db
         for stmt in &block.stmts {
             if let RStmt::Assign { expr: RExpr::Call { callee, .. }, .. } = stmt
                 && maps::locate(db, *callee).is_none()
+                && maps::step(db, *callee).is_none()
             {
                 out.push(*callee);
             }

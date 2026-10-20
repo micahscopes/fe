@@ -321,7 +321,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 _ => OSet::new(),
             },
             // A map entry's slot, hashed from the root: in the root's map region.
-            RExpr::Call { callee, args } if crate::maps::locate(self.db, *callee).is_some() => match args.get(1) {
+            RExpr::Call { callee, args } if let Some(l) = crate::maps::locate(self.db, *callee) => match args.get(l.root_arg) {
                 Some(root) => org(root)
                     .into_iter()
                     .map(|x| match x {
@@ -332,6 +332,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     .collect(),
                 None => OSet::new(),
             },
+            RExpr::Call { callee, .. } if crate::maps::step(self.db, *callee).is_some() => OSet::new(),
             RExpr::Call { callee, args } => {
                 let mut o = OSet::new();
                 if self.class(dst).is_some() {
@@ -348,6 +349,50 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             }
             _ => OSet::new(),
         })
+    }
+
+    fn const_int_u64(c: &mir::ConstScalar) -> Option<u64> {
+        let mir::ConstScalar::Int { words, signed: false, .. } = c else { return None };
+        let mut word = [0u8; 32];
+        let n = words.len().min(32);
+        word[32 - n..].copy_from_slice(&words[words.len() - n..]);
+        u64::try_from(ruint::aliases::U256::from_be_bytes(word)).ok()
+    }
+
+    fn index_needs_check(index: &hir::projection::IndexSource<RLocalId>, len: u64, const_u64: &FxHashMap<RLocalId, u64>) -> bool {
+        match index {
+            hir::projection::IndexSource::Constant(i) => (*i as u64) >= len,
+            hir::projection::IndexSource::Dynamic(l) => const_u64.get(l).is_none_or(|&c| c >= len),
+            hir::projection::IndexSource::Any => true,
+        }
+    }
+
+    fn place_needs_index_check(&self, place: &RuntimePlace<'db>, const_u64: &FxHashMap<RLocalId, u64>) -> Result<bool, String> {
+        let program = self.db as &dyn mir::MirDb;
+        let resolved = mir::resolve_runtime_place(self.db, &program, self.body, place).map_err(|e| format!("place: {e:?}"))?;
+        let mut cur_class = match &resolved.root_kind {
+            ResolvedPlaceRootKind::Slot { class, .. }
+            | ResolvedPlaceRootKind::Ref { class, .. }
+            | ResolvedPlaceRootKind::Provider { class, .. }
+            | ResolvedPlaceRootKind::Ptr { class, .. } => class.clone(),
+        };
+        for elem in resolved.path.iter() {
+            match elem {
+                ResolvedPlaceElem::Index { index, class } => {
+                    let len = cur_class.array_len(self.db).unwrap_or(0);
+                    if Self::index_needs_check(index, len, const_u64) {
+                        return Ok(true);
+                    }
+                    cur_class = class.clone();
+                }
+                ResolvedPlaceElem::Field { class, .. }
+                | ResolvedPlaceElem::VariantField { class, .. }
+                | ResolvedPlaceElem::Deref { class, .. } => {
+                    cur_class = class.clone();
+                }
+            }
+        }
+        Ok(false)
     }
 
     pub fn analyze(&self, instance: RuntimeInstance<'db>) -> Result<Facts<'db>, String> {
@@ -468,7 +513,8 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             let block = &body.blocks[b];
             for stmt in &block.stmts {
                 match stmt {
-                    RStmt::Assign { expr: RExpr::Call { callee, .. }, .. } if crate::maps::locate(db, *callee).is_some() => {}
+                    RStmt::Assign { expr: RExpr::Call { callee, .. }, .. }
+                        if crate::maps::locate(db, *callee).is_some() || crate::maps::step(db, *callee).is_some() => {}
                     RStmt::Assign { expr: RExpr::Call { callee, args }, .. } => {
                         escape_args(&mut facts, callee, args);
                         facts.calls.push((*callee, args.to_vec()));
@@ -557,10 +603,28 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         // What the body needs by itself, now that the pooled objects are known.
         for &b in &blocks {
             let block = &body.blocks[b];
+            let mut const_u64: FxHashMap<RLocalId, u64> = FxHashMap::default();
             for stmt in &block.stmts {
                 match stmt {
-                    RStmt::Assign { dst, expr } => self.expr_needs(&mut facts, *dst, expr)?,
-                    RStmt::Store { dst, .. } => self.access(&mut facts, dst, true)?,
+                    RStmt::Assign { dst, expr } => {
+                        self.expr_needs(&mut facts, *dst, expr, &const_u64)?;
+                        let is_slot = matches!(body.locals[dst.index()].root, RuntimeLocalRoot::Slot(_));
+                        let kv = if is_slot {
+                            None
+                        } else {
+                            match expr {
+                                RExpr::ConstScalar(c) => Self::const_int_u64(c),
+                                RExpr::Use(src) => const_u64.get(src).copied(),
+                                _ => None,
+                            }
+                        };
+                        if let Some(v) = kv {
+                            const_u64.insert(*dst, v);
+                        } else {
+                            const_u64.remove(dst);
+                        }
+                    }
+                    RStmt::Store { dst, .. } => self.access(&mut facts, dst, true, &const_u64)?,
                     RStmt::CopyInto { dst, src } => {
                         if matches!(self.class(*src), Some(RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. })) {
                             let o = facts.origins[src.index()].clone();
@@ -568,11 +632,13 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                                 facts.pool = true;
                             }
                         }
-                        self.access(&mut facts, dst, true)?;
+                        self.access(&mut facts, dst, true, &const_u64)?;
                     }
-                    RStmt::AssertIndexInBounds { .. } => {
-                        facts.pool = true;
-                        facts.ctl = true;
+                    RStmt::AssertIndexInBounds { index, len } => {
+                        if Self::index_needs_check(index, *len, &const_u64) {
+                            facts.pool = true;
+                            facts.ctl = true;
+                        }
                     }
                     RStmt::EnumSetTag { root, .. } | RStmt::EnumWriteVariant { root, .. } => {
                         let o = facts.origins[root.index()].clone();
@@ -609,10 +675,10 @@ impl<'a, 'db> Analyzer<'a, 'db> {
     }
 
     /// A place accessed (read or written): which state it needs.
-    fn access(&self, facts: &mut Facts<'db>, place: &RuntimePlace<'db>, write: bool) -> Result<(), String> {
+    fn access(&self, facts: &mut Facts<'db>, place: &RuntimePlace<'db>, write: bool, const_u64: &FxHashMap<RLocalId, u64>) -> Result<(), String> {
         let info = self.place_info(facts, place)?;
-        // A dynamic index is checked, and its failure reverts.
-        if place.path.iter().any(|e| matches!(e, mir::PlaceElem::Index(hir::projection::IndexSource::Dynamic(_)))) {
+        // A dynamic index not statically in bounds is checked, and its failure reverts.
+        if self.place_needs_index_check(place, const_u64)? {
             facts.pool = true;
             facts.ctl = true;
         }
@@ -650,7 +716,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         Ok(())
     }
 
-    fn expr_needs(&self, facts: &mut Facts<'db>, dst: RLocalId, expr: &RExpr<'db>) -> Result<(), String> {
+    fn expr_needs(&self, facts: &mut Facts<'db>, dst: RLocalId, expr: &RExpr<'db>, const_u64: &FxHashMap<RLocalId, u64>) -> Result<(), String> {
         use RuntimeBuiltin as B;
         let pool_if = |facts: &mut Facts<'db>, l: &RLocalId| {
             let o = facts.origins[l.index()].clone();
@@ -659,10 +725,15 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             }
         };
         match expr {
-            RExpr::Load { place } | RExpr::EnumGetTag { place } | RExpr::MaterializePlaceToObject { place } => self.access(facts, place, false)?,
+            RExpr::Load { place } | RExpr::EnumGetTag { place } | RExpr::MaterializePlaceToObject { place } => {
+                self.access(facts, place, false, const_u64)?
+            }
             RExpr::AddrOf { place } => {
-                if place.path.iter().any(|e| matches!(e, mir::PlaceElem::Index(hir::projection::IndexSource::Dynamic(_)) | mir::PlaceElem::Deref)) {
-                    self.access(facts, place, false)?;
+                if place.path.iter().any(|e| matches!(e, mir::PlaceElem::Deref)) {
+                    self.access(facts, place, false, const_u64)?;
+                } else if self.place_needs_index_check(place, const_u64)? {
+                    facts.pool = true;
+                    facts.ctl = true;
                 }
             }
             RExpr::MaterializeToObject { src } => {
@@ -743,8 +814,6 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 facts.pool = true;
                 facts.ctl = true;
             }
-            // A map entry's slot is hashed in the pool's free memory.
-            RExpr::Call { callee, .. } if crate::maps::locate(self.db, *callee).is_some() => facts.pool = true,
             _ => {}
         }
         let _ = dst;
