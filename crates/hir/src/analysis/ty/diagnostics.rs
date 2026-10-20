@@ -852,6 +852,13 @@ pub enum BodyDiag<'db> {
         part: bool,
     },
 
+    /// A value of an opaque shape, `D::Step<ref>` before `D` is known, bound
+    /// to a name: it is only passed on.
+    OpaqueShapeBound {
+        primary: DynLazySpan<'db>,
+        shape: TyId<'db>,
+    },
+
     /// A projection's yield site does not grant its return shape.
     InvalidYield {
         primary: DynLazySpan<'db>,
@@ -1395,6 +1402,7 @@ impl<'db> BodyDiag<'db> {
             Self::ProductArgExpected { .. } => 135,
             Self::ProductArgTooWeak { .. } => 150,
             Self::SpreadNotKnown { .. } => 146,
+            Self::OpaqueShapeBound { .. } => 147,
             Self::ParamBindsTwice { .. } => 134,
             Self::InitializerMarker { .. } => 124,
             Self::VarOfNoValue { .. } => 125,
