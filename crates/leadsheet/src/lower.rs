@@ -384,7 +384,8 @@ impl<'p, 'db> Lower<'p, 'db> {
             self.set(Key::Ctl, params[at]);
         }
         for (j, p) in params_rmir.iter().enumerate() {
-            let words: Vec<V> = params[word_at[j]..word_at[j] + plan.params[j].0].to_vec();
+            let src = self.facts.alias_params.get(&(j as u16)).copied().map_or(j, usize::from);
+            let words: Vec<V> = params[word_at[src]..word_at[src] + plan.params[src].0].to_vec();
             if !self.is_slot(p.local) {
                 self.env.vals.insert(p.local, words);
             }
@@ -424,7 +425,8 @@ impl<'p, 'db> Lower<'p, 'db> {
         }
         for (j, p) in params_rmir.iter().enumerate() {
             if self.is_slot(p.local) {
-                let words: Vec<V> = params[word_at[j]..word_at[j] + plan.params[j].0].to_vec();
+                let src = self.facts.alias_params.get(&(j as u16)).copied().map_or(j, usize::from);
+                let words: Vec<V> = params[word_at[src]..word_at[src] + plan.params[src].0].to_vec();
                 let class = p.class.clone();
                 self.store_slot(p.local, words, &Src::Class(class))?;
             }
@@ -2964,9 +2966,9 @@ impl<'p, 'db> Lower<'p, 'db> {
         // Pieces taken: the key each came from, and whether it was the whole
         // state there (an object passed whole) or split out of it.
         let mut taken: Vec<(Key, bool)> = Vec::new();
-        // Each memory piece passed: its key, address, length and state, for an
-        // aliased view to be copied from.
-        let mut passed: Vec<(Key, V, u64, V)> = Vec::new();
+        // Each memory piece passed: its parameter index, key, address, length
+        // and state, for an aliased view to be copied from.
+        let mut passed: Vec<(usize, Key, V, u64, V)> = Vec::new();
         // Copies made for aliased views, dropped into the pool afterwards.
         let mut copies: Vec<usize> = Vec::new();
         let callee_body = callee.body(self.db);
@@ -2997,13 +2999,10 @@ impl<'p, 'db> Lower<'p, 'db> {
                         // (Fe lets views overlap) gets a copy: the callee cannot
                         // write a view, so a copy reads the same.
                         let held = self.env.held.contains_key(&key);
-                        let aliased = passed.iter().find(|(k, addr, ..)| *k == key && (!held || *addr == ws[0])).copied();
-                        if let Some((_, _, _, state)) = aliased {
-                            let local = callee_body.signature.params[j].local;
-                            let mutable = matches!(
-                                callee_body.locals[local.index()].semantic_ty.as_capability(self.db),
-                                Some((hir::analysis::ty::ty_def::CapabilityKind::Mut, _))
-                            );
+                        let aliased = passed.iter().find(|(_, k, addr, ..)| *k == key && (!held || *addr == ws[0])).copied();
+                        if let Some((prev_j, _, _, _, state)) = aliased {
+                            let mutable = crate::plan::param_is_mut(self.db, callee, &callee_body, prev_j)
+                                || crate::plan::param_is_mut(self.db, callee, &callee_body, j);
                             if mutable {
                                 return Err(format!("a `mut` argument of @{} overlaps another", plan.name));
                             }
@@ -3043,7 +3042,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                             self.env.held.remove(&key);
                             ins.push(s);
                             taken.push((key, true));
-                            passed.push((key, ws[0], n, s));
+                            passed.push((j, key, ws[0], n, s));
                         } else {
                             let s = self.state(key)?;
                             let len = self.b.k(n);
@@ -3051,7 +3050,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                             self.set(key, rest);
                             ins.push(piece);
                             taken.push((key, false));
-                            passed.push((key, ws[0], n, piece));
+                            passed.push((j, key, ws[0], n, piece));
                         }
                         tys.push(Ty::State(Space::Mem));
                     }

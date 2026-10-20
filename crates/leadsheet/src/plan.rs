@@ -27,7 +27,7 @@
 //! object made inside a loop whose address a local carries into the next
 //! run; any other object a loop makes is made once and used by every run.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cranelift_entity::EntityRef;
 use hir::analysis::ty::AddressSpace;
@@ -115,9 +115,46 @@ pub fn stor_piece(db: Db<'_>, class: &RuntimeClass<'_>, space: AddressSpace) -> 
     }
 }
 
+/// Whether parameter `j` of `body` has `mut` capability (either as an ordinary
+/// `mut` parameter or as a `mut` effect provider binding, including associated
+/// effect row parameters whose `semantic_ty` is not wrapped in `Mut`).
+pub fn param_is_mut(db: Db<'_>, instance: RuntimeInstance<'_>, body: &RuntimeBody<'_>, j: usize) -> bool {
+    let Some(param) = body.signature.params.get(j) else {
+        return false;
+    };
+    let local = param.local;
+    if body.locals.get(local.index()).is_some_and(|l| {
+        matches!(
+            l.semantic_ty.as_capability(db),
+            Some((hir::analysis::ty::ty_def::CapabilityKind::Mut, _))
+        )
+    }) {
+        return true;
+    }
+    if body.provider_bindings.iter().any(|b| b.value == local && b.provider.is_mut) {
+        return true;
+    }
+    instance
+        .key(db)
+        .semantic(db)
+        .and_then(|sem| sem.body(db).locals.get(local.index()).and_then(|l| l.source))
+        .is_some_and(|src| {
+            matches!(
+                src,
+                hir::analysis::ty::ty_check::LocalBinding::Param {
+                    mode: hir::hir_def::FuncParamMode::Mut,
+                    ..
+                } | hir::analysis::ty::ty_check::LocalBinding::EffectParam { is_mut: true, .. }
+            )
+        })
+}
+
 /// What one body needs by itself, and the origins of its locals.
 pub struct Facts<'db> {
     pub origins: Vec<OSet>,
+    /// Parameters that alias an earlier parameter of the same piece size at a
+    /// call site where at least one of the two is `mut`: maps `j -> root_i`.
+    pub alias_params: BTreeMap<u16, u16>,
     /// Object sites: slot-root locals, and allocating statements by
     /// (block, statement); with the class of each object.
     pub slot_site: FxHashMap<RLocalId, u32>,
@@ -182,6 +219,8 @@ pub struct Analyzer<'a, 'db> {
     pub cfg: &'a Cfg,
     /// The memory parameters each callee may return addresses into.
     pub ret_params: &'a FxHashMap<RuntimeInstance<'db>, BTreeSet<u16>>,
+    /// Parameters of this body that share an earlier parameter's piece.
+    pub alias_params: &'a BTreeMap<u16, u16>,
     /// The body is the constructor's: it may read the creation code's tail,
     /// where the constructor arguments are.
     pub ctor: bool,
@@ -305,6 +344,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         let n = body.locals.len();
         let mut facts = Facts {
             origins: vec![OSet::new(); n],
+            alias_params: self.alias_params.clone(),
             slot_site: FxHashMap::default(),
             stmt_site: FxHashMap::default(),
             site_class: Vec::new(),
@@ -355,10 +395,11 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         }
         // Parameter origins.
         for (j, p) in body.signature.params.iter().enumerate() {
+            let root = self.alias_params.get(&(j as u16)).copied().unwrap_or(j as u16);
             let o = match &p.class {
-                c if mem_piece(db, c).is_some() => Some(Org::MemParam(j as u16)),
-                RuntimeClass::Ref { kind: RefKind::Provider { space: AddressSpace::Storage, .. }, .. } => Some(Org::StorParam(j as u16)),
-                RuntimeClass::Ref { kind: RefKind::Provider { space: AddressSpace::Transient, .. }, .. } => Some(Org::TstorParam(j as u16)),
+                c if mem_piece(db, c).is_some() => Some(Org::MemParam(root)),
+                RuntimeClass::Ref { kind: RefKind::Provider { space: AddressSpace::Storage, .. }, .. } => Some(Org::StorParam(root)),
+                RuntimeClass::Ref { kind: RefKind::Provider { space: AddressSpace::Transient, .. }, .. } => Some(Org::TstorParam(root)),
                 _ => None,
             };
             if let Some(o) = o {

@@ -22,7 +22,7 @@ pub mod maps;
 pub mod plan;
 pub mod text;
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use cranelift_entity::EntityRef;
 use driver::DriverDataBase;
@@ -56,9 +56,19 @@ pub struct Lowered {
     pub functions: usize,
 }
 
-/// Lowers every contract of `top_mod`: one module per contract, or the reason
-/// a contract could not be lowered.
+/// Lowers every contract of `top_mod`: one module per contract, or the reason a
+/// contract could not be lowered.
 pub fn lower_contracts(db: Db<'_>, top_mod: TopLevelMod<'_>) -> Result<Vec<TestModule>, String> {
+    lower_contracts_with(db, top_mod, |db, package, root, ctor, name| {
+        lower_program_with_balance(db, package, root, ctor, name, None, None)
+    })
+}
+
+fn lower_contracts_with<'db>(
+    db: Db<'db>,
+    top_mod: TopLevelMod<'db>,
+    mut lower_one: impl FnMut(Db<'db>, RuntimePackage<'db>, RuntimeInstance<'db>, Option<RuntimeInstance<'db>>, &str) -> Result<Lowered, String>,
+) -> Result<Vec<TestModule>, String> {
     let package = mir::build_runtime_package(db, top_mod).map_err(|e| format!("{e:?}"))?;
     let mut out = Vec::new();
     for object in package.objects(db) {
@@ -67,7 +77,7 @@ pub fn lower_contracts(db: Db<'_>, top_mod: TopLevelMod<'_>) -> Result<Vec<TestM
         for section in &sections {
             if section.name == RuntimeSectionName::Runtime {
                 let name = object.name(db).clone();
-                let lowered = lower_program_with_balance(db, package, section.entry.instance(db), ctor, &name, None, None)
+                let lowered = lower_one(db, package, section.entry.instance(db), ctor, &name)
                     .map_err(|e| (name, e));
                 out.push(lowered);
             }
@@ -90,7 +100,7 @@ fn init_abi<'db>(db: Db<'db>, package: RuntimePackage<'db>, root: RuntimeInstanc
     callees(db, root).into_iter().find(|c| wrappers.contains(c))
 }
 
-/// A lowered test, or its name and why it could not be lowered.
+/// A lowered contract or test, or its name and why it could not be lowered.
 pub type TestModule = Result<Lowered, (String, String)>;
 
 /// Lowers every `#[test]` of `top_mod`: one module per test, or the reason a
@@ -402,13 +412,22 @@ fn lower_program_with_balance<'db>(
         let cfg = Cfg::new(&bodies[f]).map_err(|e| format!("@{}: {e}", names[f]))?;
         cfgs.insert(*f, cfg);
     }
-    // Facts, until the addresses callees may return settle.
+    // Facts, until the addresses callees may return and aliased effect parameters settle.
     let mut ret_params: FxHashMap<RuntimeInstance<'db>, BTreeSet<u16>> = FxHashMap::default();
+    let mut alias_params: FxHashMap<RuntimeInstance<'db>, BTreeMap<u16, u16>> = FxHashMap::default();
+    let empty_aliases = BTreeMap::new();
     let facts: FxHashMap<RuntimeInstance<'db>, Facts<'db>> = loop {
         let mut facts = FxHashMap::default();
         let mut changed = false;
         for f in &order {
-            let a = Analyzer { db, body: &bodies[f], cfg: &cfgs[f], ret_params: &ret_params, ctor: ctor_fns.contains(f) };
+            let a = Analyzer {
+                db,
+                body: &bodies[f],
+                cfg: &cfgs[f],
+                ret_params: &ret_params,
+                alias_params: alias_params.get(f).unwrap_or(&empty_aliases),
+                ctor: ctor_fns.contains(f),
+            };
             let fx = a.analyze(*f).map_err(|e| format!("@{}: {e}", names[f]))?;
             facts.insert(*f, fx);
         }
@@ -417,6 +436,38 @@ fn lower_program_with_balance<'db>(
             if ret_params.get(f) != Some(rp) {
                 ret_params.insert(*f, rp.clone());
                 changed = true;
+            }
+            for (g, args) in &facts[f].calls {
+                let Some(g_body) = bodies.get(g) else { continue };
+                let g_params = &g_body.signature.params;
+                for j in 1..args.len().min(g_params.len()) {
+                    let oj = &facts[f].origins[args[j].index()];
+                    if oj.is_empty() {
+                        continue;
+                    }
+                    for i in 0..j {
+                        let oi = &facts[f].origins[args[i].index()];
+                        if oi.is_empty() || oi.is_disjoint(oj) {
+                            continue;
+                        }
+                        let same_piece = (mem_piece(db, &g_params[i].class).is_some()
+                            && mem_piece(db, &g_params[i].class) == mem_piece(db, &g_params[j].class))
+                            || (stor_piece(db, &g_params[i].class, AddressSpace::Storage).is_some()
+                                && stor_piece(db, &g_params[i].class, AddressSpace::Storage)
+                                    == stor_piece(db, &g_params[j].class, AddressSpace::Storage))
+                            || (stor_piece(db, &g_params[i].class, AddressSpace::Transient).is_some()
+                                && stor_piece(db, &g_params[i].class, AddressSpace::Transient)
+                                    == stor_piece(db, &g_params[j].class, AddressSpace::Transient));
+                        if same_piece && (plan::param_is_mut(db, *g, g_body, i) || plan::param_is_mut(db, *g, g_body, j)) {
+                            let entry = alias_params.entry(*g).or_default();
+                            let root = entry.get(&(i as u16)).copied().unwrap_or(i as u16);
+                            if entry.insert(j as u16, root) != Some(root) {
+                                changed = true;
+                            }
+                            break;
+                        }
+                    }
+                }
             }
         }
         if !changed {
@@ -439,7 +490,9 @@ fn lower_program_with_balance<'db>(
             .map(|(j, p)| {
                 let j16 = j as u16;
                 let words = flat_len(db, &p.class);
-                let piece = if let Some(n) = mem_piece(db, &p.class) {
+                let piece = if fx.alias_params.contains_key(&j16) {
+                    Piece::None
+                } else if let Some(n) = mem_piece(db, &p.class) {
                     Piece::Mem(n)
                 } else if let Some(n) = stor_piece(db, &p.class, AddressSpace::Storage) {
                     Piece::Stor { len: n, slots: fx.stor_pieces.contains(&j16), maps: fx.stor_maps.contains(&j16) }
@@ -842,3 +895,154 @@ fn build_export_fn(ep: &ExportPlan<'_>, uplan: &Plan) -> Result<text::Function, 
     let fparams = params.into_iter().zip(tys).zip(owns).map(|((v, t), o)| (v, t, o)).collect();
     Ok(Function { name: ep.name.clone(), params: fparams, results, body })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use common::{InputDb, config::Config, diagnostics::Severity};
+    use driver::DriverDataBase;
+    use hir::hir_def::HirIngot;
+    use url::Url;
+
+    use super::{lower_contracts, lower_tests};
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
+    }
+
+    #[test]
+    fn p1_per_contract_lowering_isolates_sibling_failures() {
+        let path = repo_root().join("crates/fe/tests/fixtures/fe_test/eip712_domain.fe");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let url = Url::from_file_path(&path).unwrap();
+        let mut db = DriverDataBase::default();
+        db.workspace().touch(&mut db, url.clone(), Some(content.clone()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let results = lower_contracts(&db, top_mod).unwrap();
+        let summary: Vec<String> = results
+            .iter()
+            .map(|r| match r {
+                Ok(l) => format!("Ok({})", l.name),
+                Err((n, e)) => format!("Err({n}: {e})"),
+            })
+            .collect();
+        assert_eq!(results.len(), 2, "{summary:?}");
+        assert!(results.iter().any(|r| matches!(r, Ok(l) if l.name == "Proxy")), "{summary:?}");
+        assert!(results.iter().any(|r| matches!(r, Ok(l) if l.name == "Signer")), "{summary:?}");
+
+        // Also verify that when one contract in a multi-contract file hits a lowering error,
+        // its sibling contract still lowers as `Ok(...)`.
+        let isolated = super::lower_contracts_with(&db, top_mod, |db, package, root, ctor, name| {
+            if name == "Signer" {
+                Err("simulated per-contract lowering failure".into())
+            } else {
+                super::lower_program_with_balance(db, package, root, ctor, name, None, None)
+            }
+        })
+        .unwrap();
+        assert_eq!(isolated.len(), 2);
+        assert!(isolated.iter().any(|r| matches!(r, Ok(l) if l.name == "Proxy")));
+        assert!(isolated.iter().any(|r| matches!(r, Err((name, err)) if name == "Signer" && !err.is_empty())));
+    }
+
+    #[test]
+    fn p2_enclosing_ingot_and_diagnostic_gate() {
+        let dir = std::env::temp_dir().join(format!("fe-leadsheet-p2-test-{}", std::process::id()));
+        let src_dir = dir.join("src");
+        let _ = std::fs::create_dir_all(&src_dir);
+        std::fs::write(
+            dir.join("fe.toml"),
+            "[ingot]\nname = \"p2_test\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src_dir.join("lib.fe"),
+            "pub use helper::answer\nmsg M {\n    #[selector = 0x01]\n    Get -> u256,\n}\npub contract Boxed {\n    recv M {\n        Get -> u256 uses () {\n            answer()\n        }\n    }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src_dir.join("helper.fe"),
+            "pub fn answer() -> u256 {\n    7\n}\n\n#[test]\nfn helper_test() {\n    assert(answer() == 7)\n}\n",
+        )
+        .unwrap();
+
+        let lib_path = src_dir.join("lib.fe").canonicalize().unwrap();
+        let ingot_dir = lib_path
+            .parent()
+            .unwrap()
+            .ancestors()
+            .find(|d| {
+                d.join("fe.toml").is_file()
+                    && std::fs::read_to_string(d.join("fe.toml"))
+                        .is_ok_and(|c| matches!(Config::parse(&c), Ok(Config::Ingot(_))))
+            })
+            .unwrap();
+        let mut db = DriverDataBase::default();
+        let ingot_url = Url::from_directory_path(ingot_dir).unwrap();
+        assert!(!driver::init_ingot(&mut db, &ingot_url));
+        let url = Url::from_file_path(&lib_path).unwrap();
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let ingot = db.workspace().containing_ingot(&db, url).unwrap();
+        assert!(!db.run_on_ingot(ingot).has_errors(&db));
+        assert!(!db.mir_diagnostics_for_ingot(ingot).iter().any(|d| d.severity == Severity::Error));
+
+        // 1. Multi-file ingot contract resolves `helper::answer()` across files.
+        let contracts = lower_contracts(&db, top_mod).unwrap();
+        assert_eq!(contracts.len(), 1);
+        assert!(matches!(&contracts[0], Ok(l) if l.name == "Boxed"));
+
+        // 2. Non-root test in `helper.fe` is discovered via `ingot.all_modules(&db)`.
+        let mut tests = Vec::new();
+        for &m in ingot.all_modules(&db) {
+            tests.extend(lower_tests(&db, m).unwrap());
+        }
+        assert_eq!(tests.len(), 1);
+        assert!(matches!(&tests[0], Ok(l) if l.name == "helper_test"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 3. Invalid ty_check source is caught by HIR/MIR diagnostic gate before lowering.
+        let bad_url = Url::from_file_path("/tmp/fe_leadsheet_p2_bad.fe").unwrap();
+        let mut db3 = DriverDataBase::default();
+        db3.workspace().touch(
+            &mut db3,
+            bad_url.clone(),
+            Some("pub fn bad() -> u256 {\n    true\n}\n".to_string()),
+        );
+        let bad_file = db3.workspace().get(&db3, &bad_url).unwrap();
+        let bad_mod = db3.top_mod(bad_file);
+        let hir_err = db3.run_on_top_mod(bad_mod).has_errors(&db3);
+        let mir_err = !hir_err && db3.mir_diagnostics_for_top_mod(bad_mod).iter().any(|d| d.severity == Severity::Error);
+        assert!(hir_err || mir_err);
+    }
+
+    #[test]
+    fn p3_overlapping_mut_associated_effect_row_aliases_provider() {
+        let path = repo_root().join("crates/fe/tests/fixtures/fe_test/effect_rows.fe");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let url = Url::from_file_path(&path).unwrap();
+        let mut db = DriverDataBase::default();
+        db.workspace().touch(&mut db, url.clone(), Some(content));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let tests = lower_tests(&db, top_mod).unwrap();
+        assert_eq!(tests.len(), 4);
+        for t in &tests {
+            assert!(t.is_ok(), "expected test to lower cleanly, got {:?}", t.as_ref().err());
+        }
+        let concrete = tests
+            .into_iter()
+            .map(Result::unwrap)
+            .find(|l| l.name == "concrete_rows_take_providers_in_scope")
+            .unwrap();
+        assert!(
+            concrete.text.contains("fn bump_and_read(%0: word, %1: state<mem>[%0, +32], %2: word, %3: state<mem>[free], %4: state<ctl>) -> (word, state<mem>[%0, +32], state<mem>[free], state<ctl>)"),
+            "expected aliased single-provider signature in bump_and_read, got:\n{}",
+            concrete.text
+        );
+    }
+}
+
+

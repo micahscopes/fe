@@ -14,8 +14,9 @@
 
 use std::process::ExitCode;
 
-use common::InputDb;
+use common::{InputDb, config::Config, diagnostics::Severity};
 use driver::DriverDataBase;
+use hir::hir_def::HirIngot;
 use url::Url;
 
 fn main() -> ExitCode {
@@ -57,10 +58,21 @@ fn main() -> ExitCode {
     };
     let url = Url::from_file_path(&canonical).expect("an absolute path");
     let mut db = DriverDataBase::default();
-    if let Some(ingot_dir) = canonical.parent().and_then(|p| p.parent()).filter(|d| d.join("fe.toml").is_file())
-        && let Ok(ingot_url) = Url::from_directory_path(ingot_dir)
-    {
-        driver::init_ingot(&mut db, &ingot_url);
+    let ingot_dir = canonical.parent().and_then(|p| {
+        p.ancestors().find(|d| {
+            d.join("fe.toml").is_file()
+                && std::fs::read_to_string(d.join("fe.toml"))
+                    .is_ok_and(|c| matches!(Config::parse(&c), Ok(Config::Ingot(_))))
+        })
+    });
+    if let Some(dir) = ingot_dir {
+        let ingot_url = Url::from_directory_path(dir).expect("a directory");
+        if driver::init_ingot(&mut db, &ingot_url) {
+            return ExitCode::FAILURE;
+        }
+        if db.workspace().get(&db, &url).is_none() {
+            db.workspace().touch(&mut db, url.clone(), Some(content));
+        }
     } else {
         db.workspace().touch(&mut db, url.clone(), Some(content));
     }
@@ -69,6 +81,30 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     let top_mod = db.top_mod(file);
+    let ingot = ingot_dir.and_then(|_| db.workspace().containing_ingot(&db, url.clone()));
+    if let Some(ingot) = ingot {
+        let hir_diags = db.run_on_ingot(ingot);
+        if hir_diags.has_errors(&db) {
+            hir_diags.emit(&db);
+            return ExitCode::FAILURE;
+        }
+        let mir_diags = db.mir_diagnostics_for_ingot(ingot);
+        if mir_diags.iter().any(|d| d.severity == Severity::Error) {
+            db.emit_complete_diagnostics(&mir_diags);
+            return ExitCode::FAILURE;
+        }
+    } else {
+        let hir_diags = db.run_on_top_mod(top_mod);
+        if hir_diags.has_errors(&db) {
+            hir_diags.emit(&db);
+            return ExitCode::FAILURE;
+        }
+        let mir_diags = db.mir_diagnostics_for_top_mod(top_mod);
+        if mir_diags.iter().any(|d| d.severity == Severity::Error) {
+            db.emit_complete_diagnostics(&mir_diags);
+            return ExitCode::FAILURE;
+        }
+    }
     if let Some(filter) = dump {
         return match fe_leadsheet::dump(&db, top_mod, tests, &filter) {
             Ok(text) => {
@@ -81,23 +117,36 @@ fn main() -> ExitCode {
             }
         };
     }
-    let results: Vec<fe_leadsheet::TestModule> = if tests {
-        match fe_leadsheet::lower_tests(&db, top_mod) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("{path}: {e}");
-                return ExitCode::FAILURE;
-            }
-        }
-    } else {
-        match fe_leadsheet::lower_contracts(&db, top_mod) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("{path}: {e}");
-                return ExitCode::FAILURE;
-            }
+    let lower_one = |m: hir::hir_def::TopLevelMod<'_>| {
+        if tests {
+            fe_leadsheet::lower_tests(&db, m)
+        } else {
+            fe_leadsheet::lower_contracts(&db, m)
         }
     };
+    let mut results: Vec<fe_leadsheet::TestModule> = match lower_one(top_mod) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if results.is_empty()
+        && let Some(ingot) = ingot
+    {
+        for &m in ingot.all_modules(&db) {
+            if m == top_mod {
+                continue;
+            }
+            match lower_one(m) {
+                Ok(r) => results.extend(r),
+                Err(e) => {
+                    eprintln!("{path}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    }
     let mut failed = false;
     for r in results {
         match r {
