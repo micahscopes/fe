@@ -203,13 +203,34 @@ pub(super) use slot_key::SlotKey;
 
 mod frames {
     //! Frames are read only through `lookup` (and `opens_trait`, which
-    //! reads only the trait of each slot): their nodes are private here.
+    //! reads only the trait of each slot or provider): their nodes are private here.
     use super::{Choice, FrameId, HirAnalysisDb, SlotKey};
+    use crate::{analysis::ty::ty_def::TyId, hir_def::Trait};
+
+    #[derive(Clone, Copy)]
+    pub(super) enum FrameChoice<'db> {
+        Choice(Choice<'db>),
+        Provider(TyId<'db>),
+    }
+
+    #[derive(Clone, Copy)]
+    enum FrameEntry<'db> {
+        Slot {
+            slot: SlotKey<'db>,
+            choice: Choice<'db>,
+        },
+        Provider {
+            trait_: Trait<'db>,
+            provider_ty: TyId<'db>,
+        },
+        UnsuppliedTrait {
+            trait_: Trait<'db>,
+        },
+    }
 
     struct FrameNode<'db> {
         parent: Option<FrameId>,
-        slot: SlotKey<'db>,
-        choice: Choice<'db>,
+        entry: FrameEntry<'db>,
     }
 
     /// The lexical frames of choices, kept as a persistent list so that a use can
@@ -240,32 +261,108 @@ mod frames {
             );
             self.nodes.push(FrameNode {
                 parent: None,
-                slot,
-                choice,
+                entry: FrameEntry::Slot { slot, choice },
+            });
+            self.current = Some(FrameId(self.nodes.len() as u32 - 1));
+        }
+
+        pub(super) fn seed_unsupplied_trait(&mut self, trait_: Trait<'db>) {
+            debug_assert!(
+                self.current.is_none(),
+                "a body is seeded before it is checked"
+            );
+            self.nodes.push(FrameNode {
+                parent: None,
+                entry: FrameEntry::UnsuppliedTrait { trait_ },
+            });
+            self.current = Some(FrameId(self.nodes.len() as u32 - 1));
+        }
+
+        pub(super) fn push_unsupplied_trait(&mut self, trait_: Trait<'db>) {
+            self.nodes.push(FrameNode {
+                parent: self.current,
+                entry: FrameEntry::UnsuppliedTrait { trait_ },
             });
             self.current = Some(FrameId(self.nodes.len() as u32 - 1));
         }
 
         /// Map `slot` to `choice` in the header that began at `header`. A slot given
-        /// twice in one header is an error; an outer frame's slot is shadowed.
+        /// twice in one header (or competing with a derive provider for the same trait
+        /// in the same header) is an error; an outer frame's slot is shadowed.
         pub(super) fn push(
             &mut self,
+            db: &'db dyn HirAnalysisDb,
             header: Option<FrameId>,
             slot: SlotKey<'db>,
             choice: Choice<'db>,
-        ) -> Result<(), ()> {
+        ) -> Result<(), &'static str> {
+            let slot_trait = slot.inst().def(db);
             let mut at = self.current;
             while at != header {
                 let node = &self.nodes[at.expect("header is an ancestor").0 as usize];
-                if node.slot == slot {
-                    return Err(());
+                match node.entry {
+                    FrameEntry::Slot {
+                        slot: existing_slot,
+                        ..
+                    } if existing_slot == slot => {
+                        self.push_unsupplied_trait(slot_trait);
+                        return Err("one `with` header gives the same trait slot twice");
+                    }
+                    FrameEntry::Provider { trait_, .. } if trait_ == slot_trait => {
+                        self.push_unsupplied_trait(slot_trait);
+                        return Err(
+                            "one `with` header gives a derive provider and a choice for the same trait",
+                        );
+                    }
+                    _ => {}
                 }
                 at = node.parent;
             }
             self.nodes.push(FrameNode {
                 parent: self.current,
-                slot,
-                choice,
+                entry: FrameEntry::Slot { slot, choice },
+            });
+            self.current = Some(FrameId(self.nodes.len() as u32 - 1));
+            Ok(())
+        }
+
+        /// Map `trait_` to `provider_ty` in the header that began at `header`.
+        pub(super) fn push_provider(
+            &mut self,
+            db: &'db dyn HirAnalysisDb,
+            header: Option<FrameId>,
+            trait_: Trait<'db>,
+            provider_ty: TyId<'db>,
+        ) -> Result<(), &'static str> {
+            let mut at = self.current;
+            while at != header {
+                let node = &self.nodes[at.expect("header is an ancestor").0 as usize];
+                match node.entry {
+                    FrameEntry::Slot { slot, .. } if slot.inst().def(db) == trait_ => {
+                        self.push_unsupplied_trait(trait_);
+                        return Err(
+                            "one `with` header gives a derive provider and a choice for the same trait",
+                        );
+                    }
+                    FrameEntry::Provider {
+                        trait_: existing_trait,
+                        ..
+                    } if existing_trait == trait_ => {
+                        self.push_unsupplied_trait(trait_);
+                        return Err(
+                            "one `with` header gives two derive providers for the same trait",
+                        );
+                    }
+                    _ => {}
+                }
+                at = node.parent;
+            }
+            self.nodes.push(FrameNode {
+                parent: self.current,
+                entry: FrameEntry::Provider {
+                    trait_,
+                    provider_ty,
+                },
             });
             self.current = Some(FrameId(self.nodes.len() as u32 - 1));
             Ok(())
@@ -278,13 +375,15 @@ mod frames {
             let mut at = frame;
             while let Some(id) = at {
                 let node = &self.nodes[id.0 as usize];
-                opened.push(node.slot.inst());
+                if let FrameEntry::Slot { slot, .. } = node.entry {
+                    opened.push(slot.inst());
+                }
                 at = node.parent;
             }
             opened
         }
 
-        /// Whether `frame` or a frame around it opens a slot of `trait_`.
+        /// Whether `frame` or a frame around it opens a slot or derive provider of `trait_`.
         pub(super) fn opens_trait(
             &self,
             db: &'db dyn HirAnalysisDb,
@@ -294,35 +393,78 @@ mod frames {
             let mut at = frame;
             while let Some(id) = at {
                 let node = &self.nodes[id.0 as usize];
-                if node.slot.inst().def(db) == trait_ {
-                    return true;
+                match node.entry {
+                    FrameEntry::Slot { slot, .. } if slot.inst().def(db) == trait_ => return true,
+                    FrameEntry::Provider {
+                        trait_: opened_trait,
+                        ..
+                    } if opened_trait == trait_ => return true,
+                    FrameEntry::UnsuppliedTrait {
+                        trait_: opened_trait,
+                    } if opened_trait == trait_ => return true,
+                    _ => {}
                 }
                 at = node.parent;
             }
             false
         }
 
-        /// The frame entry a use of `slot` reads: the innermost entry for exactly
-        /// that slot, as written. A slot that would equal an opened one only for
-        /// some generic arguments is a different slot.
+        /// The frame entry a use of `slot` reads: the innermost entry for either
+        /// that exact slot or a derive provider for `slot`'s trait.
         pub(super) fn lookup(
             &self,
+            db: &'db dyn HirAnalysisDb,
             frame: Option<FrameId>,
             slot: SlotKey<'db>,
-        ) -> Option<Choice<'db>> {
+        ) -> Option<FrameChoice<'db>> {
+            let slot_trait = slot.inst().def(db);
             let mut at = frame;
             while let Some(id) = at {
                 let node = &self.nodes[id.0 as usize];
-                if node.slot == slot {
-                    return Some(node.choice);
+                match node.entry {
+                    FrameEntry::Slot {
+                        slot: node_slot,
+                        choice,
+                    } if node_slot == slot => {
+                        return Some(FrameChoice::Choice(choice));
+                    }
+                    FrameEntry::Provider {
+                        trait_,
+                        provider_ty,
+                    } if trait_ == slot_trait => {
+                        return Some(FrameChoice::Provider(provider_ty));
+                    }
+                    FrameEntry::UnsuppliedTrait { trait_ } if trait_ == slot_trait => {
+                        return Some(FrameChoice::Choice(Choice::Slot(
+                            super::SlotRef::Unsupplied,
+                        )));
+                    }
+                    _ => {}
                 }
                 at = node.parent;
             }
             None
         }
+
+        /// All traits that have an active derive provider in `frame` or its ancestors.
+        pub(super) fn provider_traits(&self, frame: Option<FrameId>) -> Vec<Trait<'db>> {
+            let mut traits = Vec::new();
+            let mut at = frame;
+            while let Some(id) = at {
+                let node = &self.nodes[id.0 as usize];
+                if let FrameEntry::Provider { trait_, .. } = node.entry
+                    && !traits.contains(&trait_)
+                {
+                    traits.push(trait_);
+                }
+                at = node.parent;
+            }
+            traits
+        }
     }
 }
 pub(super) use frames::ChoiceFrames;
+use frames::FrameChoice;
 
 /// Why an expression does not denote a choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1387,6 +1529,101 @@ impl<'db> TyChecker<'db> {
         Some(opened)
     }
 
+    /// Open an unkeyed `with` binding that names a derive provider type (`with (Provider)`
+    /// or `with (Provider {})`). Returns `None` if `value` does not denote a derive provider.
+    pub(super) fn open_derive_provider_binding(
+        &mut self,
+        header: Option<FrameId>,
+        value: ExprId,
+    ) -> Option<bool> {
+        let Partial::Present(expr) = value.data(self.db, self.body()) else {
+            return None;
+        };
+        let path = match expr {
+            Expr::Path(Partial::Present(path)) => *path,
+            Expr::RecordInit(Partial::Present(path), fields) if fields.is_empty() => *path,
+            _ => return None,
+        };
+        let res = crate::analysis::name_resolution::resolve_path(
+            self.db,
+            path,
+            self.env.scope(),
+            self.env.assumptions(),
+            true,
+        )
+        .ok()?;
+        let (crate::analysis::name_resolution::PathRes::Ty(provider_ty)
+        | crate::analysis::name_resolution::PathRes::TyAlias(_, provider_ty)) = res
+        else {
+            return None;
+        };
+        let traits = crate::core::meta::derive_provider_traits_for_ty(
+            self.db,
+            self.env.scope(),
+            provider_ty,
+        );
+        if traits.is_empty() {
+            return None;
+        }
+        if let Some(scope) = provider_ty.as_scope(self.db)
+            && !crate::analysis::name_resolution::is_scope_visible_from(
+                self.db,
+                scope,
+                self.env.scope(),
+            )
+        {
+            for &trait_ in &traits {
+                self.env.choice_frames.push_unsupplied_trait(trait_);
+                self.env
+                    .record_scoped_derive_opening(super::env::ScopedDeriveOpening {
+                        value_expr: value,
+                        trait_def: trait_,
+                        provider_ty,
+                        scope: self.env.scope(),
+                    });
+            }
+            self.push_diag(BodyDiag::ObligationOpening {
+                primary: value.span(self.body()).into(),
+                reason: "scoped derive provider type is not visible",
+            });
+            self.env
+                .type_expr(value, ExprProp::new(TyId::unit(self.db), false));
+            self.env.with_choice_bindings.push(value);
+            return Some(false);
+        }
+        let mut opened = true;
+        for trait_ in traits {
+            self.env
+                .record_scoped_derive_opening(super::env::ScopedDeriveOpening {
+                    value_expr: value,
+                    trait_def: trait_,
+                    provider_ty,
+                    scope: self.env.scope(),
+                });
+            if crate::analysis::ty::permits::is_canonical_trait(self.db, trait_) {
+                self.env.choice_frames.push_unsupplied_trait(trait_);
+                self.push_diag(BodyDiag::ObligationOpening {
+                    primary: value.span(self.body()).into(),
+                    reason: "a canonical goal accepts only its ordinary home provision",
+                });
+                opened = false;
+                continue;
+            }
+            if let Err(reason) = self.env.install_frame_provider(header, trait_, provider_ty) {
+                self.push_diag(BodyDiag::ObligationOpening {
+                    primary: value.span(self.body()).into(),
+                    reason,
+                });
+                opened = false;
+                continue;
+            }
+        }
+        self.env
+            .type_expr(value, ExprProp::new(TyId::unit(self.db), false));
+        self.env.with_choice_bindings.push(value);
+        Some(opened)
+    }
+
     /// Open an unkeyed `with` binding whose checked value is evidence. `None`
     /// for an effect value; otherwise whether the opening holds.
     pub(super) fn open_evidence_binding(
@@ -2152,23 +2389,37 @@ fn evidence_choice<'db>(
 type CallDecisions<'db> = (Option<Choice<'db>>, Vec<(Delivery<'db>, Choice<'db>)>);
 
 impl<'db> TyCheckEnv<'db> {
+    /// The normalized slot and frame entry `frame` gives `inst`. The one reader
+    /// of choice frames.
+    fn frame_entry(
+        &self,
+        frame: Option<FrameId>,
+        inst: TraitInstId<'db>,
+    ) -> Option<(SlotKey<'db>, FrameChoice<'db>)> {
+        let db = self.db();
+        // Only a slot of a trait some frame opened can be found; any other is
+        // answered without normalizing it.
+        if !self.choice_frames.opens_trait(db, frame, inst.def(db)) {
+            return None;
+        }
+        let slot = self.normalized_slot(inst);
+        Some((slot, self.choice_frames.lookup(db, frame, slot)?))
+    }
+
     /// The choice `frame` gives the slot of `inst`, its arguments normalized
-    /// in this body, so that every spelling of one slot reads one entry. The
-    /// one reader of choice frames.
+    /// in this body, so that every spelling of one slot reads one entry.
     pub(super) fn frame_choice(
         &self,
         frame: Option<FrameId>,
         inst: TraitInstId<'db>,
     ) -> Option<Choice<'db>> {
-        // Only a slot of a trait some frame opened can be found; any other is
-        // answered without normalizing it.
-        if !self
-            .choice_frames
-            .opens_trait(self.db(), frame, inst.def(self.db()))
-        {
-            return None;
+        let (slot, entry) = self.frame_entry(frame, inst)?;
+        match entry {
+            FrameChoice::Choice(choice) => Some(choice),
+            FrameChoice::Provider(provider_ty) => {
+                self.resolve_provider_choice(slot.inst(), provider_ty)
+            }
         }
-        self.choice_frames.lookup(frame, self.normalized_slot(inst))
     }
 
     /// Whether a type's or constant's read of `slot` depends on a choice
@@ -2198,15 +2449,20 @@ impl<'db> TyCheckEnv<'db> {
     /// Whether `frame` answers all of `goal`: inside the block that opened
     /// its slot, the goal holds even with no ordinary implementation, by a
     /// known choice (whose conditions were checked when it was opened, and
-    /// only with the associated types it has) or by evidence.
+    /// only with the associated types it has), by a derive provider, or by evidence.
     pub(super) fn frame_proves(&self, frame: Option<FrameId>, goal: TraitInstId<'db>) -> bool {
         let db = self.db();
-        match self.frame_choice(frame, goal) {
-            Some(Choice::Known(known)) => known.answers(db, goal),
+        match self.frame_entry(frame, goal) {
+            Some((_, FrameChoice::Choice(Choice::Known(known)))) => known.answers(db, goal),
             // Evidence for exactly this slot proves it. Its associated types
             // are not known until it arrives, so a goal that states them is
             // left to the ordinary proof.
-            Some(Choice::Slot(_)) => goal.assoc_type_bindings(db).is_empty(),
+            Some((_, FrameChoice::Choice(Choice::Slot(_)))) => {
+                goal.assoc_type_bindings(db).is_empty()
+            }
+            Some((slot, FrameChoice::Provider(provider_ty))) => {
+                self.can_derive_goal_with_provider(slot.inst(), goal, provider_ty)
+            }
             None => false,
         }
     }
@@ -2264,14 +2520,22 @@ impl<'db> TyCheckEnv<'db> {
     /// way, so no evaluation of it reads the ordinary implementation where
     /// the code around it reads the choice.
     pub(super) fn seed_written_frames(&mut self, body: crate::hir_def::Body<'db>) {
-        let frames = super::written_frames::written_frames(self.db(), body);
+        let db = self.db();
+        let frames = super::written_frames::written_frames(db, body);
         for slot in frames.slots() {
             let key = self.normalized_slot(*slot);
             let unsupplied = Choice::Slot(SlotRef::Unsupplied);
             if !has_frames(self.choice_frames.current()) {
                 self.choice_frames.seed(key, unsupplied);
             } else {
-                let _ = self.choice_frames.push(None, key, unsupplied);
+                let _ = self.choice_frames.push(db, None, key, unsupplied);
+            }
+        }
+        for &trait_ in frames.traits() {
+            if !has_frames(self.choice_frames.current()) {
+                self.choice_frames.seed_unsupplied_trait(trait_);
+            } else {
+                self.choice_frames.push_unsupplied_trait(trait_);
             }
         }
         self.written_unknown = frames.unknown();
@@ -2307,15 +2571,154 @@ impl<'db> TyCheckEnv<'db> {
         choice: Choice<'db>,
         seed: bool,
     ) -> Result<(), &'static str> {
+        let db = self.db();
         self.add_premise_if_needed(goal);
         let slot = self.normalized_slot(goal);
         if seed {
             self.choice_frames.seed(slot, choice);
             Ok(())
         } else {
-            self.choice_frames
-                .push(header, slot, choice)
-                .map_err(|_| "one `with` header gives the same trait slot twice")
+            self.choice_frames.push(db, header, slot, choice)
+        }
+    }
+
+    /// Install a derive provider for `trait_` into `choice_frames`.
+    pub(super) fn install_frame_provider(
+        &mut self,
+        header: Option<FrameId>,
+        trait_: crate::hir_def::Trait<'db>,
+        provider_ty: TyId<'db>,
+    ) -> Result<(), &'static str> {
+        let db = self.db();
+        self.choice_frames
+            .push_provider(db, header, trait_, provider_ty)
+    }
+
+    fn can_derive_goal_with_provider(
+        &self,
+        slot_inst: TraitInstId<'db>,
+        goal: TraitInstId<'db>,
+        provider_ty: TyId<'db>,
+    ) -> bool {
+        let db = self.db();
+        if let Some(Choice::Known(known)) = self.resolve_provider_choice(slot_inst, provider_ty) {
+            return known.answers(db, goal);
+        }
+        if !goal.assoc_type_bindings(db).is_empty() {
+            return false;
+        }
+        if slot_inst.args(db).len() != 1 {
+            return false;
+        }
+        let target_ty = slot_inst.self_ty(db);
+        if target_ty.has_var(db) || target_ty.has_param(db) || target_ty.has_invalid(db) {
+            return false;
+        }
+        let Some(adt_def) = target_ty.adt_def(db) else {
+            return false;
+        };
+        if !matches!(
+            adt_def.adt_ref(db),
+            crate::analysis::ty::adt_def::AdtRef::Struct(_)
+                | crate::analysis::ty::adt_def::AdtRef::Enum(_)
+        ) {
+            return false;
+        }
+        let trait_def = slot_inst.def(db);
+        if crate::analysis::ty::permits::is_canonical_trait(db, trait_def) {
+            return false;
+        }
+        self.record_scoped_derive_demand(super::env::ScopedDeriveDemand {
+            trait_def,
+            target_ty,
+            provider_ty,
+            scope: self.scope(),
+        });
+        true
+    }
+
+    fn resolve_provider_choice(
+        &self,
+        slot_inst: TraitInstId<'db>,
+        provider_ty: TyId<'db>,
+    ) -> Option<Choice<'db>> {
+        use crate::analysis::name_resolution::path_resolver::{ImplNameRes, resolve_impl_name};
+        let db = self.db();
+        if slot_inst.args(db).len() != 1 {
+            return None;
+        }
+        let target_ty = slot_inst.self_ty(db);
+        if target_ty.has_var(db) || target_ty.has_param(db) || target_ty.has_invalid(db) {
+            return None;
+        }
+        let trait_def = slot_inst.def(db);
+        let selection_name =
+            crate::core::meta::scoped_derive_selection_name(db, trait_def, target_ty, provider_ty);
+        let path = crate::hir_def::PathId::from_ident(db, selection_name);
+        let ImplNameRes::Found(implementation) =
+            resolve_impl_name(db, path, self.scope().top_mod(db).scope())
+        else {
+            if let Some(adt_def) = target_ty.adt_def(db)
+                && matches!(
+                    adt_def.adt_ref(db),
+                    crate::analysis::ty::adt_def::AdtRef::Struct(_)
+                        | crate::analysis::ty::adt_def::AdtRef::Enum(_)
+                )
+                && !crate::analysis::ty::permits::is_canonical_trait(db, trait_def)
+            {
+                self.record_scoped_derive_demand(super::env::ScopedDeriveDemand {
+                    trait_def,
+                    target_ty,
+                    provider_ty,
+                    scope: self.scope(),
+                });
+            }
+            return None;
+        };
+        let known = KnownChoice::prove(db, self.proof_context(), implementation, slot_inst).ok()?;
+        Some(Choice::Known(known))
+    }
+
+    /// Augment `assumptions()` with synthetic trait predicates for any `receiver_tys`
+    /// that can be derived by an active `with (Provider)` in `frame` and whose trait
+    /// declares `method_name`.
+    pub(super) fn assumptions_with_provider_methods(
+        &self,
+        frame: Option<FrameId>,
+        receiver_tys: &[TyId<'db>],
+        method_name: crate::hir_def::IdentId<'db>,
+    ) -> PredicateListId<'db> {
+        let db = self.db();
+        let traits = self.choice_frames.provider_traits(frame);
+        if traits.is_empty() {
+            return self.assumptions();
+        }
+        let base = self.assumptions();
+        let mut preds = base.list(db).to_vec();
+        let mut changed = false;
+        for trait_ in traits {
+            if !trait_.method_defs(db).contains_key(&method_name) {
+                continue;
+            }
+            if trait_.params(db).len() != 1 {
+                continue;
+            }
+            for &ty in receiver_tys {
+                let goal = TraitInstId::new_simple(db, trait_, vec![ty]);
+                if let Some((slot, FrameChoice::Provider(provider_ty))) =
+                    self.frame_entry(frame, goal)
+                    && self.can_derive_goal_with_provider(slot.inst(), goal, provider_ty)
+                    && !preds.contains(&goal)
+                {
+                    preds.push(goal);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            PredicateListId::new(db, preds)
+        } else {
+            base
         }
     }
 
@@ -2652,7 +3055,7 @@ impl<'db> TyCheckEnv<'db> {
         }
         let mut unfollowed = false;
         for goal in undecided {
-            if Some(goal) == exempt {
+            if Some(goal) == exempt || self.frame_proves(frame, goal) {
                 continue;
             }
             match self.conditions_read_frame(frame, goal) {

@@ -66,7 +66,7 @@ use ena::unify::InPlace;
 use env::TyCheckEnv;
 pub use env::{
     BindingAccess, ClosureCapture, ClosureInfo, EffectParamSite, ExprProp, LocalBinding, ParamSite,
-    PatBindingMode, PathReadSemantics,
+    PatBindingMode, PathReadSemantics, ScopedDeriveDemand, ScopedDeriveOpening,
 };
 pub(super) use expr::TraitOps;
 use num_traits::ToPrimitive;
@@ -1627,6 +1627,8 @@ fn typed_body_for_bodyless_func<'db>(
         effect_with_operands: Vec::new(),
         choice_refusals: Vec::new(),
         expr_premises: SecondaryMap::new(),
+        scoped_derive_openings: Vec::new(),
+        scoped_derive_demands: Vec::new(),
     }
     .into()
 }
@@ -4085,6 +4087,25 @@ impl<'db> TyChecker<'db> {
         lowering_cx: &LoweringContext<'db>,
     ) -> Result<PathRes<'db>, PathResError<'db>> {
         let scope = self.env.scope();
+        let mut assumptions = self.env.assumptions();
+        if resolve_tail_as_value
+            && let Some(parent_path) = path.parent(self.db)
+            && let Some(method_name) = path.ident(self.db).to_opt()
+            && let Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) =
+                crate::analysis::name_resolution::resolve_path(
+                    self.db,
+                    parent_path,
+                    scope,
+                    assumptions,
+                    false,
+                )
+        {
+            assumptions = self.env.assumptions_with_provider_methods(
+                self.env.choice_frames.current(),
+                &[ty],
+                method_name,
+            );
+        }
         let mut invisible = None;
         let mut applications = Vec::new();
         let mut observe_segment = |path: PathId<'db>, reso: &PathRes<'db>| {
@@ -4101,7 +4122,7 @@ impl<'db> TyChecker<'db> {
             self.db,
             path,
             scope,
-            self.env.assumptions(),
+            assumptions,
             resolve_tail_as_value,
             &mut observe_segment,
             lowering_cx,
@@ -4536,6 +4557,8 @@ mod typed_body_tables {
         /// The premises where an expression was typed, when a `with` added
         /// goals to the body's own.
         pub(super) expr_premises: SecondaryMap<ExprId, Option<PredicateListId<'db>>>,
+        pub(super) scoped_derive_openings: Vec<env::ScopedDeriveOpening<'db>>,
+        pub(super) scoped_derive_demands: Vec<env::ScopedDeriveDemand<'db>>,
     }
 }
 use typed_body_tables::TypedBodyTables;
@@ -4930,6 +4953,13 @@ impl<'db> TyFoldable<'db> for TypedBody<'db> {
             .values_mut()
             .flatten()
             .for_each(|premises| *premises = premises.fold_with(db, folder));
+        for opening in &mut this.scoped_derive_openings {
+            opening.provider_ty = opening.provider_ty.fold_with(db, folder);
+        }
+        for demand in &mut this.scoped_derive_demands {
+            demand.target_ty = demand.target_ty.fold_with(db, folder);
+            demand.provider_ty = demand.provider_ty.fold_with(db, folder);
+        }
         this.into()
     }
 }
@@ -5051,6 +5081,14 @@ impl<'db> TypedBody<'db> {
         self.tables.with_choice_bindings.contains(&value)
     }
 
+    pub fn scoped_derive_openings(&self) -> &[env::ScopedDeriveOpening<'db>] {
+        &self.tables.scoped_derive_openings
+    }
+
+    pub fn scoped_derive_demands(&self) -> &[env::ScopedDeriveDemand<'db>] {
+        &self.tables.scoped_derive_demands
+    }
+
     pub fn body(&self) -> Option<Body<'db>> {
         self.tables.body
     }
@@ -5113,6 +5151,9 @@ impl<'db> TypedBody<'db> {
         expr_data: &Expr<'db>,
     ) -> Option<SmirLoweringIssue> {
         let expr_ty = self.expr_ty(db, expr);
+        if self.is_with_choice_binding(expr) && !expr_ty.has_invalid(db) {
+            return None;
+        }
         let missing_plan = || {
             Some(if expr_ty.has_invalid(db) || expr_ty.has_var(db) {
                 SmirLoweringIssue::InvalidExpr(expr)
@@ -6756,6 +6797,8 @@ impl<'db> TypedBody<'db> {
             effect_with_operands: Vec::new(),
             choice_refusals: Vec::new(),
             expr_premises: SecondaryMap::new(),
+            scoped_derive_openings: Vec::new(),
+            scoped_derive_demands: Vec::new(),
         }
         .into()
     }

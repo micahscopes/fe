@@ -64,16 +64,22 @@ pub struct CanonicalEstablishment<'db> {
     pub root: Const<'db>,
 }
 
+pub fn is_canonical_trait<'db>(
+    db: &'db dyn HirAnalysisDb,
+    trait_: crate::hir_def::Trait<'db>,
+) -> bool {
+    ItemKind::Trait(trait_)
+        .attrs(db)
+        .is_some_and(|a| a.has_attr(db, "canonical"))
+}
+
 /// Prototype attribute bridge; no new permit registry, solver or context.
 pub fn establishment_for_goal<'db>(
     db: &'db dyn HirAnalysisDb,
     home: ImplTrait<'db>,
     goal: TraitInstId<'db>,
 ) -> Result<Option<CanonicalEstablishment<'db>>, &'static str> {
-    if !ItemKind::Trait(goal.def(db))
-        .attrs(db)
-        .is_some_and(|a| a.has_attr(db, "canonical"))
-    {
+    if !is_canonical_trait(db, goal.def(db)) {
         return Ok(None);
     }
     if home.selection_name(db).is_some() {

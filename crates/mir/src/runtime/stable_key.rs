@@ -117,7 +117,14 @@ pub fn semantic_owner_context_identity<'db>(
                     .map(|trait_ref| trait_ref.pretty_print(db))
                     .unwrap_or_else(|| "trait".to_string())
             });
-        let impl_identity = format!("{trait_identity}${}", type_identity(db, impl_trait.ty(db)));
+        let impl_identity = match impl_trait.selection_name(db) {
+            Some(selection_name) => format!(
+                "{trait_identity}${}$as${}",
+                type_identity(db, impl_trait.ty(db)),
+                selection_name.data(db),
+            ),
+            None => format!("{trait_identity}${}", type_identity(db, impl_trait.ty(db))),
+        };
         return Some(format!(
             "impl_trait${}",
             stable_identity_fingerprint(&impl_identity)
@@ -156,10 +163,17 @@ pub fn semantic_owner_context_trace_identity<'db>(
                     .map(|trait_ref| trait_ref.pretty_print(db))
                     .unwrap_or_else(|| "trait".to_string())
             });
-        return Some(format!(
-            "impl_trait${trait_identity}${}",
-            type_identity(db, impl_trait.ty(db))
-        ));
+        return Some(match impl_trait.selection_name(db) {
+            Some(selection_name) => format!(
+                "impl_trait${trait_identity}${}$as${}",
+                type_identity(db, impl_trait.ty(db)),
+                selection_name.data(db),
+            ),
+            None => format!(
+                "impl_trait${trait_identity}${}",
+                type_identity(db, impl_trait.ty(db))
+            ),
+        });
     }
     func.containing_impl(db)
         .map(|impl_| format!("impl${}", type_identity(db, impl_.ty(db))))

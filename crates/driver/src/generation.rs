@@ -161,7 +161,7 @@ pub fn prepare_file(
     let (green, parse_errors) =
         parser::parse_source_file(file.text(db), parser::RecoveryMode::Recover);
     let root = ast::Root::cast(parser::SyntaxNode::new_root(green)).unwrap();
-    if !root
+    let has_derive_impl = root
         .syntax()
         .descendants()
         .filter_map(ast::ImplTrait::cast)
@@ -171,19 +171,34 @@ pub fn prepare_file(
                     .syntax()
                     .ancestors()
                     .any(|node| ast::QuoteExpr::cast(node).is_some())
-        })
-        && !root
-            .syntax()
-            .descendants()
-            .filter_map(ast::NormalAttr::cast)
-            .any(|attr| {
-                attr.is_named("generate")
-                    && !attr
-                        .syntax()
-                        .ancestors()
-                        .any(|node| ast::QuoteExpr::cast(node).is_some())
-            })
-    {
+        });
+    let has_generate_attr = root
+        .syntax()
+        .descendants()
+        .filter_map(ast::NormalAttr::cast)
+        .any(|attr| {
+            attr.is_named("generate")
+                && !attr
+                    .syntax()
+                    .ancestors()
+                    .any(|node| ast::QuoteExpr::cast(node).is_some())
+        });
+    let has_unkeyed_with = root
+        .syntax()
+        .descendants()
+        .filter_map(ast::WithExpr::cast)
+        .any(|with_expr| {
+            !with_expr
+                .syntax()
+                .ancestors()
+                .any(|node| ast::QuoteExpr::cast(node).is_some())
+                && with_expr
+                    .params()
+                    .into_iter()
+                    .flatten()
+                    .any(|param| param.eq().is_none())
+        });
+    if !has_derive_impl && !has_generate_attr && !has_unkeyed_with {
         return Ok(None);
     }
     if !parse_errors.is_empty() {
@@ -441,7 +456,151 @@ pub fn prepare_file(
             ));
         }
     }
-    if plans.is_empty() {
+    let mut scoped_openings = Vec::new();
+    let mut scoped_demands = Vec::new();
+    let mut opening_diags = Vec::new();
+    if has_unkeyed_with {
+        for &func in module.all_funcs(db) {
+            if func.body(db).is_none() {
+                continue;
+            }
+            let (diags, typed_body) = hir::analysis::ty::ty_check::check_func_body(db, func);
+            if !typed_body.scoped_derive_openings().is_empty() {
+                for diag in diags {
+                    if let hir::analysis::ty::diagnostics::FuncBodyDiag::Body(
+                        hir::analysis::ty::diagnostics::BodyDiag::ObligationOpening {
+                            reason, ..
+                        },
+                    ) = diag
+                        && (reason.starts_with("one `with` header")
+                            || reason.contains("canonical goal")
+                            || reason.contains("not visible"))
+                    {
+                        opening_diags.push(diag.to_complete(db));
+                    }
+                }
+            }
+            scoped_openings.extend(typed_body.scoped_derive_openings().iter().copied());
+            scoped_demands.extend(typed_body.scoped_derive_demands().iter().copied());
+        }
+        for &item in module.all_items(db) {
+            let hir::hir_def::ItemKind::Const(const_def) = item else {
+                continue;
+            };
+            if const_def.body(db).to_opt().is_none() {
+                continue;
+            }
+            let (diags, typed_body) = hir::analysis::ty::ty_check::check_const_body(db, const_def);
+            if !typed_body.scoped_derive_openings().is_empty() {
+                for diag in diags {
+                    if let hir::analysis::ty::diagnostics::FuncBodyDiag::Body(
+                        hir::analysis::ty::diagnostics::BodyDiag::ObligationOpening {
+                            reason, ..
+                        },
+                    ) = diag
+                        && (reason.starts_with("one `with` header")
+                            || reason.contains("canonical goal")
+                            || reason.contains("not visible"))
+                    {
+                        opening_diags.push(diag.to_complete(db));
+                    }
+                }
+            }
+            scoped_openings.extend(typed_body.scoped_derive_openings().iter().copied());
+            scoped_demands.extend(typed_body.scoped_derive_demands().iter().copied());
+        }
+    }
+    if !has_derive_impl
+        && !has_generate_attr
+        && scoped_openings.is_empty()
+        && scoped_demands.is_empty()
+    {
+        return Ok(None);
+    }
+    if !opening_diags.is_empty() {
+        return Err(diagnostic_error(
+            db,
+            &opening_diags,
+            error(
+                root.syntax().text_range(),
+                "scoped derive opening failed".into(),
+            ),
+        ));
+    }
+    for opening in &scoped_openings {
+        let range = root.syntax().text_range();
+        hir::core::meta::validate_scoped_derive_opening(
+            db,
+            opening.scope,
+            opening.trait_def,
+            opening.provider_ty,
+        )
+        .map_err(|cause| match cause {
+            hir::core::meta::NativeDeriveProviderError::Message(message) => error(range, message),
+            hir::core::meta::NativeDeriveProviderError::Target(failure) => {
+                let diagnostics = failure
+                    .vouchers()
+                    .iter()
+                    .map(|voucher| voucher.to_complete(db))
+                    .collect::<Vec<_>>();
+                diagnostic_error(
+                    db,
+                    &diagnostics,
+                    error(
+                        range,
+                        format!(
+                            "scoped derive provider admission failed: {}",
+                            failure.description()
+                        ),
+                    ),
+                )
+            }
+        })?;
+    }
+    let mut seen_scoped = std::collections::HashSet::new();
+    let mut validated_scoped = Vec::new();
+    for demand in scoped_demands {
+        if !seen_scoped.insert((demand.trait_def, demand.target_ty, demand.provider_ty)) {
+            continue;
+        }
+        let range = root.syntax().text_range();
+        let (provider, input, scoped_impl) = hir::core::meta::scoped_derive_provider(
+            db,
+            module,
+            demand.scope,
+            demand.trait_def,
+            demand.target_ty,
+            demand.provider_ty,
+        )
+        .map_err(|cause| match cause {
+            hir::core::meta::NativeDeriveProviderError::Message(message) => error(range, message),
+            hir::core::meta::NativeDeriveProviderError::Target(failure) => {
+                let diagnostics = failure
+                    .vouchers()
+                    .iter()
+                    .map(|voucher| voucher.to_complete(db))
+                    .collect::<Vec<_>>();
+                diagnostic_error(
+                    db,
+                    &diagnostics,
+                    error(
+                        range,
+                        format!(
+                            "scoped derive target admission failed: {}",
+                            failure.description()
+                        ),
+                    ),
+                )
+            }
+        })?;
+        validated_scoped.push((provider, input, scoped_impl, range));
+    }
+    for (provider, input, scoped_impl, range) in validated_scoped {
+        let mut plan = evaluate_provider(db, file, provider, input, range)?;
+        plan.scoped_impl = Some(scoped_impl);
+        plans.push(plan);
+    }
+    if plans.is_empty() && scoped_openings.is_empty() {
         return Err(error(
             parser::TextRange::empty(0.into()),
             "generation request requires an authored concrete root record".into(),

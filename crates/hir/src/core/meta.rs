@@ -433,9 +433,21 @@ impl<'db> ItemCode<'db> {
             unreachable!()
         };
         let signature = function.sig();
-        if signature
-            .params()
-            .is_some_and(|params| params.into_iter().next().is_some())
+        let params_valid = match signature.params() {
+            None => true,
+            Some(params) => {
+                let mut iter = params.into_iter();
+                match (iter.next(), iter.next()) {
+                    (None, _) => true,
+                    (Some(param), None) => {
+                        matches!(param.name(), Some(ast::FuncParamName::SelfParam(_)))
+                            && param.ty().is_none()
+                    }
+                    _ => false,
+                }
+            }
+        };
+        if !params_valid
             || signature.generic_params().is_some()
             || signature.where_clause().is_some()
             || signature.uses_clause().is_some()
@@ -508,6 +520,7 @@ impl<'db> ItemCode<'db> {
                 .ok_or("generation target has no source URL")?,
             quote_range: quote.syntax().text_range(),
             request_impl: None,
+            scoped_impl: None,
             producer_module,
             producer_block,
             holes,
@@ -744,4 +757,318 @@ pub(crate) fn is_unfulfilled_derive_request(
             plan.request_impl == Some(ast.syntax().text_range())
                 && Some(plan.target_file.clone()) == request.top_mod(db).file(db).url(db)
         })
+}
+
+pub fn item_module_relative_path<'db>(
+    db: &'db dyn HirAnalysisDb,
+    item: crate::hir_def::ItemKind<'db>,
+) -> Option<Vec<String>> {
+    let mut segments = vec![item.name(db)?.data(db).to_string()];
+    let mut scope = item.scope();
+    while let Some(parent) = scope.parent(db) {
+        match parent {
+            crate::hir_def::scope_graph::ScopeId::Item(crate::hir_def::ItemKind::TopMod(_)) => {
+                segments.reverse();
+                return Some(segments);
+            }
+            crate::hir_def::scope_graph::ScopeId::Item(crate::hir_def::ItemKind::Mod(m)) => {
+                segments.push(m.name(db).to_opt()?.data(db).to_string());
+                scope = parent;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn ty_selection_component<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
+    if let Some(adt) = ty.adt_def(db)
+        && let Some(item) = adt.adt_ref(db).scope().to_item()
+        && let Some(segments) = item_module_relative_path(db, item)
+    {
+        return segments.join("_");
+    }
+    ty.pretty_print(db).to_string()
+}
+
+pub fn scoped_derive_selection_name<'db>(
+    db: &'db dyn HirAnalysisDb,
+    trait_: crate::hir_def::Trait<'db>,
+    target_ty: TyId<'db>,
+    provider_ty: TyId<'db>,
+) -> IdentId<'db> {
+    let trait_comp = item_module_relative_path(db, trait_.into())
+        .map(|segments| segments.join("_"))
+        .or_else(|| trait_.name(db).to_opt().map(|id| id.data(db).to_string()))
+        .unwrap_or_else(|| "Trait".to_string());
+    let target_comp = ty_selection_component(db, target_ty);
+    let provider_comp = ty_selection_component(db, provider_ty);
+    IdentId::new(
+        db,
+        format!("__fe_scoped_derive${trait_comp}${target_comp}${provider_comp}"),
+    )
+}
+
+/// Returns the traits `T` for which an authored ordinary `impl Derive<T> for Provider`
+/// exists in the ingot.
+pub fn derive_provider_traits_for_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    provider_ty: TyId<'db>,
+) -> Vec<crate::hir_def::Trait<'db>> {
+    use crate::analysis::ty::{
+        canonical::Canonical,
+        corelib::resolve_core_trait,
+        trait_def::impls_for_trait_and_ty,
+        ty_def::{TyBase, TyData},
+    };
+    if provider_ty.has_param(db) || provider_ty.has_invalid(db) || !provider_ty.is_star_kind(db) {
+        return Vec::new();
+    }
+    let Some(derive) = resolve_core_trait(db, scope, &["derive", "Derive"]) else {
+        return Vec::new();
+    };
+    let ingot = scope.top_mod(db).ingot(db);
+    let mut traits = Vec::new();
+    for implementor in impls_for_trait_and_ty(db, ingot, derive, Canonical::new(db, provider_ty)) {
+        let args = implementor.trait_(db).args(db);
+        if args.len() == 2
+            && let TyData::TyBase(TyBase::TraitCtor(trait_)) = args[1].data(db)
+            && !traits.contains(trait_)
+        {
+            traits.push(*trait_);
+        }
+    }
+    traits
+}
+
+/// Validate a scoped on-demand derive opening `with (Provider)` at its opening site.
+pub fn validate_scoped_derive_opening<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    trait_: crate::hir_def::Trait<'db>,
+    provider_ty: TyId<'db>,
+) -> Result<(), NativeDeriveProviderError<'db>> {
+    use crate::analysis::ty::{
+        corelib::resolve_core_trait,
+        trait_choice::Resolved,
+        trait_def::{TraitInstId, chosen_method, prove_selected_hir_application},
+        trait_resolution::{PredicateListId, Selection, TraitSolveCx},
+        ty_def::{TyBase, TyData},
+    };
+    let span: crate::span::DynLazySpan<'db> = scope
+        .name_span(db)
+        .unwrap_or_else(|| scope.top_mod(db).span().into());
+    if crate::analysis::ty::permits::is_canonical_trait(db, trait_) {
+        return Err(
+            "canonical root establishment failed: a canonical goal accepts only its ordinary home provision"
+                .into(),
+        );
+    }
+    if !trait_.types(db).is_empty() || !trait_.consts(db).is_empty() {
+        return Err(
+            "bounded native derive requires an unparameterized goal without associated equalities"
+                .into(),
+        );
+    }
+    if trait_.top_mod(db).ingot(db) != scope.top_mod(db).ingot(db) {
+        return Err("library/canonical goal establishment is pending the permits owner API".into());
+    }
+    if provider_ty.has_param(db) || provider_ty.has_invalid(db) || !provider_ty.is_star_kind(db) {
+        return Err("native derive requires a concrete provider type".into());
+    }
+    crate::analysis::ty::ty_check::admit_ground_type_application(
+        db,
+        provider_ty,
+        scope.item(),
+        span,
+    )
+    .map_err(NativeDeriveProviderError::Target)?;
+    let derive = resolve_core_trait(db, scope, &["derive", "Derive"])
+        .ok_or("missing canonical Derive protocol")?;
+    let constructor = TyId::new(db, TyData::TyBase(TyBase::TraitCtor(trait_)));
+    let inst = TraitInstId::new_simple(db, derive, vec![provider_ty, constructor]);
+    let selected = chosen_method(
+        db,
+        Resolved::Ordinary,
+        inst,
+        IdentId::new(db, "derive"),
+        scope,
+        PredicateListId::empty_list(db),
+        None,
+    );
+    match selected {
+        Selection::Unique(method) => {
+            if !method.body_args().is_empty() {
+                return Err(
+                    "generic provider method substitution remains unsupported in this checkpoint"
+                        .into(),
+                );
+            }
+            let crate::analysis::ty::trait_def::ImplementorOrigin::Hir(implementation) =
+                method.origin(db)
+            else {
+                return Err("native derive provider requires an authored implementation".into());
+            };
+            let checked = prove_selected_hir_application(
+                db,
+                TraitSolveCx::new(db, scope),
+                implementation,
+                inst,
+            )
+            .map_err(|cause| {
+                format!("native derive provider application not admitted: {cause:?}")
+            })?;
+            let Selection::Unique(method) = checked.method(IdentId::new(db, "derive")) else {
+                return Err("admitted native derive provider has no unique method".into());
+            };
+            if method.body().is_none() {
+                return Err("selected Derive method has no authored body".into());
+            }
+            Ok(())
+        }
+        Selection::NotFound => {
+            Err("no ordinary Derive<requested goal> implementation for the provider".into())
+        }
+        Selection::Ambiguous(_) => {
+            Err("ambiguous ordinary Derive<requested goal> provider implementation".into())
+        }
+    }
+}
+
+/// Validate and resolve a concrete scoped on-demand derive demand `(Trait, Target, Provider)`.
+pub fn scoped_derive_provider<'db>(
+    db: &'db dyn HirAnalysisDb,
+    _module: crate::hir_def::TopLevelMod<'db>,
+    scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    trait_def: crate::hir_def::Trait<'db>,
+    target_ty: TyId<'db>,
+    provider_ty: TyId<'db>,
+) -> Result<
+    (
+        crate::hir_def::Func<'db>,
+        RecordInput<'db>,
+        common::generation::FrozenScopedImpl,
+    ),
+    NativeDeriveProviderError<'db>,
+> {
+    use crate::analysis::ty::{
+        corelib::resolve_core_trait,
+        trait_choice::Resolved,
+        trait_def::{TraitInstId, chosen_method, prove_selected_hir_application},
+        trait_resolution::{PredicateListId, Selection, TraitSolveCx},
+        ty_def::{TyBase, TyData},
+    };
+    let span: crate::span::DynLazySpan<'db> = scope
+        .name_span(db)
+        .unwrap_or_else(|| scope.top_mod(db).span().into());
+    let goal = TraitInstId::new_simple(db, trait_def, vec![target_ty]);
+    if crate::analysis::ty::permits::is_canonical_trait(db, goal.def(db)) {
+        return Err(
+            "canonical root establishment failed: a canonical goal accepts only its ordinary home provision"
+                .into(),
+        );
+    }
+    if goal.args(db).len() != 1
+        || !goal.assoc_type_bindings(db).is_empty()
+        || !goal.def(db).types(db).is_empty()
+        || !goal.def(db).consts(db).is_empty()
+    {
+        return Err(
+            "bounded native derive requires an unparameterized goal without associated equalities"
+                .into(),
+        );
+    }
+    if goal.def(db).ingot(db) != scope.top_mod(db).ingot(db) {
+        return Err("library/canonical goal establishment is pending the permits owner API".into());
+    }
+    let input = RecordInput::for_authored_type(db, goal.args(db)[0])
+        .map_err(|cause| format!("native derive requires a concrete authored record: {cause:?}"))?;
+    crate::analysis::ty::ty_check::admit_ground_type_application(
+        db,
+        input.ty(),
+        scope.item(),
+        span.clone(),
+    )
+    .map_err(NativeDeriveProviderError::Target)?;
+    if provider_ty.has_param(db) || provider_ty.has_invalid(db) || !provider_ty.is_star_kind(db) {
+        return Err("native derive requires a concrete provider type".into());
+    }
+    crate::analysis::ty::ty_check::admit_ground_type_application(
+        db,
+        provider_ty,
+        scope.item(),
+        span,
+    )
+    .map_err(NativeDeriveProviderError::Target)?;
+    let trait_path = item_module_relative_path(db, trait_def.into())
+        .ok_or("cannot resolve module-relative path for scoped derive trait")?;
+    let target_item = input
+        .declaration()
+        .scope()
+        .to_item()
+        .ok_or("cannot resolve item for scoped derive target")?;
+    let target_path = item_module_relative_path(db, target_item)
+        .ok_or("cannot resolve module-relative path for scoped derive target")?;
+    let selection_name = scoped_derive_selection_name(db, trait_def, target_ty, provider_ty)
+        .data(db)
+        .to_string();
+    let scoped_impl = common::generation::FrozenScopedImpl {
+        trait_path,
+        target_path,
+        selection_name,
+    };
+    let derive = resolve_core_trait(db, scope, &["derive", "Derive"])
+        .ok_or("missing canonical Derive protocol")?;
+    let constructor = TyId::new(db, TyData::TyBase(TyBase::TraitCtor(goal.def(db))));
+    let inst = TraitInstId::new_simple(db, derive, vec![provider_ty, constructor]);
+    let selected = chosen_method(
+        db,
+        Resolved::Ordinary,
+        inst,
+        IdentId::new(db, "derive"),
+        scope,
+        PredicateListId::empty_list(db),
+        None,
+    );
+    match selected {
+        Selection::Unique(method) => {
+            if !method.body_args().is_empty() {
+                return Err(
+                    "generic provider method substitution remains unsupported in this checkpoint"
+                        .into(),
+                );
+            }
+            let crate::analysis::ty::trait_def::ImplementorOrigin::Hir(implementation) =
+                method.origin(db)
+            else {
+                return Err("native derive provider requires an authored implementation".into());
+            };
+            let checked = prove_selected_hir_application(
+                db,
+                TraitSolveCx::new(db, scope),
+                implementation,
+                inst,
+            )
+            .map_err(|cause| {
+                format!("native derive provider application not admitted: {cause:?}")
+            })?;
+            let Selection::Unique(method) = checked.method(IdentId::new(db, "derive")) else {
+                return Err("admitted native derive provider has no unique method".into());
+            };
+            Ok((
+                method
+                    .body()
+                    .ok_or("selected Derive method has no authored body")?,
+                input,
+                scoped_impl,
+            ))
+        }
+        Selection::NotFound => {
+            Err("no ordinary Derive<requested goal> implementation for the provider".into())
+        }
+        Selection::Ambiguous(_) => {
+            Err("ambiguous ordinary Derive<requested goal> provider implementation".into())
+        }
+    }
 }

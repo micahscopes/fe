@@ -15,11 +15,20 @@ pub enum FrozenScalar {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrozenScopedImpl {
+    pub trait_path: Vec<String>,
+    pub target_path: Vec<String>,
+    pub selection_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrozenFunctionTemplate {
     pub target_file: Url,
     /// Existing authored impl header receiving this method template.
     /// Syntax identity only; authority and semantic context are rechecked in output.
     pub request_impl: Option<TextRange>,
+    /// Scoped on-demand derive impl header synthesized for a concrete `(Trait, Target, Provider)`.
+    pub scoped_impl: Option<FrozenScopedImpl>,
     pub quote_range: TextRange,
     pub producer_module: Option<TextRange>,
     pub producer_block: Option<TextRange>,

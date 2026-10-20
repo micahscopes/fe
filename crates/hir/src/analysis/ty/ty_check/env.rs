@@ -238,6 +238,40 @@ pub(crate) struct TyCheckEnv<'db> {
     /// A constant body written under a `with` whose opened slot is not
     /// written down (`seed_written_frames`).
     pub(super) written_unknown: bool,
+    /// `with (Provider)` openings of derive providers in this body.
+    pub(super) scoped_derive_openings: Vec<ScopedDeriveOpening<'db>>,
+    /// Concrete single-hop trait demands resolved against a `with (Provider)`
+    /// opening in this body.
+    pub(super) scoped_derive_demands: std::cell::RefCell<Vec<ScopedDeriveDemand<'db>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
+pub struct ScopedDeriveOpening<'db> {
+    pub value_expr: ExprId,
+    pub trait_def: crate::hir_def::Trait<'db>,
+    pub provider_ty: TyId<'db>,
+    pub scope: ScopeId<'db>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
+pub struct ScopedDeriveDemand<'db> {
+    pub trait_def: crate::hir_def::Trait<'db>,
+    pub target_ty: TyId<'db>,
+    pub provider_ty: TyId<'db>,
+    pub scope: ScopeId<'db>,
+}
+
+impl<'db> TyCheckEnv<'db> {
+    pub(super) fn record_scoped_derive_opening(&mut self, opening: ScopedDeriveOpening<'db>) {
+        self.scoped_derive_openings.push(opening);
+    }
+
+    pub(super) fn record_scoped_derive_demand(&self, demand: ScopedDeriveDemand<'db>) {
+        let mut demands = self.scoped_derive_demands.borrow_mut();
+        if !demands.contains(&demand) {
+            demands.push(demand);
+        }
+    }
 }
 
 /// A closure expression's parameters and captured bindings, in the order of
@@ -370,6 +404,8 @@ impl<'db> TyCheckEnv<'db> {
             expr_premises: SecondaryMap::new(),
             conditions_read: Default::default(),
             written_unknown: false,
+            scoped_derive_openings: Vec::new(),
+            scoped_derive_demands: Default::default(),
         };
 
         env.enter_scope(body.expr(db));
@@ -1628,6 +1664,15 @@ impl<'db> TyCheckEnv<'db> {
         self.path_applications
             .iter_mut()
             .for_each(|(_, ty)| *ty = ty.fold_with(self.db, &mut prober));
+        let mut scoped_derive_openings = self.scoped_derive_openings;
+        for opening in &mut scoped_derive_openings {
+            opening.provider_ty = opening.provider_ty.fold_with(self.db, &mut prober);
+        }
+        let mut scoped_derive_demands = self.scoped_derive_demands.into_inner();
+        for demand in &mut scoped_derive_demands {
+            demand.target_ty = demand.target_ty.fold_with(self.db, &mut prober);
+            demand.provider_ty = demand.provider_ty.fold_with(self.db, &mut prober);
+        }
         let mut expr_place = SecondaryMap::new();
         let mut expr_places: PrimaryMap<super::ExprPlaceId, Place<'db>> = PrimaryMap::new();
         for expr in self.body.exprs(self.db).keys() {
@@ -1693,6 +1738,8 @@ impl<'db> TyCheckEnv<'db> {
             effect_with_operands: self.effect_with_operands,
             choice_refusals: self.choice_refusals,
             expr_premises: self.expr_premises,
+            scoped_derive_openings,
+            scoped_derive_demands,
         }
         .into()
     }

@@ -1750,6 +1750,13 @@ impl<'db> TyChecker<'db> {
                 opening_failed |= !opened;
                 continue;
             }
+            if binding.key_path.is_none()
+                && let Some(opened) =
+                    self.open_derive_provider_binding(choice_header, binding.value)
+            {
+                opening_failed |= !opened;
+                continue;
+            }
             let value_prop = self.check_expr_unknown(binding.value);
             if binding.key_path.is_none()
                 && let Some(opened) =
@@ -3801,7 +3808,11 @@ impl<'db> TyChecker<'db> {
         }
 
         let receiver_tys = self.receiver_candidates(receiver_prop.ty);
-        let method_assumptions = self.env.assumptions();
+        let method_assumptions = self.env.assumptions_with_provider_methods(
+            self.env.choice_frames.current(),
+            &receiver_tys,
+            method_name,
+        );
 
         let mut selected_receiver_ty = receiver_tys[0];
         let mut canonical_r_ty = Canonicalized::new(self.db, selected_receiver_ty);

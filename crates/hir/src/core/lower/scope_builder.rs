@@ -382,7 +382,7 @@ impl<'db> ScopeGraphBuilder<'db> {
                 _ => None,
             })
             .expect("validated producer module exists in copied source");
-        let publication = self
+        let (publication_node, publication) = self
             .graph
             .edges
             .get(&function_node)
@@ -391,7 +391,7 @@ impl<'db> ScopeGraphBuilder<'db> {
                     .iter()
                     .find(|(_, kind)| matches!(kind, EdgeKind::Lex(_)))
             })
-            .map(|(node, _)| self.graph.nodes[*node].0)
+            .map(|(node, _)| (*node, self.graph.nodes[*node].0))
             .expect("generated function retains an authored publication scope");
         self.graph
             .edges
@@ -399,6 +399,13 @@ impl<'db> ScopeGraphBuilder<'db> {
             .or_default()
             .retain(|(_, kind)| !matches!(kind, EdgeKind::Lex(_)));
         self.graph.nodes[function_node].1.publication_parent = Some(publication);
+        if matches!(
+            publication,
+            ScopeId::Item(ItemKind::ImplTrait(_) | ItemKind::Impl(_) | ItemKind::Trait(_))
+        ) {
+            self.graph
+                .add_edge(function_node, publication_node, EdgeKind::self_ty());
+        }
         let lexical = if producer_block.is_some() {
             block_node.expect("validated producer block exists in unchanged copied source")
         } else {

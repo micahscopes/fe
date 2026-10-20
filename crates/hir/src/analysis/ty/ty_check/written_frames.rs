@@ -33,6 +33,7 @@ use crate::{
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) struct WrittenFrames<'db> {
     slots: Vec<TraitInstId<'db>>,
+    traits: Vec<crate::hir_def::Trait<'db>>,
     /// A `with (e)` around the body whose evidence type is not written down:
     /// any slot with a named implementation may be open.
     unknown: bool,
@@ -51,6 +52,11 @@ impl<'db> WrittenFrames<'db> {
         &self.slots
     }
 
+    /// The traits opened for on-demand derive by `with (Provider)` around the body.
+    pub(crate) fn traits(&self) -> &[crate::hir_def::Trait<'db>] {
+        &self.traits
+    }
+
     /// Whether a frame around the body opens a slot not written down.
     pub(crate) fn unknown(&self) -> bool {
         self.unknown
@@ -64,7 +70,7 @@ impl<'db> WrittenFrames<'db> {
     /// Whether no frame opens anything here (`has_frames` for written
     /// constants).
     pub(crate) fn is_empty(&self) -> bool {
-        self.slots.is_empty() && !self.unknown
+        self.slots.is_empty() && self.traits.is_empty() && !self.unknown
     }
 
     /// Whether a read of `slot` here could see a choice a frame opened.
@@ -73,7 +79,7 @@ impl<'db> WrittenFrames<'db> {
             return false;
         };
         let key = super::choice::slot_key(db, slot, scope, assumptions).inst();
-        if self.slots.contains(&key) {
+        if self.slots.contains(&key) || self.traits.contains(&key.def(db)) {
             return true;
         }
         self.unknown && has_named_implementation(db, scope, key)
@@ -155,6 +161,7 @@ fn declaration_frames<'db>(
                 let key = super::choice::slot_key(db, inst, scope, assumptions).inst();
                 return Some(WrittenFrames {
                     slots: vec![key],
+                    traits: Vec::new(),
                     unknown: false,
                     context: Some((scope, assumptions)),
                     declaration: true,
@@ -192,6 +199,7 @@ pub(crate) fn declaration_frames_at<'db>(
                 let key = super::choice::slot_key(db, inst, scope, assumptions).inst();
                 return Some(WrittenFrames {
                     slots: vec![key],
+                    traits: Vec::new(),
                     unknown: false,
                     context: Some((scope, assumptions)),
                     declaration: true,
@@ -370,6 +378,7 @@ impl<'db> BodyLayout<'db> {
         let assumptions = crate::analysis::ty::const_ty::assumptions_for_body(db, func_body);
         let mut frames = WrittenFrames {
             slots: Vec::new(),
+            traits: Vec::new(),
             unknown: false,
             context: Some((scope, assumptions)),
             declaration: false,
@@ -378,6 +387,11 @@ impl<'db> BodyLayout<'db> {
             let key = super::choice::slot_key(db, inst, scope, assumptions).inst();
             if !frames.slots.contains(&key) {
                 frames.slots.push(key);
+            }
+        };
+        let open_trait = |trait_: crate::hir_def::Trait<'db>, frames: &mut WrittenFrames<'db>| {
+            if !frames.traits.contains(&trait_) {
+                frames.traits.push(trait_);
             }
         };
         // Inside `impl T for S as N`, the slot `T<S>` is N for the body.
@@ -415,7 +429,12 @@ impl<'db> BodyLayout<'db> {
                         continue;
                     }
                     match opened_by(db, func_body, binding.value) {
-                        Some(insts) => insts.into_iter().for_each(|inst| open(inst, &mut frames)),
+                        Some(WrittenOpening::Slots(insts)) => {
+                            insts.into_iter().for_each(|inst| open(inst, &mut frames))
+                        }
+                        Some(WrittenOpening::Traits(traits)) => traits
+                            .into_iter()
+                            .for_each(|trait_| open_trait(trait_, &mut frames)),
                         None => frames.unknown = true,
                     }
                 }
@@ -532,33 +551,56 @@ fn item_slot_reads<'db>(db: &'db dyn HirAnalysisDb, item: ItemKind<'db>) -> Vec<
     reads.reads
 }
 
-/// The slots a `with` binding's value opens, read from what is written:
-/// a named implementation's name, a local, parameter or constant item with
-/// an evidence type. `None` when the slot is not written down.
+enum WrittenOpening<'db> {
+    Slots(Vec<TraitInstId<'db>>),
+    Traits(Vec<crate::hir_def::Trait<'db>>),
+}
+
+/// The slots or traits a `with` binding's value opens, read from what is written:
+/// a named implementation's name, a derive provider type or zero-field struct literal,
+/// or a local, parameter or constant item with an evidence type. `None` when the slot is not written down.
 fn opened_by<'db>(
     db: &'db dyn HirAnalysisDb,
     func_body: Body<'db>,
     value: ExprId,
-) -> Option<Vec<TraitInstId<'db>>> {
-    let Partial::Present(Expr::Path(Partial::Present(path))) = value.data(db, func_body) else {
-        return None;
-    };
+) -> Option<WrittenOpening<'db>> {
     let lex = super::env::body_lexical_env(db, func_body);
     let body_scope = func_body.scope();
     let expr_scope = lex.expr_scope(value).unwrap_or(body_scope);
     let assumptions = crate::analysis::ty::const_ty::assumptions_for_body(db, func_body);
+    if let Partial::Present(Expr::RecordInit(Partial::Present(path), fields)) =
+        value.data(db, func_body)
+        && fields.is_empty()
+    {
+        let mut bodies = Vec::new();
+        path_bodies(db, *path, &mut bodies);
+        if !bodies.is_empty() {
+            return None;
+        }
+        if let Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) =
+            resolve_path(db, *path, expr_scope, assumptions, false)
+        {
+            let traits = crate::core::meta::derive_provider_traits_for_ty(db, body_scope, ty);
+            if !traits.is_empty() {
+                return Some(WrittenOpening::Traits(traits));
+            }
+        }
+    }
+    let Partial::Present(Expr::Path(Partial::Present(path))) = value.data(db, func_body) else {
+        return None;
+    };
     use crate::analysis::name_resolution::path_resolver::{ImplNameRes, resolve_impl_name};
     match resolve_impl_name(db, *path, expr_scope) {
         ImplNameRes::Found(implementation) => {
             if path.parent(db).is_none() && lex.expr_binding(value).is_some() {
-                return Some(Vec::new());
+                return Some(WrittenOpening::Slots(Vec::new()));
             }
             let mut bodies = Vec::new();
             path_bodies(db, *path, &mut bodies);
             if !bodies.is_empty() {
                 return None;
             }
-            return Some(
+            return Some(WrittenOpening::Slots(
                 super::choice::instantiate_named_impl_header(
                     db,
                     implementation,
@@ -568,16 +610,19 @@ fn opened_by<'db>(
                     Some,
                 )
                 .map_or_else(|_| Vec::new(), |(goal, _)| vec![goal]),
-            );
+            ));
         }
-        ImplNameRes::NotVisible | ImplNameRes::Ambiguous => return Some(Vec::new()),
+        ImplNameRes::NotVisible | ImplNameRes::Ambiguous => {
+            return Some(WrittenOpening::Slots(Vec::new()));
+        }
         ImplNameRes::NotFound => {}
     }
     if path.is_bare_ident(db) {
         use super::env::LexicalBinding;
         let ty = match lex.expr_binding(value)? {
             LexicalBinding::Local { pat } => {
-                return local_evidence_goal(db, func_body, lex, pat).map(|goal| vec![goal]);
+                return local_evidence_goal(db, func_body, lex, pat)
+                    .map(|goal| WrittenOpening::Slots(vec![goal]));
             }
             LexicalBinding::Param { idx } => match super::BodyOwner::from_body(db, func_body)? {
                 super::BodyOwner::Func(func, _) => *func.arg_tys(db).get(idx)?.skip_binder(),
@@ -608,12 +653,38 @@ fn opened_by<'db>(
                     _ => return None,
                 }
             }
+            LexicalBinding::Item(ScopeId::Item(ItemKind::Struct(_) | ItemKind::TypeAlias(_))) => {
+                let mut bodies = Vec::new();
+                path_bodies(db, *path, &mut bodies);
+                if !bodies.is_empty() {
+                    return None;
+                }
+                match resolve_path(db, *path, expr_scope, assumptions, false) {
+                    Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => {
+                        let traits =
+                            crate::core::meta::derive_provider_traits_for_ty(db, body_scope, ty);
+                        return (!traits.is_empty()).then_some(WrittenOpening::Traits(traits));
+                    }
+                    _ => return None,
+                }
+            }
             LexicalBinding::Item(_) => return None,
         };
-        return evidence_goal(db, body_scope, ty).map(|goal| vec![goal]);
+        return evidence_goal(db, body_scope, ty).map(|goal| WrittenOpening::Slots(vec![goal]));
     }
     match resolve_path(db, *path, expr_scope, assumptions, true) {
-        Ok(PathRes::Const(_, ty)) => evidence_goal(db, body_scope, ty).map(|goal| vec![goal]),
+        Ok(PathRes::Const(_, ty)) => {
+            evidence_goal(db, body_scope, ty).map(|goal| WrittenOpening::Slots(vec![goal]))
+        }
+        Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => {
+            let mut bodies = Vec::new();
+            path_bodies(db, *path, &mut bodies);
+            if !bodies.is_empty() {
+                return None;
+            }
+            let traits = crate::core::meta::derive_provider_traits_for_ty(db, body_scope, ty);
+            (!traits.is_empty()).then_some(WrittenOpening::Traits(traits))
+        }
         _ => None,
     }
 }

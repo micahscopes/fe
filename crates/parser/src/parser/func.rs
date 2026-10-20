@@ -117,8 +117,12 @@ impl super::Parse for FuncSignatureScope {
             SyntaxKind::LParen,
             ExpectedKind::Syntax(SyntaxKind::FuncParamList),
         )? {
+            let in_quote = parser
+                .parents
+                .iter()
+                .any(|entry| entry.scope.syntax_kind() == SyntaxKind::QuoteExpr);
             parser.parse(super::param::FuncParamListScope::new(
-                self.fn_def_scope.allows_self(),
+                self.fn_def_scope.allows_self() || in_quote,
             ))?;
         }
 
