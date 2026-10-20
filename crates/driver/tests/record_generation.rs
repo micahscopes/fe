@@ -553,3 +553,152 @@ mod nested {
         submod_err.cause
     );
 }
+
+#[test]
+fn transitive_helper_access_check_and_unsafe_block_hygiene_and_quoted_attrs() {
+    // Finding 1: Transitive #1821 ownership/move check on provider helper callees before CTFE.
+    let helper_move_source = r#"
+use core::meta::{Code, Item, Record, field_count}
+
+struct NonCopy {
+    v: u256,
+}
+
+const fn consume(_ x: own NonCopy) -> u256 {
+    x.v
+}
+
+const fn bad_move_helper() -> usize {
+    let x = NonCopy { v: 20 }
+    let first = consume(x)
+    let second = consume(x)
+    (first + second) as usize
+}
+
+pub const fn inspect(_ r: Record) -> Code<Item> {
+    let total = field_count(r) + bad_move_helper()
+    quote {
+        fn generated() -> usize {
+            ${total}
+        }
+    }
+}
+
+#[generate(inspect)]
+pub struct Pair {
+    pub a: u256,
+    pub b: u256,
+}
+"#;
+    let (db, file) = input(helper_move_source);
+    let helper_err = prepare_file(&db, file)
+        .err()
+        .expect("helper move conflict must fail before CTFE");
+    assert!(
+        helper_err
+            .cause
+            .contains("authored provider ownership/capability validation failed")
+            && helper_err.cause.contains("move conflict")
+            && helper_err.cause.contains("16-0002"),
+        "{helper_err}"
+    );
+
+    // Finding 3: Quote directly inside `unsafe { ... }` block preserves producer-block lexical hygiene without panicking.
+    let unsafe_quote_source = r#"
+use core::meta::{Code, Item, Record, field_count}
+
+mod author {
+    use core::meta::{Code, Item, Record, field_count}
+
+    pub const fn inspect(_ r: Record) -> Code<Item> {
+        let n = field_count(r)
+        unsafe {
+            const fn unsafe_local_boost(_ x: usize) -> usize {
+                x + 40
+            }
+            quote {
+                const fn generated_from_unsafe() -> usize {
+                    unsafe_local_boost(${n})
+                }
+            }
+        }
+    }
+}
+
+const fn unsafe_local_boost(_ x: usize) -> usize {
+    999
+}
+
+#[generate(author::inspect)]
+pub struct Pair {
+    pub a: u256,
+    pub b: u256,
+}
+"#;
+    let (db, file) = input(unsafe_quote_source);
+    let output = prepare_file(&db, file).unwrap().unwrap();
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    let module = output.top_mod(output_file);
+    assert!(output.run_on_top_mod(module).is_empty());
+
+    // Finding 4a: Quoted function carrying `#[generate(...)]` is rejected.
+    let quoted_generate_source = r#"
+use core::meta::{Code, Item, Record}
+
+pub const fn inspect(_ r: Record) -> Code<Item> {
+    quote {
+        #[generate(inspect)]
+        fn generated() -> usize {
+            1
+        }
+    }
+}
+
+#[generate(inspect)]
+pub struct Pair {
+    pub a: u256,
+}
+"#;
+    let (db, file) = input(quoted_generate_source);
+    let quoted_gen_err = prepare_file(&db, file)
+        .err()
+        .expect("quoted #[generate] on function must refuse");
+    assert!(
+        quoted_gen_err
+            .cause
+            .contains("quoted functions cannot carry #[generate] attributes"),
+        "{}",
+        quoted_gen_err.cause
+    );
+
+    // Finding 4b: Quoted function carrying invalid function attribute (`#[event]`) is diagnosed by `validate_func_attrs`.
+    let quoted_event_attr_source = r#"
+use core::meta::{Code, Item, Record}
+
+pub const fn inspect(_ r: Record) -> Code<Item> {
+    quote {
+        #[event]
+        fn generated() -> usize {
+            1
+        }
+    }
+}
+
+#[generate(inspect)]
+pub struct Pair {
+    pub a: u256,
+}
+"#;
+    let (db, file) = input(quoted_event_attr_source);
+    let quoted_attr_err = prepare_file(&db, file)
+        .err()
+        .expect("quoted #[event] on function must fail output admission");
+    assert!(
+        quoted_attr_err.cause.contains("`#[event]`") && quoted_attr_err.cause.contains("structs"),
+        "{}",
+        quoted_attr_err.cause
+    );
+}

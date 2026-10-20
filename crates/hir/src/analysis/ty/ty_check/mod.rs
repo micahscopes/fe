@@ -1260,15 +1260,17 @@ fn const_body_ctfe_diags_with_context<'db>(
                     EvidenceList::none(db),
                 );
                 let semantic = get_or_build_semantic_instance(db, key);
-                let checked_metadata = crate::core::meta::ty_contains_meta_carrier(db, expected)
-                    .is_some()
+                let has_meta_carrier =
+                    crate::core::meta::ty_contains_meta_carrier(db, expected).is_some();
+                let checked_metadata = has_meta_carrier
                     && crate::core::meta::issued_metadata_leaves(db, value)
                     && crate::analysis::semantic::sem_const_ty(db, value) == expected
                     && crate::analysis::semantic::consts::verify_sem_const_shape(db, value).is_ok();
                 // A completely verified compile-time token is a known constant;
                 // it is intentionally never reified into a runtime seal value.
-                if !checked_metadata
-                    && reify_runtime_const_for_ty(db, semantic, expected, value).is_none()
+                if (has_meta_carrier && !checked_metadata)
+                    || (!has_meta_carrier
+                        && reify_runtime_const_for_ty(db, semantic, expected, value).is_none())
                 {
                     push_const_eval_diag(
                         &mut diags,

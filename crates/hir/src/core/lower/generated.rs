@@ -43,6 +43,13 @@ pub(super) fn append_functions<'db>(ctxt: &mut FileLowerCtxt<'db>) {
         else {
             unreachable!("validated one-function template")
         };
+        super::item::validate_func_attrs(
+            ctxt,
+            function.attr_list(),
+            "fn",
+            function.sig().name().map(|name| name.text().to_string()),
+            true,
+        );
         let generated = Func::lower_ast(ctxt, function);
         ctxt.generation_holes.clear();
         ctxt.builder.set_quoted_function_origin(

@@ -226,6 +226,42 @@ const fn inspect_field_type(_ f: Field) -> FieldType { field_type(f) }
         format!("{forged_refusal:?}").contains("field_type requires a compiler-issued Field"),
         "{forged_refusal:?}"
     );
+
+    assert_eq!(record_arg.pretty_print(&db), "<record Pair>");
+    assert_eq!(first_val.pretty_print(&db), "<field Pair.first>");
+    assert_eq!(second_ty_val.pretty_print(&db), "<field_type bool>");
+
+    let instance = fe_hir::analysis::semantic::get_or_build_semantic_instance(
+        &db,
+        fe_hir::analysis::semantic::identity_semantic_instance_key(&db, inspect_owner),
+    );
+    let forged_record = SemConstId::new(
+        &db,
+        SemConstValue::Struct {
+            ty: record_carrier,
+            fields: vec![seal].into_boxed_slice(),
+        },
+    );
+    assert!(
+        fe_hir::analysis::semantic::reify_runtime_const_for_ty(
+            &db,
+            instance,
+            record_carrier,
+            forged_record,
+        )
+        .is_none(),
+        "forged Record struct must never reify as a runtime constant"
+    );
+    assert!(
+        fe_hir::analysis::semantic::reify_runtime_const_for_ty(
+            &db,
+            instance,
+            field_carrier,
+            forged_field,
+        )
+        .is_none(),
+        "forged Field struct must never reify as a runtime constant"
+    );
 }
 
 #[test]
