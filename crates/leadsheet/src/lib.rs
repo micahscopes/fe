@@ -144,7 +144,7 @@ fn test_expectation(db: Db<'_>, owner: &RuntimeFunctionOwner<'_>) -> Result<Stri
         return Err("a test section without a test root".into());
     };
     let semantic = callee.key(db).semantic(db).ok_or("a test without a semantic instance")?;
-    let hir::analysis::ty::ty_check::BodyOwner::Func(func) = semantic.key(db).owner(db) else {
+    let hir::analysis::ty::ty_check::BodyOwner::Func(func, _) = semantic.key(db).owner(db) else {
         return Err("a test that is not a function".into());
     };
     let attrs = ItemKind::from(func).attrs(db).ok_or("a test without attributes")?;
@@ -170,7 +170,7 @@ fn test_balance(db: Db<'_>, owner: &RuntimeFunctionOwner<'_>) -> Option<String> 
         return None;
     };
     let semantic = callee.key(db).semantic(db)?;
-    let hir::analysis::ty::ty_check::BodyOwner::Func(func) = semantic.key(db).owner(db) else {
+    let hir::analysis::ty::ty_check::BodyOwner::Func(func, _) = semantic.key(db).owner(db) else {
         return None;
     };
     let attrs = ItemKind::from(func).attrs(db)?;

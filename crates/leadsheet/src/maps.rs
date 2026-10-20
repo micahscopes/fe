@@ -50,7 +50,7 @@ fn word_key(ty: &str) -> bool {
 pub fn locate<'db>(db: Db<'db>, callee: RuntimeInstance<'db>) -> Option<Locate> {
     let semantic = callee.key(db).semantic(db)?;
     let key = semantic.key(db);
-    let BodyOwner::Func(func) = key.owner(db) else { return None };
+    let BodyOwner::Func(func, _) = key.owner(db) else { return None };
     let name = func.name(db).to_opt()?.data(db).to_string();
     if name != "locate" {
         return None;
