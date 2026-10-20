@@ -25,7 +25,7 @@ use crate::analysis::{
 use crate::{
     ParserError, SpannedHirDb,
     hir_def::{
-        CallableDef, FieldIndex, GenericParamOwner, ModeMarker, PathKind, Trait,
+        AssocTyDecl, CallableDef, FieldIndex, GenericParamOwner, ModeMarker, PathKind, Trait,
         params::FuncParamMode,
     },
     span::LazySpan,
@@ -1711,6 +1711,14 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 Severity::Error,
                 "`ref` and `mut` are not types",
                 "modes are only allowed on parameters and in projection returns",
+                span.resolve(db),
+                error_code,
+            ),
+
+            Self::ModeArgNotShape(span) => primary_diag(
+                Severity::Error,
+                "a mode argument names an associated shape's mode",
+                "only an associated shape takes `ref` or `mut`, as in `D::Step<ref>`",
                 span.resolve(db),
                 error_code,
             ),
@@ -6370,17 +6378,47 @@ impl DiagnosticVoucher for ImplDiag<'_> {
                 primary,
                 type_name,
                 trait_,
-            } => primary_diag(
-                severity,
-                "missing associated type in trait implementation",
-                format!(
-                    "missing associated type `{}` from trait `{}`",
-                    type_name.data(db),
-                    trait_.name(db).unwrap().data(db)
-                ),
-                primary.resolve(db),
-                error_code,
-            ),
+            } => {
+                let item = if trait_
+                    .assoc_ty(db, *type_name)
+                    .is_some_and(AssocTyDecl::is_shape)
+                {
+                    "shape"
+                } else {
+                    "type"
+                };
+                primary_diag(
+                    severity,
+                    format!("missing associated {item} in trait implementation"),
+                    format!(
+                        "missing associated {item} `{}` from trait `{}`",
+                        type_name.data(db),
+                        trait_.name(db).unwrap().data(db)
+                    ),
+                    primary.resolve(db),
+                    error_code,
+                )
+            }
+
+            Self::AssocShapeMismatch {
+                primary,
+                trait_,
+                name,
+                is_shape,
+            } => {
+                let item = if *is_shape { "shape" } else { "type" };
+                primary_diag(
+                    severity,
+                    format!(
+                        "`{}` is an associated {item} of `{}`",
+                        name.data(db),
+                        trait_.name(db).unwrap().data(db)
+                    ),
+                    format!("give it with `{item} {} = ..`", name.data(db)),
+                    primary.resolve(db),
+                    error_code,
+                )
+            }
 
             Self::MissingAssociatedConstValue {
                 primary,
