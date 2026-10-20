@@ -860,20 +860,40 @@ impl<'db> TyId<'db> {
 
     /// Perform type level application.
     pub(crate) fn app_structural(db: &'db dyn HirAnalysisDb, lhs: Self, rhs: Self) -> TyId<'db> {
-        if let TyData::TyBase(TyBase::TraitCtor(def)) = lhs.data(db) {
-            if !def.self_param(db).kind(db).does_match(rhs.kind(db)) {
-                return Self::invalid(
+        let (base, args) = lhs.decompose_ty_app(db);
+        if let TyData::TyBase(TyBase::TraitCtor(def)) = base.data(db) {
+            let params = def.params(db);
+            if args.len() + 1 < params.len() {
+                let expected_kind = params[args.len() + 1].kind(db);
+                if !expected_kind.does_match(rhs.kind(db)) {
+                    return Self::invalid(
+                        db,
+                        InvalidCause::KindMismatch {
+                            expected: Some(expected_kind.clone()),
+                            given: rhs,
+                        },
+                    );
+                }
+                return Self::new(db, TyData::TyApp(lhs, rhs));
+            }
+            if args.len() + 1 == params.len() {
+                if !def.self_param(db).kind(db).does_match(rhs.kind(db)) {
+                    return Self::invalid(
+                        db,
+                        InvalidCause::KindMismatch {
+                            expected: Some(def.self_param(db).kind(db).clone()),
+                            given: rhs,
+                        },
+                    );
+                }
+                let mut inst_args = Vec::with_capacity(params.len());
+                inst_args.push(rhs);
+                inst_args.extend_from_slice(args);
+                return Self::new(
                     db,
-                    InvalidCause::KindMismatch {
-                        expected: Some(def.self_param(db).kind(db).clone()),
-                        given: rhs,
-                    },
+                    TyData::ConstraintTerm(TraitInstId::new_simple(db, *def, inst_args)),
                 );
             }
-            return Self::new(
-                db,
-                TyData::ConstraintTerm(TraitInstId::new_simple(db, *def, vec![rhs])),
-            );
         }
         Self::new(db, TyData::TyApp(lhs, rhs))
     }
@@ -2360,7 +2380,14 @@ impl HasKind for TyBase<'_> {
             TyBase::Contract(_) => Kind::Star, // Contracts have no generic params
             TyBase::Func(func) => func.kind(db),
             TyBase::TraitCtor(def) => {
-                Kind::abs(def.self_param(db).kind(db).clone(), Kind::Constraint)
+                let self_to_constraint =
+                    Kind::abs(def.self_param(db).kind(db).clone(), Kind::Constraint);
+                def.params(db)[1..]
+                    .iter()
+                    .rev()
+                    .fold(self_to_constraint, |acc, param| {
+                        Kind::abs(param.kind(db).clone(), acc)
+                    })
             }
             TyBase::Closure(_) => Kind::Star,
         }

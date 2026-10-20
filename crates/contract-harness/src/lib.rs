@@ -1218,6 +1218,17 @@ impl FeContractHarness {
             .workspace()
             .get(&db, &url)
             .expect("file should exist in workspace");
+        let db = match driver::generation::prepare_file(&db, file) {
+            Ok(Some(db)) => db,
+            Ok(None) => db,
+            Err(err) => {
+                return Err(HarnessError::CompilerDiagnostics(err.cause));
+            }
+        };
+        let file = db
+            .workspace()
+            .get(&db, &url)
+            .expect("file should exist in workspace");
         let top_mod = db.top_mod(file);
         let diags = db.run_on_top_mod(top_mod);
         if !diags.is_empty() {
@@ -1303,6 +1314,17 @@ pub fn compile_runtime_sonatina_from_source(source: &str) -> Result<String, Harn
     let url = Url::parse(MEMORY_SOURCE_URL).expect("static URL is valid");
     db.workspace()
         .touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db
+        .workspace()
+        .get(&db, &url)
+        .expect("file should exist in workspace");
+    let db = match driver::generation::prepare_file(&db, file) {
+        Ok(Some(db)) => db,
+        Ok(None) => db,
+        Err(err) => {
+            return Err(HarnessError::CompilerDiagnostics(err.cause));
+        }
+    };
     let file = db
         .workspace()
         .get(&db, &url)

@@ -1721,3 +1721,212 @@ pub struct BadTarget where false {
         target_err.cause
     );
 }
+
+#[test]
+fn client1_and_client2_abi_and_error_derive_match_compiler_oracles_in_ctfe() {
+    let source = r#"use core::abi::{AbiSize, abi_record_layout}
+use core::error::ErrorVariant
+use core::meta::{Code, Item, Record}
+use std::abi::{Bytes, DynString, Sol, SolCompat}
+use std::derive::{
+    AbiDecodeDerive, AbiEncodeDerive, AbiSizeDerive, AbiSpanDerive, SolCompatDerive, SolError,
+    abi_struct, error_struct, error_variant_with_selector,
+}
+
+mod oracle {
+    use std::abi::{Bytes, DynString}
+
+    #[abi]
+    pub struct Unit {}
+
+    #[abi]
+    pub struct Packet {
+        pub id: u256,
+        pub ok: bool,
+        pub tag: u8,
+    }
+
+    #[abi]
+    pub struct Outer {
+        pub count: u256,
+        pub inner: Packet,
+        pub tail: bool,
+    }
+
+    #[abi]
+    pub struct DynBundle {
+        pub tag: u256,
+        pub text: DynString,
+        pub raw: Bytes,
+    }
+
+    #[error]
+    pub struct EmptyErr {}
+
+    #[error]
+    pub struct InsufficientBalance {
+        pub available: u256,
+        pub required: u256,
+    }
+
+    #[error]
+    pub struct NestedFailure {
+        pub code: u32,
+        pub detail: Packet,
+    }
+
+    #[error]
+    pub struct ExtremelyLongCustomRevertErrorNameExceedingThirtyTwoBytes {
+        pub code: u256,
+    }
+
+    #[error]
+    pub struct DynFailure {
+        pub code: u256,
+        pub reason: DynString,
+    }
+}
+
+#[generate(abi_struct)]
+pub struct Unit {}
+
+pub struct Packet {
+    pub id: u256,
+    pub ok: bool,
+    pub tag: u8,
+}
+
+impl core::abi::AbiSize for Packet with (AbiSizeDerive)
+impl core::abi::AbiSpan<Sol> for Packet with (AbiSpanDerive)
+impl core::abi::Encode<Sol> for Packet with (AbiEncodeDerive)
+impl core::abi::Decode<Sol> for Packet with (AbiDecodeDerive)
+impl std::abi::SolCompat for Packet with (SolCompatDerive)
+
+#[generate(abi_struct)]
+pub struct Outer {
+    pub count: u256,
+    pub inner: Packet,
+    pub tail: bool,
+}
+
+#[generate(abi_struct)]
+pub struct DynBundle {
+    pub tag: u256,
+    pub text: DynString,
+    pub raw: Bytes,
+}
+
+#[generate(error_struct)]
+pub struct EmptyErr {}
+
+pub struct InsufficientBalance {
+    pub available: u256,
+    pub required: u256,
+}
+
+impl std::abi::SolCompat for InsufficientBalance with (SolCompatDerive)
+impl ErrorVariant<Sol> for InsufficientBalance with (SolError)
+impl core::abi::AbiSize for InsufficientBalance with (AbiSizeDerive)
+impl core::abi::Encode<Sol> for InsufficientBalance with (AbiEncodeDerive)
+
+#[generate(error_struct)]
+pub struct NestedFailure {
+    pub code: u32,
+    pub detail: Packet,
+}
+
+#[generate(error_struct)]
+pub struct ExtremelyLongCustomRevertErrorNameExceedingThirtyTwoBytes {
+    pub code: u256,
+}
+
+#[generate(error_struct)]
+pub struct DynFailure {
+    pub code: u256,
+    pub reason: DynString,
+}
+
+pub const fn custom_sel_error(_ record: Record) -> Code<Item> {
+    error_variant_with_selector(record, 0xdeadbeef)
+}
+
+#[generate(custom_sel_error)]
+pub struct CustomSelErr {
+    pub reason: u256,
+}
+
+impl core::abi::AbiSize for CustomSelErr with (AbiSizeDerive)
+impl core::abi::Encode<Sol> for CustomSelErr with (AbiEncodeDerive)
+
+const fn verify_client1_and_client2() -> bool {
+    let unit_ok = <Unit as AbiSize>::HEAD_SIZE == <oracle::Unit as AbiSize>::HEAD_SIZE
+        && <Unit as AbiSize>::IS_DYNAMIC == <oracle::Unit as AbiSize>::IS_DYNAMIC
+        && core::keccak(<Unit as SolCompat>::SOL_TYPE) == core::keccak(<oracle::Unit as SolCompat>::SOL_TYPE)
+
+    let packet_ok = <Packet as AbiSize>::HEAD_SIZE == <oracle::Packet as AbiSize>::HEAD_SIZE
+        && <Packet as AbiSize>::IS_DYNAMIC == <oracle::Packet as AbiSize>::IS_DYNAMIC
+        && core::keccak(<Packet as SolCompat>::SOL_TYPE) == core::keccak(<oracle::Packet as SolCompat>::SOL_TYPE)
+
+    let outer_ok = <Outer as AbiSize>::HEAD_SIZE == <oracle::Outer as AbiSize>::HEAD_SIZE
+        && <Outer as AbiSize>::IS_DYNAMIC == <oracle::Outer as AbiSize>::IS_DYNAMIC
+        && core::keccak(<Outer as SolCompat>::SOL_TYPE) == core::keccak(<oracle::Outer as SolCompat>::SOL_TYPE)
+
+    let dyn_ok = <DynBundle as AbiSize>::HEAD_SIZE == <oracle::DynBundle as AbiSize>::HEAD_SIZE
+        && <DynBundle as AbiSize>::IS_DYNAMIC == <oracle::DynBundle as AbiSize>::IS_DYNAMIC
+        && core::keccak(<DynBundle as SolCompat>::SOL_TYPE) == core::keccak(<oracle::DynBundle as SolCompat>::SOL_TYPE)
+
+    let layout = abi_record_layout([32, 32, 64])
+    let layout_ok = layout.offsets[0] == 0
+        && layout.offsets[1] == 32
+        && layout.offsets[2] == 64
+        && layout.head_size == 128
+
+    let err_ok = <EmptyErr as ErrorVariant<Sol>>::SELECTOR == <oracle::EmptyErr as ErrorVariant<Sol>>::SELECTOR
+        && <InsufficientBalance as ErrorVariant<Sol>>::SELECTOR == <oracle::InsufficientBalance as ErrorVariant<Sol>>::SELECTOR
+        && <NestedFailure as ErrorVariant<Sol>>::SELECTOR == <oracle::NestedFailure as ErrorVariant<Sol>>::SELECTOR
+        && <ExtremelyLongCustomRevertErrorNameExceedingThirtyTwoBytes as ErrorVariant<Sol>>::SELECTOR
+            == <oracle::ExtremelyLongCustomRevertErrorNameExceedingThirtyTwoBytes as ErrorVariant<Sol>>::SELECTOR
+        && <DynFailure as ErrorVariant<Sol>>::SELECTOR == <oracle::DynFailure as ErrorVariant<Sol>>::SELECTOR
+        && <DynFailure as AbiSize>::HEAD_SIZE == <oracle::DynFailure as AbiSize>::HEAD_SIZE
+        && <DynFailure as AbiSize>::IS_DYNAMIC == <oracle::DynFailure as AbiSize>::IS_DYNAMIC
+        && <CustomSelErr as ErrorVariant<Sol>>::SELECTOR == 0xdeadbeef
+
+    unit_ok && packet_ok && outer_ok && dyn_ok && layout_ok && err_ok
+}
+"#;
+    let (db, file) = input(source);
+    let output = prepare_file(&db, file).unwrap().unwrap();
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    let module = output.top_mod(output_file);
+    let diags = output.run_on_top_mod(module);
+    assert!(diags.is_empty(), "{}", diags.format_diags(&output));
+    let function = module
+        .all_funcs(&output)
+        .into_iter()
+        .find(|f| {
+            f.name(&output)
+                .to_opt()
+                .is_some_and(|name| name.data(&output) == "verify_client1_and_client2")
+        })
+        .unwrap();
+    let owner = BodyOwner::Func(*function, None);
+    let result = eval_body_owner_const(
+        &output,
+        owner,
+        GenericSubst::for_body_owner(&output, owner, vec![]),
+    );
+    let EvalOutcome::Ready(value) = result else {
+        panic!("{result:?}")
+    };
+    assert!(matches!(
+        value.value(&output),
+        SemConstValue::Scalar {
+            value: SemConstScalar::Bool(true),
+            ..
+        }
+    ));
+}
+

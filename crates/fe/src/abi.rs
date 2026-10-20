@@ -638,11 +638,29 @@ fn reverted_error_struct<'db>(
         return None;
     }
     let struct_ = struct_from_ty(db, typed_body.expr_ty(db, args.first()?.expr))?;
-    matches!(
+    is_error_struct(db, struct_).then_some(struct_)
+}
+
+fn is_error_struct(db: &DriverDataBase, struct_: Struct<'_>) -> bool {
+    if matches!(
         hir::span::struct_ast(db, struct_),
         hir::span::HirOrigin::Desugared(hir::span::DesugaredOrigin::Error(_))
-    )
-    .then_some(struct_)
+    ) {
+        return true;
+    }
+    let scope = struct_.scope();
+    let Some(error_variant_trait) =
+        hir::analysis::ty::corelib::resolve_core_trait(db, scope, &["error", "ErrorVariant"])
+    else {
+        return false;
+    };
+    let Ok(sol_ty) = resolve_sol_abi_ty(db, scope) else {
+        return false;
+    };
+    let struct_ty = TyId::new(db, TyData::TyBase(TyBase::Adt(struct_.as_adt(db))));
+    let inst = TraitInstId::new_simple(db, error_variant_trait, vec![struct_ty, sol_ty]);
+    let solve_cx = hir::analysis::ty::trait_resolution::TraitSolveCx::new(db, scope);
+    hir::analysis::ty::evidence::prove(db, solve_cx, inst).is_some()
 }
 
 fn push_event_struct<'db>(
@@ -926,7 +944,13 @@ mod tests {
         let file_path = temp.path().join("test.fe");
         let url = url::Url::from_file_path(&file_path).expect("file path to url");
         let mut db = DriverDataBase::default();
-        let file = db.workspace().touch(&mut db, url, Some(code.to_string()));
+        let file = db.workspace().touch(&mut db, url.clone(), Some(code.to_string()));
+        if let Some(prepared) =
+            driver::generation::prepare_file(&db, file).map_err(|e| e.to_string())?
+        {
+            db = prepared;
+        }
+        let file = db.workspace().get(&db, &url).expect("file in workspace");
         let top_mod = db.top_mod(file);
         generate_contract_abi(&db, top_mod, contract_name)?
             .ok_or_else(|| format!("contract `{contract_name}` not found"))
@@ -2251,5 +2275,333 @@ pub contract EncodeMsgAbiProbe {
             "EncodeMsgAbiProbe",
         );
         assert!(entries.iter().any(|e| e["name"] == "probe"));
+    }
+
+    #[test]
+    fn client1_and_client2_runtime_evm_and_json_abi_parity() {
+        use contract_harness::{ExecutionOptions, FeContractHarness, HarnessError, U256};
+        use ethers_core::{
+            abi::{Token, encode},
+            types::{Address as EthAddress, Bytes as EthBytes, U256 as EthU256},
+        };
+
+        let code = r#"
+use core::abi::{AbiSize, Decode, Encode, encode_alloc}
+use core::error::ErrorVariant
+use core::meta::{Code, Item, Record}
+use std::abi::{Bytes, DynString, Sol, SolCompat, decode_input, sol}
+use std::derive::{
+    AbiDecodeDerive, AbiEncodeDerive, AbiSizeDerive, AbiSpanDerive, SolCompatDerive, SolError,
+    abi_struct, error_struct, error_variant_with_selector,
+}
+use std::evm::{Address, revert_error}
+
+mod oracle {
+    use std::abi::{Bytes, DynString}
+    use std::evm::Address
+
+    #[abi]
+    pub struct Unit {}
+
+    #[abi]
+    pub struct Packet {
+        pub a: u64,
+        pub b: bool,
+        pub c: Address,
+    }
+
+    #[abi]
+    pub struct Outer {
+        pub head: u256,
+        pub inner: Packet,
+        pub tail: u32,
+    }
+
+    #[abi]
+    pub struct DynBundle {
+        pub id: u256,
+        pub text: DynString,
+        pub raw: Bytes,
+    }
+}
+
+#[generate(abi_struct)]
+pub struct Unit {}
+
+pub struct Packet {
+    pub a: u64,
+    pub b: bool,
+    pub c: Address,
+}
+
+impl core::abi::AbiSize for Packet with (AbiSizeDerive)
+impl core::abi::AbiSpan<Sol> for Packet with (AbiSpanDerive)
+impl core::abi::Encode<Sol> for Packet with (AbiEncodeDerive)
+impl core::abi::Decode<Sol> for Packet with (AbiDecodeDerive)
+impl std::abi::SolCompat for Packet with (SolCompatDerive)
+
+#[generate(abi_struct)]
+pub struct Outer {
+    pub head: u256,
+    pub inner: Packet,
+    pub tail: u32,
+}
+
+#[generate(abi_struct)]
+pub struct DynBundle {
+    pub id: u256,
+    pub text: DynString,
+    pub raw: Bytes,
+}
+
+#[generate(error_struct)]
+pub struct EmptyErr {}
+
+pub struct InsufficientBalance {
+    pub available: u256,
+    pub required: u256,
+}
+
+impl std::abi::SolCompat for InsufficientBalance with (SolCompatDerive)
+impl ErrorVariant<Sol> for InsufficientBalance with (SolError)
+impl core::abi::AbiSize for InsufficientBalance with (AbiSizeDerive)
+impl core::abi::Encode<Sol> for InsufficientBalance with (AbiEncodeDerive)
+
+#[generate(error_struct)]
+pub struct NestedFailure {
+    pub code: u32,
+    pub detail: Packet,
+}
+
+#[generate(error_struct)]
+pub struct ExtremelyLongCustomRevertErrorNameExceedingThirtyTwoBytes {
+    pub code: u256,
+}
+
+#[generate(error_struct)]
+pub struct DynFailure {
+    pub code: u256,
+    pub reason: DynString,
+}
+
+pub const fn custom_sel_error(_ record: Record) -> Code<Item> {
+    error_variant_with_selector(record, 0xdeadbeef)
+}
+
+#[generate(custom_sel_error)]
+pub struct CustomSelErr {
+    pub reason: u256,
+}
+
+impl core::abi::AbiSize for CustomSelErr with (AbiSizeDerive)
+impl core::abi::Encode<Sol> for CustomSelErr with (AbiEncodeDerive)
+
+msg Client1And2Msg {
+    #[selector = sol("roundtripAlloc()")]
+    RoundtripAlloc -> bool,
+    #[selector = sol("echoPacket((uint64,bool,address))")]
+    EchoPacket { v: Packet } -> Packet,
+    #[selector = sol("echoOuter((uint256,(uint64,bool,address),uint32))")]
+    EchoOuter { v: Outer } -> Outer,
+    #[selector = sol("echoDyn((uint256,string,bytes))")]
+    EchoDyn { v: DynBundle } -> DynBundle,
+    #[selector = sol("failEmpty()")]
+    FailEmpty,
+    #[selector = sol("failBalance(uint256,uint256)")]
+    FailBalance { available: u256, required: u256 },
+    #[selector = sol("failNested(uint32,uint64)")]
+    FailNested { code: u32, a: u64 },
+    #[selector = sol("failLong(uint256)")]
+    FailLong { code: u256 },
+    #[selector = sol("failDyn(uint256,string)")]
+    FailDyn { code: u256, reason: DynString },
+    #[selector = sol("failCustom(uint256)")]
+    FailCustom { reason: u256 },
+}
+
+pub contract Client1And2Contract {
+    recv Client1And2Msg {
+        RoundtripAlloc -> bool {
+            let u = Unit {}
+            let u_enc = encode_alloc<Sol, Unit>(u)
+            let _u_dec: Unit = decode_input(u_enc.span())
+
+            let p = Packet { a: 42, b: true, c: Address::new(0x1234) }
+            let p_enc = encode_alloc<Sol, Packet>(p)
+            let p_oracle = encode_alloc<Sol, oracle::Packet>(oracle::Packet { a: 42, b: true, c: Address::new(0x1234) })
+            let p_dec: Packet = decode_input(p_enc.span())
+
+            let o = Outer { head: 99, inner: Packet { a: 7, b: false, c: Address::new(0xbeef) }, tail: 11 }
+            let o_enc = encode_alloc<Sol, Outer>(o)
+            let o_oracle = encode_alloc<Sol, oracle::Outer>(oracle::Outer {
+                head: 99,
+                inner: oracle::Packet { a: 7, b: false, c: Address::new(0xbeef) },
+                tail: 11,
+            })
+            let o_dec: Outer = decode_input(o_enc.span())
+
+            p_enc.len() == p_oracle.len()
+                && p_dec.a == 42
+                && p_dec.b
+                && p_dec.c == Address::new(0x1234)
+                && o_enc.len() == o_oracle.len()
+                && o_dec.head == 99
+                && o_dec.inner.a == 7
+                && !o_dec.inner.b
+                && o_dec.inner.c == Address::new(0xbeef)
+                && o_dec.tail == 11
+        }
+
+        EchoPacket { v } -> Packet {
+            v
+        }
+
+        EchoOuter { v } -> Outer {
+            v
+        }
+
+        EchoDyn { v } -> DynBundle {
+            v
+        }
+
+        FailEmpty {} {
+            revert_error(EmptyErr {})
+        }
+
+        FailBalance { available, required } {
+            revert_error(InsufficientBalance { available, required })
+        }
+
+        FailNested { code, a } {
+            revert_error(NestedFailure {
+                code,
+                detail: Packet { a, b: true, c: Address::new(0x42) },
+            })
+        }
+
+        FailLong { code } {
+            revert_error(ExtremelyLongCustomRevertErrorNameExceedingThirtyTwoBytes { code })
+        }
+
+        FailDyn { code, reason } {
+            revert_error(DynFailure { code, reason })
+        }
+
+        FailCustom { reason } {
+            revert_error(CustomSelErr { reason })
+        }
+    }
+}
+"#;
+
+        let entries = abi_entries(code, "Client1And2Contract");
+        let error_names: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry["type"] == "error")
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect();
+        for expected in [
+            "EmptyErr",
+            "InsufficientBalance",
+            "NestedFailure",
+            "ExtremelyLongCustomRevertErrorNameExceedingThirtyTwoBytes",
+            "DynFailure",
+            "CustomSelErr",
+        ] {
+            assert!(
+                error_names.contains(&expected),
+                "missing error `{expected}` in ABI: {entries:?}"
+            );
+        }
+
+        let nested_err = entries
+            .iter()
+            .find(|entry| entry["type"] == "error" && entry["name"] == "NestedFailure")
+            .unwrap();
+        assert_eq!(nested_err["inputs"][0]["type"], "uint32");
+        assert_eq!(nested_err["inputs"][1]["type"], "tuple");
+        assert_eq!(nested_err["inputs"][1]["components"][0]["type"], "uint64");
+        assert_eq!(nested_err["inputs"][1]["components"][1]["type"], "bool");
+        assert_eq!(nested_err["inputs"][1]["components"][2]["type"], "address");
+
+        let harness =
+            FeContractHarness::compile("Client1And2Contract", code).expect("compile contract");
+        let mut instance = harness.deploy_instance().expect("deploy instance");
+        let opts = ExecutionOptions::default();
+
+        let roundtrip = instance
+            .call_function("roundtripAlloc()", &[], opts)
+            .expect("roundtripAlloc");
+        assert_eq!(
+            U256::from_be_slice(&roundtrip.return_data),
+            U256::from(1u64)
+        );
+
+        let packet_token = Token::Tuple(vec![
+            Token::Uint(EthU256::from(42u64)),
+            Token::Bool(true),
+            Token::Address(EthAddress::from_low_u64_be(0x1234)),
+        ]);
+        let packet_payload = encode(std::slice::from_ref(&packet_token));
+        let mut echo_packet_calldata =
+            ethers_core::utils::keccak256(b"echoPacket((uint64,bool,address))")[..4].to_vec();
+        echo_packet_calldata.extend_from_slice(&packet_payload);
+        let echoed_packet = instance
+            .call_raw(&echo_packet_calldata, opts)
+            .expect("echoPacket");
+        assert_eq!(echoed_packet.return_data, packet_payload);
+
+        let dyn_token = Token::Tuple(vec![
+            Token::Uint(EthU256::from(55u64)),
+            Token::String("hello fe".to_string()),
+            Token::Bytes(EthBytes::from(vec![0xde, 0xad, 0xbe, 0xef]).to_vec()),
+        ]);
+        let dyn_payload = encode(std::slice::from_ref(&dyn_token));
+        let mut echo_dyn_calldata =
+            ethers_core::utils::keccak256(b"echoDyn((uint256,string,bytes))")[..4].to_vec();
+        echo_dyn_calldata.extend_from_slice(&dyn_payload);
+        let echoed_dyn = instance
+            .call_raw(&echo_dyn_calldata, opts)
+            .expect("echoDyn");
+        assert_eq!(echoed_dyn.return_data, dyn_payload);
+
+        let err = instance
+            .call_function(
+                "failBalance(uint256,uint256)",
+                &[
+                    Token::Uint(EthU256::from(10u64)),
+                    Token::Uint(EthU256::from(25u64)),
+                ],
+                opts,
+            )
+            .expect_err("failBalance should revert");
+        let HarnessError::Revert(revert_data) = err else {
+            panic!("expected Revert, got {err:?}");
+        };
+        let expected_sel = &ethers_core::utils::keccak256(b"InsufficientBalance(uint256,uint256)")[..4];
+        assert_eq!(&revert_data.0[..4], expected_sel);
+        assert_eq!(
+            &revert_data.0[4..],
+            &encode(&[
+                Token::Uint(EthU256::from(10u64)),
+                Token::Uint(EthU256::from(25u64)),
+            ])[..]
+        );
+
+        let custom_err = instance
+            .call_function(
+                "failCustom(uint256)",
+                &[Token::Uint(EthU256::from(0x77u64))],
+                opts,
+            )
+            .expect_err("failCustom should revert");
+        let HarnessError::Revert(custom_revert) = custom_err else {
+            panic!("expected Revert, got {custom_err:?}");
+        };
+        assert_eq!(&custom_revert.0[..4], &[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(
+            &custom_revert.0[4..],
+            &encode(&[Token::Uint(EthU256::from(0x77u64))])[..]
+        );
     }
 }

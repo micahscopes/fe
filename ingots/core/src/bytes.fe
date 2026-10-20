@@ -36,6 +36,12 @@ impl<const N: usize> PackedBytes<N> {
         out.push_array(bytes)
         out.finish()
     }
+    #[inline(always)]
+    pub const fn pack<B: AsBytes>(_ value: B) -> Self {
+        var out = ByteWriter<N>::new()
+        out.append(value)
+        out.finish()
+    }
     pub const fn to_array(self) -> [u8; N] {
         var out: [u8; N] = [0; N]
         var i: usize = 0

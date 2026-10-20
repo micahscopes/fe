@@ -54,6 +54,63 @@ impl<'db> Expr<'db> {
                         );
                         Self::Cast(value, crate::hir_def::Partial::Present(ty))
                     }
+                    Some(FrozenHoleValue::Record(record_ref)) => {
+                        let db = ctxt.f_ctxt.db();
+                        let item = ctxt.f_ctxt.resolve_record_item(&record_ref);
+                        let name = match (item, record_ref.variant_index) {
+                            (ItemKind::Enum(e), Some(v)) => e
+                                .variants_list(db)
+                                .data(db)
+                                .get(v)
+                                .and_then(|variant| variant.name.to_opt())
+                                .map(|ident| ident.data(db).to_string()),
+                            _ => item.name(db).map(|ident| ident.data(db).to_string()),
+                        };
+                        let Some(name) = name else {
+                            ctxt.f_ctxt.record_generation_error(
+                                hole.syntax().text_range(),
+                                "invalid record splice in expression position",
+                            );
+                            return ctxt.push_invalid_expr(HirOrigin::raw(&ast));
+                        };
+                        let chunks = super::signature_name_chunks(&name);
+                        if let [single] = chunks.as_slice() {
+                            Self::Lit(LitKind::String(crate::hir_def::StringId::new(
+                                db,
+                                (*single).to_string(),
+                            )))
+                        } else {
+                            let mut elems: Vec<_> = chunks
+                                .into_iter()
+                                .map(|chunk| {
+                                    ctxt.push_expr(
+                                        Self::Lit(LitKind::String(crate::hir_def::StringId::new(
+                                            db,
+                                            chunk.to_string(),
+                                        ))),
+                                        HirOrigin::raw(&ast),
+                                    )
+                                })
+                                .collect();
+                            const MAX_TUPLE_ARITY: usize = 16;
+                            while elems.len() > MAX_TUPLE_ARITY {
+                                elems = elems
+                                    .chunks(MAX_TUPLE_ARITY)
+                                    .map(|chunk| {
+                                        if let [single] = chunk {
+                                            *single
+                                        } else {
+                                            ctxt.push_expr(
+                                                Self::Tuple(chunk.to_vec()),
+                                                HirOrigin::raw(&ast),
+                                            )
+                                        }
+                                    })
+                                    .collect();
+                            }
+                            Self::Tuple(elems)
+                        }
+                    }
                     Some(FrozenHoleValue::Code(code)) => {
                         return Self::lower_code(ctxt, &code, &ast);
                     }
@@ -189,15 +246,12 @@ impl<'db> Expr<'db> {
 
             ast::ExprKind::RecordInit(record_init) => {
                 let path = PathId::lower_ast_partial(ctxt.f_ctxt, record_init.path());
-                let fields = record_init
-                    .fields()
-                    .map(|fields| {
-                        fields
-                            .into_iter()
-                            .map(|field| Field::lower_ast(ctxt, field))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let mut fields = Vec::new();
+                if let Some(ast_fields) = record_init.fields() {
+                    for field in ast_fields {
+                        Field::lower_ast_into(ctxt, field, &mut fields);
+                    }
+                }
                 Self::RecordInit(path, fields)
             }
 
@@ -705,7 +759,50 @@ impl<'db> CallArg<'db> {
 }
 
 impl<'db> Field<'db> {
-    fn lower_ast(ctxt: &mut BodyCtxt<'_, 'db>, ast: ast::RecordField) -> Self {
+    fn lower_ast_into(ctxt: &mut BodyCtxt<'_, 'db>, ast: ast::RecordField, out: &mut Vec<Self>) {
+        if ast.label_hole().is_none()
+            && ast.label().is_none()
+            && let Some(expr) = ast.expr()
+            && let ast::ExprKind::QuoteHole(hole) = expr.kind()
+            && let Some(common::generation::FrozenHoleValue::Code(
+                common::generation::FrozenCode::Template {
+                    kind: common::generation::FrozenCodeKind::Expr,
+                    quote_file,
+                    quote_range,
+                    producer_module,
+                    producer_block,
+                    holes,
+                },
+            )) = ctxt.f_ctxt.current_hole(hole.syntax().text_range())
+        {
+            let (quote, frame) = ctxt.f_ctxt.resolve_quote_template(
+                &quote_file,
+                quote_range,
+                producer_module,
+                producer_block,
+                true,
+                holes,
+            );
+            if let Some(block) = quote.body() {
+                let stmts = block.stmts().collect::<Vec<_>>();
+                if stmts.len() == 1
+                    && block.items().next().is_none()
+                    && let ast::StmtKind::Expr(expr_stmt) = stmts[0].kind()
+                    && let Some(inner_expr) = expr_stmt.expr()
+                    && let ast::ExprKind::RecordInit(record_init) = inner_expr.kind()
+                {
+                    ctxt.validate_frame_open_names(&frame);
+                    ctxt.f_ctxt.quote_frames.push(frame);
+                    if let Some(fields) = record_init.fields() {
+                        for field in fields {
+                            Self::lower_ast_into(ctxt, field, out);
+                        }
+                    }
+                    ctxt.f_ctxt.quote_frames.pop();
+                    return;
+                }
+            }
+        }
         let label = if let Some(hole) = ast.label_hole() {
             ctxt.f_ctxt
                 .lower_field_hole_ident(hole.syntax().text_range())
@@ -715,6 +812,6 @@ impl<'db> Field<'db> {
                 .map(|label| IdentId::lower_token(ctxt.f_ctxt, label))
         };
         let expr = Expr::push_to_body_opt(ctxt, ast.expr());
-        Self { label, expr }
+        out.push(Self { label, expr });
     }
 }

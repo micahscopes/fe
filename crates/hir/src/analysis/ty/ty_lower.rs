@@ -656,16 +656,40 @@ fn lower_constraint_term<'db>(
     else {
         return None;
     };
-    if path.generic_args(db).data(db).is_empty() && !path.generic_args(db).is_given(db) {
-        let constructor = if def.params(db).len() == 1
-            && def.self_param(db).is_star_kind(db)
-            && def.assoc_types(db).next().is_none()
-            && def.assoc_consts(db).next().is_none()
-        {
+    let given_args = path.generic_args(db).data(db);
+    if path.generic_args(db).is_empty(db) && !path.generic_args(db).is_given(db) {
+        let constructor = if def.params(db).len() == 1 && def.self_param(db).is_star_kind(db) {
             TyId::new(db, TyData::TyBase(TyBase::TraitCtor(def)))
         } else {
             TyId::invalid(db, InvalidCause::NotFullyApplied)
         };
+        minter.record_resolution(
+            path,
+            &crate::analysis::name_resolution::PathRes::Ty(constructor),
+        );
+        return Some(constructor);
+    }
+    if given_args.len() + 1 == def.params(db).len()
+        && def.self_param(db).is_star_kind(db)
+        && !given_args
+            .iter()
+            .any(|arg| matches!(arg, GenericArg::AssocType(_)))
+    {
+        let mut constructor = TyId::new(db, TyData::TyBase(TyBase::TraitCtor(def)));
+        for arg in given_args {
+            let arg_ty = match arg {
+                GenericArg::Type(ty_arg) => {
+                    lower_opt_hir_ty_impl(db, ty_arg.ty, scope, assumptions, minter)
+                }
+                GenericArg::Const(const_arg) => {
+                    let const_ty =
+                        lower_opt_const_body(db, const_arg.value, scope, assumptions, minter);
+                    TyId::const_ty(db, const_ty)
+                }
+                GenericArg::AssocType(_) => unreachable!(),
+            };
+            constructor = TyId::app(db, constructor, arg_ty);
+        }
         minter.record_resolution(
             path,
             &crate::analysis::name_resolution::PathRes::Ty(constructor),

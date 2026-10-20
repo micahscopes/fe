@@ -1297,18 +1297,10 @@ pub fn native_derive_provider<'db>(
     // No establishment receipt or old-database proof enters the output template.
     crate::analysis::ty::permits::establishment_for_goal(db, request, goal)
         .map_err(|cause| format!("canonical root establishment failed: {cause}"))?;
-    if goal.args(db).len() != 1
-        || !goal.assoc_type_bindings(db).is_empty()
-        || !goal.def(db).types(db).is_empty()
-        || !goal.def(db).consts(db).is_empty()
-    {
+    if goal.args(db).is_empty() || !goal.assoc_type_bindings(db).is_empty() {
         return Err(
-            "bounded native derive requires an unparameterized goal without associated equalities"
-                .into(),
+            "bounded native derive requires a goal without associated equalities".into(),
         );
-    }
-    if goal.def(db).ingot(db) != request.top_mod(db).ingot(db) {
-        return Err("library/canonical goal establishment is pending the permits owner API".into());
     }
     let input = RecordInput::for_authored_type(db, goal.args(db)[0])
         .map_err(|cause| format!("native derive requires a concrete authored record: {cause:?}"))?;
@@ -1331,7 +1323,10 @@ pub fn native_derive_provider<'db>(
     .map_err(NativeDeriveProviderError::Target)?;
     let derive = resolve_core_trait(db, request.scope(), &["derive", "Derive"])
         .ok_or("missing canonical Derive protocol")?;
-    let constructor = TyId::new(db, TyData::TyBase(TyBase::TraitCtor(goal.def(db))));
+    let mut constructor = TyId::new(db, TyData::TyBase(TyBase::TraitCtor(goal.def(db))));
+    for &arg in &goal.args(db)[1..] {
+        constructor = TyId::app(db, constructor, arg);
+    }
     let inst = TraitInstId::new_simple(db, derive, vec![provider_ty, constructor]);
     let selected = chosen_method(
         db,
@@ -1399,23 +1394,32 @@ pub fn authored_derive_request<'db>(
         .iter()
         .copied()
         .find(|implementation| {
+            if implementation.scope().data(db).publication_parent.is_some() {
+                return false;
+            }
             let HirOrigin::Raw(ptr) = implementation.origin(db) else {
                 return false;
             };
-            ptr.to_node(root.syntax()).syntax().text_range() == ast.syntax().text_range()
+            ptr.try_to_node(root.syntax())
+                .is_some_and(|node| node.syntax().text_range() == ast.syntax().text_range())
         })
 }
 
 /// A header-only request is not an implementation before its output plan exists.
-pub(crate) fn is_unfulfilled_derive_request(
-    db: &dyn HirAnalysisDb,
-    request: crate::hir_def::ImplTrait<'_>,
+pub(crate) fn is_unfulfilled_derive_request<'db>(
+    db: &'db dyn HirAnalysisDb,
+    request: crate::hir_def::ImplTrait<'db>,
 ) -> bool {
+    if request.scope().data(db).publication_parent.is_some() {
+        return false;
+    }
     let HirOrigin::Raw(ptr) = request.origin(db) else {
         return false;
     };
     let root = crate::core::lower::top_mod_ast(db, request.top_mod(db));
-    let ast = ptr.to_node(root.syntax());
+    let Some(ast) = ptr.try_to_node(root.syntax()) else {
+        return false;
+    };
     ast.derive_provider().is_some()
         && !db.generation_inputs().requests(db).iter().any(|plan| {
             plan.request_impl == Some(ast.syntax().text_range())

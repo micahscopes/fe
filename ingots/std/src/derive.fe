@@ -1,5 +1,9 @@
-use core::abi::AbiSize
-use core::meta::{Code, Expr, Field, Record, field, field_count, field_type}
+use core::AsBytes
+use core::abi::{AbiDecoder, AbiFrame, AbiSize, AbiSpan, ByteInput, Decode, Encode}
+use core::derive::Derive
+use core::error::ErrorVariant
+use core::meta::{Code, Expr, Field, Item, Record, Where, empty, field, field_count, field_type}
+use ingot::abi::{Sol, SolCompat}
 
 /// One step of a fold over the fields of a record, written as code.
 ///
@@ -31,6 +35,85 @@ pub const fn abi_is_dynamic<T: AbiSize>() -> bool {
     <T as AbiSize>::IS_DYNAMIC
 }
 
+/// Type-application carrier for per-field Solidity ABI operations inside quotes,
+/// separating the explicit field type `T` from method-level generic parameters
+/// (`D`, `I`) that are inferred from value arguments.
+pub struct SolField<T> {}
+
+impl<T> SolField<T> {
+    pub const fn sol_type_len() -> usize
+        where T: SolCompat
+    {
+        <T::S as AsBytes>::N
+    }
+
+    #[inline(always)]
+    pub fn record_field_end<I: ByteInput>(
+        _ input: I,
+        _ frame: u256,
+        _ head_pos: u256,
+        _ input_len: u256,
+        _ end: u256,
+    ) -> u256
+        where T: AbiSpan<Sol> + AbiSize
+    {
+        core::abi::abi_record_field_end<Sol, T, I>(input, frame, head_pos, input_len, end)
+    }
+
+    #[inline(always)]
+    pub fn encode(
+        _ value: own T,
+        _ out: AbiFrame,
+        head_pos: u256,
+        tails: own AbiFrame,
+    ) -> AbiFrame
+        where T: Encode<Sol> + AbiSize
+    {
+        core::abi::encode_field<Sol, T>(value, out, head_pos: head_pos, tails: tails)
+    }
+
+    #[inline(always)]
+    pub fn decode_payload<D: AbiDecoder<Sol>, I: ByteInput>(_ d: mut D, _ input: I) -> T
+        where T: Decode<Sol> + AbiSize
+    {
+        core::abi::decode_field<Sol, T, D, I>(mut d, input)
+    }
+
+    #[inline(always)]
+    pub fn decode_from_prechecked_head<I: ByteInput>(
+        _ input: I,
+        base: u256,
+        head_pos: u256,
+        input_len: u256,
+    ) -> T
+        where T: Decode<Sol> + AbiSize
+    {
+        core::abi::decode_field_from_prechecked_head<Sol, T, I>(
+            input,
+            base: base,
+            head_pos: head_pos,
+            input_len: input_len,
+        )
+    }
+
+    #[inline(always)]
+    pub fn decode_msg_field_from<I: ByteInput>(
+        _ input: I,
+        base: u256,
+        head_pos: u256,
+        input_len: u256,
+    ) -> T
+        where T: Decode<Sol> + AbiSize
+    {
+        core::abi::decode_msg_field_from<Sol, T, I>(
+            input,
+            base: base,
+            head_pos: head_pos,
+            input_len: input_len,
+        )
+    }
+}
+
 /// Sum of the fields' head sizes: the head size of an ABI record. A dynamic
 /// field counts as the one word that points to its tail.
 pub struct AbiHeadSize {}
@@ -53,5 +136,409 @@ impl FieldStep for AbiIsDynamic {
     const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
         let ty = field_type(field)
         quote { ${acc} || ingot::derive::abi_is_dynamic<${ty}>() }
+    }
+}
+
+/// Sum of the fields' dynamic tail payload sizes on `self`.
+pub struct AbiPayloadSize {}
+impl FieldStep for AbiPayloadSize {
+    const fn unit() -> Code<Expr> {
+        quote { 0 }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote { ${acc} + core::abi::dynamic_payload_size<${ty}>(self.${field}) }
+    }
+}
+
+/// Folds each field's payload end into `end` while advancing `head_pos`.
+pub struct AbiSpanStep {}
+impl FieldStep for AbiSpanStep {
+    const fn unit() -> Code<Expr> {
+        quote { () }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote(input, pos, head_pos, input_len, end) {
+            {
+                ${acc}
+                end = ingot::derive::SolField<${ty}>::record_field_end(
+                    input,
+                    pos,
+                    head_pos,
+                    input_len,
+                    end,
+                )
+                head_pos += core::abi::abi_field_head_size<${ty}>()
+            }
+        }
+    }
+}
+
+/// Encodes each field of `self` into `out` and `tails` while advancing `head_pos`.
+pub struct AbiEncodeStep {}
+impl FieldStep for AbiEncodeStep {
+    const fn unit() -> Code<Expr> {
+        quote { () }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote(out, head_pos, tails) {
+            {
+                ${acc}
+                tails = ingot::derive::SolField<${ty}>::encode(
+                    self.${field},
+                    out,
+                    head_pos: head_pos,
+                    tails: tails,
+                )
+                head_pos += core::abi::abi_field_head_size<${ty}>()
+            }
+        }
+    }
+}
+
+/// Decodes each field of `Self` in declaration order through `AbiDecoder<Sol>`.
+pub struct AbiDecodePayloadStep {}
+impl FieldStep for AbiDecodePayloadStep {
+    const fn unit() -> Code<Expr> {
+        quote { Self {} }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote(d, input) {
+            Self {
+                ${acc},
+                ${field}: ingot::derive::SolField<${ty}>::decode_payload(mut d, input),
+            }
+        }
+    }
+}
+
+/// Decodes each field of `Self` from a prechecked head frame while advancing `head_pos`.
+pub struct AbiDecodePrecheckedStep {}
+impl FieldStep for AbiDecodePrecheckedStep {
+    const fn unit() -> Code<Expr> {
+        quote { Self {} }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote(input, pos, head_pos, input_len) {
+            Self {
+                ${acc},
+                ${field}: {
+                    let field_head = head_pos
+                    head_pos += core::abi::abi_field_head_size<${ty}>()
+                    ingot::derive::SolField<${ty}>::decode_from_prechecked_head(
+                        input,
+                        base: pos,
+                        head_pos: field_head,
+                        input_len: input_len,
+                    )
+                },
+            }
+        }
+    }
+}
+
+/// Byte length of the Solidity tuple signature `(F0,F1,...)` for a non-empty record.
+pub struct SolTypeLen {}
+impl FieldStep for SolTypeLen {
+    const fn unit() -> Code<Expr> {
+        quote { 1 }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote { ${acc} + 1 + ingot::derive::SolField<${ty}>::sol_type_len() }
+    }
+}
+
+/// Expression computing the byte length of `record`'s Solidity tuple type string.
+pub const fn sol_type_len_expr(_ record: Record) -> Code<Expr> {
+    if field_count(record) == 0 {
+        quote { 2 }
+    } else {
+        fold_fields<SolTypeLen>(record)
+    }
+}
+
+/// Nested tuple expression `("(", F0::SOL_TYPE, ",", ..., ")")` implementing `AsBytes`.
+pub const fn sol_tuple_type(_ record: Record) -> Code<Expr> {
+    let n = field_count(record)
+    if n == 0 {
+        return quote { "()" }
+    }
+    let ty0 = field_type(field(record, 0))
+    var acc: Code<Expr> = quote { ("(", <${ty0} as ingot::abi::SolCompat>::SOL_TYPE) }
+    var i: usize = 1
+    while i < n {
+        let ty = field_type(field(record, i))
+        acc = quote { (${acc}, ",", <${ty} as ingot::abi::SolCompat>::SOL_TYPE) }
+        i += 1
+    }
+    quote { (${acc}, ")") }
+}
+
+/// `where F0: SolCompat, F1: SolCompat, ...` over `record`'s field types.
+pub const fn sol_compat_bounds(_ record: Record) -> Code<Where> {
+    var bounds = empty<Where>()
+    var i: usize = 0
+    let n = field_count(record)
+    while i < n {
+        let ty = field_type(field(record, i))
+        bounds = quote { where ${bounds}, ${ty}: ingot::abi::SolCompat }
+        i += 1
+    }
+    bounds
+}
+
+/// Generates `impl core::abi::AbiSize for ${record}`.
+pub const fn abi_size(_ record: Record) -> Code<Item> {
+    let head = fold_fields<AbiHeadSize>(record)
+    let dynamic = fold_fields<AbiIsDynamic>(record)
+    let dyn_payload = fold_fields<AbiPayloadSize>(record)
+    quote {
+        impl core::abi::AbiSize for ${record} {
+            const HEAD_SIZE: u256 = ${head}
+            const IS_DYNAMIC: bool = ${dynamic}
+
+            fn payload_size(self) -> u256 {
+                <Self as core::abi::AbiSize>::HEAD_SIZE + ${dyn_payload}
+            }
+        }
+    }
+}
+
+/// Generates `impl core::abi::AbiSpan<std::abi::Sol> for ${record}`.
+pub const fn abi_span(_ record: Record) -> Code<Item> {
+    let steps = fold_fields<AbiSpanStep>(record)
+    quote(input, pos, head_pos, input_len, end) {
+        impl core::abi::AbiSpan<ingot::abi::Sol> for ${record} {
+            fn payload_end<I: core::abi::ByteInput>(_ input: I, base: u256, pos: u256) -> u256 {
+                Self::payload_end_with_input_len(input, base: base, pos: pos, input_len: input.len())
+            }
+
+            fn payload_end_with_input_len<I: core::abi::ByteInput>(
+                _ input: I,
+                base: u256,
+                pos: u256,
+                input_len: u256,
+            ) -> u256 {
+                let _ = base
+                var end: u256 = core::abi::checked_frame_end<ingot::abi::Sol>(
+                    pos,
+                    <Self as core::abi::AbiSize>::HEAD_SIZE,
+                    input_len,
+                )
+                var head_pos: u256 = pos
+                let _ = head_pos
+                ${steps}
+                end
+            }
+        }
+    }
+}
+
+/// Generates `impl core::abi::Encode<std::abi::Sol> for ${record}`.
+pub const fn abi_encode(_ record: Record) -> Code<Item> {
+    let steps = fold_fields<AbiEncodeStep>(record)
+    quote(out, head_pos, tails) {
+        impl core::abi::Encode<ingot::abi::Sol> for ${record} {
+            fn encode(own self, _ out: core::abi::AbiFrame) {
+                var tails = out.tail(<Self as core::abi::AbiSize>::HEAD_SIZE)
+                var head_pos: u256 = 0
+                let _ = tails
+                let _ = head_pos
+                ${steps}
+            }
+        }
+    }
+}
+
+/// Generates `impl core::abi::Decode<std::abi::Sol> for ${record}`.
+pub const fn abi_decode(_ record: Record) -> Code<Item> {
+    let decode_payload_body = fold_fields<AbiDecodePayloadStep>(record)
+    let decode_prechecked_body = fold_fields<AbiDecodePrecheckedStep>(record)
+    quote(d, input, pos, head_pos, input_len) {
+        impl core::abi::Decode<ingot::abi::Sol> for ${record} {
+            fn decode_payload<D: core::abi::AbiDecoder<ingot::abi::Sol>, I: core::abi::ByteInput>(
+                _ d: mut D,
+                _ input: I,
+            ) -> Self {
+                ${decode_payload_body}
+            }
+
+            fn decode_from_prechecked_head<I: core::abi::ByteInput>(
+                _ input: I,
+                _ pos: u256,
+                _ input_len: u256,
+            ) -> Self {
+                var head_pos: u256 = pos
+                let _ = head_pos
+                ${decode_prechecked_body}
+            }
+
+            fn decode_from<I: core::abi::ByteInput>(_ input: I, _ pos: u256) -> Self {
+                let input_len = input.len()
+                Self::decode_from_bounded(input, pos, input_len)
+            }
+
+            fn decode_from_bounded<I: core::abi::ByteInput>(
+                _ input: I,
+                _ pos: u256,
+                _ input_len: u256,
+            ) -> Self {
+                core::abi::checked_frame_end<ingot::abi::Sol>(
+                    pos,
+                    <Self as core::abi::AbiSize>::HEAD_SIZE,
+                    input_len,
+                )
+                Self::decode_from_prechecked_head(input, pos, input_len)
+            }
+        }
+    }
+}
+
+/// Generates `impl std::abi::SolCompat for ${record}`.
+pub const fn sol_compat(_ record: Record) -> Code<Item> {
+    let bounds = sol_compat_bounds(record)
+    let len = sol_type_len_expr(record)
+    let tuple_ty = sol_tuple_type(record)
+    quote {
+        impl ingot::abi::SolCompat for ${record}
+        where ${bounds}
+        {
+            type S = core::PackedBytes<{ ${len} }>
+            const SOL_TYPE: Self::S = core::PackedBytes::pack(${tuple_ty})
+        }
+    }
+}
+
+/// Client 2 all-in-one Fe ABI struct generator (`#[abi]` equivalent):
+/// generates `AbiSize`, `AbiSpan<Sol>`, `Encode<Sol>`, `Decode<Sol>`, and `SolCompat`.
+pub const fn abi_struct(_ record: Record) -> Code<Item> {
+    let size_impl = abi_size(record)
+    let span_impl = abi_span(record)
+    let encode_impl = abi_encode(record)
+    let decode_impl = abi_decode(record)
+    let compat_impl = sol_compat(record)
+    quote {
+        ${size_impl}
+        ${span_impl}
+        ${encode_impl}
+        ${decode_impl}
+        ${compat_impl}
+    }
+}
+
+/// Alias for `abi_struct`.
+pub const fn abi(_ record: Record) -> Code<Item> {
+    abi_struct(record)
+}
+
+/// Explicit `Derive<AbiSize>` provider.
+pub struct AbiSizeDerive {}
+impl Derive<AbiSize> for AbiSizeDerive {
+    const fn derive(_ input: Record) -> Code<Item> {
+        abi_size(input)
+    }
+}
+
+/// Explicit `Derive<AbiSpan<Sol>>` provider.
+pub struct AbiSpanDerive {}
+impl Derive<AbiSpan<Sol>> for AbiSpanDerive {
+    const fn derive(_ input: Record) -> Code<Item> {
+        abi_span(input)
+    }
+}
+
+/// Explicit `Derive<Encode<Sol>>` provider.
+pub struct AbiEncodeDerive {}
+impl Derive<Encode<Sol>> for AbiEncodeDerive {
+    const fn derive(_ input: Record) -> Code<Item> {
+        abi_encode(input)
+    }
+}
+
+/// Explicit `Derive<Decode<Sol>>` provider.
+pub struct AbiDecodeDerive {}
+impl Derive<Decode<Sol>> for AbiDecodeDerive {
+    const fn derive(_ input: Record) -> Code<Item> {
+        abi_decode(input)
+    }
+}
+
+/// Explicit `Derive<SolCompat>` provider.
+pub struct SolCompatDerive {}
+impl Derive<SolCompat> for SolCompatDerive {
+    const fn derive(_ input: Record) -> Code<Item> {
+        sol_compat(input)
+    }
+}
+
+/// Generates `impl core::error::ErrorVariant<std::abi::Sol> for ${record}`
+/// with `SELECTOR` computed from `${record}`'s name and field `SolCompat::SOL_TYPE`s.
+pub const fn error_variant(_ record: Record) -> Code<Item> {
+    let tuple_ty = sol_tuple_type(record)
+    quote {
+        impl core::error::ErrorVariant<ingot::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ingot::abi::sol((${record}, ${tuple_ty}))
+        }
+    }
+}
+
+/// Generates `impl core::error::ErrorVariant<std::abi::Sol> for ${record}` with an explicit selector.
+pub const fn error_variant_with_selector(_ record: Record, _ selector: u32) -> Code<Item> {
+    quote {
+        impl core::error::ErrorVariant<ingot::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ${selector}
+        }
+    }
+}
+
+/// Client 1 all-in-one Fe Error struct generator with an explicit selector:
+/// generates `ErrorVariant<Sol>`, `AbiSize`, and `Encode<Sol>`.
+pub const fn error_struct_with_selector(_ record: Record, _ selector: u32) -> Code<Item> {
+    let err_impl = error_variant_with_selector(record, selector)
+    let size_impl = abi_size(record)
+    let encode_impl = abi_encode(record)
+    quote {
+        ${err_impl}
+        ${size_impl}
+        ${encode_impl}
+    }
+}
+
+/// Client 1 all-in-one Fe Error struct generator (`#[error]` equivalent):
+/// generates `ErrorVariant<Sol>`, `AbiSize`, and `Encode<Sol>`.
+pub const fn error_struct(_ record: Record) -> Code<Item> {
+    let err_impl = error_variant(record)
+    let size_impl = abi_size(record)
+    let encode_impl = abi_encode(record)
+    quote {
+        ${err_impl}
+        ${size_impl}
+        ${encode_impl}
+    }
+}
+
+/// Alias for `error_struct`.
+pub const fn error(_ record: Record) -> Code<Item> {
+    error_struct(record)
+}
+
+/// Explicit `Derive<ErrorVariant<Sol>>` provider computing `SELECTOR` from the record name and field types.
+pub struct SolError {}
+impl Derive<ErrorVariant<Sol>> for SolError {
+    const fn derive(_ input: Record) -> Code<Item> {
+        error_variant(input)
+    }
+}
+
+/// Explicit `Derive<ErrorVariant<Sol>>` provider with an explicit `SELECTOR`.
+pub struct SolErrorSelector<const SELECTOR: u32> {}
+impl<const SELECTOR: u32> Derive<ErrorVariant<Sol>> for SolErrorSelector<SELECTOR> {
+    const fn derive(_ input: Record) -> Code<Item> {
+        error_variant_with_selector(input, SELECTOR)
     }
 }
