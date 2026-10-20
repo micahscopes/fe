@@ -26,6 +26,7 @@ pub use abi_struct::{AbiStructDiagnostic, AbiStructDiagnosticKind};
 pub use attr::{AttrMisuseError, AttrMisuseErrorKind};
 pub use error::{ErrorDiagnostic, ErrorDiagnosticKind};
 pub use event::{EventError, EventErrorKind};
+pub use generated::GenerationLoweringError;
 pub use item::{FieldModifierError, FieldModifierErrorKind, MsgDiagnostic, MsgDiagnosticKind};
 pub use parse::parse_file_impl;
 
@@ -123,6 +124,16 @@ pub fn scope_graph<'db>(
     scope_graph_impl(db, top_mod)
 }
 
+pub fn generation_lowering_errors<'db>(
+    db: &'db dyn LowerHirDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<GenerationLoweringError> {
+    scope_graph_impl::accumulated::<GenerationLoweringError>(db, top_mod)
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
 /// Returns the ingot module tree of the given ingot.
 pub fn module_tree<'db>(db: &'db dyn LowerHirDb, ingot: Ingot<'db>) -> &'db ModuleTree<'db> {
     module_tree_impl(db, ingot)
@@ -189,7 +200,7 @@ pub(super) struct FileLowerCtxt<'db> {
     next_impl_idx: u32,
     next_impl_trait_idx: u32,
     next_static_assert_idx: u32,
-    generation_holes: Vec<(parser::TextRange, common::generation::FrozenScalar)>,
+    pub(super) quote_frames: Vec<generated::ActiveQuoteFrame<'db>>,
 }
 
 impl<'db> FileLowerCtxt<'db> {
@@ -199,8 +210,191 @@ impl<'db> FileLowerCtxt<'db> {
             next_impl_idx: 0,
             next_impl_trait_idx: 0,
             next_static_assert_idx: 0,
-            generation_holes: Vec::new(),
+            quote_frames: Vec::new(),
         }
+    }
+
+    pub(super) fn current_hole(
+        &self,
+        range: parser::TextRange,
+    ) -> Option<common::generation::FrozenHoleValue> {
+        self.quote_frames
+            .last()?
+            .holes
+            .iter()
+            .find(|(r, _)| *r == range)
+            .map(|(_, value)| value.clone())
+    }
+
+    pub(super) fn current_quote_ingot(&self) -> Option<common::ingot::Ingot<'db>> {
+        let frame = self.quote_frames.last()?;
+        let db = self.db();
+        let quote_ingot = frame.quote_top_mod.ingot(db);
+        (quote_ingot != self.top_mod().ingot(db)).then_some(quote_ingot)
+    }
+
+    pub(super) fn resolve_quote_template(
+        &self,
+        quote_file: &url::Url,
+        quote_range: parser::TextRange,
+        holes: Vec<common::generation::FrozenHoleValue>,
+    ) -> (ast::QuoteExpr, generated::ActiveQuoteFrame<'db>) {
+        let db = self.db();
+        let file = db
+            .workspace()
+            .get(db, quote_file)
+            .expect("validated frozen quote file exists in workspace");
+        let quote_top_mod = map_file_to_mod_impl(db, file);
+        let root = top_mod_ast(db, quote_top_mod);
+        let quote = root
+            .syntax()
+            .descendants()
+            .filter_map(ast::QuoteExpr::cast)
+            .find(|quote| quote.syntax().text_range() == quote_range)
+            .expect("validated frozen quote belongs to unchanged input source");
+        let holes = crate::core::meta::quote_holes(&quote)
+            .expect("checked frozen quote retains valid bounded syntax")
+            .into_iter()
+            .map(|hole| hole.syntax().text_range())
+            .zip(holes)
+            .collect();
+        (
+            quote,
+            generated::ActiveQuoteFrame {
+                quote_top_mod,
+                holes,
+            },
+        )
+    }
+
+    pub(super) fn resolve_record_item(
+        &self,
+        record_ref: &common::generation::FrozenRecordRef,
+    ) -> ItemKind<'db> {
+        let db = self.db();
+        let file = db
+            .workspace()
+            .get(db, &record_ref.target_file)
+            .expect("validated frozen record file exists in workspace");
+        let record_top_mod = map_file_to_mod_impl(db, file);
+        if record_top_mod == self.top_mod() {
+            return self
+                .builder
+                .find_item_by_range(record_ref.target_range)
+                .expect("validated authored record item exists in module");
+        }
+        let root = top_mod_ast(db, record_top_mod);
+        record_top_mod
+            .scope_graph(db)
+            .scopes
+            .keys()
+            .find_map(|scope| match *scope {
+                crate::hir_def::scope_graph::ScopeId::Item(item @ ItemKind::Struct(s)) => {
+                    let HirOrigin::Raw(ptr) = s.origin(db) else {
+                        return None;
+                    };
+                    (ptr.to_node(root.syntax()).syntax().text_range() == record_ref.target_range)
+                        .then_some(item)
+                }
+                crate::hir_def::scope_graph::ScopeId::Item(item @ ItemKind::Enum(e)) => {
+                    let HirOrigin::Raw(ptr) = e.origin(db) else {
+                        return None;
+                    };
+                    (ptr.to_node(root.syntax()).syntax().text_range() == record_ref.target_range)
+                        .then_some(item)
+                }
+                _ => None,
+            })
+            .expect("validated authored record item exists in target module")
+    }
+
+    pub(super) fn lower_field_hole_ident(&self, range: parser::TextRange) -> Partial<IdentId<'db>> {
+        let Some(common::generation::FrozenHoleValue::Field(field_ref)) = self.current_hole(range)
+        else {
+            return Partial::Absent;
+        };
+        let db = self.db();
+        match (
+            self.resolve_record_item(&field_ref.record),
+            field_ref.record.variant_index,
+        ) {
+            (ItemKind::Struct(s), None) => s
+                .fields(db)
+                .data(db)
+                .get(field_ref.index)
+                .map_or(Partial::Absent, |f| f.name),
+            (ItemKind::Enum(e), Some(v)) => {
+                match e.variants_list(db).data(db).get(v).map(|v| &v.kind) {
+                    Some(crate::hir_def::VariantKind::Record(fields)) => fields
+                        .data(db)
+                        .get(field_ref.index)
+                        .map_or(Partial::Absent, |f| f.name),
+                    Some(crate::hir_def::VariantKind::Tuple(_)) => {
+                        Partial::Present(IdentId::new(db, field_ref.index.to_string()))
+                    }
+                    _ => Partial::Absent,
+                }
+            }
+            _ => Partial::Absent,
+        }
+    }
+
+    pub(super) fn lower_field_hole_index(
+        &self,
+        range: parser::TextRange,
+    ) -> Partial<crate::hir_def::expr::FieldIndex<'db>> {
+        use crate::hir_def::expr::FieldIndex;
+        let Some(common::generation::FrozenHoleValue::Field(field_ref)) = self.current_hole(range)
+        else {
+            return Partial::Absent;
+        };
+        let db = self.db();
+        match (
+            self.resolve_record_item(&field_ref.record),
+            field_ref.record.variant_index,
+        ) {
+            (ItemKind::Struct(s), None) => s
+                .fields(db)
+                .data(db)
+                .get(field_ref.index)
+                .and_then(|f| f.name.to_opt())
+                .map(FieldIndex::Ident)
+                .into(),
+            (ItemKind::Enum(e), Some(v)) => {
+                match e.variants_list(db).data(db).get(v).map(|v| &v.kind) {
+                    Some(crate::hir_def::VariantKind::Record(fields)) => fields
+                        .data(db)
+                        .get(field_ref.index)
+                        .and_then(|f| f.name.to_opt())
+                        .map(FieldIndex::Ident)
+                        .into(),
+                    Some(crate::hir_def::VariantKind::Tuple(_)) => Partial::Present(
+                        FieldIndex::Index(IntegerId::new(db, BigUint::from(field_ref.index))),
+                    ),
+                    _ => Partial::Absent,
+                }
+            }
+            _ => Partial::Absent,
+        }
+    }
+
+    pub(super) fn record_generation_error(
+        &self,
+        range: parser::TextRange,
+        message: impl Into<String>,
+    ) {
+        use salsa::Accumulator as _;
+        let db = self.db();
+        let file = self.quote_frames.last().map_or_else(
+            || self.top_mod().file(db),
+            |frame| frame.quote_top_mod.file(db),
+        );
+        GenerationLoweringError {
+            file,
+            primary_range: range,
+            message: message.into(),
+        }
+        .accumulate(db);
     }
 
     pub(super) fn build(self) -> ScopeGraph<'db> {

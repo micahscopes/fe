@@ -719,6 +719,47 @@ impl<'db> TypeAlias<'db> {
     }
 }
 
+fn merge_target_record_generics<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    target_ty: Option<ast::Type>,
+    explicit_params: GenericParamListId<'db>,
+    explicit_where: WhereClauseId<'db>,
+) -> (GenericParamListId<'db>, WhereClauseId<'db>) {
+    let Some(ty) = target_ty else {
+        return (explicit_params, explicit_where);
+    };
+    let ast::TypeKind::QuoteHole(hole) = ty.kind() else {
+        return (explicit_params, explicit_where);
+    };
+    let Some(common::generation::FrozenHoleValue::Record(record_ref)) =
+        ctxt.current_hole(hole.syntax().text_range())
+    else {
+        return (explicit_params, explicit_where);
+    };
+    let db = ctxt.db();
+    let item = ctxt.resolve_record_item(&record_ref);
+    let (record_params, record_where) = match item {
+        ItemKind::Struct(s) => (s.generic_params(db), s.where_clause(db)),
+        ItemKind::Enum(e) => (e.generic_params(db), e.where_clause(db)),
+        _ => return (explicit_params, explicit_where),
+    };
+    if record_params.data(db).is_empty() && record_where.predicates(db).is_empty() {
+        return (explicit_params, explicit_where);
+    }
+    let mut params = record_params.data(db).clone();
+    for param in explicit_params.data(db) {
+        if !params.iter().any(|p| p.name() == param.name()) {
+            params.push(param.clone());
+        }
+    }
+    let mut predicates = record_where.predicates(db).clone();
+    predicates.extend(explicit_where.predicates(db).iter().cloned());
+    (
+        GenericParamListId::new(db, params),
+        WhereClauseId::new(db, predicates),
+    )
+}
+
 impl<'db> Impl<'db> {
     pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::Impl) -> Self {
         let idx = ctxt.next_impl_idx();
@@ -729,6 +770,8 @@ impl<'db> Impl<'db> {
         let generic_params = GenericParamListId::lower_ast_opt(ctxt, ast.generic_params());
         let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
         let where_clause = WhereClauseId::lower_ast_opt(ctxt, ast.where_clause());
+        let (generic_params, where_clause) =
+            merge_target_record_generics(ctxt, ast.ty(), generic_params, where_clause);
         let ty = TypeId::lower_ast_partial(ctxt, ast.ty());
         let origin = HirOrigin::raw(&ast);
 
@@ -892,6 +935,8 @@ impl<'db> ImplTrait<'db> {
         // Lower generic params first so they are in scope for trait-ref/type and where-clause lowering.
         let generic_params = GenericParamListId::lower_ast_opt(ctxt, ast.generic_params());
         let where_clause = WhereClauseId::lower_ast_opt(ctxt, ast.where_clause());
+        let (generic_params, where_clause) =
+            merge_target_record_generics(ctxt, ast.ty(), generic_params, where_clause);
         let mut trait_ref = TraitRefId::lower_ast_partial(ctxt, ast.trait_ref());
         let ty = TypeId::lower_ast_partial(ctxt, ast.ty());
         let origin = HirOrigin::raw(&ast);

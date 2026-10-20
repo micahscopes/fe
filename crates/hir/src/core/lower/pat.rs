@@ -1,14 +1,26 @@
-use parser::ast;
+use parser::ast::{self, prelude::*};
 
 use super::body::BodyCtxt;
 use crate::{
-    hir_def::{IdentId, LitKind, PathId, pat::*},
+    hir_def::{
+        GenericArgListId, IdentId, ItemKind, LitKind, Partial, PathId, PathKind, VariantKind,
+        pat::*, scope_graph::ScopeId,
+    },
     span::HirOrigin,
 };
 
 impl<'db> Pat<'db> {
     pub(super) fn lower_ast(ctxt: &mut BodyCtxt<'_, 'db>, ast: ast::Pat) -> PatId {
         let pat = match &ast.kind() {
+            ast::PatKind::QuoteHole(hole) => {
+                if let Some(common::generation::FrozenHoleValue::Code(code)) =
+                    ctxt.f_ctxt.current_hole(hole.syntax().text_range())
+                {
+                    return Self::lower_code(ctxt, &code, &ast);
+                }
+                return ctxt.push_missing_pat();
+            }
+
             ast::PatKind::WildCard(_) => Pat::WildCard,
 
             ast::PatKind::Rest(_) => Pat::Rest,
@@ -102,11 +114,233 @@ impl<'db> Pat<'db> {
             ctxt.push_missing_pat()
         }
     }
+
+    pub(super) fn lower_code(
+        ctxt: &mut BodyCtxt<'_, 'db>,
+        code: &common::generation::FrozenCode,
+        origin_ast: &ast::Pat,
+    ) -> PatId {
+        use common::generation::{FrozenCode, FrozenCodeKind};
+        match code {
+            FrozenCode::VariantBinders { record, group } => {
+                if ctxt.active_binder_groups.iter().any(|(_, g)| *g == *group) {
+                    ctxt.f_ctxt.record_generation_error(
+                        origin_ast.syntax().text_range(),
+                        "binder group already bound in an enclosing pattern",
+                    );
+                    return ctxt.push_missing_pat();
+                }
+                ctxt.active_binder_groups.push((record.clone(), *group));
+                let db = ctxt.f_ctxt.db();
+                match (
+                    ctxt.f_ctxt.resolve_record_item(record),
+                    record.variant_index,
+                ) {
+                    (ItemKind::Enum(enum_), Some(variant_idx)) => {
+                        let variant_def = &enum_.variants_list(db).data(db)[variant_idx];
+                        let enum_display = PathId::new(
+                            db,
+                            PathKind::Ident {
+                                ident: enum_.name(db),
+                                generic_args: GenericArgListId::none(db),
+                            },
+                            None,
+                        );
+                        let enum_path = PathId::new(
+                            db,
+                            PathKind::BoundItem {
+                                item: ScopeId::Item(ItemKind::Enum(enum_)),
+                                display: enum_display,
+                            },
+                            None,
+                        );
+                        let variant_path = Partial::Present(PathId::new(
+                            db,
+                            PathKind::Ident {
+                                ident: variant_def.name,
+                                generic_args: GenericArgListId::none(db),
+                            },
+                            Some(enum_path),
+                        ));
+                        match &variant_def.kind {
+                            VariantKind::Unit => ctxt.push_pat(
+                                Pat::Path(variant_path, BindingMarker::Plain),
+                                HirOrigin::raw(origin_ast),
+                            ),
+                            VariantKind::Tuple(tuple_id) => {
+                                let elems = (0..tuple_id.data(db).len())
+                                    .map(|field_idx| {
+                                        let ident = IdentId::new(
+                                            db,
+                                            format!("__fe_binder_{group}_{field_idx}"),
+                                        );
+                                        let path = Partial::Present(PathId::from_ident(db, ident));
+                                        ctxt.push_pat(
+                                            Pat::Path(path, BindingMarker::Plain),
+                                            HirOrigin::raw(origin_ast),
+                                        )
+                                    })
+                                    .collect();
+                                ctxt.push_pat(
+                                    Pat::PathTuple(variant_path, elems),
+                                    HirOrigin::raw(origin_ast),
+                                )
+                            }
+                            VariantKind::Record(fields_id) => {
+                                let fields = fields_id
+                                    .data(db)
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(field_idx, field_def)| {
+                                        let ident = IdentId::new(
+                                            db,
+                                            format!("__fe_binder_{group}_{field_idx}"),
+                                        );
+                                        let path = Partial::Present(PathId::from_ident(db, ident));
+                                        let pat = ctxt.push_pat(
+                                            Pat::Path(path, BindingMarker::Plain),
+                                            HirOrigin::raw(origin_ast),
+                                        );
+                                        RecordPatField {
+                                            label: field_def.name,
+                                            pat,
+                                        }
+                                    })
+                                    .collect();
+                                ctxt.push_pat(
+                                    Pat::Record(variant_path, fields),
+                                    HirOrigin::raw(origin_ast),
+                                )
+                            }
+                        }
+                    }
+                    (ItemKind::Struct(struct_), None) => {
+                        let struct_display = PathId::new(
+                            db,
+                            PathKind::Ident {
+                                ident: struct_.name(db),
+                                generic_args: GenericArgListId::none(db),
+                            },
+                            None,
+                        );
+                        let struct_path = Partial::Present(PathId::new(
+                            db,
+                            PathKind::BoundItem {
+                                item: ScopeId::Item(ItemKind::Struct(struct_)),
+                                display: struct_display,
+                            },
+                            None,
+                        ));
+                        let fields = struct_
+                            .fields(db)
+                            .data(db)
+                            .iter()
+                            .enumerate()
+                            .map(|(field_idx, field_def)| {
+                                let ident =
+                                    IdentId::new(db, format!("__fe_binder_{group}_{field_idx}"));
+                                let path = Partial::Present(PathId::from_ident(db, ident));
+                                let pat = ctxt.push_pat(
+                                    Pat::Path(path, BindingMarker::Plain),
+                                    HirOrigin::raw(origin_ast),
+                                );
+                                RecordPatField {
+                                    label: field_def.name,
+                                    pat,
+                                }
+                            })
+                            .collect();
+                        ctxt.push_pat(Pat::Record(struct_path, fields), HirOrigin::raw(origin_ast))
+                    }
+                    _ => ctxt.push_missing_pat(),
+                }
+            }
+            FrozenCode::Template {
+                kind: FrozenCodeKind::Pat,
+                quote_file,
+                quote_range,
+                holes,
+                ..
+            } => {
+                let (quote, frame) =
+                    ctxt.f_ctxt
+                        .resolve_quote_template(quote_file, *quote_range, holes.clone());
+                ctxt.f_ctxt.quote_frames.push(frame);
+                let pat_id = if let Some(block) = quote.body()
+                    && let Some(stmt) = block.stmts().next()
+                    && let ast::StmtKind::Expr(expr_stmt) = stmt.kind()
+                    && let Some(expr) = expr_stmt.expr()
+                {
+                    Self::lower_expr_as_pat(ctxt, expr, origin_ast)
+                } else {
+                    ctxt.push_missing_pat()
+                };
+                ctxt.f_ctxt.quote_frames.pop();
+                pat_id
+            }
+            _ => ctxt.push_missing_pat(),
+        }
+    }
+
+    fn lower_expr_as_pat(
+        ctxt: &mut BodyCtxt<'_, 'db>,
+        expr: ast::Expr,
+        origin_ast: &ast::Pat,
+    ) -> PatId {
+        match expr.kind() {
+            ast::ExprKind::QuoteHole(hole) => {
+                if let Some(common::generation::FrozenHoleValue::Code(code)) =
+                    ctxt.f_ctxt.current_hole(hole.syntax().text_range())
+                {
+                    return Self::lower_code(ctxt, &code, origin_ast);
+                }
+                ctxt.push_missing_pat()
+            }
+            ast::ExprKind::Paren(paren) => match paren.expr() {
+                Some(inner) => Self::lower_expr_as_pat(ctxt, inner, origin_ast),
+                None => ctxt.push_missing_pat(),
+            },
+            ast::ExprKind::Tuple(tup) => {
+                let elems = tup
+                    .elems()
+                    .map(|elem| match elem {
+                        Some(elem) => Self::lower_expr_as_pat(ctxt, elem, origin_ast),
+                        None => ctxt.push_missing_pat(),
+                    })
+                    .collect();
+                ctxt.push_pat(Pat::Tuple(elems), HirOrigin::raw(origin_ast))
+            }
+            ast::ExprKind::Path(path_expr) => {
+                if path_expr.syntax().text() == "_" {
+                    ctxt.push_pat(Pat::WildCard, HirOrigin::raw(origin_ast))
+                } else {
+                    let path = PathId::lower_ast_partial(ctxt.f_ctxt, path_expr.path());
+                    ctxt.push_pat(
+                        Pat::Path(path, BindingMarker::Plain),
+                        HirOrigin::raw(origin_ast),
+                    )
+                }
+            }
+            ast::ExprKind::Lit(lit_expr) => {
+                let lit_kind = lit_expr
+                    .lit()
+                    .and_then(|lit| LitKind::lower_ast(ctxt.f_ctxt, lit))
+                    .into();
+                ctxt.push_pat(Pat::Lit(lit_kind), HirOrigin::raw(origin_ast))
+            }
+            _ => ctxt.push_missing_pat(),
+        }
+    }
 }
 
 impl<'db> RecordPatField<'db> {
     fn lower_ast(ctxt: &mut BodyCtxt<'_, 'db>, ast: &ast::RecordPatField) -> RecordPatField<'db> {
-        let label = IdentId::lower_token_partial(ctxt.f_ctxt, ast.name());
+        let label = if let Some(hole) = ast.syntax().children().find_map(ast::QuoteHole::cast) {
+            ctxt.f_ctxt
+                .lower_field_hole_ident(hole.syntax().text_range())
+        } else {
+            IdentId::lower_token_partial(ctxt.f_ctxt, ast.name())
+        };
         let pat = ast
             .pat()
             .map(|pat| Pat::lower_ast(ctxt, pat))

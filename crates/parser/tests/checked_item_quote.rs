@@ -54,3 +54,30 @@ fn malformed_holes_keep_parser_errors() {
         assert!(!errors.is_empty(), "{source}");
     }
 }
+
+#[test]
+fn expr_arm_where_and_open_binder_quotes_parse_without_errors() {
+    let source = r#"const fn provider() {
+    let _e = quote(min, max) { self.${f} >= min && self.${f} <= max }
+    let _w = quote { where ${bounds}, ${ty}: Eq }
+    let _a = quote(other) {
+        ${arms}
+        ${lhs} => match other {
+            ${rhs} => ${cmp}
+            _ => false
+        }
+    }
+    let _i = quote {
+        impl Eq for ${record} where ${bounds} {
+            fn eq(self, _ other: Self) -> bool {
+                match self { ${arms} }
+            }
+        }
+    }
+}"#;
+    let (green, errors) = parse_source_file(source, RecoveryMode::Recover);
+    assert!(errors.is_empty(), "{errors:?}");
+    let root = SyntaxNode::new_root(green);
+    let quotes: Vec<_> = root.descendants().filter_map(QuoteExpr::cast).collect();
+    assert_eq!(quotes.len(), 4);
+}

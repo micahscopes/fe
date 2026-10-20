@@ -304,6 +304,29 @@ impl<'db> ScopeGraphBuilder<'db> {
             .add_edge(parent_node, item_node, parent_to_child_edge);
     }
 
+    pub(super) fn find_item_by_range(&self, range: parser::TextRange) -> Option<ItemKind<'db>> {
+        let root = super::top_mod_ast(self.db, self.top_mod);
+        use parser::ast::prelude::*;
+        self.graph
+            .nodes
+            .values()
+            .find_map(|(scope, _)| match *scope {
+                ScopeId::Item(item @ ItemKind::Struct(s)) => {
+                    let crate::span::HirOrigin::Raw(ptr) = s.origin(self.db) else {
+                        return None;
+                    };
+                    (ptr.to_node(root.syntax()).syntax().text_range() == range).then_some(item)
+                }
+                ScopeId::Item(item @ ItemKind::Enum(e)) => {
+                    let crate::span::HirOrigin::Raw(ptr) = e.origin(self.db) else {
+                        return None;
+                    };
+                    (ptr.to_node(root.syntax()).syntax().text_range() == range).then_some(item)
+                }
+                _ => None,
+            })
+    }
+
     /// Keep target discovery edges while giving the whole generated function
     /// its producer lexical origin. Its body remains a child of the function.
     pub(super) fn set_quoted_function_origin(
@@ -312,16 +335,38 @@ impl<'db> ScopeGraphBuilder<'db> {
         producer: Option<parser::TextRange>,
         producer_block: Option<parser::TextRange>,
     ) {
-        let root = super::top_mod_ast(self.db, self.top_mod);
-        use parser::ast::prelude::*;
-        let function_node = self
+        self.set_quoted_item_origin(function.into(), self.top_mod, producer, producer_block);
+    }
+
+    pub(super) fn set_quoted_item_origin(
+        &mut self,
+        item: ItemKind<'db>,
+        quote_top_mod: TopLevelMod<'db>,
+        producer: Option<parser::TextRange>,
+        producer_block: Option<parser::TextRange>,
+    ) {
+        let item_node = self
             .graph
             .nodes
             .iter()
-            .find_map(|(node, (scope, _))| {
-                (*scope == ScopeId::Item(function.into())).then_some(node)
-            })
-            .expect("generated function scope");
+            .find_map(|(node, (scope, _))| (*scope == ScopeId::Item(item)).then_some(node))
+            .expect("generated item scope");
+        self.graph
+            .edges
+            .entry(item_node)
+            .or_default()
+            .retain(|(_, kind)| !matches!(kind, EdgeKind::Lex(_)));
+        self.graph.nodes[item_node].1.publication_parent = Some(self.top_mod.scope());
+        if quote_top_mod != self.top_mod {
+            self.graph.add_external_edge(
+                item_node,
+                ScopeId::Item(quote_top_mod.into()),
+                EdgeKind::lex(),
+            );
+            return;
+        }
+        let root = super::top_mod_ast(self.db, self.top_mod);
+        use parser::ast::prelude::*;
         let block_node = producer_block.and_then(|range| {
             self.graph.nodes.iter().find_map(|(node, (scope, _))| {
                 let ScopeId::Block(body, expression) = *scope else {
@@ -352,18 +397,12 @@ impl<'db> ScopeGraphBuilder<'db> {
                 _ => None,
             })
             .expect("validated producer module exists in copied source");
-        self.graph
-            .edges
-            .entry(function_node)
-            .or_default()
-            .retain(|(_, kind)| !matches!(kind, EdgeKind::Lex(_)));
-        self.graph.nodes[function_node].1.publication_parent = Some(self.top_mod.scope());
         let lexical = if producer_block.is_some() {
             block_node.expect("validated producer block exists in unchanged copied source")
         } else {
             producer_node
         };
-        self.graph.add_lex_edge(function_node, lexical);
+        self.graph.add_lex_edge(item_node, lexical);
     }
 
     pub(super) fn joined_id(&self, variant: TrackedItemVariant<'db>) -> TrackedItemId<'db> {

@@ -31,6 +31,19 @@ impl<'db> PathId<'db> {
                         ));
                     }
                 }
+                Some(ast::PathSegmentKind::Ingot(_))
+                    if path.is_none()
+                        && let Some(ingot) = ctxt.current_quote_ingot() =>
+                {
+                    path = Some(Self::new(
+                        db,
+                        PathKind::BoundIngot {
+                            ingot,
+                            display: IdentId::make_ingot(db),
+                        },
+                        None,
+                    ));
+                }
                 Some(seg_kind) => {
                     let ident = match seg_kind {
                         ast::PathSegmentKind::Ingot(_) => Some(IdentId::make_ingot(db)),

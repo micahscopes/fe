@@ -67,6 +67,7 @@ pub(super) struct BodyCtxt<'ctxt, 'db> {
     pub(super) conds: NodeStore<CondId, Partial<Cond>>,
     pub(super) pats: NodeStore<PatId, Partial<Pat<'db>>>,
     pub(super) source_map: BodySourceMap,
+    pub(super) active_binder_groups: Vec<(common::generation::FrozenRecordRef, usize)>,
 }
 
 impl<'ctxt, 'db> BodyCtxt<'ctxt, 'db> {
@@ -127,6 +128,7 @@ impl<'ctxt, 'db> BodyCtxt<'ctxt, 'db> {
             conds: NodeStore::new(),
             pats: NodeStore::new(),
             source_map: BodySourceMap::default(),
+            active_binder_groups: Vec::new(),
         }
     }
 

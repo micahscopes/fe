@@ -152,7 +152,9 @@ pub fn prepare_file(
         range,
         cause,
     };
-    if !db.generation_inputs().functions(db).is_empty() {
+    if !db.generation_inputs().functions(db).is_empty()
+        || !db.generation_inputs().requests(db).is_empty()
+    {
         return Err(error(
             parser::TextRange::empty(0.into()),
             "generation requires the authored input view; output is checked once".into(),
@@ -191,13 +193,15 @@ pub fn prepare_file(
         ));
     }
     let module = db.top_mod(file);
-    let mut plans = Vec::new();
+    let mut requests = Vec::new();
     let mut consumed = std::collections::HashSet::new();
     for item in root.items().into_iter().flatten() {
-        let Some(ast::ItemKind::Struct(record)) = item.kind() else {
-            continue;
+        let attributes = match item.kind() {
+            Some(ast::ItemKind::Struct(record)) => record.attr_list(),
+            Some(ast::ItemKind::Enum(enum_)) => enum_.attr_list(),
+            _ => continue,
         };
-        let Some(attributes) = record.attr_list() else {
+        let Some(attributes) = attributes else {
             continue;
         };
         for attribute in attributes.normal_attrs_named("generate") {
@@ -266,7 +270,7 @@ pub fn prepare_file(
                 .ok_or_else(|| error(range, "missing Record carrier".into()))?;
             let code = resolve_lib_type_path(db, provider.scope(), "core::meta::Code")
                 .ok_or_else(|| error(range, "missing Code carrier".into()))?;
-            let item = resolve_lib_type_path(db, provider.scope(), "core::meta::Item")
+            let item_marker = resolve_lib_type_path(db, provider.scope(), "core::meta::Item")
                 .ok_or_else(|| error(range, "missing Item kind".into()))?;
             let arguments = provider.arg_tys(db);
             if arguments.len() != 1
@@ -279,7 +283,7 @@ pub fn prepare_file(
                     .return_ty(db)
                     .as_view(db)
                     .unwrap_or(provider.return_ty(db))
-                    != TyId::app(db, code, item)
+                    != TyId::app(db, code, item_marker)
             {
                 return Err(error(
                     range,
@@ -290,7 +294,7 @@ pub fn prepare_file(
                             .map(|a| a.instantiate_identity().pretty_print(db))
                             .collect::<Vec<_>>(),
                         provider.return_ty(db).pretty_print(db),
-                        TyId::app(db, code, item).pretty_print(db)
+                        TyId::app(db, code, item_marker).pretty_print(db)
                     ),
                 ));
             }
@@ -322,7 +326,7 @@ pub fn prepare_file(
                     error(range, "authored provider body diagnostics".into()),
                 ));
             }
-            let input = RecordInput::for_authored_syntax(db, module, &record).map_err(|cause| {
+            let input = RecordInput::for_authored_item(db, module, &item).map_err(|cause| {
                 error(
                     range,
                     format!("cannot issue concrete authored record: {cause:?}"),
@@ -415,8 +419,8 @@ pub fn prepare_file(
                     "provider returned an ordinary value rather than checked item code".into(),
                 ));
             };
-            plans.push(
-                code.freeze_function(db, file)
+            requests.push(
+                code.freeze_request(db, file)
                     .map_err(|cause| error(range, cause.into()))?,
             );
         }
@@ -439,7 +443,7 @@ pub fn prepare_file(
             ));
         }
     }
-    if plans.is_empty() {
+    if requests.is_empty() {
         return Err(error(
             parser::TextRange::empty(0.into()),
             "generation request requires an authored concrete root record".into(),
@@ -460,9 +464,18 @@ pub fn prepare_file(
         .to(db.compilation_settings().profile(db).clone());
     output
         .generation_inputs()
-        .set_functions(&mut output)
-        .to(plans);
+        .set_requests(&mut output)
+        .to(requests);
     let output_module = output.top_mod(output_file);
+    let _ = output_module.scope_graph(&output);
+    let lowering_errors = hir::lower::generation_lowering_errors(&output, output_module);
+    if let Some(first) = lowering_errors.first() {
+        return Err(GenerationError {
+            file: first.file.url(&output).unwrap_or(url),
+            range: first.primary_range,
+            cause: first.message.clone(),
+        });
+    }
     let diagnostics = output.run_on_top_mod(output_module);
     if !diagnostics.is_empty() {
         return Err(diagnostic_error(

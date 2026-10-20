@@ -710,7 +710,7 @@ fn path_bodies<'db>(db: &'db dyn HirAnalysisDb, path: PathId<'db>, out: &mut Vec
     let mut segment = Some(path);
     while let Some(path) = segment {
         match path.kind(db) {
-            PathKind::Ident { .. } => {}
+            PathKind::Ident { .. } | PathKind::BoundIngot { .. } | PathKind::BoundItem { .. } => {}
             PathKind::QualifiedType { type_, trait_ } => {
                 ty_bodies(db, Partial::Present(type_), out);
                 if let Partial::Present(trait_path) = trait_.path(db) {

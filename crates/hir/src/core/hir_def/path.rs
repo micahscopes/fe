@@ -1,5 +1,6 @@
 use super::{GenericArgListId, IdentId, TraitRefId, TypeId};
 use crate::{HirDb, hir_def::Partial};
+use common::{ingot::Ingot, stdlib::BUILTIN_CORE_BASE_URL};
 
 #[salsa::interned]
 #[derive(Debug)]
@@ -13,6 +14,14 @@ pub enum PathKind<'db> {
     Ident {
         ident: Partial<IdentId<'db>>,
         generic_args: GenericArgListId<'db>,
+    },
+    BoundIngot {
+        ingot: Ingot<'db>,
+        display: IdentId<'db>,
+    },
+    BoundItem {
+        item: super::scope_graph::ScopeId<'db>,
+        display: PathId<'db>,
     },
     QualifiedType {
         type_: TypeId<'db>,
@@ -83,6 +92,8 @@ impl<'db> PathId<'db> {
         } else {
             match self.kind(db) {
                 PathKind::Ident { ident, .. } => ident.to_opt(),
+                PathKind::BoundIngot { display, .. } => Some(display),
+                PathKind::BoundItem { display, .. } => display.root_ident(db),
                 PathKind::QualifiedType { .. } => None,
             }
         }
@@ -145,10 +156,13 @@ impl<'db> PathId<'db> {
     pub fn is_core_lib_path(self, db: &'db dyn HirDb) -> bool {
         match self.parent(db) {
             Some(parent) => parent.is_core_lib_path(db),
-            None => self
-                .as_ident(db)
-                .map(|id| id.data(db) == "core")
-                .unwrap_or_default(),
+            None => match self.kind(db) {
+                PathKind::BoundIngot { ingot, .. } => {
+                    ingot.base(db).as_str() == BUILTIN_CORE_BASE_URL
+                }
+                PathKind::BoundItem { display, .. } => display.is_core_lib_path(db),
+                _ => self.as_ident(db).is_some_and(|id| id.data(db) == "core"),
+            },
         }
     }
 
@@ -197,6 +211,8 @@ impl<'db> PathId<'db> {
     pub fn ident(self, db: &'db dyn HirDb) -> Partial<IdentId<'db>> {
         match self.kind(db) {
             PathKind::Ident { ident, .. } => ident,
+            PathKind::BoundIngot { display, .. } => Partial::Present(display),
+            PathKind::BoundItem { display, .. } => display.ident(db),
             PathKind::QualifiedType { .. } => Partial::Absent,
         }
     }
@@ -204,8 +220,29 @@ impl<'db> PathId<'db> {
     pub fn generic_args(self, db: &'db dyn HirDb) -> GenericArgListId<'db> {
         match self.kind(db) {
             PathKind::Ident { generic_args, .. } => generic_args,
+            PathKind::BoundIngot { .. } => GenericArgListId::none(db),
+            PathKind::BoundItem { display, .. } => display.generic_args(db),
             PathKind::QualifiedType { .. } => GenericArgListId::none(db),
         }
+    }
+
+    pub fn with_generic_args(
+        self,
+        db: &'db dyn HirDb,
+        generic_args: GenericArgListId<'db>,
+    ) -> Option<Self> {
+        let kind = match self.kind(db) {
+            PathKind::Ident { ident, .. } => PathKind::Ident {
+                ident,
+                generic_args,
+            },
+            PathKind::BoundItem { item, display } => PathKind::BoundItem {
+                item,
+                display: display.with_generic_args(db, generic_args)?,
+            },
+            _ => return None,
+        };
+        Some(Self::new(db, kind, self.parent(db)))
     }
 
     pub fn strip_generic_args(self, db: &'db dyn HirDb) -> PathId<'db> {
@@ -214,6 +251,11 @@ impl<'db> PathId<'db> {
             PathKind::Ident { ident, .. } => PathKind::Ident {
                 ident,
                 generic_args: GenericArgListId::none(db),
+            },
+            kind @ PathKind::BoundIngot { .. } => kind,
+            PathKind::BoundItem { item, display } => PathKind::BoundItem {
+                item,
+                display: display.strip_generic_args(db),
             },
             kind @ PathKind::QualifiedType { .. } => kind,
         };
@@ -245,6 +287,8 @@ impl<'db> PathId<'db> {
                     generic_args.pretty_print(db)
                 )
             }
+            PathKind::BoundIngot { display, .. } => display.data(db).clone(),
+            PathKind::BoundItem { display, .. } => display.pretty_print(db),
             PathKind::QualifiedType { type_, trait_ } => {
                 format!(
                     "<{} as {}>",
