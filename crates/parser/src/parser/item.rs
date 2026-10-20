@@ -894,6 +894,19 @@ impl super::Parse for ImplScope {
             }
         }
 
+        if is_impl_trait
+            && parser
+                .current_token()
+                .is_some_and(|token| token.text() == "with")
+        {
+            parser.bump();
+            parser.set_scope_recovery_stack(&[SyntaxKind::RParen]);
+            parser.set_newline_as_trivia(true);
+            parser.bump_expected(SyntaxKind::LParen);
+            parser.or_recover(|parser| parser.parse(PathScope::default()))?;
+            parser.bump_expected(SyntaxKind::RParen);
+            return Ok(());
+        }
         parser.expect_and_pop_recovery_stack()?;
         parse_where_clause_opt(parser, ItemBlock::Required)?;
 

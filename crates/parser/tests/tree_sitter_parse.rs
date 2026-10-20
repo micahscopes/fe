@@ -655,3 +655,27 @@ fn tree_sitter_agrees_on_where_clauses_and_function_bodies() {
         ["enum", "function", "impl", "impl trait", "struct", "trait"],
     );
 }
+
+#[test]
+fn tree_sitter_agrees_on_bounded_native_derive_surface() {
+    let mut parser = new_parser();
+    for source in [
+        include_str!("../../../ingots/core/src/derive.fe"),
+        "impl Score for Pair with (Fields)\nimpl Score for Pair as Zero with (mod_::Provider)\n",
+        "impl Score for Pair with (Provider<u256>)\n",
+        "trait Constraint {}\ntrait Holder<T: Constraint> {}\n",
+        "impl Score for Pair as Ordinary where true { fn score() -> usize { 7 } }\n",
+    ] {
+        let (_, compiler_errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(compiler_errors.is_empty(), "{compiler_errors:?}\n{source}");
+        assert!(parse_errors(&mut parser, source).is_empty(), "{source}");
+    }
+    for source in [
+        "impl Score for Pair with ()\n",
+        "impl Score for Pair with (Provider) where true {}\n",
+    ] {
+        let (_, compiler_errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(!compiler_errors.is_empty(), "{source}");
+        assert!(!parse_errors(&mut parser, source).is_empty(), "{source}");
+    }
+}

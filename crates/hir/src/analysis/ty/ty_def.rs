@@ -225,6 +225,7 @@ impl<'db> TyId<'db> {
         }
 
         match self.data(db) {
+            TyData::TyBase(TyBase::TraitCtor(def)) => Some(def.ingot(db)),
             TyData::TyBase(TyBase::Adt(adt)) => adt.ingot(db).into(),
             TyData::TyBase(TyBase::Contract(contract)) => contract.top_mod(db).ingot(db).into(),
             TyData::TyBase(TyBase::Func(def)) => def.ingot(db).into(),
@@ -753,6 +754,7 @@ impl<'db> TyId<'db> {
             TyData::QualifiedTy(trait_inst) | TyData::ConstraintTerm(trait_inst) => {
                 Some(trait_inst.def(db).scope())
             }
+            TyData::TyBase(TyBase::TraitCtor(def)) => Some(def.scope()),
             TyData::TyBase(TyBase::Adt(adt)) => Some(adt.scope(db)),
             TyData::TyBase(TyBase::Contract(c)) => Some(c.scope()),
             TyData::TyBase(TyBase::Func(func)) => Some(func.scope()),
@@ -782,6 +784,7 @@ impl<'db> TyId<'db> {
                 trait_inst.def(db).scope().name_span(db)
             }
 
+            TyData::TyBase(TyBase::TraitCtor(def)) => def.scope().name_span(db),
             TyData::TyBase(TyBase::Adt(adt)) => Some(adt.name_span(db)),
             TyData::TyBase(TyBase::Contract(c)) => c.scope().name_span(db),
             TyData::TyBase(TyBase::Func(func)) => Some(func.name_span()),
@@ -857,6 +860,21 @@ impl<'db> TyId<'db> {
 
     /// Perform type level application.
     pub(crate) fn app_structural(db: &'db dyn HirAnalysisDb, lhs: Self, rhs: Self) -> TyId<'db> {
+        if let TyData::TyBase(TyBase::TraitCtor(def)) = lhs.data(db) {
+            if !def.self_param(db).kind(db).does_match(rhs.kind(db)) {
+                return Self::invalid(
+                    db,
+                    InvalidCause::KindMismatch {
+                        expected: Some(def.self_param(db).kind(db).clone()),
+                        given: rhs,
+                    },
+                );
+            }
+            return Self::new(
+                db,
+                TyData::ConstraintTerm(TraitInstId::new_simple(db, *def, vec![rhs])),
+            );
+        }
         Self::new(db, TyData::TyApp(lhs, rhs))
     }
 
@@ -902,7 +920,7 @@ impl<'db> TyId<'db> {
             );
         }
 
-        Self::new(db, TyData::TyApp(lhs, rhs))
+        Self::app_structural(db, lhs, rhs)
     }
 
     /// Whether application must retain this const argument as deferred metadata.
@@ -2060,6 +2078,8 @@ enum Variant {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, derive_more::From, Update)]
 pub enum TyBase<'db> {
+    /// Nominal unary trait constructor, using the existing trait identity.
+    TraitCtor(crate::hir_def::Trait<'db>),
     Prim(PrimTy),
     Adt(AdtDef<'db>),
     Contract(crate::hir_def::Contract<'db>),
@@ -2127,6 +2147,10 @@ impl<'db> TyBase<'db> {
                 .to_opt()
                 .map_or_else(|| "<unknown>".to_string(), |i| i.data(db).to_string()),
 
+            Self::TraitCtor(def) => def
+                .name(db)
+                .to_opt()
+                .map_or_else(|| "<trait>".into(), |name| name.data(db).to_string()),
             Self::Func(func) => format!(
                 "fn {}",
                 func.name(db)
@@ -2335,6 +2359,9 @@ impl HasKind for TyBase<'_> {
             TyBase::Adt(adt) => adt.kind(db),
             TyBase::Contract(_) => Kind::Star, // Contracts have no generic params
             TyBase::Func(func) => func.kind(db),
+            TyBase::TraitCtor(def) => {
+                Kind::abs(def.self_param(db).kind(db).clone(), Kind::Constraint)
+            }
             TyBase::Closure(_) => Kind::Star,
         }
     }

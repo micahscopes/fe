@@ -326,7 +326,7 @@ impl super::Parse for TypeBoundScope {
         );
 
         if is_type_kind {
-            parse_kind_bound(parser)
+            parse_kind_bound(parser, false)
         } else {
             if self.disallow_trait_bound {
                 return parser.error_and_recover("trait bounds are not allowed here");
@@ -341,14 +341,26 @@ impl super::Parse for TypeBoundScope {
     }
 }
 
-fn parse_kind_bound<S: TokenStream>(parser: &mut Parser<S>) -> Result<(), Recovery<ErrProof>> {
+fn parse_kind_bound<S: TokenStream>(
+    parser: &mut Parser<S>,
+    allow_constraint: bool,
+) -> Result<(), Recovery<ErrProof>> {
     let checkpoint = parser.checkpoint();
     let is_newline_trivia = parser.set_newline_as_trivia(false);
+    let is_terminal_constraint = allow_constraint
+        && parser.is_ident("Constraint")
+        && !matches!(parser.peek_n_non_trivia(2).get(1), Some(SyntaxKind::Arrow));
 
-    parser.expect(&[SyntaxKind::Star, SyntaxKind::LParen], None)?;
+    if !matches!(
+        parser.current_kind(),
+        Some(SyntaxKind::Star | SyntaxKind::LParen)
+    ) && !is_terminal_constraint
+    {
+        parser.expect(&[SyntaxKind::Star, SyntaxKind::LParen], None)?;
+    }
 
     if parser.bump_if(SyntaxKind::LParen) {
-        parse_kind_bound(parser)?;
+        parse_kind_bound(parser, false)?;
         if parser.find(
             SyntaxKind::RParen,
             ExpectedKind::ClosingBracket {
@@ -358,7 +370,7 @@ fn parse_kind_bound<S: TokenStream>(parser: &mut Parser<S>) -> Result<(), Recove
         )? {
             parser.bump();
         }
-    } else if parser.current_kind() == Some(SyntaxKind::Star) {
+    } else if parser.current_kind() == Some(SyntaxKind::Star) || is_terminal_constraint {
         parser
             .parse(KindBoundMonoScope::default())
             .unwrap_infallible();
@@ -380,7 +392,11 @@ impl super::Parse for KindBoundMonoScope {
     type Error = Infallible;
 
     fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
-        parser.bump_expected(SyntaxKind::Star);
+        if parser.is_ident("Constraint") {
+            parser.bump_expected(SyntaxKind::Ident);
+        } else {
+            parser.bump_expected(SyntaxKind::Star);
+        }
         Ok(())
     }
 }
@@ -391,7 +407,7 @@ impl super::Parse for KindBoundAbsScope {
 
     fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
         parser.bump_expected(SyntaxKind::Arrow);
-        parse_kind_bound(parser)
+        parse_kind_bound(parser, true)
     }
 }
 

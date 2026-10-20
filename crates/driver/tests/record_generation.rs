@@ -157,49 +157,16 @@ fn test_borrow_bypass_executes() {
     );
     assert!(error.range.start() > 0.into());
 
-    let (db, file) = input(
-        r#"use core::meta::{Code, Item, Record, field_count}
-
-struct NonCopy {
-    v: u256,
-}
-
-const fn consume(_ x: own NonCopy) -> u256 {
-    x.v
-}
-
-const fn alias_bump(_ a: mut u256, _ b: mut u256) -> u256 {
-    a = a + b
-    a
-}
-
-pub const fn inspect(_ r: Record) -> Code<Item> {
-    let x = NonCopy { v: 20 }
-    let first = consume(x)
-    let second = consume(NonCopy { v: 20 })
-    var base: u256 = 0
-    var other: u256 = 0
-    let bumped = alias_bump(mut base, mut other)
-    let total: usize = (first + second + bumped) as usize + field_count(r)
-    quote {
-        fn generated() -> usize {
-            ${total}
-        }
-    }
-}
-
-#[generate(inspect)]
-pub struct Pair {
-    pub a: u256,
-    pub b: u256,
-}
-
-#[test]
-fn test_borrow_bypass_executes() {
-    assert(generated() == 42)
-}
-"#,
-    );
+    let valid_twin = source
+        .replace(
+            "let second = consume(x)",
+            "let second = consume(NonCopy { v: 20 })",
+        )
+        .replace(
+            "var base: u256 = 0\n    let bumped = alias_bump(mut base, mut base)",
+            "var base: u256 = 0\n    var other: u256 = 0\n    let bumped = alias_bump(mut base, mut other)",
+        );
+    let (db, file) = input(&valid_twin);
     assert!(prepare_file(&db, file).unwrap().is_some());
 }
 
@@ -1177,6 +1144,84 @@ struct Pair {
 }
 
 #[test]
+fn provider_field_and_field_type_projection_and_boundary_refusals() {
+    let valid_source = r#"
+use core::meta::{Code, Field, FieldType, Item, Record, field, field_count, field_type}
+
+pub const fn inspect_fields(_ record: Record) -> Code<Item> {
+    let count = field_count(record)
+    let first: Field = field(record, 0)
+    let second: Field = field(record, 1)
+    let _first_ty: FieldType = field_type(first)
+    let _second_ty: FieldType = field_type(second)
+    quote {
+        const fn generated_field_summary() -> usize {
+            ${count}
+        }
+    }
+}
+
+#[generate(inspect_fields)]
+struct Pair {
+    first: u256,
+    second: bool,
+}
+"#;
+    let (db, file) = input(valid_source);
+    let output = prepare_file(&db, file).unwrap().unwrap();
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    let module = output.top_mod(output_file);
+    assert!(output.run_on_top_mod(module).is_empty());
+
+    let oob_source = valid_source.replace(
+        "let second: Field = field(record, 1)",
+        "let second: Field = field(record, 2)",
+    );
+    let (db, file) = input(&oob_source);
+    let oob_err = prepare_file(&db, file)
+        .err()
+        .expect("out-of-bounds field index must refuse");
+    assert!(
+        oob_err
+            .cause
+            .contains("constant index outside record or aggregate"),
+        "{}",
+        oob_err.cause
+    );
+
+    let submod_source = r#"
+use core::meta::{Code, Item, Record}
+
+pub const fn make(_ r: Record) -> Code<Item> {
+    quote {
+        fn generated() -> usize { 1 }
+    }
+}
+
+mod nested {
+    #[generate(super::make)]
+    pub struct Inner {
+        pub x: u256,
+    }
+}
+"#;
+    let (db, file) = input(submod_source);
+    let submod_err = prepare_file(&db, file)
+        .err()
+        .expect("submodule #[generate] must refuse");
+    assert!(
+        submod_err
+            .cause
+            .contains("generation request requires an authored concrete root record"),
+        "{}",
+        submod_err.cause
+    );
+}
+
+#[test]
 fn binder_hygiene_avoids_user_ident_collision_and_scopes_let_if_let_and_logical_or() {
     let no_collision = r#"use core::meta::{Code, Item, Record, binders, field, variant}
 
@@ -1490,4 +1535,189 @@ struct Pair {
             error.cause
         );
     }
+}
+
+#[test]
+fn transitive_helper_access_check_and_unsafe_block_hygiene_and_quoted_attrs() {
+    // Finding 1: Transitive #1821 ownership/move check on provider helper callees before CTFE.
+    let helper_move_source = r#"
+use core::meta::{Code, Item, Record, field_count}
+
+struct NonCopy {
+    v: u256,
+}
+
+const fn consume(_ x: own NonCopy) -> u256 {
+    x.v
+}
+
+const fn bad_move_helper() -> usize {
+    let x = NonCopy { v: 20 }
+    let first = consume(x)
+    let second = consume(x)
+    (first + second) as usize
+}
+
+pub const fn inspect(_ r: Record) -> Code<Item> {
+    let total = field_count(r) + bad_move_helper()
+    quote {
+        fn generated() -> usize {
+            ${total}
+        }
+    }
+}
+
+#[generate(inspect)]
+pub struct Pair {
+    pub a: u256,
+    pub b: u256,
+}
+"#;
+    let (db, file) = input(helper_move_source);
+    let helper_err = prepare_file(&db, file)
+        .err()
+        .expect("helper move conflict must fail before CTFE");
+    assert!(
+        helper_err
+            .cause
+            .contains("authored provider ownership/capability validation failed")
+            && helper_err.cause.contains("move conflict")
+            && helper_err.cause.contains("16-0002"),
+        "{helper_err}"
+    );
+
+    // Finding 3: Quote directly inside `unsafe { ... }` block preserves producer-block lexical hygiene without panicking.
+    let unsafe_quote_source = r#"
+use core::meta::{Code, Item, Record, field_count}
+
+mod author {
+    use core::meta::{Code, Item, Record, field_count}
+
+    pub const fn inspect(_ r: Record) -> Code<Item> {
+        let n = field_count(r)
+        unsafe {
+            const fn unsafe_local_boost(_ x: usize) -> usize {
+                x + 40
+            }
+            quote {
+                const fn generated_from_unsafe() -> usize {
+                    unsafe_local_boost(${n})
+                }
+            }
+        }
+    }
+}
+
+const fn unsafe_local_boost(_ x: usize) -> usize {
+    999
+}
+
+#[generate(author::inspect)]
+pub struct Pair {
+    pub a: u256,
+    pub b: u256,
+}
+"#;
+    let (db, file) = input(unsafe_quote_source);
+    let output = prepare_file(&db, file).unwrap().unwrap();
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    let module = output.top_mod(output_file);
+    assert!(output.run_on_top_mod(module).is_empty());
+
+    // Finding 4a: Quoted function carrying `#[generate(...)]` is rejected.
+    let quoted_generate_source = r#"
+use core::meta::{Code, Item, Record}
+
+pub const fn inspect(_ r: Record) -> Code<Item> {
+    quote {
+        #[generate(inspect)]
+        fn generated() -> usize {
+            1
+        }
+    }
+}
+
+#[generate(inspect)]
+pub struct Pair {
+    pub a: u256,
+}
+"#;
+    let (db, file) = input(quoted_generate_source);
+    let quoted_gen_err = prepare_file(&db, file)
+        .err()
+        .expect("quoted #[generate] on function must refuse");
+    assert!(
+        quoted_gen_err
+            .cause
+            .contains("quoted functions cannot carry #[generate] attributes"),
+        "{}",
+        quoted_gen_err.cause
+    );
+
+    // Finding 4b: Quoted function carrying invalid function attribute (`#[event]`) is diagnosed by `validate_func_attrs`.
+    let quoted_event_attr_source = r#"
+use core::meta::{Code, Item, Record}
+
+pub const fn inspect(_ r: Record) -> Code<Item> {
+    quote {
+        #[event]
+        fn generated() -> usize {
+            1
+        }
+    }
+}
+
+#[generate(inspect)]
+pub struct Pair {
+    pub a: u256,
+}
+"#;
+    let (db, file) = input(quoted_event_attr_source);
+    let quoted_attr_err = prepare_file(&db, file)
+        .err()
+        .expect("quoted #[event] on function must fail output admission");
+    assert!(
+        quoted_attr_err.cause.contains("`#[event]`") && quoted_attr_err.cause.contains("structs"),
+        "{}",
+        quoted_attr_err.cause
+    );
+
+    // Finding 2a: `#[generate(provider)]` rejects ill-formed target before executing provider CTFE.
+    let ill_formed_target_source = r#"
+use core::meta::{Code, Item, Record}
+
+pub const fn faulting_provider(_ r: Record) -> Code<Item> {
+    let zero: usize = 0
+    let boom = 1 / zero
+    quote {
+        fn generated() -> usize {
+            ${boom}
+        }
+    }
+}
+
+#[generate(faulting_provider)]
+pub struct BadTarget where false {
+    pub a: u256,
+}
+"#;
+    let (db, file) = input(ill_formed_target_source);
+    let target_err = prepare_file(&db, file)
+        .err()
+        .expect("ill-formed #[generate] target must fail admission before provider CTFE");
+    assert!(
+        target_err
+            .cause
+            .contains("generation target admission failed"),
+        "{}",
+        target_err.cause
+    );
+    assert!(
+        !target_err.cause.contains("division by zero"),
+        "{}",
+        target_err.cause
+    );
 }

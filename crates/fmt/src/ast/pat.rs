@@ -22,6 +22,7 @@ impl ToDoc for ast::Pat {
             PatKind::PathTuple(path_tuple) => path_tuple.to_doc(ctx),
             PatKind::Record(record) => record.to_doc(ctx),
             PatKind::Or(or) => or.to_doc(ctx),
+            PatKind::QuoteHole(hole) => ctx.alloc.text(ctx.snippet(hole.syntax().text_range())),
         }
     }
 }

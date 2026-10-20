@@ -365,8 +365,14 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
         // structure as a normal type. Const expressions inside types are validated via
         // const-ty lowering/evaluation, and walking their HIR representation as a type
         // produces spurious "expected type" diagnostics for paths like `SALT`.
-        if let TyData::ConstraintTerm(goal) = ty.data(self.db) {
-            // A goal's first argument is its subject, unlike a trait reference.
+        let trait_def = match ty.data(self.db) {
+            TyData::ConstraintTerm(goal) => Some(goal.def(self.db)),
+            TyData::TyBase( super::ty_def::TyBase::TraitCtor(def)) => Some(*def),
+            _ => None,
+        };
+        if let Some(trait_def) = trait_def {
+            // A goal's first argument is its subject, unlike a trait reference;
+            // an unapplied unary trait in generic-arg position is a trait constructor.
             // Check the resolved declaration and visit the original arguments
             // without resolving the goal spelling as an ordinary type path.
             if let TypeKind::Path(path) = hir_ty.data(self.db)
@@ -376,7 +382,7 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
                 let vis_scope = path.hygiene_scope(self.db).unwrap_or(ctxt.scope());
                 if !crate::analysis::name_resolution::is_scope_visible_from(
                     self.db,
-                    goal.def(self.db).scope(),
+                    trait_def.scope(),
                     vis_scope,
                 ) {
                     let span = ctxt
@@ -390,7 +396,7 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
                         PathResDiag::Invisible(
                             span.into(),
                             path.ident(self.db).unwrap(),
-                            goal.def(self.db).scope().name_span(self.db),
+                            trait_def.scope().name_span(self.db),
                         )
                         .into(),
                     );

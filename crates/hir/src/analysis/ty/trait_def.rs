@@ -630,6 +630,23 @@ pub enum CheckedApplicationError {
     UnresolvedApplication,
 }
 
+/// Existing admission category together with the ordinary causal diagnostics.
+/// This adds no proof authority; legacy callers keep their original category.
+#[derive(Debug)]
+pub(crate) struct CheckedApplicationFailure<'db> {
+    pub kind: CheckedApplicationError,
+    pub diagnostics: Vec<super::diagnostics::FuncBodyDiag<'db>>,
+}
+
+impl From<CheckedApplicationError> for CheckedApplicationFailure<'_> {
+    fn from(kind: CheckedApplicationError) -> Self {
+        Self {
+            kind,
+            diagnostics: Vec::new(),
+        }
+    }
+}
+
 impl std::fmt::Debug for CheckedImplApplication<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CheckedImplApplication")
@@ -644,6 +661,47 @@ fn checked_type<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> bool {
     !ty.has_invalid(db) && !ty.has_var(db) && !ty.has_projection(db)
 }
 
+/// Evidence introduction requires a fully concrete goal. Merely lowering a
+/// Constraint term does not prove it, and rigid generic premises are not an
+/// introduction route for a concrete language witness.
+pub fn concrete_obligation_goal<'db>(
+    db: &'db dyn HirAnalysisDb,
+    term: TyId<'db>,
+) -> Result<TraitInstId<'db>, CheckedApplicationError> {
+    let super::ty_def::TyData::ConstraintTerm(goal) = term.data(db) else {
+        return Err(CheckedApplicationError::UnsupportedInput);
+    };
+    if !checked_type(db, term) || term.has_param(db) {
+        return Err(CheckedApplicationError::UnsupportedInput);
+    }
+    Ok(*goal)
+}
+
+/// Select once through ordinary discovery, then prove that exact application
+/// through the shared restricted-root and condition-admission boundary.
+pub fn introduce_obligation<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    term: TyId<'db>,
+) -> Result<CheckedImplApplication<'db>, CheckedApplicationError> {
+    introduce_obligation_with_diagnostics(db, context, term).map_err(|failure| failure.kind)
+}
+
+pub(crate) fn introduce_obligation_with_diagnostics<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: TraitSolveCx<'db>,
+    term: TyId<'db>,
+) -> Result<CheckedImplApplication<'db>, CheckedApplicationFailure<'db>> {
+    let goal = concrete_obligation_goal(db, term)?;
+    match resolve_trait_impl_instance_query(db, context, goal) {
+        ImplSelection::Unique(resolved) => {
+            prove_selected_application_with_diagnostics(db, context, resolved.selected(), goal)
+        }
+        ImplSelection::Ambiguous => Err(CheckedApplicationError::Incomplete.into()),
+        ImplSelection::NotFound => Err(CheckedApplicationError::NotProven.into()),
+    }
+}
+
 /// Header reconstruction alone is deliberately not a checked application.
 /// Proof conditions are checked outside solving through master's ordinary
 /// declaration admission. Unsupported generic conditions remain Unsupported.
@@ -653,6 +711,16 @@ pub(crate) fn prove_selected_application<'db>(
     candidate: ImplementorId<'db>,
     goal: TraitInstId<'db>,
 ) -> Result<CheckedImplApplication<'db>, CheckedApplicationError> {
+    prove_selected_application_with_diagnostics(db, origin, candidate, goal)
+        .map_err(|failure| failure.kind)
+}
+
+fn prove_selected_application_with_diagnostics<'db>(
+    db: &'db dyn HirAnalysisDb,
+    origin: TraitSolveCx<'db>,
+    candidate: ImplementorId<'db>,
+    goal: TraitInstId<'db>,
+) -> Result<CheckedImplApplication<'db>, CheckedApplicationFailure<'db>> {
     use CheckedApplicationError::*;
     if matches!(candidate.origin(db), ImplementorOrigin::Assumption)
         || goal
@@ -661,16 +729,16 @@ pub(crate) fn prove_selected_application<'db>(
             .chain(goal.assoc_type_bindings(db).values())
             .any(|ty| !checked_type(db, *ty))
     {
-        return Err(UnsupportedInput);
+        return Err(UnsupportedInput.into());
     }
     if super::trait_resolution::goal_has_const_type_requirements(db, goal) {
-        return Err(UnsupportedConditions);
+        return Err(UnsupportedConditions.into());
     }
     let conditions = match origin.restricted_goal(db, goal, candidate) {
         GoalSatisfiability::Satisfied(solution) => solution.value.impl_conditions,
-        GoalSatisfiability::NeedsConfirmation { .. } => return Err(Incomplete),
-        GoalSatisfiability::ContainsInvalid => return Err(UnsupportedInput),
-        GoalSatisfiability::UnSat(_) => return Err(NotProven),
+        GoalSatisfiability::NeedsConfirmation { .. } => return Err(Incomplete.into()),
+        GoalSatisfiability::ContainsInvalid => return Err(UnsupportedInput.into()),
+        GoalSatisfiability::UnSat(_) => return Err(NotProven.into()),
     };
     let completed = complete_selected_impl(db, candidate).ok_or(UnsupportedInput)?;
     let scope = origin.normalization_scope_for_trait_inst(db, goal);
@@ -694,38 +762,42 @@ pub(crate) fn prove_selected_application<'db>(
         .chain(resolved.trait_inst().assoc_type_bindings(db).values())
         .any(|ty| !checked_type(db, *ty))
     {
-        return Err(UnresolvedApplication);
+        return Err(UnresolvedApplication.into());
     }
     // Use the complete existing receipt, including prerequisite impls,
     // after solving. Master's checker retains source admission policy:
     // ground true is admitted; generic/false/blocked/failed is not.
     for instance in conditions.instances(db) {
         if super::trait_resolution::goal_has_const_type_requirements(db, instance.trait_inst(db)) {
-            return Err(UnsupportedConditions);
+            return Err(UnsupportedConditions.into());
         }
         let ImplementorOrigin::Hir(implementation) = instance.origin(db) else {
-            return Err(ConditionsNotAdmitted);
+            return Err(ConditionsNotAdmitted.into());
         };
-        if !super::ty_check::check_where_const_predicates(
+        let diagnostics = super::ty_check::check_where_const_predicates(
             db,
             crate::hir_def::WhereClauseOwner::ImplTrait(implementation),
-        )
-        .is_empty()
-        {
-            return Err(ConditionsNotAdmitted);
+        );
+        if !diagnostics.is_empty() {
+            return Err(CheckedApplicationFailure {
+                kind: ConditionsNotAdmitted,
+                diagnostics,
+            });
         }
     }
     for goal in conditions.trait_goals(db) {
         if super::trait_resolution::goal_has_const_type_requirements(db, *goal) {
-            return Err(UnsupportedConditions);
+            return Err(UnsupportedConditions.into());
         }
-        if !super::ty_check::check_where_const_predicates(
+        let diagnostics = super::ty_check::check_where_const_predicates(
             db,
             crate::hir_def::WhereClauseOwner::Trait(goal.def(db)),
-        )
-        .is_empty()
-        {
-            return Err(ConditionsNotAdmitted);
+        );
+        if !diagnostics.is_empty() {
+            return Err(CheckedApplicationFailure {
+                kind: ConditionsNotAdmitted,
+                diagnostics,
+            });
         }
     }
     Ok(CheckedImplApplication {
@@ -812,7 +884,7 @@ pub(crate) enum NamedOutputMismatch<'db> {
 /// another location, or encode it another way, under a `with` than without
 /// it, so they have none. Every core trait lowering resolves is listed here
 /// (a guard checks it).
-const UNIQUE_CORE_TRAITS: [&[&str]; 8] = [
+const UNIQUE_CORE_TRAITS: [&[&str]; 9] = [
     &["ops", "StateIndex"],
     &["ops", "LaneCodec"],
     &["abi", "Abi"],
@@ -821,6 +893,7 @@ const UNIQUE_CORE_TRAITS: [&[&str]; 8] = [
     &["abi", "Decode"],
     &["error", "ErrorVariant"],
     &["contracts", "ContractHost"],
+    &["meta", "FieldQuery"],
 ];
 
 /// Whether `trait_` may have no named implementation: one of
@@ -1667,8 +1740,14 @@ impl<'db> TraitEnv<'db> {
             FxHashMap::default();
         let mut unindexed_self_impls = Vec::new();
         let mut named_by_name: FxHashMap<IdentId<'db>, Vec<ImplTrait<'db>>> = FxHashMap::default();
+        let is_ordinary = |item| {
+            impl_selection_class(db, item) == ImplSelectionClass::Ordinary
+                && !crate::core::meta::is_unfulfilled_derive_request(db, item)
+        };
         for &item in ingot.all_impl_traits(db).iter() {
-            if let ImplSelectionClass::Named(name) = impl_selection_class(db, item) {
+            if let ImplSelectionClass::Named(name) = impl_selection_class(db, item)
+                && !crate::core::meta::is_unfulfilled_derive_request(db, item)
+            {
                 named_by_name.entry(name).or_default().push(item);
             }
         }
@@ -1682,18 +1761,19 @@ impl<'db> TraitEnv<'db> {
             // Raw collection is syntax-only. Candidate lookup performs semantic
             // lowering after this environment has been fully assembled.
             for (trait_def, implementors) in &impl_map.by_trait {
-                impls
-                    .entry(*trait_def)
-                    .or_default()
-                    .extend(implementors.iter().copied().filter(|&item| {
-                        impl_selection_class(db, item) == ImplSelectionClass::Ordinary
-                    }));
+                impls.entry(*trait_def).or_default().extend(
+                    implementors
+                        .iter()
+                        .copied()
+                        .filter(|&item| is_ordinary(item)),
+                );
             }
             for (self_key, implementors) in &impl_map.by_self {
                 impls_by_self.entry(*self_key).or_default().extend(
-                    implementors.iter().copied().filter(|&item| {
-                        impl_selection_class(db, item) == ImplSelectionClass::Ordinary
-                    }),
+                    implementors
+                        .iter()
+                        .copied()
+                        .filter(|&item| is_ordinary(item)),
                 );
             }
             unindexed_self_impls.extend(
@@ -1701,7 +1781,7 @@ impl<'db> TraitEnv<'db> {
                     .unindexed_self
                     .iter()
                     .copied()
-                    .filter(|&item| impl_selection_class(db, item) == ImplSelectionClass::Ordinary),
+                    .filter(|&item| is_ordinary(item)),
             );
         }
 

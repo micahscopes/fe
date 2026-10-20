@@ -1051,21 +1051,10 @@ where
     F: FnMut(PathId<'db>, &PathRes<'db>),
 {
     let is_trait = |kind| matches!(kind, NameResKind::Scope(ScopeId::Item(ItemKind::Trait(_))));
-<<<<<<< HEAD
-    let definition = resolve_type_path_definition(db, path, scope);
-    if let Some(outer) =
-        definition.and_then(|definition| shadowed_trait(db, path, scope, definition))
-=======
     let query_scope = path.hygiene_scope(db).unwrap_or(scope);
     let definition = resolve_type_path_definition(db, path, query_scope);
-    if let Some(NameResKind::Scope(ScopeId::TraitType(shadowing_trait, _))) = definition
-        && path.parent(db).is_none()
-        // The shadow can only come from a trait that encloses the use site.
-        && query_scope.is_transitive_child_of(db, shadowing_trait.scope())
-        && let Some(outer_scope) = shadowing_trait.scope().parent(db)
-        && let Ok(outer) = resolve_ident_to_bucket(db, path, outer_scope).pick(NameDomain::TYPE)
-        && is_trait(outer.kind)
->>>>>>> 6cf7deeb71961ccfb37334e91b51572d5c412150
+    if let Some(outer) =
+        definition.and_then(|definition| shadowed_trait(db, path, query_scope, definition))
     {
         let res =
             resolve_name_res_with_minter(db, outer, None, path, scope, assumptions, lowering_cx)?;
@@ -1282,6 +1271,8 @@ fn find_written_path<'db, R>(
 /// constant, as a type's generic argument may.
 fn trait_arg_path_error<'db>(
     db: &'db dyn HirAnalysisDb,
+    trait_def: Option<Trait<'db>>,
+    arg_idx: usize,
     arg: &GenericArg<'db>,
     scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
@@ -1292,6 +1283,9 @@ fn trait_arg_path_error<'db>(
         GenericArg::AssocType(binding) => (binding.ty, TypePosition::Type),
         GenericArg::Const(_) => return None,
     };
+    let allows_trait_ctor = trait_def
+        .and_then(|t| t.params(db).get(arg_idx + 1))
+        .is_some_and(|param| !param.is_star_kind(db));
     let mut visited = 0;
     find_written_path(
         db,
@@ -1312,7 +1306,16 @@ fn trait_arg_path_error<'db>(
                         position,
                         lowering_cx,
                     )
-                    .is_ok_and(|ty| ty.is_const_ty(db)) =>
+                    .is_ok_and(|ty| {
+                        ty.is_const_ty(db)
+                            || match ty.base_ty(db).data(db) {
+                                TyData::ConstraintTerm(_) => true,
+                                TyData::TyBase(TyBase::TraitCtor(_)) => {
+                                    nth > 0 || allows_trait_ctor
+                                }
+                                _ => false,
+                            }
+                    }) =>
                 {
                     None
                 }
@@ -1334,7 +1337,23 @@ pub(crate) fn trait_arg_path_diag<'db>(
     assumptions: PredicateListId<'db>,
 ) -> Option<TyDiagCollection<'db>> {
     let arg = path.generic_args(db).data(db).get(arg_idx)?;
-    let (nth, result) = trait_arg_path_error(db, arg, scope, assumptions, &LoweringContext::new())?;
+    let definition = resolve_type_path_definition(db, path, scope);
+    let definition = definition
+        .and_then(|definition| shadowed_trait(db, path, scope, definition))
+        .map_or(definition, |outer| Some(outer.kind));
+    let trait_def = match definition {
+        Some(NameResKind::Scope(ScopeId::Item(ItemKind::Trait(def)))) => Some(def),
+        _ => None,
+    };
+    let (nth, result) = trait_arg_path_error(
+        db,
+        trait_def,
+        arg_idx,
+        arg,
+        scope,
+        assumptions,
+        &LoweringContext::new(),
+    )?;
     PathResError::new(
         PathResErrorKind::TraitGenericArgType {
             arg_idx,
@@ -2741,9 +2760,15 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                         // resolve yet, such as `Q::T` in `Option<Q::T>` before `Q: Ty` is
                         // collected, fails the trait path, so its bound waits for the others.
                         for (arg_idx, arg) in path.generic_args(db).data(db).iter().enumerate() {
-                            if let Some((nth, result)) =
-                                trait_arg_path_error(db, arg, scope, assumptions, lowering_cx)
-                            {
+                            if let Some((nth, result)) = trait_arg_path_error(
+                                db,
+                                Some(t),
+                                arg_idx,
+                                arg,
+                                scope,
+                                assumptions,
+                                lowering_cx,
+                            ) {
                                 return Err(PathResError::new(
                                     PathResErrorKind::TraitGenericArgType {
                                         arg_idx,

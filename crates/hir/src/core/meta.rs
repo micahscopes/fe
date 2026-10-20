@@ -143,8 +143,12 @@ pub enum RecordInputError {
     NotConcrete,
     NotRecord,
     NotAuthored,
+    NotEnum,
+    WholeEnumHasNoFields,
     InvalidField,
     FieldOutsideRecord,
+    VariantOutsideEnum,
+    SelectedPayloadIsNotWholeEnum,
 }
 
 impl<'db> RecordInput<'db> {
@@ -259,10 +263,14 @@ impl<'db> RecordInput<'db> {
         self.variant_index
     }
 
-    pub fn declaration(self) -> Struct<'db> {
+    pub fn selected_variant(self) -> Option<usize> {
+        self.variant_index
+    }
+
+    pub fn declaration(self) -> crate::analysis::ty::adt_def::AdtRef<'db> {
         match self.owner {
-            RecordOwner::Struct(s) => s,
-            RecordOwner::Enum(_) => panic!("record input is an enum"),
+            RecordOwner::Struct(s) => crate::analysis::ty::adt_def::AdtRef::Struct(s),
+            RecordOwner::Enum(e) => crate::analysis::ty::adt_def::AdtRef::Enum(e),
         }
     }
 
@@ -286,26 +294,25 @@ impl<'db> RecordInput<'db> {
         Ok(())
     }
 
-    pub fn variant_count(self, db: &'db dyn HirAnalysisDb) -> usize {
+    /// Whole authored enum count; selected payloads are outside this checkpoint.
+    pub fn variant_count(self, db: &'db dyn HirAnalysisDb) -> Result<usize, RecordInputError> {
+        let RecordOwner::Enum(e) = self.owner else {
+            return Err(RecordInputError::NotEnum);
+        };
         if self.variant_index.is_some() {
-            return 0;
+            return Err(RecordInputError::SelectedPayloadIsNotWholeEnum);
         }
-        match self.owner {
-            RecordOwner::Struct(_) => 0,
-            RecordOwner::Enum(e) => e.variants_list(db).data(db).len(),
-        }
+        Ok(e.variants_list(db).data(db).len())
     }
 
+    /// Select an authored payload in declaration order; retain nominal owner.
     pub fn variant(
         self,
         db: &'db dyn HirAnalysisDb,
         index: usize,
     ) -> Result<Self, RecordInputError> {
-        let RecordOwner::Enum(e) = self.owner else {
-            return Err(RecordInputError::FieldOutsideRecord);
-        };
-        if self.variant_index.is_some() || index >= e.variants_list(db).data(db).len() {
-            return Err(RecordInputError::FieldOutsideRecord);
+        if index >= self.variant_count(db)? {
+            return Err(RecordInputError::VariantOutsideEnum);
         }
         Ok(Self {
             ty: self.ty,
@@ -314,16 +321,32 @@ impl<'db> RecordInput<'db> {
         })
     }
 
-    pub fn field_count(self, db: &'db dyn HirAnalysisDb) -> usize {
+    pub fn field_count(self, db: &'db dyn HirAnalysisDb) -> Result<usize, RecordInputError> {
         match (self.owner, self.variant_index) {
-            (RecordOwner::Struct(s), None) => s.hir_fields(db).data(db).len(),
-            (RecordOwner::Enum(e), Some(v)) => match e.variants_list(db).data(db)[v].kind {
+            (RecordOwner::Struct(s), None) => Ok(s.hir_fields(db).data(db).len()),
+            (RecordOwner::Enum(e), Some(v)) => Ok(match e.variants_list(db).data(db)[v].kind {
                 VariantKind::Unit => 0,
                 VariantKind::Tuple(t) => t.data(db).len(),
                 VariantKind::Record(f) => f.data(db).len(),
-            },
-            _ => 0,
+            }),
+            _ => Err(RecordInputError::WholeEnumHasNoFields),
         }
+    }
+
+    pub fn for_authored_enum_syntax(
+        db: &'db dyn HirAnalysisDb,
+        module: crate::hir_def::TopLevelMod<'db>,
+        syntax: &ast::Enum,
+    ) -> Result<Self, RecordInputError> {
+        let origin = HirOrigin::raw(syntax);
+        let declaration = module
+            .all_enums(db)
+            .iter()
+            .find(|decl| *decl.origin(db) == origin)
+            .ok_or(RecordInputError::NotAuthored)?;
+        let adt = crate::analysis::ty::adt_def::AdtRef::Enum(*declaration).as_adt(db);
+        let ty = TyId::foldl(db, TyId::adt(db, adt), adt.params(db));
+        Self::for_authored_adt_ty(db, ty)
     }
 
     pub fn field(
@@ -331,7 +354,7 @@ impl<'db> RecordInput<'db> {
         db: &'db dyn HirAnalysisDb,
         index: usize,
     ) -> Result<RecordField<'db>, RecordInputError> {
-        if index >= self.field_count(db) {
+        if index >= self.field_count(db)? {
             return Err(RecordInputError::FieldOutsideRecord);
         }
         Ok(RecordField {
@@ -931,6 +954,7 @@ impl<'db> ItemCode<'db> {
             target_file: target
                 .url(db)
                 .ok_or("generation target has no source URL")?,
+            request_impl: None,
             code: self.freeze(db)?,
         })
     }
@@ -1133,15 +1157,23 @@ impl<'db> ItemCode<'db> {
                 }
             }
         }
-
         match *kind {
             FrozenCodeKind::Item => {
                 if let Some(items) = quote.item_list() {
                     for item in items {
+                        if let Some(ast::ItemKind::Func(function)) = item.kind()
+                            && function
+                                .attr_list()
+                                .is_some_and(|attrs| attrs.normal_attrs_named("generate").next().is_some())
+                        {
+                            return Err("quoted functions cannot carry #[generate] attributes");
+                        }
                         if !matches!(
                             item.kind(),
                             Some(
                                 ast::ItemKind::Func(_)
+                                    | ast::ItemKind::Const(_)
+                                    | ast::ItemKind::TypeAlias(_)
                                     | ast::ItemKind::Impl(_)
                                     | ast::ItemKind::ImplTrait(_)
                             )
@@ -1167,10 +1199,19 @@ impl<'db> ItemCode<'db> {
                     return Err("item quotation requires item declarations");
                 }
                 for item in items {
+                    if let Some(ast::ItemKind::Func(function)) = item.kind()
+                        && function
+                            .attr_list()
+                            .is_some_and(|attrs| attrs.normal_attrs_named("generate").next().is_some())
+                    {
+                        return Err("quoted functions cannot carry #[generate] attributes");
+                    }
                     if !matches!(
                         item.kind(),
                         Some(
                             ast::ItemKind::Func(_)
+                                | ast::ItemKind::Const(_)
+                                | ast::ItemKind::TypeAlias(_)
                                 | ast::ItemKind::Impl(_)
                                 | ast::ItemKind::ImplTrait(_)
                         )
@@ -1211,4 +1252,173 @@ impl<'db> ItemCode<'db> {
         }
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub enum NativeDeriveProviderError<'db> {
+    Message(String),
+    Target(crate::analysis::ty::ty_check::GroundTypeAdmissionError<'db>),
+}
+impl From<String> for NativeDeriveProviderError<'_> {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+impl From<&str> for NativeDeriveProviderError<'_> {
+    fn from(message: &str) -> Self {
+        Self::Message(message.into())
+    }
+}
+
+/// Explicit bounded Derive request through the ordinary trait selection path.
+pub fn native_derive_provider<'db>(
+    db: &'db dyn HirAnalysisDb,
+    request: crate::hir_def::ImplTrait<'db>,
+    provider_ty: TyId<'db>,
+) -> Result<(crate::hir_def::Func<'db>, RecordInput<'db>), NativeDeriveProviderError<'db>> {
+    use crate::analysis::ty::{
+        corelib::resolve_core_trait,
+        trait_choice::Resolved,
+        trait_def::{TraitInstId, chosen_method, prove_selected_hir_application},
+        trait_resolution::{PredicateListId, Selection, TraitSolveCx},
+        ty_def::{TyBase, TyData},
+    };
+    if !request.impl_params(db).is_empty() || !request.where_clause(db).predicates(db).is_empty() {
+        return Err(
+            "bounded native derive requires a concrete header without binders or where conditions"
+                .into(),
+        );
+    }
+    let goal = request
+        .candidate_trait_inst_result(db)
+        .map_err(|_| "cannot resolve requested trait and target")?;
+    // Validate authority against the authored goal and scope before any provider runs.
+    // Ok(None) means the goal is outside the canonical gate, not a grant.
+    // No establishment receipt or old-database proof enters the output template.
+    crate::analysis::ty::permits::establishment_for_goal(db, request, goal)
+        .map_err(|cause| format!("canonical root establishment failed: {cause}"))?;
+    if goal.args(db).len() != 1
+        || !goal.assoc_type_bindings(db).is_empty()
+        || !goal.def(db).types(db).is_empty()
+        || !goal.def(db).consts(db).is_empty()
+    {
+        return Err(
+            "bounded native derive requires an unparameterized goal without associated equalities"
+                .into(),
+        );
+    }
+    if goal.def(db).ingot(db) != request.top_mod(db).ingot(db) {
+        return Err("library/canonical goal establishment is pending the permits owner API".into());
+    }
+    let input = RecordInput::for_authored_type(db, goal.args(db)[0])
+        .map_err(|cause| format!("native derive requires a concrete authored record: {cause:?}"))?;
+    crate::analysis::ty::ty_check::admit_ground_type_application(
+        db,
+        input.ty(),
+        request.into(),
+        request.span().ty().into(),
+    )
+    .map_err(NativeDeriveProviderError::Target)?;
+    if provider_ty.has_param(db) || provider_ty.has_invalid(db) || !provider_ty.is_star_kind(db) {
+        return Err("native derive requires a concrete provider type".into());
+    }
+    crate::analysis::ty::ty_check::admit_ground_type_application(
+        db,
+        provider_ty,
+        request.into(),
+        request.span().into(),
+    )
+    .map_err(NativeDeriveProviderError::Target)?;
+    let derive = resolve_core_trait(db, request.scope(), &["derive", "Derive"])
+        .ok_or("missing canonical Derive protocol")?;
+    let constructor = TyId::new(db, TyData::TyBase(TyBase::TraitCtor(goal.def(db))));
+    let inst = TraitInstId::new_simple(db, derive, vec![provider_ty, constructor]);
+    let selected = chosen_method(
+        db,
+        Resolved::Ordinary,
+        inst,
+        IdentId::new(db, "derive"),
+        request.scope(),
+        PredicateListId::empty_list(db),
+        None,
+    );
+    match selected {
+        Selection::Unique(method) => {
+            if !method.body_args().is_empty() {
+                return Err(
+                    "generic provider method substitution remains unsupported in this checkpoint"
+                        .into(),
+                );
+            }
+            // Method discovery is not admission. Check this exact retained
+            // implementation with the ordinary declaration-condition machinery
+            // before its body can execute. Ground conditions remain ambient at
+            // their declaration; no caller selection is transported here.
+            let crate::analysis::ty::trait_def::ImplementorOrigin::Hir(implementation) =
+                method.origin(db)
+            else {
+                return Err("native derive provider requires an authored implementation".into());
+            };
+            let checked = prove_selected_hir_application(
+                db,
+                TraitSolveCx::new(db, request.scope()),
+                implementation,
+                inst,
+            )
+            .map_err(|cause| {
+                format!("native derive provider application not admitted: {cause:?}")
+            })?;
+            let Selection::Unique(method) = checked.method(IdentId::new(db, "derive")) else {
+                return Err("admitted native derive provider has no unique method".into());
+            };
+            Ok((
+                method
+                    .body()
+                    .ok_or("selected Derive method has no authored body")?,
+                input,
+            ))
+        }
+        Selection::NotFound => {
+            Err("no ordinary Derive<requested goal> implementation for the provider".into())
+        }
+        Selection::Ambiguous(_) => {
+            Err("ambiguous ordinary Derive<requested goal> provider implementation".into())
+        }
+    }
+}
+
+/// Recover the exact authored header, never a first-by-name implementation.
+pub fn authored_derive_request<'db>(
+    db: &'db dyn HirAnalysisDb,
+    module: crate::hir_def::TopLevelMod<'db>,
+    ast: &ast::ImplTrait,
+) -> Option<crate::hir_def::ImplTrait<'db>> {
+    let root = crate::core::lower::top_mod_ast(db, module);
+    module
+        .all_impl_traits(db)
+        .iter()
+        .copied()
+        .find(|implementation| {
+            let HirOrigin::Raw(ptr) = implementation.origin(db) else {
+                return false;
+            };
+            ptr.to_node(root.syntax()).syntax().text_range() == ast.syntax().text_range()
+        })
+}
+
+/// A header-only request is not an implementation before its output plan exists.
+pub(crate) fn is_unfulfilled_derive_request(
+    db: &dyn HirAnalysisDb,
+    request: crate::hir_def::ImplTrait<'_>,
+) -> bool {
+    let HirOrigin::Raw(ptr) = request.origin(db) else {
+        return false;
+    };
+    let root = crate::core::lower::top_mod_ast(db, request.top_mod(db));
+    let ast = ptr.to_node(root.syntax());
+    ast.derive_provider().is_some()
+        && !db.generation_inputs().requests(db).iter().any(|plan| {
+            plan.request_impl == Some(ast.syntax().text_range())
+                && Some(plan.target_file.clone()) == request.top_mod(db).file(db).url(db)
+        })
 }

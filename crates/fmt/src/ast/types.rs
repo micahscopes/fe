@@ -593,6 +593,9 @@ fn where_predicate_doc<'a>(
             Some(expr) => expr.to_doc(ctx),
             None => ctx.alloc.nil(),
         },
+        ast::WherePredicateKind::Hole(hole) => {
+            ctx.alloc.text(ctx.snippet(hole.syntax().text_range()))
+        }
     }
 }
 
@@ -608,7 +611,7 @@ fn ends_with_braced_condition_and_comma(clause: &ast::WhereClause) -> bool {
         ast::WherePredicateKind::Const(predicate) => predicate
             .expr()
             .is_some_and(|expr| matches!(expr.kind(), ast::ExprKind::Block(_))),
-        ast::WherePredicateKind::Type(_) => false,
+        ast::WherePredicateKind::Type(_) | ast::WherePredicateKind::Hole(_) => false,
     };
     braced
         && std::iter::successors(last.syntax().next_sibling_or_token(), |element| {
@@ -886,6 +889,7 @@ impl ToDoc for ast::Type {
             TypeKind::Tuple(tuple) => tuple.to_doc(ctx),
             TypeKind::Array(array) => array.to_doc(ctx),
             TypeKind::Never(never) => never.to_doc(ctx),
+            TypeKind::QuoteHole(hole) => ctx.alloc.text(ctx.snippet(hole.syntax().text_range())),
         }
     }
 }

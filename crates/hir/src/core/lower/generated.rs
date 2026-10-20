@@ -112,12 +112,13 @@ pub(super) fn append_functions<'db>(ctxt: &mut FileLowerCtxt<'db>) {
         .generation_inputs()
         .requests(db)
         .iter()
-        .filter(|request| request.target_file == url)
+        .filter(|request| request.target_file == url && request.request_impl.is_none())
         .cloned()
         .collect::<Vec<_>>();
     for request in requests {
         lower_generated_item_code(ctxt, &request.code);
     }
+    ctxt.builder.apply_quoted_function_origins();
 }
 
 fn lower_quoted_ast_item<'db>(
@@ -223,6 +224,189 @@ pub(super) fn lower_generated_item_code<'db>(ctxt: &mut FileLowerCtxt<'db>, code
                             ctxt.current_hole(hole.syntax().text_range())
                         {
                             lower_generated_item_code(ctxt, &nested);
+                        } else {
+                            ctxt.record_generation_error(
+                                hole.syntax().text_range(),
+                                "item-level quotation hole requires Code<Item> splice",
+                            );
+                        }
+                    } else {
+                        ctxt.record_generation_error(
+                            stmt.syntax().text_range(),
+                            "item quotation requires item declarations",
+                        );
+                    }
+                }
+            } else {
+                ctxt.record_generation_error(
+                    *quote_range,
+                    "item quotation requires item declarations",
+                );
+            }
+            ctxt.pop_quote_frame();
+        }
+        _ => {
+            let range = ctxt
+                .quote_frames
+                .last()
+                .map_or_else(|| parser::TextRange::empty(0.into()), |f| f.quote_range);
+            ctxt.record_generation_error(range, "item-level quotation splice requires Code<Item>");
+        }
+    }
+}
+
+fn lower_quoted_impl_trait_ast_item<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    item: ast::Item,
+    quote_top_mod: TopLevelMod<'db>,
+    producer_module: Option<parser::TextRange>,
+    producer_block: Option<parser::TextRange>,
+    types: &mut Vec<crate::hir_def::AssocTyDef<'db>>,
+    consts: &mut Vec<crate::hir_def::AssocConstDef<'db>>,
+    rows: &mut Vec<crate::hir_def::AssocRow<'db>>,
+) {
+    match item.kind() {
+        Some(ast::ItemKind::Func(func)) => {
+            super::item::validate_func_attrs(
+                ctxt,
+                func.attr_list(),
+                "fn",
+                func.sig().name().map(|name| name.text().to_string()),
+                true,
+            );
+            let generated = Func::lower_ast(ctxt, func);
+            ctxt.builder.defer_quoted_item_origin(
+                generated.into(),
+                quote_top_mod,
+                producer_module,
+                producer_block,
+            );
+        }
+        Some(ast::ItemKind::Const(c)) => {
+            super::item::validate_unsupported_item_attrs(
+                ctxt,
+                c.attr_list(),
+                "const",
+                c.name().map(|name| name.text().to_string()),
+            );
+            let def = super::item::lower_quoted_assoc_const_from_const(
+                ctxt,
+                c,
+                quote_top_mod,
+                producer_module,
+                producer_block,
+            );
+            consts.push(def);
+        }
+        Some(ast::ItemKind::TypeAlias(t)) => {
+            super::item::validate_unsupported_item_attrs(
+                ctxt,
+                t.attr_list(),
+                "type",
+                t.alias().map(|name| name.text().to_string()),
+            );
+            types.push(super::item::lower_quoted_assoc_type_from_alias(ctxt, t));
+        }
+        Some(ast::ItemKind::ImplTrait(impl_trait)) => {
+            if let Some(item_list) = impl_trait.item_list() {
+                for impl_item in item_list {
+                    super::item::lower_quoted_trait_item(
+                        ctxt,
+                        impl_item,
+                        quote_top_mod,
+                        producer_module,
+                        producer_block,
+                        types,
+                        consts,
+                        rows,
+                    );
+                }
+            }
+        }
+        _ => {
+            ctxt.record_generation_error(
+                item.syntax().text_range(),
+                "trait impl quotation supports function, const, and type declarations",
+            );
+        }
+    }
+}
+
+pub(super) fn lower_generated_impl_trait_members<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    code: &FrozenCode,
+    types: &mut Vec<crate::hir_def::AssocTyDef<'db>>,
+    consts: &mut Vec<crate::hir_def::AssocConstDef<'db>>,
+    rows: &mut Vec<crate::hir_def::AssocRow<'db>>,
+) {
+    match code {
+        FrozenCode::Empty { .. } => {}
+        FrozenCode::Template {
+            kind: FrozenCodeKind::Item,
+            quote_file,
+            quote_range,
+            producer_module,
+            producer_block,
+            holes,
+        } => {
+            let (quote, frame) = ctxt.resolve_quote_template(
+                quote_file,
+                *quote_range,
+                *producer_module,
+                *producer_block,
+                false,
+                holes.clone(),
+            );
+            let quote_top_mod = frame.quote_top_mod;
+            ctxt.quote_frames.push(frame);
+            if let Some(item_list) = quote.item_list() {
+                for child in item_list.syntax().children() {
+                    if let Some(item) = ast::Item::cast(child.clone()) {
+                        lower_quoted_impl_trait_ast_item(
+                            ctxt,
+                            item,
+                            quote_top_mod,
+                            *producer_module,
+                            *producer_block,
+                            types,
+                            consts,
+                            rows,
+                        );
+                    } else if let Some(hole) = ast::QuoteHole::cast(child) {
+                        if let Some(FrozenHoleValue::Code(nested)) =
+                            ctxt.current_hole(hole.syntax().text_range())
+                        {
+                            lower_generated_impl_trait_members(ctxt, &nested, types, consts, rows);
+                        } else {
+                            ctxt.record_generation_error(
+                                hole.syntax().text_range(),
+                                "item-level quotation hole requires Code<Item> splice",
+                            );
+                        }
+                    }
+                }
+            } else if let Some(block) = quote.body() {
+                for item in block.items() {
+                    lower_quoted_impl_trait_ast_item(
+                        ctxt,
+                        item,
+                        quote_top_mod,
+                        *producer_module,
+                        *producer_block,
+                        types,
+                        consts,
+                        rows,
+                    );
+                }
+                for stmt in block.stmts() {
+                    if let ast::StmtKind::Expr(expr_stmt) = stmt.kind()
+                        && let Some(expr) = expr_stmt.expr()
+                        && let ast::ExprKind::QuoteHole(hole) = expr.kind()
+                    {
+                        if let Some(FrozenHoleValue::Code(nested)) =
+                            ctxt.current_hole(hole.syntax().text_range())
+                        {
+                            lower_generated_impl_trait_members(ctxt, &nested, types, consts, rows);
                         } else {
                             ctxt.record_generation_error(
                                 hole.syntax().text_range(),

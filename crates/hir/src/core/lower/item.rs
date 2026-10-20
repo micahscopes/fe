@@ -205,6 +205,7 @@ pub(super) fn validate_func_attrs<'db>(
             AttrRule::unsupported("error", ERROR_TARGETS),
             AttrRule::unsupported("abi", ABI_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
+            AttrRule::unsupported("generate", "structs"),
         ],
     );
 }
@@ -1084,10 +1085,34 @@ impl<'db> ImplTrait<'db> {
             }
         }
 
+        // The authored header owns generated methods and ordinary impl identity.
+        let db = ctxt.db();
+        let file_url = ctxt.top_mod().file(db).url(db);
+        let requests = db
+            .generation_inputs()
+            .requests(db)
+            .iter()
+            .filter(|request| {
+                Some(&request.target_file) == file_url.as_ref()
+                    && request.request_impl == Some(ast.syntax().text_range())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for request in requests {
+            super::generated::lower_generated_impl_trait_members(
+                ctxt,
+                &request.code,
+                &mut types,
+                &mut consts,
+                &mut rows,
+            );
+        }
+
         shape_types.retain(|shape_type: &AssocTyDef| {
             !types.iter().any(|defined| defined.name == shape_type.name)
         });
         types.extend(shape_types);
+
         let impl_trait = Self::new(
             ctxt.db(),
             id,
@@ -1151,6 +1176,103 @@ impl<'db> AssocConstDef<'db> {
             value,
             vis: super::lower_visibility(&ast),
         }
+    }
+}
+
+pub(super) fn lower_quoted_assoc_type_from_alias<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    ast: ast::TypeAlias,
+) -> AssocTyDef<'db> {
+    let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+    AssocTyDef {
+        attributes,
+        name: IdentId::lower_token_partial(ctxt, ast.alias()),
+        type_ref: TypeId::lower_ast_partial(ctxt, ast.ty()),
+    }
+}
+
+pub(super) fn lower_quoted_assoc_const_from_const<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    ast: ast::Const,
+    quote_top_mod: TopLevelMod<'db>,
+    producer_module: Option<parser::TextRange>,
+    producer_block: Option<parser::TextRange>,
+) -> AssocConstDef<'db> {
+    let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+    let body = ast.value().map(|expr| {
+        let b = Body::lower_ast(ctxt, expr);
+        ctxt.builder.defer_quoted_item_origin(
+            b.into(),
+            quote_top_mod,
+            producer_module,
+            producer_block,
+        );
+        b
+    });
+    AssocConstDef {
+        attributes,
+        name: IdentId::lower_token_partial(ctxt, ast.name()),
+        ty: TypeId::lower_ast_partial(ctxt, ast.ty()),
+        value: body.into(),
+        vis: super::lower_visibility(&ast),
+    }
+}
+
+pub(super) fn lower_quoted_trait_item<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    impl_item: ast::TraitItem,
+    quote_top_mod: TopLevelMod<'db>,
+    producer_module: Option<parser::TextRange>,
+    producer_block: Option<parser::TextRange>,
+    types: &mut Vec<AssocTyDef<'db>>,
+    consts: &mut Vec<AssocConstDef<'db>>,
+    rows: &mut Vec<AssocRow<'db>>,
+) {
+    match impl_item.kind() {
+        ast::TraitItemKind::Func(func) => {
+            validate_func_attrs(
+                ctxt,
+                func.attr_list(),
+                "fn",
+                func.sig().name().map(|name| name.text().to_string()),
+                true,
+            );
+            let generated = Func::lower_ast(ctxt, func);
+            ctxt.builder.defer_quoted_item_origin(
+                generated.into(),
+                quote_top_mod,
+                producer_module,
+                producer_block,
+            );
+        }
+        ast::TraitItemKind::Type(t) => {
+            validate_unsupported_item_attrs(
+                ctxt,
+                t.attr_list(),
+                "type",
+                t.name().map(|name| name.text().to_string()),
+            );
+            types.push(AssocTyDef::lower_ast(ctxt, t));
+        }
+        ast::TraitItemKind::Const(c) => {
+            validate_unsupported_item_attrs(
+                ctxt,
+                c.attr_list(),
+                "const",
+                c.name().map(|name| name.text().to_string()),
+            );
+            let def = AssocConstDef::lower_ast(ctxt, c);
+            if let Some(body) = def.value.to_opt() {
+                ctxt.builder.defer_quoted_item_origin(
+                    body.into(),
+                    quote_top_mod,
+                    producer_module,
+                    producer_block,
+                );
+            }
+            consts.push(def);
+        }
+        ast::TraitItemKind::Uses(row) => rows.push(AssocRow::lower_ast(ctxt, row)),
     }
 }
 

@@ -407,6 +407,8 @@ impl<'db> TraitRefId<'db> {
 pub enum KindBound {
     /// `*`
     Mono,
+    /// Intrinsic constraint codomain of a constructor kind.
+    Constraint,
     /// `* -> *`
     Abs(Partial<Box<KindBound>>, Partial<Box<KindBound>>),
 }

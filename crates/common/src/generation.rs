@@ -88,6 +88,9 @@ pub enum FrozenCode {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrozenGenerationRequest {
     pub target_file: Url,
+    /// Existing authored impl header receiving this member template.
+    /// Syntax identity only; authority and semantic context are rechecked in output.
+    pub request_impl: Option<TextRange>,
     pub code: FrozenCode,
 }
 
