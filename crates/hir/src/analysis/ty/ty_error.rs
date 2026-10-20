@@ -364,17 +364,24 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
         // structure as a normal type. Const expressions inside types are validated via
         // const-ty lowering/evaluation, and walking their HIR representation as a type
         // produces spurious "expected type" diagnostics for paths like `SALT`.
-        if let TyData::ConstraintTerm(goal) = ty.data(self.db) {
-            // A goal's first argument is its subject, unlike a trait reference.
-            // Check the resolved declaration and visit the original arguments
-            // without resolving the goal spelling as an ordinary type path.
+        let trait_term_def = match ty.data(self.db) {
+            TyData::ConstraintTerm(goal) => Some(goal.def(self.db)),
+            TyData::TyBase(super::ty_def::TyBase::TraitCtor(def)) => Some(*def),
+            _ => None,
+        };
+        if let Some(def) = trait_term_def {
+            // A goal's first argument is its subject, unlike a trait reference,
+            // and a unary trait constructor names a trait in type-argument
+            // position. Check the resolved declaration and visit the original
+            // arguments without resolving the trait spelling as an ordinary
+            // type path.
             if let TypeKind::Path(path) = hir_ty.data(self.db)
                 && let Some(path) = path.to_opt()
             {
                 let idx = path.segment_index(self.db);
                 if !crate::analysis::name_resolution::is_scope_visible_from(
                     self.db,
-                    goal.def(self.db).scope(),
+                    def.scope(),
                     ctxt.scope(),
                 ) {
                     let span = ctxt
@@ -388,7 +395,7 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
                         PathResDiag::Invisible(
                             span.into(),
                             path.ident(self.db).unwrap(),
-                            goal.def(self.db).scope().name_span(self.db),
+                            def.scope().name_span(self.db),
                         )
                         .into(),
                     );

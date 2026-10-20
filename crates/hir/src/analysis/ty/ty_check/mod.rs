@@ -1,7 +1,10 @@
 mod callable;
 mod choice;
 mod const_requirements;
-pub use const_requirements::{EvaluationStop, RequirementFailure};
+pub use const_requirements::{
+    EvaluationStop, GroundTypeAdmissionError, GroundTypeAdmissionKind, RequirementFailure,
+    admit_ground_type_application,
+};
 pub(crate) use const_requirements::{
     check_declared_type_requirements, type_has_const_requirements,
 };
@@ -1222,7 +1225,11 @@ pub(crate) fn inference_met_lowering_cycle<'db>(
 /// recursive const definition would be an unrecoverable salsa cycle through
 /// body checking instead of converging to a `RecursiveConst` error in the
 /// eval queries.
-#[salsa::tracked(return_ref)]
+#[salsa::tracked(
+    return_ref,
+    cycle_initial=check_const_value_cycle_initial,
+    cycle_fn=check_const_value_cycle_recover
+)]
 pub fn check_const_value<'db>(
     db: &'db dyn HirAnalysisDb,
     const_: Const<'db>,
@@ -1238,6 +1245,29 @@ pub fn check_const_value<'db>(
     }
 
     const_body_ctfe_diags(db, body, const_.ty(db), ConstUsePolicy::RequireValue)
+}
+
+fn check_const_value_cycle_initial<'db>(
+    db: &'db dyn HirAnalysisDb,
+    const_: Const<'db>,
+) -> Vec<FuncBodyDiag<'db>> {
+    let span = const_
+        .body(db)
+        .to_opt()
+        .map(|body| body.span().into())
+        .unwrap_or_else(DynLazySpan::invalid);
+    vec![FuncBodyDiag::Ty(
+        TyLowerDiag::TypeLoweringCycle(span).into(),
+    )]
+}
+
+fn check_const_value_cycle_recover<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    _value: &Vec<FuncBodyDiag<'db>>,
+    _count: u32,
+    _const_: Const<'db>,
+) -> salsa::CycleRecoveryAction<Vec<FuncBodyDiag<'db>>> {
+    salsa::CycleRecoveryAction::Iterate
 }
 
 /// CTFE-validates an anonymous const body (a top-level `const` initializer or
@@ -1359,7 +1389,18 @@ fn const_body_ctfe_diags_with_context<'db>(
                     EvidenceList::none(db),
                 );
                 let semantic = get_or_build_semantic_instance(db, key);
-                if reify_runtime_const_for_ty(db, semantic, expected, value).is_none() {
+                let has_meta_carrier =
+                    crate::core::meta::ty_contains_meta_carrier(db, expected).is_some();
+                let checked_metadata = has_meta_carrier
+                    && crate::core::meta::issued_metadata_leaves(db, value)
+                    && crate::analysis::semantic::sem_const_ty(db, value) == expected
+                    && crate::analysis::semantic::consts::verify_sem_const_shape(db, value).is_ok();
+                // A completely verified compile-time token is a known constant;
+                // it is intentionally never reified into a runtime seal value.
+                if (has_meta_carrier && !checked_metadata)
+                    || (!has_meta_carrier
+                        && reify_runtime_const_for_ty(db, semantic, expected, value).is_none())
+                {
                     push_const_eval_diag(
                         &mut diags,
                         body,
@@ -1669,6 +1710,34 @@ impl<'db> TyChecker<'db> {
         let env = TyCheckEnv::new(db, owner)?;
         let expected = env.compute_expected_return();
         let mut checker = Self::new_internal(db, env, expected);
+        if let BodyOwner::Func(function, _) = owner
+            && !function.is_const(db)
+        {
+            for (index, ty) in function.arg_tys(db).iter().enumerate() {
+                if let Some(meta) =
+                    crate::core::meta::ty_contains_meta_carrier(db, ty.instantiate_identity())
+                {
+                    checker.push_diag(BodyDiag::CompileTimePhase {
+                        primary: function.span().params().param(index).ty().into(),
+                        message: format!(
+                            "`{}` is compile-time-only in a runtime parameter",
+                            meta.pretty_print(db)
+                        ),
+                    });
+                }
+            }
+            if let Some(meta) =
+                crate::core::meta::ty_contains_meta_carrier(db, function.return_ty(db))
+            {
+                checker.push_diag(BodyDiag::CompileTimePhase {
+                    primary: function.span().ret_ty().into(),
+                    message: format!(
+                        "`{}` is compile-time-only in a runtime return type",
+                        meta.pretty_print(db)
+                    ),
+                });
+            }
+        }
         checker.seed_effect_witnesses();
         Ok(checker)
     }
@@ -6409,7 +6478,7 @@ impl<'db> TypedBody<'db> {
             Expr::Closure { .. } => {
                 *saw_non_param = true;
             }
-            Expr::Lit(_) | Expr::Path(_) | Expr::UnsupportedMacroCall => {}
+            Expr::ItemQuote(_) | Expr::Lit(_) | Expr::Path(_) | Expr::UnsupportedMacroCall => {}
         }
     }
 

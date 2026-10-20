@@ -1232,7 +1232,7 @@ fn find_written_path<'db, R>(
                 }
             })
         }
-        TypeKind::Never => None,
+        TypeKind::Primitive(_) | TypeKind::Never => None,
     }
 }
 
@@ -1273,7 +1273,14 @@ fn trait_arg_path_error<'db>(
                         position,
                         lowering_cx,
                     )
-                    .is_ok_and(|ty| ty.is_const_ty(db)) =>
+                    .is_ok_and(|ty| {
+                        ty.is_const_ty(db)
+                            || matches!(
+                                ty.base_ty(db).data(db),
+                                TyData::TyBase(TyBase::TraitCtor(_))
+                                    | TyData::ConstraintTerm(_)
+                            )
+                    }) =>
                 {
                     None
                 }

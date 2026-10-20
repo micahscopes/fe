@@ -638,6 +638,17 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
     ) -> Result<NExpr<'db>, NormalizeError<'db>> {
         let dst_ty = self.normalized_local_ty(dst);
         let normalized = match expr {
+            SExpr::ItemQuote { expression, holes } => {
+                let holes = holes
+                    .iter()
+                    .map(|hole| self.read_scalar_operand(block, origin, *hole, None))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice();
+                NExpr::ItemQuote {
+                    expression: *expression,
+                    holes,
+                }
+            }
             SExpr::Forward(value) => NExpr::Forward {
                 src: self.read_operand(block, origin, *value, Some(ReadMode::Copy))?,
             },
@@ -1147,7 +1158,9 @@ impl<'a, 'db> NormalizeCx<'a, 'db> {
             SemConstValue::Enum {
                 variant, fields, ..
             } => (Some(*variant), fields),
-            SemConstValue::Scalar { .. }
+            SemConstValue::ItemCode { .. }
+            | SemConstValue::Meta { .. }
+            | SemConstValue::Scalar { .. }
             | SemConstValue::Unit
             | SemConstValue::Description(..)
             | SemConstValue::Evidence { .. } => {
@@ -2376,6 +2389,7 @@ fn semantic_root_provider<'db>(
 
 fn for_each_address_required_local(expr: &SExpr<'_>, mut f: impl FnMut(SLocalId)) {
     match expr {
+        SExpr::ItemQuote { .. } => {}
         SExpr::Borrow { place, .. } => {
             if !place
                 .path

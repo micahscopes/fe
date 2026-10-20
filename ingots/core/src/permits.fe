@@ -1,0 +1,8 @@
+//! Prototype canonical root authority; root configuration remains a compiler input gap.
+use ingot::obligations::Constraint
+pub struct PermitAuthority<G: Constraint> {}
+pub struct ImplPermit<G: Constraint> {}
+/// Reusable ordinary immutable effect authority, not a move-once token.
+pub fn impl_permit<G: Constraint>() -> ImplPermit<G> uses (grant: PermitAuthority<G>) {
+    ImplPermit {}
+}

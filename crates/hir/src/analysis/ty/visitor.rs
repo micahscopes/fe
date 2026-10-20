@@ -110,6 +110,7 @@ where
         TyBase::Adt(adt) => visitor.visit_adt(*adt),
         TyBase::Contract(c) => visitor.visit_contract(*c),
         TyBase::Func(func) => visitor.visit_func(*func),
+        TyBase::TraitCtor(_) => {}
         TyBase::Closure(closure) => visitor.visit_closure(*closure),
     }
 }
@@ -210,6 +211,16 @@ where
 {
     let db = visitor.db();
     match value.value(db) {
+        SemConstValue::ItemCode { ty, code } => {
+            ty.visit_with(visitor);
+            for hole in code.holes() {
+                walk_sem_const(visitor, *hole);
+            }
+        }
+        SemConstValue::Meta { ty, value } => {
+            ty.visit_with(visitor);
+            value.input().ty().visit_with(visitor);
+        }
         SemConstValue::Evidence { ty, choice } => {
             visitor.visit_ty(*ty);
             choice.visit_with(visitor);

@@ -1256,7 +1256,11 @@ fn force_immutable_description<'db>(
         }
         SemConstValue::Tuple { elems, .. } | SemConstValue::Array { elems, .. } => elems,
         SemConstValue::Struct { fields, .. } | SemConstValue::Enum { fields, .. } => fields,
-        SemConstValue::Unit | SemConstValue::Scalar { .. } | SemConstValue::Evidence { .. } => {
+        SemConstValue::Unit
+        | SemConstValue::Scalar { .. }
+        | SemConstValue::Evidence { .. }
+        | SemConstValue::ItemCode { .. }
+        | SemConstValue::Meta { .. } => {
             return Ok(value);
         }
     };
