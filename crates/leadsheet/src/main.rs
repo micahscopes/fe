@@ -131,7 +131,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if results.is_empty()
+    if (results.is_empty() || !tests)
         && let Some(ingot) = ingot
     {
         for &m in ingot.all_modules(&db) {
@@ -139,7 +139,16 @@ fn main() -> ExitCode {
                 continue;
             }
             match lower_one(m) {
-                Ok(r) => results.extend(r),
+                Ok(r) => {
+                    for item in r {
+                        let dup = item.as_ref().ok().is_some_and(|l| {
+                            results.iter().any(|existing| existing.as_ref().ok().is_some_and(|e| e.name == l.name))
+                        });
+                        if !dup {
+                            results.push(item);
+                        }
+                    }
+                }
                 Err(e) => {
                     eprintln!("{path}: {e}");
                     return ExitCode::FAILURE;
