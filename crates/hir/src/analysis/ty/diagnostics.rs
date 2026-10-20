@@ -1211,12 +1211,6 @@ pub enum BodyDiag<'db> {
         untupled: bool,
     },
 
-    /// A closure parameter annotated with a product, which no shape trait
-    /// names yet.
-    ClosureProductParam {
-        primary: DynLazySpan<'db>,
-    },
-
     /// A write to, or a `mut` access of, a binding a closure captures: the
     /// closure has its own copy, read-only.
     WriteToCapture {
@@ -1385,7 +1379,6 @@ impl<'db> BodyDiag<'db> {
             Self::MaybeMutWithoutMode { .. } => 130,
             Self::RefutableParamPattern { .. } => 133,
             Self::ProductArgExpected { .. } => 135,
-            Self::ClosureProductParam { .. } => 136,
             Self::ProductArgTooWeak { .. } => 150,
             Self::SpreadNotKnown { .. } => 146,
             Self::ParamBindsTwice { .. } => 134,
