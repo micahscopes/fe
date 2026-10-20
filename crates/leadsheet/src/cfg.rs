@@ -235,17 +235,20 @@ impl Cfg {
                 innermost[b] = Some(i);
             }
         }
-        for l in loops.iter_mut() {
+        for i in 0..loops.len() {
             let mut exits: Vec<usize> = Vec::new();
-            for &b in &l.blocks {
+            for &b in &loops[i].blocks {
                 for s in succ(b) {
-                    if !l.blocks.contains(&s) && !exits.contains(&s) {
-                        exits.push(s);
+                    if !loops[i].blocks.contains(&s) {
+                        let s = skip_empty_block(body, &topo, &innermost, &loops, s);
+                        if !exits.contains(&s) {
+                            exits.push(s);
+                        }
                     }
                 }
             }
             exits.sort_by_key(|b| topo[*b]);
-            l.exits = exits.into_iter().map(RBlockId::new).collect();
+            loops[i].exits = exits.into_iter().map(RBlockId::new).collect();
         }
         // A successor as a node of the level `level`.
         let at_level = |level: Option<usize>, s: usize| -> Result<Succ, String> {
@@ -388,4 +391,28 @@ impl Cfg {
     pub fn loop_headed(&self, b: RBlockId, level: Option<usize>) -> Option<usize> {
         self.loops.iter().position(|l| l.header == b && l.parent == level)
     }
+
+    /// Follows empty `Goto` blocks within the same loop level.
+    pub fn skip_empty(&self, body: &RuntimeBody<'_>, b: RBlockId) -> RBlockId {
+        RBlockId::new(skip_empty_block(body, &self.topo, &self.innermost, &self.loops, b.index()))
+    }
+}
+
+fn skip_empty_block(
+    body: &RuntimeBody<'_>,
+    topo: &[usize],
+    innermost: &[Option<usize>],
+    loops: &[Loop],
+    mut b: usize,
+) -> usize {
+    while body.blocks[b].stmts.is_empty()
+        && let RTerminator::Goto(next) = body.blocks[b].terminator
+        && let next = next.index()
+        && topo[next] > topo[b]
+        && innermost[b] == innermost[next]
+        && !loops.iter().any(|l| l.header.index() == b || l.header.index() == next)
+    {
+        b = next;
+    }
+    b
 }

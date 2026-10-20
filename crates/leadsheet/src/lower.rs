@@ -708,6 +708,10 @@ impl<'p, 'db> Lower<'p, 'db> {
         self.env = snapshot;
         let outs = self.b.theta(&inputs, region, owns);
         for (v, slots) in &layout {
+            if !lp.exits.iter().any(|e| self.cfg.live_in[e.index()].contains(v)) {
+                self.env.vals.remove(v);
+                continue;
+            }
             let ws = slots
                 .iter()
                 .map(|s| match s {
@@ -753,7 +757,8 @@ impl<'p, 'db> Lower<'p, 'db> {
         let exit = if block == lp.header {
             None
         } else if !lp.blocks.contains(&block.index()) {
-            Some(lp.exits.iter().position(|e| *e == block).ok_or("an exit the loop does not have")?)
+            let target = self.cfg.skip_empty(&self.body, block);
+            Some(lp.exits.iter().position(|e| *e == target).ok_or("an exit the loop does not have")?)
         } else {
             return Ok(None);
         };
@@ -816,6 +821,9 @@ impl<'p, 'db> Lower<'p, 'db> {
         }
         let mut out = Vec::new();
         for l in self.live_at(join) {
+            if self.is_slot(l) && keys.contains(&Key::ObjAddr(self.facts.slot_site[&l])) {
+                continue;
+            }
             let n = self.word_count(l);
             match self.env.vals.get(&l) {
                 Some(ws) if ws.len() == n => out.extend(ws.clone()),
@@ -863,25 +871,27 @@ impl<'p, 'db> Lower<'p, 'db> {
             live.extend(self.cfg.live_in[s.index()].iter().copied().filter(|l| self.env.vals.contains_key(l)));
         }
         let mut inputs: Vec<V> = Vec::new();
+        let mut seen: FxHashMap<V, usize> = FxHashMap::default();
+        let mut push_in = |v: V, inputs: &mut Vec<V>| -> usize {
+            *seen.entry(v).or_insert_with(|| {
+                let i = inputs.len();
+                inputs.push(v);
+                i
+            })
+        };
         let mut layout: Vec<(RLocalId, Vec<Result<usize, U256>>)> = Vec::new();
         for l in &live {
             let mut slots = Vec::new();
             for w in self.env.vals[l].clone() {
                 match self.b.known(w) {
                     Some(c) => slots.push(Err(c)),
-                    None => {
-                        slots.push(Ok(inputs.len()));
-                        inputs.push(w);
-                    }
+                    None => slots.push(Ok(push_in(w, &mut inputs))),
                 }
             }
             layout.push((*l, slots));
         }
         let keys: Vec<Key> = self.env.held.keys().copied().collect();
-        let state_at = inputs.len();
-        for k in &keys {
-            inputs.push(self.env.held[k]);
-        }
+        let key_at: Vec<usize> = keys.iter().map(|k| push_in(self.env.held[k], &mut inputs)).collect();
         let in_tys: Vec<Ty> = inputs.iter().map(|v| self.b.ty(*v)).collect();
         let snapshot = self.env.clone();
         let mut regions: Vec<Region> = Vec::new();
@@ -901,7 +911,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                 env.vals.insert(*l, ws);
             }
             for (i, k) in keys.iter().enumerate() {
-                env.held.insert(*k, params[state_at + i]);
+                env.held.insert(*k, params[key_at[i]]);
             }
             self.env = env;
             self.rebase();
@@ -922,7 +932,7 @@ impl<'p, 'db> Lower<'p, 'db> {
         }
         if default.is_none() {
             let params = self.b.open(&in_tys);
-            let c = keys.iter().position(|k| *k == Key::Ctl).map(|i| params[state_at + i]).ok_or("an arm that halts without the control token")?;
+            let c = keys.iter().position(|k| *k == Key::Ctl).map(|i| params[key_at[i]]).ok_or("an arm that halts without the control token")?;
             regions.push(self.b.close(params, End::Halt("invalid", vec![c])));
         }
         let default_region = regions.pop().expect("a default arm");
@@ -941,14 +951,25 @@ impl<'p, 'db> Lower<'p, 'db> {
                     env.in_pool.extend(e.in_pool.iter().copied());
                 }
                 let mut at = 0;
-                for l in self.live_at(j) {
-                    let n = self.word_count(l);
-                    env.vals.insert(l, outs[at..at + n].to_vec());
+                let live_j = self.live_at(j);
+                for l in &live_j {
+                    if self.is_slot(*l) && keys.contains(&Key::ObjAddr(self.facts.slot_site[l])) {
+                        continue;
+                    }
+                    let n = self.word_count(*l);
+                    env.vals.insert(*l, outs[at..at + n].to_vec());
                     at += n;
                 }
                 for k in &keys {
                     env.held.insert(*k, outs[at]);
                     at += 1;
+                }
+                for l in live_j {
+                    if self.is_slot(l)
+                        && let Some(&addr) = env.held.get(&Key::ObjAddr(self.facts.slot_site[&l]))
+                    {
+                        env.vals.insert(l, vec![addr]);
+                    }
                 }
                 self.env = env;
                 self.rebase();
@@ -967,25 +988,27 @@ impl<'p, 'db> Lower<'p, 'db> {
         }
         live.extend(self.cfg.live_in[last.index()].iter().copied().filter(|l| self.env.vals.contains_key(l)));
         let mut inputs: Vec<V> = Vec::new();
+        let mut seen: FxHashMap<V, usize> = FxHashMap::default();
+        let mut push_in = |v: V, inputs: &mut Vec<V>| -> usize {
+            *seen.entry(v).or_insert_with(|| {
+                let i = inputs.len();
+                inputs.push(v);
+                i
+            })
+        };
         let mut layout: Vec<(RLocalId, Vec<Result<usize, U256>>)> = Vec::new();
         for l in &live {
             let mut slots = Vec::new();
             for w in self.env.vals[l].clone() {
                 match self.b.known(w) {
                     Some(c) => slots.push(Err(c)),
-                    None => {
-                        slots.push(Ok(inputs.len()));
-                        inputs.push(w);
-                    }
+                    None => slots.push(Ok(push_in(w, &mut inputs))),
                 }
             }
             layout.push((*l, slots));
         }
         let keys: Vec<Key> = self.env.held.keys().copied().collect();
-        let state_at = inputs.len();
-        for k in &keys {
-            inputs.push(self.env.held[k]);
-        }
+        let key_at: Vec<usize> = keys.iter().map(|k| push_in(self.env.held[k], &mut inputs)).collect();
         let tys: Vec<Ty> = inputs.iter().map(|v| self.b.ty(*v)).collect();
         let snapshot = self.env.clone();
         let mut regions = Vec::new();
@@ -1003,7 +1026,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                 env.vals.insert(*l, ws);
             }
             for (i, k) in keys.iter().enumerate() {
-                env.held.insert(*k, params[state_at + i]);
+                env.held.insert(*k, params[key_at[i]]);
             }
             self.env = env;
             self.rebase();
@@ -1030,7 +1053,7 @@ impl<'p, 'db> Lower<'p, 'db> {
             self.env.vals.insert(*l, ws);
         }
         for (i, k) in keys.iter().enumerate() {
-            self.env.held.insert(*k, outs[state_at + i]);
+            self.env.held.insert(*k, outs[key_at[i]]);
         }
         self.rebase();
         Ok(())
@@ -1476,7 +1499,13 @@ impl<'p, 'db> Lower<'p, 'db> {
         if self.b.known(flag) == Some(U256::ZERO) {
             return Ok(());
         }
-        let keys: Vec<Key> = self.env.held.keys().copied().collect();
+        let keys: Vec<Key> = self
+            .env
+            .held
+            .keys()
+            .copied()
+            .filter(|k| !matches!(k, Key::ParamAddr(_) | Key::ObjAddr(_)))
+            .collect();
         let ins: Vec<V> = keys.iter().map(|k| self.env.held[k]).collect();
         let tys: Vec<Ty> = ins.iter().map(|v| self.b.ty(*v)).collect();
         let pool_at = keys.iter().position(|k| *k == Key::Pool).ok_or("a check without the pool")?;
