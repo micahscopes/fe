@@ -1807,6 +1807,34 @@ impl<'p, 'db> Lower<'p, 'db> {
         }
     }
 
+    fn known_u64(&self, v: V) -> Option<u64> {
+        self.b.known(v).and_then(|c| u64::try_from(c).ok())
+    }
+
+    /// Whether `[addr, +len]` is a constant range disjoint from `[0x40, +0x20]`.
+    fn misses_fp_word(&self, addr: V, len: Option<u64>) -> bool {
+        let (Some(a), Some(n)) = (self.b.known(addr), len) else { return false };
+        if n == 0 {
+            return true;
+        }
+        let Ok(a) = u64::try_from(a) else { return false };
+        a.checked_add(n).is_some_and(|end| end <= 0x40 || a >= 0x60)
+    }
+
+    fn save_fp(&mut self, key: Key, s: V, keep: bool) -> Option<V> {
+        if key != Key::Pool || keep {
+            return None;
+        }
+        let slot = self.b.k(0x40);
+        Some(self.b.op("mload", &[s, slot], 1, &[])[0])
+    }
+
+    fn restore_fp(&mut self, s: V, saved: Option<V>) -> V {
+        let Some(fp) = saved else { return s };
+        let slot = self.b.k(0x40);
+        self.b.op("mstore", &[s, slot, fp], 0, &[Space::Mem])[0]
+    }
+
     fn store_word(&mut self, addr: V, space: AddressSpace, holder: Holder, word: V) -> R<()> {
         let key = Self::key_of(holder)?;
         let s = self.state(key)?;
@@ -1817,7 +1845,9 @@ impl<'p, 'db> Lower<'p, 'db> {
             other => return Err(format!("a store into {other:?}")),
         };
         if sp == Space::Mem {
+            let saved = self.save_fp(key, s, self.misses_fp_word(addr, Some(32)));
             let s2 = self.b.op(op, &[s, addr, word], 0, &[sp])[0];
+            let s2 = self.restore_fp(s2, saved);
             self.set(key, s2);
         } else {
             // A store an ending keeps takes the control token.
@@ -1876,6 +1906,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                 if space == AddressSpace::Memory && width < 32 {
                     let key = Self::key_of(holder)?;
                     let mut s = self.state(key)?;
+                    let saved = self.save_fp(key, s, self.misses_fp_word(addr, Some(width)));
                     for i in 0..width {
                         let shift = (width - 1 - i) * 8;
                         let byte = if shift == 0 {
@@ -1887,6 +1918,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                         let a = self.offset(addr, i);
                         s = self.b.op("mstore8", &[s, a, byte], 0, &[Space::Mem])[0];
                     }
+                    let s = self.restore_fp(s, saved);
                     self.set(key, s);
                     Ok(())
                 } else {
@@ -2551,8 +2583,16 @@ impl<'p, 'db> Lower<'p, 'db> {
         let mut ins = vec![s];
         ins.extend_from_slice(words);
         if update {
+            let len = match op {
+                "mstore" => Some(32),
+                "mstore8" => Some(1),
+                _ => words.get(2).and_then(|l| self.known_u64(*l)),
+            };
+            let keep = words.first().is_some_and(|a| self.misses_fp_word(*a, len));
+            let saved = self.save_fp(key, s, keep);
             let outs = self.b.op(op, &ins, words_out, &[Space::Mem]);
-            self.set(key, outs[words_out]);
+            let s2 = self.restore_fp(outs[words_out], saved);
+            self.set(key, s2);
             Ok(outs[..words_out].to_vec())
         } else {
             Ok(self.b.op(op, &ins, words_out, &[]))
@@ -2602,6 +2642,8 @@ impl<'p, 'db> Lower<'p, 'db> {
                 let d = w(self, dst)?;
                 let key = self.mem_of(*dst)?;
                 let mut s = self.state(key)?;
+                let total_len = 32 * bytes.chunks(32).len() as u64;
+                let saved = self.save_fp(key, s, self.misses_fp_word(d, Some(total_len)));
                 for (i, chunk) in bytes.chunks(32).enumerate() {
                     let mut word = [0u8; 32];
                     word[..chunk.len()].copy_from_slice(chunk);
@@ -2609,6 +2651,7 @@ impl<'p, 'db> Lower<'p, 'db> {
                     let a = self.offset(d, 32 * i as u64);
                     s = self.b.op("mstore", &[s, a, v], 0, &[Space::Mem])[0];
                 }
+                let s = self.restore_fp(s, saved);
                 self.set(key, s);
                 vec![]
             }
@@ -2813,8 +2856,10 @@ impl<'p, 'db> Lower<'p, 'db> {
                 let (d, o, l) = (w(self, dst)?, as_word(self, offset)?, as_word(self, len)?);
                 let key = self.mem_of(*dst)?;
                 let (m, world, c) = (self.state(key)?, self.state(Key::World)?, self.state(Key::Ctl)?);
+                let saved = self.save_fp(key, m, self.misses_fp_word(d, self.known_u64(l)));
                 let out = self.b.op("returndatacopy", &[m, world, c, d, o, l], 0, &[Space::Mem, Space::Ctl]);
-                self.set(key, out[0]);
+                let m2 = self.restore_fp(out[0], saved);
+                self.set(key, m2);
                 self.set(Key::Ctl, out[1]);
                 vec![]
             }
@@ -2822,8 +2867,10 @@ impl<'p, 'db> Lower<'p, 'db> {
                 let (a, d, o, l) = (as_word(self, addr)?, w(self, dst)?, as_word(self, offset)?, as_word(self, len)?);
                 let key = self.mem_of(*dst)?;
                 let (m, world) = (self.state(key)?, self.state(Key::World)?);
+                let saved = self.save_fp(key, m, self.misses_fp_word(d, self.known_u64(l)));
                 let out = self.b.op("extcodecopy", &[m, world, a, d, o, l], 0, &[Space::Mem]);
-                self.set(key, out[0]);
+                let m2 = self.restore_fp(out[0], saved);
+                self.set(key, m2);
                 vec![]
             }
             B::Call { gas, addr, value, args_offset, args_len, ret_offset, ret_len } => {
@@ -2847,13 +2894,16 @@ impl<'p, 'db> Lower<'p, 'db> {
                     w(self, ret_offset)?,
                     as_word(self, ret_len)?,
                 );
+                let keep = self.misses_fp_word(ao, self.known_u64(al)) && self.misses_fp_word(ro, self.known_u64(rl));
+                let saved = self.save_fp(ka, m, keep);
                 let out = self.b.op(
                     "call",
                     &[m, stor, tstor, world, ctl, g, a, v, ao, al, ro, rl],
                     1,
                     &[Space::Mem, Space::Stor, Space::Tstor, Space::World, Space::Ctl],
                 );
-                self.set(ka, out[1]);
+                let m2 = self.restore_fp(out[1], saved);
+                self.set(ka, m2);
                 self.set(Key::Stor, out[2]);
                 self.set(Key::Tstor, out[3]);
                 self.set(Key::World, out[4]);
@@ -2880,13 +2930,16 @@ impl<'p, 'db> Lower<'p, 'db> {
                     w(self, ret_offset)?,
                     as_word(self, ret_len)?,
                 );
+                let keep = self.misses_fp_word(ao, self.known_u64(al)) && self.misses_fp_word(ro, self.known_u64(rl));
+                let saved = self.save_fp(ka, m, keep);
                 let out = self.b.op(
                     "delegatecall",
                     &[m, stor, tstor, world, ctl, g, a, ao, al, ro, rl],
                     1,
                     &[Space::Mem, Space::Stor, Space::Tstor, Space::World, Space::Ctl],
                 );
-                self.set(ka, out[1]);
+                let m2 = self.restore_fp(out[1], saved);
+                self.set(ka, m2);
                 self.set(Key::Stor, out[2]);
                 self.set(Key::Tstor, out[3]);
                 self.set(Key::World, out[4]);
@@ -2913,8 +2966,11 @@ impl<'p, 'db> Lower<'p, 'db> {
                     w(self, ret_offset)?,
                     as_word(self, ret_len)?,
                 );
+                let keep = self.misses_fp_word(ao, self.known_u64(al)) && self.misses_fp_word(ro, self.known_u64(rl));
+                let saved = self.save_fp(ka, m, keep);
                 let out = self.b.op("staticcall", &[m, stor, tstor, world, ctl, g, a, ao, al, ro, rl], 1, &[Space::Mem, Space::World, Space::Ctl]);
-                self.set(ka, out[1]);
+                let m2 = self.restore_fp(out[1], saved);
+                self.set(ka, m2);
                 self.set(Key::World, out[2]);
                 self.set(Key::Ctl, out[3]);
                 vec![out[0]]
