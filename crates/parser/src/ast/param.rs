@@ -565,6 +565,11 @@ ast_node! {
     pub struct KindBoundMono,
     SK::KindBoundMono,
 }
+impl KindBoundMono {
+    pub fn is_constraint(&self) -> bool {
+        support::token(self.syntax(), SK::Ident).is_some_and(|token| token.text() == "Constraint")
+    }
+}
 
 ast_node! {
     pub struct KindBoundAbs,

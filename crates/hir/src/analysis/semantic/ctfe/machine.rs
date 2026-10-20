@@ -2063,9 +2063,12 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         let value = match ctfe_extern_intrinsic_kind(self.db, func) {
             Some(
                 kind @ (CtfeExternIntrinsic::MetaFieldCount
+                | CtfeExternIntrinsic::MetaVariantCount
+                | CtfeExternIntrinsic::MetaVariant
+                | CtfeExternIntrinsic::MetaTypeIs
                 | CtfeExternIntrinsic::MetaField
                 | CtfeExternIntrinsic::MetaFieldType),
-            ) => self.eval_meta_extern_intrinsic(kind, result_ty, args, origin),
+            ) => self.eval_meta_extern_intrinsic(kind, instance, result_ty, args, origin),
             Some(CtfeExternIntrinsic::AddMod) => {
                 self.eval_evm_modular_arithmetic(result_ty, args, EvmModularArithmetic::Add, origin)
             }
@@ -2108,6 +2111,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
     fn eval_meta_extern_intrinsic(
         &self,
         kind: CtfeExternIntrinsic,
+        instance: SemanticInstance<'db>,
         result_ty: TyId<'db>,
         args: &[CtfeConstValue<'db>],
         origin: SemOrigin<'db>,
@@ -2131,8 +2135,103 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 Ok(CtfeConstValue::int(
                     self.db,
                     result_ty,
-                    BigInt::from(input.field_count(self.db)),
+                    BigInt::from(input.field_count(self.db).map_err(|_| {
+                        CtfeError::InvalidOperation {
+                            origin,
+                            message:
+                                "field_count requires a struct; a whole enum has no selected payload"
+                                    .into(),
+                        }
+                    })?),
                 ))
+            }
+            CtfeExternIntrinsic::MetaVariantCount => {
+                let [arg] = args else {
+                    return Err(CtfeError::NotConstEvaluable { origin });
+                };
+                let value = arg.materialize(self.db);
+                let SemConstValue::Meta {
+                    value: crate::core::meta::MetaValue::Record(input),
+                    ..
+                } = value.value(self.db)
+                else {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "variant_count requires a compiler-issued Record".into(),
+                    });
+                };
+                let count =
+                    input
+                        .variant_count(self.db)
+                        .map_err(|_| CtfeError::InvalidOperation {
+                            origin,
+                            message: "variant_count requires a whole authored enum".into(),
+                        })?;
+                Ok(CtfeConstValue::int(self.db, result_ty, BigInt::from(count)))
+            }
+            CtfeExternIntrinsic::MetaVariant => {
+                let [arg, index] = args else {
+                    return Err(CtfeError::NotConstEvaluable { origin });
+                };
+                let value = arg.materialize(self.db);
+                let SemConstValue::Meta {
+                    value: crate::core::meta::MetaValue::Record(input),
+                    ..
+                } = value.value(self.db)
+                else {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "variant requires a compiler-issued Record".into(),
+                    });
+                };
+                let index = self
+                    .expect_int(index.clone(), origin)?
+                    .to_usize()
+                    .ok_or(CtfeError::OutOfBounds { origin })?;
+                let selected = input.variant(self.db, index).map_err(|cause| {
+                    CtfeError::InvalidOperation {
+                        origin,
+                        message: format!(
+                            "variant requires a whole authored enum and an in-range ordinal: {cause:?}"
+                        ),
+                    }
+                })?;
+                let value = SemConstId::new(
+                    self.db,
+                    SemConstValue::Meta {
+                        ty: result_ty,
+                        value: crate::core::meta::MetaValue::Record(selected),
+                    },
+                );
+                let verified = VerifiedConstValueId::from_complete_execution(self.db, value)
+                    .map_err(|message| CtfeError::InvalidOperation {
+                        origin,
+                        message: message.into(),
+                    })?;
+                Ok(CtfeConstValue::concrete(self.db, verified))
+            }
+            CtfeExternIntrinsic::MetaTypeIs => {
+                let [arg] = args else {
+                    return Err(CtfeError::NotConstEvaluable { origin });
+                };
+                let value = arg.materialize(self.db);
+                let SemConstValue::Meta {
+                    value: crate::core::meta::MetaValue::FieldType(field),
+                    ..
+                } = value.value(self.db)
+                else {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "type_is requires a compiler-issued FieldType".into(),
+                    });
+                };
+                let ty = *instance
+                    .key(self.db)
+                    .subst(self.db)
+                    .generic_args(self.db)
+                    .first()
+                    .ok_or(CtfeError::NotConstEvaluable { origin })?;
+                Ok(CtfeConstValue::bool(field.ty(self.db) == ty))
             }
             CtfeExternIntrinsic::MetaField => {
                 let [arg, index] = args else {
@@ -2153,9 +2252,17 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                     .expect_int(index.clone(), origin)?
                     .to_usize()
                     .ok_or(CtfeError::OutOfBounds { origin })?;
-                let field = input
-                    .field(self.db, index)
-                    .map_err(|_| CtfeError::OutOfBounds { origin })?;
+                let field = input.field(self.db, index).map_err(|cause| match cause {
+                    crate::core::meta::RecordInputError::WholeEnumHasNoFields => {
+                        CtfeError::InvalidOperation {
+                            origin,
+                            message:
+                                "field requires a struct; a whole enum has no selected payload"
+                                    .into(),
+                        }
+                    }
+                    _ => CtfeError::OutOfBounds { origin },
+                })?;
                 let value = SemConstId::new(
                     self.db,
                     SemConstValue::Meta {

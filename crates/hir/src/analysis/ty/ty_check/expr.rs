@@ -4490,6 +4490,32 @@ impl<'db> TyChecker<'db> {
                 {
                     return ExprProp::invalid(self.db);
                 }
+                if let Some(kind) = crate::analysis::ty::permits::permit_kind(self.db, ty) {
+                    use crate::analysis::ty::permits::{PermitKind, is_root_authority};
+                    let allowed = match (kind, self.env.owner()) {
+                        (PermitKind::Authority, BodyOwner::Const(root)) => {
+                            is_root_authority(self.db, root)
+                        }
+                        (PermitKind::Permit, BodyOwner::Func(function, _)) => {
+                            crate::analysis::ty::corelib::resolve_lib_func_path(
+                                self.db,
+                                function.scope(),
+                                "core::permits::impl_permit",
+                            ) == Some(function)
+                        }
+                        _ => false,
+                    };
+                    if !allowed {
+                        self.push_diag(BodyDiag::ObligationOpening {
+                            primary: expr.span(self.body()).into(),
+                            reason: match kind {
+                                PermitKind::Authority => "PermitAuthority construction is restricted to a designated program-root constant",
+                                PermitKind::Permit => "ImplPermit construction is restricted to the resolved core permit mint",
+                            },
+                        });
+                        return ExprProp::invalid(self.db);
+                    }
+                }
                 let record_like = RecordLike::from_ty(ty);
                 if record_like.is_record(self.db) {
                     self.env

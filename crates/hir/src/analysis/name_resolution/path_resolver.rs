@@ -2505,7 +2505,14 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                                                     position,
                                                     lowering_cx,
                                                 )
-                                                .is_ok_and(|ty| ty.is_const_ty(db)) =>
+                                                .is_ok_and(|ty| {
+                                                    ty.is_const_ty(db)
+                                                        || matches!(
+                                                            ty.base_ty(db).data(db),
+                                                            TyData::TyBase(TyBase::TraitCtor(_))
+                                                                | TyData::ConstraintTerm(_)
+                                                        )
+                                                }) =>
                                             {
                                                 None
                                             }

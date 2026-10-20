@@ -66,7 +66,7 @@ fn pretty_print_ty_for_mismatch<'db>(db: &'db dyn SpannedHirAnalysisDb, ty: TyId
                     .scope()
                     .pretty_path(db)
                     .unwrap_or_else(|| ty.pretty_print(db).to_string()),
-                TyBase::Prim(_) | TyBase::Func(_) | TyBase::Closure(_) => {
+                TyBase::Prim(_) | TyBase::Func(_) | TyBase::Closure(_) | TyBase::TraitCtor(_) => {
                     ty.pretty_print(db).to_string()
                 }
             }
@@ -5361,6 +5361,20 @@ impl DiagnosticVoucher for TraitLowerDiag<'_> {
         let error_code =
             GlobalErrorCode::new(DiagnosticPass::ImplTraitDefinition, self.local_code());
         match self {
+            Self::CanonicalEstablishment { primary, reason } => primary_diag(
+                Severity::Error,
+                "canonical root establishment failed",
+                reason.to_string(),
+                primary.span().resolve(db),
+                error_code,
+            ),
+            Self::NamedCanonicalImplementation { primary } => primary_diag(
+                Severity::Error,
+                "a canonical-only trait does not admit named alternatives",
+                "use the ordinary home implementation",
+                primary.span().resolve(db),
+                error_code,
+            ),
             Self::NamedImplementationOfUniqueTrait { primary, trait_ } => primary_diag(
                 Severity::Error,
                 "this trait cannot have a named implementation",
@@ -5678,6 +5692,14 @@ impl DiagnosticVoucher for ImplDiag<'_> {
         let severity = Severity::Error;
 
         match self {
+            Self::UnfulfilledDeriveRequest { primary } => primary_diag(
+                severity,
+                "native derive request was not prepared",
+                "explicit native derive currently requires standalone authored-input preparation",
+                primary.resolve(db),
+                error_code,
+            ),
+
             Self::ConflictMethodImpl {
                 primary,
                 conflict_with,

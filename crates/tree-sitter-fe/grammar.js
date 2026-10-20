@@ -494,8 +494,10 @@ module.exports = grammar({
       'for',
       field('type', $._type),
       optional(seq('as', field('selection_name', $.identifier))),
-      optional($.where_clause),
-      field('body', $.trait_item_list),
+      choice(
+        seq('with', '(', field('derive_provider', $.path_type), ')'),
+        seq(optional($.where_clause), field('body', $.trait_item_list)),
+      ),
     ),
 
     impl_item_list: $ => seq(
@@ -574,8 +576,8 @@ module.exports = grammar({
     ),
 
     kind_bound: $ => prec.right(choice(
-      seq('*', optional(seq('->', $.kind_bound))),
-      seq('(', $.kind_bound, ')', optional(seq('->', $.kind_bound))),
+      seq('*', optional(seq('->', choice($.kind_bound, 'Constraint')))),
+      seq('(', $.kind_bound, ')', optional(seq('->', choice($.kind_bound, 'Constraint')))),
     )),
 
     // Uses external scanner token _generic_open instead of '<' to avoid

@@ -23,7 +23,7 @@ use super::{
             collect_candidate_constraints, collect_constraints, collect_func_decl_constraints,
         },
     },
-    ty_def::{InvalidCause, Kind, TyData, TyId, TyParam},
+    ty_def::{InvalidCause, Kind, TyBase, TyData, TyId, TyParam},
 };
 use crate::analysis::name_resolution::{
     NameDomain, NameResKind, PathRes, TypePosition, path_resolver::PathResolutionResult,
@@ -648,11 +648,30 @@ fn lower_constraint_term<'db>(
     use crate::analysis::name_resolution::resolve_type_path_definition;
     use crate::hir_def::{ItemKind, PathKind, TraitRefId};
     let path = path.to_opt()?;
-    let NameResKind::Scope(ScopeId::Item(ItemKind::Trait(_))) =
+    if path.is_self_ty(db) {
+        return None;
+    }
+    let NameResKind::Scope(ScopeId::Item(ItemKind::Trait(def))) =
         resolve_type_path_definition(db, path, scope)?
     else {
         return None;
     };
+    if path.generic_args(db).data(db).is_empty() && !path.generic_args(db).is_given(db) {
+        let constructor = if def.params(db).len() == 1
+            && def.self_param(db).is_star_kind(db)
+            && def.assoc_types(db).next().is_none()
+            && def.assoc_consts(db).next().is_none()
+        {
+            TyId::new(db, TyData::TyBase(TyBase::TraitCtor(def)))
+        } else {
+            TyId::invalid(db, InvalidCause::NotFullyApplied)
+        };
+        minter.record_resolution(
+            path,
+            &crate::analysis::name_resolution::PathRes::Ty(constructor),
+        );
+        return Some(constructor);
+    }
     let (GenericArg::Type(subject), rest) = path.generic_args(db).data(db).split_first()? else {
         return Some(TyId::invalid(db, InvalidCause::Other));
     };
@@ -697,7 +716,9 @@ fn lower_constraint_term<'db>(
             return None;
         }
     }
-    Some(TyId::new(db, TyData::ConstraintTerm(goal)))
+    let term = TyId::new(db, TyData::ConstraintTerm(goal));
+    minter.record_resolution(path, &crate::analysis::name_resolution::PathRes::Ty(term));
+    Some(term)
 }
 
 fn lower_path_impl<'db>(
@@ -731,6 +752,11 @@ pub(crate) fn lower_type_position_path<'db>(
     position: TypePosition,
     lowering_cx: &LoweringContext<'db>,
 ) -> PathResolutionResult<'db, TyId<'db>> {
+    if let Some(goal) =
+        lower_constraint_term(db, Partial::Present(path), scope, assumptions, lowering_cx)
+    {
+        return Ok(goal);
+    }
     let assumptions = with_enclosing_trait_self_predicate(db, scope, assumptions);
     let res = resolve_type_position_path_with_minter(
         db,
@@ -2066,6 +2092,7 @@ pub(crate) fn is_core_constraint_bound<'db>(
 pub(super) fn lower_kind(kind: &HirKindBound) -> Kind {
     match kind {
         HirKindBound::Mono => Kind::Star,
+        HirKindBound::Constraint => Kind::Constraint,
         HirKindBound::Abs(lhs, rhs) => match (lhs, rhs) {
             (Partial::Present(lhs), Partial::Present(rhs)) => {
                 Kind::Abs(Box::new((lower_kind(lhs), lower_kind(rhs))))

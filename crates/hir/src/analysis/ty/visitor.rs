@@ -110,6 +110,7 @@ where
         TyBase::Adt(adt) => visitor.visit_adt(*adt),
         TyBase::Contract(c) => visitor.visit_contract(*c),
         TyBase::Func(func) => visitor.visit_func(*func),
+        TyBase::TraitCtor(_) => {}
         TyBase::Closure(closure) => visitor.visit_closure(*closure),
     }
 }

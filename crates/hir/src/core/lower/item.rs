@@ -972,6 +972,53 @@ impl<'db> ImplTrait<'db> {
             !types.iter().any(|defined| defined.name == shape_type.name)
         });
         types.extend(shape_types);
+
+        // The authored header owns generated methods and ordinary impl identity.
+        let db = ctxt.db();
+        let file_url = ctxt.top_mod().file(db).url(db);
+        let plan = db
+            .generation_inputs()
+            .functions(db)
+            .iter()
+            .find(|plan| {
+                Some(&plan.target_file) == file_url.as_ref()
+                    && plan.request_impl == Some(ast.syntax().text_range())
+            })
+            .cloned();
+        if let Some(plan) = plan {
+            let root = super::top_mod_ast(db, ctxt.top_mod());
+            let quote = root
+                .syntax()
+                .descendants()
+                .filter_map(ast::QuoteExpr::cast)
+                .find(|quote| quote.syntax().text_range() == plan.quote_range)
+                .expect("frozen method quote belongs to unchanged source");
+            ctxt.generation_holes = crate::core::meta::quote_holes(&quote)
+                .expect("validated holes")
+                .into_iter()
+                .map(|hole| hole.syntax().text_range())
+                .zip(plan.holes)
+                .collect();
+            let ast::ItemKind::Func(function) = quote
+                .body()
+                .unwrap()
+                .items()
+                .next()
+                .unwrap()
+                .kind()
+                .unwrap()
+            else {
+                unreachable!("checked single function template")
+            };
+            let generated = Func::lower_ast(ctxt, function);
+            ctxt.generation_holes.clear();
+            ctxt.builder.defer_quoted_function_origin(
+                generated,
+                plan.producer_module,
+                plan.producer_block,
+            );
+        }
+
         let impl_trait = Self::new(
             ctxt.db(),
             id,

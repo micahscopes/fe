@@ -1386,6 +1386,13 @@ impl<'db> BodyDiag<'db> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
 pub enum TraitLowerDiag<'db> {
+    CanonicalEstablishment {
+        primary: ImplTrait<'db>,
+        reason: &'static str,
+    },
+    NamedCanonicalImplementation {
+        primary: ImplTrait<'db>,
+    },
     /// A named implementation may not change an ordinary
     /// implementation's associated types.
     NamedAssociatedTypeMismatch {
@@ -1437,6 +1444,8 @@ pub enum TraitLowerDiag<'db> {
 impl TraitLowerDiag<'_> {
     pub fn local_code(&self) -> u16 {
         match self {
+            Self::NamedCanonicalImplementation { .. } => 6,
+            Self::CanonicalEstablishment { .. } => 7,
             Self::NamedAssociatedTypeMismatch { .. }
             | Self::NamedAssociatedTypeDisagreement { .. }
             | Self::NamedAssociatedRowMismatch { .. }
@@ -1500,6 +1509,9 @@ impl TraitConstraintDiag<'_> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
 pub enum ImplDiag<'db> {
+    UnfulfilledDeriveRequest {
+        primary: DynLazySpan<'db>,
+    },
     ConflictMethodImpl {
         primary: CallableDef<'db>,
         conflict_with: CallableDef<'db>,
@@ -1678,7 +1690,9 @@ pub enum ImplDiag<'db> {
 
     /// A `Pinned` implementation whose space is not a state space, nor
     /// another pinned type's.
-    PinNotStateSpace { primary: DynLazySpan<'db> },
+    PinNotStateSpace {
+        primary: DynLazySpan<'db>,
+    },
 
     /// An implementation of an `unsafe trait` without `unsafe impl`, or an
     /// `unsafe impl` of a safe trait.
@@ -1697,7 +1711,9 @@ pub enum ImplDiag<'db> {
 
     /// A `Copy` implementation for a bare type parameter, which covers types
     /// whose fields, views and state the checks of a `Copy` type never see.
-    BlanketCopy { primary: DynLazySpan<'db> },
+    BlanketCopy {
+        primary: DynLazySpan<'db>,
+    },
 
     /// An effect row whose components, expanded through the rows they name,
     /// come back to it.
@@ -1710,6 +1726,7 @@ pub enum ImplDiag<'db> {
 impl ImplDiag<'_> {
     pub fn local_code(&self) -> u16 {
         match self {
+            Self::UnfulfilledDeriveRequest { .. } => 25,
             Self::ConflictMethodImpl { .. } => 0,
             Self::MethodNotDefinedInTrait { .. } => 1,
             Self::NotAllTraitItemsImplemented { .. } => 2,

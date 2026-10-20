@@ -1,7 +1,10 @@
 mod callable;
 mod choice;
 mod const_requirements;
-pub use const_requirements::{EvaluationStop, RequirementFailure};
+pub use const_requirements::{
+    EvaluationStop, GroundTypeAdmissionError, GroundTypeAdmissionKind, RequirementFailure,
+    admit_ground_type_application,
+};
 pub(crate) use const_requirements::{
     check_declared_type_requirements, type_has_const_requirements,
 };

@@ -313,9 +313,7 @@ fn verify_sem_const_shape_impl<'db>(
             {
                 return Err("record input payload has a different declared carrier type");
             }
-            if crate::core::meta::RecordInput::for_authored_type(db, value.input().ty())
-                != Ok(value.input())
-            {
+            if !value.input().validate(db) {
                 return Err("record input no longer identifies its authored concrete type");
             }
             Ok(())

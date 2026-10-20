@@ -14,6 +14,9 @@ impl<K> Copy for Code<K> {}
 pub struct Item {}
 
 extern {
+    pub const fn variant(_ record: Record, _ index: usize) -> Record
+    pub const fn type_is<T>(_ field_type: FieldType) -> bool
+    pub const fn variant_count(_ record: Record) -> usize
     pub const fn field_count(_ record: Record) -> usize
     pub const fn field(_ record: Record, _ index: usize) -> Field
     pub const fn field_type(_ field: Field) -> FieldType

@@ -78,7 +78,11 @@ fn raw_impl_self_key<'db>(
             {
                 NameResKind::Prim(prim) => match TyBase::from(prim) {
                     TyBase::Prim(prim) => Some(ImplSelfKey::Prim(prim)),
-                    TyBase::Adt(_) | TyBase::Contract(_) | TyBase::Func(_) | TyBase::Closure(_) => {
+                    TyBase::Adt(_)
+                    | TyBase::Contract(_)
+                    | TyBase::Func(_)
+                    | TyBase::Closure(_)
+                    | TyBase::TraitCtor(_) => {
                         unreachable!()
                     }
                 },
@@ -342,6 +346,9 @@ pub(crate) fn lower_impl_trait_header<'db>(
     // `ImplTrait`. If lowering fails or the ingot rule is violated, this
     // returns `None`.
     let trait_inst = impl_trait.candidate_trait_inst_result(db).ok()?;
+    if super::permits::establishment_for_goal(db, impl_trait, trait_inst).is_err() {
+        return None;
+    }
 
     // Semantic generic parameters for this impl-trait block.
     let params = impl_trait.impl_params(db);

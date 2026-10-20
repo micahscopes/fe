@@ -17,6 +17,9 @@ pub enum FrozenScalar {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrozenFunctionTemplate {
     pub target_file: Url,
+    /// Existing authored impl header receiving this method template.
+    /// Syntax identity only; authority and semantic context are rechecked in output.
+    pub request_impl: Option<TextRange>,
     pub quote_range: TextRange,
     pub producer_module: Option<TextRange>,
     pub producer_block: Option<TextRange>,
