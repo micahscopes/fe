@@ -752,5 +752,18 @@ fn tree_sitter_agrees_on_composed_quotation_and_enum_reflection_examples() {
         assert!(errors.is_empty(), "{errors:?}\n{source}");
         let errors = parse_errors(&mut parser, source);
         assert!(errors.is_empty(), "{errors:?}\n{source}");
+        let tree = parser.parse(source, None).unwrap();
+        let mut pending = vec![tree.root_node()];
+        while let Some(node) = pending.pop() {
+            if matches!(node.kind(), "quote" | "<") {
+                assert_eq!(
+                    node.utf8_text(source.as_bytes()).unwrap(),
+                    node.kind(),
+                    "{source}"
+                );
+            }
+            let mut cursor = node.walk();
+            pending.extend(node.children(&mut cursor));
+        }
     }
 }
