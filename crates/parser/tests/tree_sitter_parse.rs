@@ -654,3 +654,42 @@ fn tree_sitter_agrees_on_where_clauses_and_function_bodies() {
         ["enum", "function", "impl", "impl trait", "struct", "trait"],
     );
 }
+
+#[test]
+fn tree_sitter_agrees_on_basic_quotation_and_contextual_quote_names() {
+    use fe_parser::{SyntaxKind, SyntaxNode};
+    let mut parser = new_parser();
+    for (source, expected_quotes) in [
+        (
+            "const fn make() { let n = 2\n quote { const fn count() -> usize { ${n} } } }",
+            1,
+        ),
+        ("const fn make() { quote /* comment */ { fn f() {} } }", 1),
+        (
+            "const fn make() { quote /* comment\n continues */ { fn f() {} } }",
+            1,
+        ),
+        ("fn ordinary() { let quote = 41\n quote + 1 }", 0),
+        ("fn ordinary() { quote(1, 2) }", 0),
+        ("fn ordinary() { quote\n { 1 } }", 0),
+    ] {
+        let (green, errors) = parse_source_file(source, RecoveryMode::NoRecover);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let count = SyntaxNode::new_root(green)
+            .descendants()
+            .filter(|node| node.kind() == SyntaxKind::QuoteExpr)
+            .count();
+        assert_eq!(count, expected_quotes, "{source}");
+        let errors = parse_errors(&mut parser, source);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let tree = parser.parse(source, None).unwrap();
+        let mut pending = vec![tree.root_node()];
+        let mut count = 0;
+        while let Some(node) = pending.pop() {
+            count += usize::from(node.kind() == "quote_expression");
+            let mut cursor = node.walk();
+            pending.extend(node.children(&mut cursor));
+        }
+        assert_eq!(count, expected_quotes, "{source}");
+    }
+}
