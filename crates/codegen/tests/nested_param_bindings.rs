@@ -117,17 +117,8 @@ fn invalid_relative_projection_is_a_diagnostic_not_a_fallback() {
 }
 
 #[test]
-fn ambiguous_flat_target_does_not_choose_one_same_named_nested_leaf() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::create_dir(temp.path().join("src")).unwrap();
-    std::fs::write(
-        temp.path().join("fe.toml"),
-        "[ingot]\nname = \"ambiguous_controls\"\nversion = \"0.1.0\"\n",
-    )
-    .unwrap();
-    std::fs::write(
-        temp.path().join("src/lib.fe"),
-        r#"
+fn ambiguous_and_duplicate_flat_targets_are_diagnostics() {
+    let source = r#"
 use core::actor::InitialState
 use std::web::view::{Param, Surface, Extent}
 use std::webgpu::{GpuProgram, WebGpuBackend, FragmentSurface}
@@ -147,23 +138,41 @@ actor AmbiguousSurface uses (GpuProgram<WebGpuBackend>) {
     }
     fn shade(self, x: i32, y: i32) -> i32 uses (FragmentSurface) { -1 }
 }
-"#,
-    )
-    .unwrap();
-    let url = url::Url::from_directory_path(temp.path()).unwrap();
-    let mut db = DriverDataBase::default();
-    assert!(!driver::init_ingot(&mut db, &url));
-    let top = db
-        .workspace()
-        .containing_ingot(&db, url)
-        .unwrap()
-        .root_mod(&db);
-    let diagnostics = db.run_on_top_mod(top).format_diags(&db);
-    assert!(diagnostics.is_empty(), "{diagnostics}");
-    let error = WebBundle::compile(&db, top, WebBuildOptions::render("shade", None))
-        .err()
-        .expect("ambiguous target must not compile a bundle");
-    assert!(error.to_string().contains("found 2"), "{error}");
+"#;
+    let duplicate = source
+        .replace("struct Group { value: f32 }", "struct Group { value: f32 }\nstruct Hidden { spare: f32 }\nstruct GroupParams { value: Param }")
+        .replace("right: Group", "right: Hidden")
+        .replace("right: Group { value: 2.0 }", "right: Hidden { spare: 2.0 }")
+        .replace("right: Hidden { value: 2.0 }", "right: Hidden { spare: 2.0 }")
+        .replace("struct Params { value: Param }", "struct Params { value: Param, left: GroupParams }")
+        .replace("value: Param::range(min: 0.0, max: 8.0, init: 1.0),", "value: Param::range(min: 0.0, max: 8.0, init: 1.0), left: GroupParams { value: Param::range(min: 0.0, max: 8.0, init: 1.0) },");
+    for (source, expected) in [
+        (source, "found 2"),
+        (duplicate.as_str(), "duplicates actor scalar target"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
+        std::fs::write(
+            temp.path().join("fe.toml"),
+            "[ingot]\nname = \"invalid_controls\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("src/lib.fe"), source).unwrap();
+        let url = url::Url::from_directory_path(temp.path()).unwrap();
+        let mut db = DriverDataBase::default();
+        assert!(!driver::init_ingot(&mut db, &url));
+        let top = db
+            .workspace()
+            .containing_ingot(&db, url)
+            .unwrap()
+            .root_mod(&db);
+        let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+        let error = WebBundle::compile(&db, top, WebBuildOptions::render("shade", None))
+            .err()
+            .expect("invalid target must not compile a bundle");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
 }
 
 #[test]
@@ -202,4 +211,40 @@ fn typed_update_does_not_grant_access_to_private_nested_fields() {
         .root_mod(&db);
     let diagnostics = db.run_on_top_mod(top).format_diags(&db);
     assert!(diagnostics.contains("private"), "{diagnostics}");
+}
+
+#[test]
+fn record_updates_remain_inside_their_short_circuit_operand() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/record_update_scope")
+        .canonicalize()
+        .unwrap();
+    let url = url::Url::from_directory_path(path).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .unwrap()
+        .root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top, "edit").unwrap();
+    let artifact =
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+            .unwrap();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &artifact.bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let edit = instance
+        .get_typed_func::<i32, i32>(&mut store, "edit")
+        .unwrap();
+    for index in [0, 1, 2, 255] {
+        assert_eq!(
+            edit.call(&mut store, index).unwrap(),
+            1,
+            "denominator {index}"
+        );
+    }
 }

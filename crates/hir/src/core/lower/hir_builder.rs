@@ -756,6 +756,19 @@ where
         stmt_id
     }
 
+    /// Build a statement-bearing expression without hoisting its evaluation
+    /// into the enclosing generated method (for example out of a match arm).
+    pub(super) fn block_expr(&mut self, build: impl FnOnce(&mut Self) -> ExprId) -> ExprId {
+        let outer_stmts = std::mem::take(&mut self.stmts);
+        self.body.f_ctxt.enter_block_scope();
+        let tail = build(self);
+        self.emit_expr_stmt(tail);
+        let stmts = std::mem::replace(&mut self.stmts, outer_stmts);
+        let expr = self.push_expr(Expr::Block(stmts));
+        self.body.f_ctxt.leave_block_scope(expr);
+        expr
+    }
+
     pub(super) fn emit_expr_stmt(&mut self, expr: ExprId) -> StmtId {
         self.emit_stmt(Stmt::Expr(expr))
     }

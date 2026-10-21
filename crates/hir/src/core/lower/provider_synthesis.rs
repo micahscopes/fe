@@ -578,31 +578,50 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
                 body.core_keccak_call(arg)
             }
             GenExpr::RecordUpdate { base, fields } => {
-                // One hygienic mutable value, with ordinary typed assignments.
-                // No private-field reconstruction or per-leaf record copies.
-                let name = IdentId::new(db, format!("$fco_record_update_{}", expr.0));
-                let init = self.replay_expr(body, *base);
-                let pat = body.push_pat(crate::hir_def::Pat::Path(
-                    Partial::Present(PathId::from_ident(db, name)),
-                    true,
-                ));
-                body.emit_stmt(crate::hir_def::Stmt::Let(pat, None, Some(init)));
-                for update in fields {
-                    let value = self.replay_expr(body, update.value);
-                    let mut place = body.ident_expr(name);
-                    for field in &update.path {
-                        let index = match field {
-                            FieldName::Named(name) => FieldIndex::Ident(*name),
-                            FieldName::Positional(index) => {
-                                FieldIndex::Index(IntegerId::new(db, BigUint::from(*index)))
-                            }
-                        };
-                        place = body.push_expr(Expr::Field(place, Partial::Present(index)));
+                // Shares created inside this expression must not escape its
+                // lexical scope; already materialized outer shares remain usable.
+                let shared_exprs = RefCell::new(self.shared_exprs.borrow().clone());
+                let replay = Self {
+                    shared_exprs: &shared_exprs,
+                    ..*self
+                };
+                body.block_expr(|body| {
+                    // One hygienic mutable value, with ordinary typed assignments.
+                    // No private-field reconstruction or per-leaf record copies.
+                    // A handle may be replayed more than once. Each evaluation
+                    // needs its own binding, even within the same method root.
+                    let stem = format!("$fco_record_update_{}", expr.0);
+                    let mut suffix = 0usize;
+                    let name = loop {
+                        let candidate = IdentId::new(db, format!("{stem}_{suffix}"));
+                        if self.reserved_names.borrow_mut().insert(candidate) {
+                            break candidate;
+                        }
+                        suffix += 1;
+                    };
+                    let init = replay.replay_expr(body, *base);
+                    let pat = body.push_pat(crate::hir_def::Pat::Path(
+                        Partial::Present(PathId::from_ident(db, name)),
+                        true,
+                    ));
+                    body.emit_stmt(crate::hir_def::Stmt::Let(pat, None, Some(init)));
+                    for update in fields {
+                        let value = replay.replay_expr(body, update.value);
+                        let mut place = body.ident_expr(name);
+                        for field in &update.path {
+                            let index = match field {
+                                FieldName::Named(name) => FieldIndex::Ident(*name),
+                                FieldName::Positional(index) => {
+                                    FieldIndex::Index(IntegerId::new(db, BigUint::from(*index)))
+                                }
+                            };
+                            place = body.push_expr(Expr::Field(place, Partial::Present(index)));
+                        }
+                        let assign = body.push_expr(Expr::Assign(place, value));
+                        body.emit_stmt(crate::hir_def::Stmt::Expr(assign));
                     }
-                    let assign = body.push_expr(Expr::Assign(place, value));
-                    body.emit_stmt(crate::hir_def::Stmt::Expr(assign));
-                }
-                body.ident_expr(name)
+                    body.ident_expr(name)
+                })
             }
             GenExpr::StructInit { fields } => {
                 let field_inits = fields

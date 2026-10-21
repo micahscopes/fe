@@ -207,7 +207,10 @@ Category decision: `record_update(base)` is **generated IR construction**.
 It adds one builder name (48 -> 49), and `with_field` additionally accepts
 nonempty disjoint reflected paths for that update. Replay evaluates the base
 once into a hygienic owned mutable local, assigns the selected paths, and
-returns it. Ordinary field, ownership and privacy checks still apply. This is
+returns it within a lexical block expression. Reusing a handle gets fresh
+bindings; unselected match/short-circuit branches do not execute an update.
+Shares first materialized inside the update cannot escape that scope.
+Ordinary field, ownership and privacy checks still apply. This is
 not private reconstruction, runtime reflection, or a serialization policy.
 
 `Type.leaf_fields(LeafType)` and a returned path's `root_name()` are read-only

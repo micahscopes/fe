@@ -1,0 +1,36 @@
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+use core::marker::Copy
+
+trait GuardedUpdate {
+    fn guarded(self, _ denominator: u32) -> bool
+}
+
+impl Derive<GuardedUpdate> for GuardedProvider {
+    const fn derive<T>(ev: own Evidence<GuardedUpdate<T>>) -> Evidence<GuardedUpdate<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<GuardedUpdate<T>>)
+    {
+        let mut result = quote { true }
+        for field in reflect.fields() {
+            let update = builder.record_update(builder.self_ref())
+            let update = builder.with_field(update, field, quote(denominator) { 10 / denominator })
+            let value = builder.field_get(update, field)
+            // Reuse the same handle twice. Both evaluations belong to this
+            // short-circuit operand, including their temporary bindings.
+            result = quote(denominator) {
+                denominator == 0 || (${value} == 10 / denominator && ${value} == 10 / denominator)
+            }
+        }
+        builder.emit_method("guarded", result)
+        builder.finish()
+        ev
+    }
+}
+
+struct Value { value: u32 }
+impl Copy for Value {}
+derive GuardedUpdate for Value using GuardedProvider
+
+pub fn edit(index: u32) -> bool {
+    let original = Value { value: 17 }
+    original.guarded(index) && original.value == 17
+}
