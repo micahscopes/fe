@@ -581,7 +581,7 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
                 // Shares created inside this expression must not escape its
                 // lexical scope; already materialized outer shares remain usable.
                 let shared_exprs = RefCell::new(self.shared_exprs.borrow().clone());
-                let replay = Self {
+                let replay = ReplayCtxt {
                     shared_exprs: &shared_exprs,
                     ..*self
                 };
