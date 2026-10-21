@@ -176,6 +176,16 @@ pub(super) fn validate_func_attrs<'db>(
     name: Option<String>,
     arithmetic_supported: bool,
 ) {
+    if !ctxt.quote_frames.is_empty()
+        && let Some(ref attr_list) = attrs
+    {
+        for attr in attr_list.normal_attrs_named("generate") {
+            ctxt.record_generation_error(
+                attr.syntax().text_range(),
+                "quoted functions cannot carry #[generate] attributes",
+            );
+        }
+    }
     let arithmetic = if arithmetic_supported {
         AttrRule::supported("arithmetic", ARITHMETIC_FORM, ARITHMETIC_EXPECTED)
     } else {
@@ -273,12 +283,22 @@ fn validate_type_alias_attrs<'db>(
     );
 }
 
-fn validate_unsupported_item_attrs<'db>(
+pub(super) fn validate_unsupported_item_attrs<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
     attrs: Option<ast::AttrList>,
     kind: &'static str,
     name: Option<String>,
 ) {
+    if !ctxt.quote_frames.is_empty()
+        && let Some(ref attr_list) = attrs
+    {
+        for attr in attr_list.normal_attrs_named("generate") {
+            ctxt.record_generation_error(
+                attr.syntax().text_range(),
+                "generated items cannot carry #[generate] attributes",
+            );
+        }
+    }
     validate_attr_rules(
         ctxt,
         attrs,
@@ -525,7 +545,7 @@ impl<'db> Func<'db> {
         let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
         let generic_params = GenericParamListId::lower_ast_opt(ctxt, sig.generic_params());
         let where_clause = WhereClauseId::lower_ast_opt(ctxt, sig.where_clause());
-        let params = sig
+        let params: Partial<FuncParamListId<'db>> = sig
             .params()
             .map(|params| FuncParamListId::lower_ast(ctxt, params))
             .into();
@@ -535,9 +555,28 @@ impl<'db> Func<'db> {
         let is_unsafe = super::lower_is_unsafe(&ast);
         let is_const = ast.const_kw().is_some();
         let modifiers = FuncModifiers::new(vis, is_unsafe, is_const, is_extern);
-        let body = ast
-            .body()
-            .map(|body| Body::lower_ast(ctxt, ast::Expr::cast(body.syntax().clone()).unwrap()));
+        let mut initial_binders = Vec::new();
+        if let Some(param_list) = params.to_opt() {
+            for param in param_list.data(ctxt.db()) {
+                if let Some(ident) = param.name() {
+                    ctxt.record_bound_name(ident.data(ctxt.db()));
+                    initial_binders.push(ident);
+                }
+            }
+        }
+        for effect in effects.data(ctxt.db()) {
+            if let Some(ident) = effect.name {
+                ctxt.record_bound_name(ident.data(ctxt.db()));
+                initial_binders.push(ident);
+            }
+        }
+        let body = ast.body().map(|body| {
+            Body::lower_func_body(
+                ctxt,
+                ast::Expr::cast(body.syntax().clone()).unwrap(),
+                initial_binders,
+            )
+        });
         let origin = HirOrigin::raw(&ast);
         let top_mod = ctxt.top_mod();
 
@@ -742,6 +781,57 @@ impl<'db> TypeAlias<'db> {
     }
 }
 
+fn merge_target_record_generics<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    target_ty: Option<ast::Type>,
+    explicit_params: GenericParamListId<'db>,
+    explicit_where: WhereClauseId<'db>,
+) -> (GenericParamListId<'db>, WhereClauseId<'db>) {
+    let Some(ty) = target_ty else {
+        return (explicit_params, explicit_where);
+    };
+    let ast::TypeKind::QuoteHole(hole) = ty.kind() else {
+        return (explicit_params, explicit_where);
+    };
+    let Some(common::generation::FrozenHoleValue::Record(record_ref)) =
+        ctxt.current_hole(hole.syntax().text_range())
+    else {
+        return (explicit_params, explicit_where);
+    };
+    let db = ctxt.db();
+    let item = ctxt.resolve_record_item(&record_ref);
+    let (record_params, record_where) = match item {
+        ItemKind::Struct(s) => (s.generic_params(db), s.where_clause(db)),
+        ItemKind::Enum(e) => (e.generic_params(db), e.where_clause(db)),
+        _ => return (explicit_params, explicit_where),
+    };
+    if record_params.data(db).is_empty() && record_where.predicates(db).is_empty() {
+        return (explicit_params, explicit_where);
+    }
+    let mut params: Vec<_> = record_params
+        .data(db)
+        .iter()
+        .cloned()
+        .map(|p| super::types::bind_generic_param_to_scope(db, p, item))
+        .collect();
+    for param in explicit_params.data(db) {
+        if !params.iter().any(|p| p.name() == param.name()) {
+            params.push(param.clone());
+        }
+    }
+    let mut predicates: Vec<_> = record_where
+        .predicates(db)
+        .iter()
+        .cloned()
+        .map(|pred| super::types::bind_where_predicate_to_scope(db, pred, item))
+        .collect();
+    predicates.extend(explicit_where.predicates(db).iter().cloned());
+    (
+        GenericParamListId::new(db, params),
+        WhereClauseId::new(db, predicates),
+    )
+}
+
 impl<'db> Impl<'db> {
     pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::Impl) -> Self {
         let idx = ctxt.next_impl_idx();
@@ -752,6 +842,8 @@ impl<'db> Impl<'db> {
         let generic_params = GenericParamListId::lower_ast_opt(ctxt, ast.generic_params());
         let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
         let where_clause = WhereClauseId::lower_ast_opt(ctxt, ast.where_clause());
+        let (generic_params, where_clause) =
+            merge_target_record_generics(ctxt, ast.ty(), generic_params, where_clause);
         let ty = TypeId::lower_ast_partial(ctxt, ast.ty());
         let origin = HirOrigin::raw(&ast);
 
@@ -915,6 +1007,8 @@ impl<'db> ImplTrait<'db> {
         // Lower generic params first so they are in scope for trait-ref/type and where-clause lowering.
         let generic_params = GenericParamListId::lower_ast_opt(ctxt, ast.generic_params());
         let where_clause = WhereClauseId::lower_ast_opt(ctxt, ast.where_clause());
+        let (generic_params, where_clause) =
+            merge_target_record_generics(ctxt, ast.ty(), generic_params, where_clause);
         let mut trait_ref = TraitRefId::lower_ast_partial(ctxt, ast.trait_ref());
         let ty = TypeId::lower_ast_partial(ctxt, ast.ty());
         let origin = HirOrigin::raw(&ast);
@@ -1001,7 +1095,7 @@ impl<'db> ImplTrait<'db> {
         let file_url = ctxt.top_mod().file(db).url(db);
         let plan = db
             .generation_inputs()
-            .functions(db)
+            .requests(db)
             .iter()
             .find(|plan| {
                 Some(&plan.target_file) == file_url.as_ref()
@@ -1009,44 +1103,7 @@ impl<'db> ImplTrait<'db> {
             })
             .cloned();
         if let Some(plan) = plan {
-            let root = super::top_mod_ast(db, ctxt.top_mod());
-            let quote = root
-                .syntax()
-                .descendants()
-                .filter_map(ast::QuoteExpr::cast)
-                .find(|quote| quote.syntax().text_range() == plan.quote_range)
-                .expect("frozen method quote belongs to unchanged source");
-            ctxt.generation_holes = crate::core::meta::quote_holes(&quote)
-                .expect("validated holes")
-                .into_iter()
-                .map(|hole| hole.syntax().text_range())
-                .zip(plan.holes)
-                .collect();
-            let ast::ItemKind::Func(function) = quote
-                .body()
-                .unwrap()
-                .items()
-                .next()
-                .unwrap()
-                .kind()
-                .unwrap()
-            else {
-                unreachable!("checked single function template")
-            };
-            validate_func_attrs(
-                ctxt,
-                function.attr_list(),
-                "fn",
-                function.sig().name().map(|name| name.text().to_string()),
-                true,
-            );
-            let generated = Func::lower_ast(ctxt, function);
-            ctxt.generation_holes.clear();
-            ctxt.builder.defer_quoted_function_origin(
-                generated,
-                plan.producer_module,
-                plan.producer_block,
-            );
+            super::generated::lower_derive_method(ctxt, &plan.code);
         }
 
         let impl_trait = Self::new(

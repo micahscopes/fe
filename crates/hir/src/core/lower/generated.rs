@@ -1,26 +1,27 @@
 //! Output HIR is built from the original checked quote syntax, never from an
 //! emitted source string. Provider evaluation has completed before this query.
 use super::FileLowerCtxt;
-use crate::{
-    hir_def::{
-        AttrListId, Func, GenericArgListId, GenericParamListId, IdentId, ImplTrait,
-        ImplTraitModifiers, Partial, PathId, PathKind, TrackedItemVariant, TraitRefId, TypeId,
-        TypeKind, Visibility, WhereClauseId,
-    },
-    span::HirOrigin,
-};
+use crate::hir_def::{Func, Impl, ImplTrait, ItemKind, TopLevelMod};
+use common::generation::{FrozenCode, FrozenCodeKind, FrozenHoleValue};
 use parser::ast::{self, prelude::*};
 
-fn path_from_segments<'db>(db: &'db dyn crate::HirDb, segments: &[String]) -> PathId<'db> {
-    let mut path: Option<PathId<'db>> = None;
-    for segment in segments {
-        let ident = IdentId::new(db, segment.clone());
-        path = Some(match path {
-            Some(prev) => prev.push_ident(db, ident),
-            None => PathId::from_ident(db, ident),
-        });
-    }
-    path.expect("scoped impl path must have at least one segment")
+#[salsa::accumulator]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GenerationLoweringError {
+    pub file: common::file::File,
+    pub primary_range: parser::TextRange,
+    pub message: String,
+}
+
+pub(crate) struct ActiveQuoteFrame<'db> {
+    pub(super) frame_id: usize,
+    pub(super) quote_top_mod: TopLevelMod<'db>,
+    pub(super) quote_range: parser::TextRange,
+    pub(super) producer_scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    pub(super) is_sub_quote: bool,
+    pub(super) open_names: Vec<(String, parser::TextRange)>,
+    pub(super) bound_names: rustc_hash::FxHashSet<String>,
+    pub(super) holes: Vec<(parser::TextRange, FrozenHoleValue)>,
 }
 
 pub(super) fn append_functions<'db>(ctxt: &mut FileLowerCtxt<'db>) {
@@ -48,88 +49,320 @@ pub(super) fn append_functions<'db>(ctxt: &mut FileLowerCtxt<'db>) {
             .expect("checked frozen quote retains valid bounded syntax")
             .into_iter()
             .map(|hole| hole.syntax().text_range())
-            .zip(plan.holes)
+            .zip(plan.holes.into_iter().map(FrozenHoleValue::Scalar))
             .collect();
-        ctxt.generation_holes = holes;
-        let ast::ItemKind::Func(function) = quote
-            .body()
-            .unwrap()
-            .items()
-            .next()
-            .unwrap()
-            .kind()
-            .unwrap()
-        else {
-            unreachable!("validated one-function template")
-        };
-        if let Some(scoped) = plan.scoped_impl {
-            let trait_path = path_from_segments(db, &scoped.trait_path);
-            let trait_ref = TraitRefId::new(db, Partial::Present(trait_path));
-            let target_path = path_from_segments(db, &scoped.target_path);
-            let ty = TypeId::new(
-                db,
-                TypeKind::Path(Partial::Present(PathId::new(
-                    db,
-                    PathKind::Ident {
-                        ident: Partial::Present(target_path.ident(db).unwrap()),
-                        generic_args: GenericArgListId::none(db),
-                    },
-                    target_path.parent(db),
-                ))),
-            );
-            let selection_name = Some(IdentId::new(db, scoped.selection_name));
-            let idx = ctxt.next_impl_trait_idx();
-            let id = ctxt.joined_id(TrackedItemVariant::ImplTrait(idx));
-            ctxt.enter_item_scope(id, false);
-            super::item::validate_func_attrs(
-                ctxt,
-                function.attr_list(),
-                "fn",
-                function.sig().name().map(|name| name.text().to_string()),
-                true,
-            );
-            let generated = Func::lower_ast(ctxt, function);
-            ctxt.generation_holes.clear();
-            let impl_trait = ImplTrait::new(
-                db,
-                id,
-                Partial::Present(trait_ref),
-                Partial::Present(ty),
-                AttrListId::new(db, vec![]),
-                GenericParamListId::new(db, vec![]),
-                WhereClauseId::new(db, vec![]),
-                vec![],
-                vec![],
-                vec![],
-                ImplTraitModifiers {
-                    is_unsafe: false,
-                    selection_name,
-                    vis: Visibility::Public,
-                },
-                ctxt.top_mod(),
-                HirOrigin::synthetic(),
-            );
-            ctxt.leave_item_scope(impl_trait);
-            ctxt.builder.set_quoted_function_origin(
-                generated,
-                plan.producer_module,
-                plan.producer_block,
-            );
+        let open_names = quote
+            .open_list()
+            .map(|list| {
+                list.names()
+                    .map(|n| (n.text().to_string(), n.text_range()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let producer_scope =
+            ctxt.builder
+                .resolve_producer_scope(top_mod, plan.producer_module, plan.producer_block);
+        let frame_id = ctxt.next_quote_frame_id();
+        ctxt.quote_frames.push(ActiveQuoteFrame {
+            frame_id,
+            quote_top_mod: top_mod,
+            quote_range: plan.quote_range,
+            producer_scope,
+            is_sub_quote: false,
+            open_names,
+            bound_names: rustc_hash::FxHashSet::default(),
+            holes,
+        });
+        let function = if let Some(items) = quote.item_list() {
+            match items.into_iter().next().unwrap().kind().unwrap() {
+                ast::ItemKind::Func(function) => function,
+                _ => unreachable!("validated one-function template"),
+            }
         } else {
-            super::item::validate_func_attrs(
-                ctxt,
-                function.attr_list(),
-                "fn",
-                function.sig().name().map(|name| name.text().to_string()),
-                true,
-            );
-            let generated = Func::lower_ast(ctxt, function);
-            ctxt.generation_holes.clear();
-            ctxt.builder.set_quoted_function_origin(
-                generated,
-                plan.producer_module,
-                plan.producer_block,
-            );
+            let ast::ItemKind::Func(function) = quote
+                .body()
+                .unwrap()
+                .items()
+                .next()
+                .unwrap()
+                .kind()
+                .unwrap()
+            else {
+                unreachable!("validated one-function template")
+            };
+            function
+        };
+        super::item::validate_func_attrs(
+            ctxt,
+            function.attr_list(),
+            "fn",
+            function.sig().name().map(|name| name.text().to_string()),
+            true,
+        );
+        let generated = Func::lower_ast(ctxt, function);
+        ctxt.pop_quote_frame();
+        ctxt.builder.set_quoted_function_origin(
+            generated,
+            plan.producer_module,
+            plan.producer_block,
+        );
+    }
+
+    let requests = db
+        .generation_inputs()
+        .requests(db)
+        .iter()
+        .filter(|request| request.target_file == url && request.request_impl.is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    for request in requests {
+        if let Some(scoped) = &request.scoped_impl {
+            lower_scoped_derive(ctxt, scoped, &request.code);
+        } else {
+            lower_generated_item_code(ctxt, &request.code);
         }
     }
+}
+
+fn lower_quoted_ast_item<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    item: ast::Item,
+) -> Option<ItemKind<'db>> {
+    match item.kind()? {
+        ast::ItemKind::Func(func) => {
+            super::item::validate_func_attrs(
+                ctxt,
+                func.attr_list(),
+                "fn",
+                func.sig().name().map(|name| name.text().to_string()),
+                true,
+            );
+            Some(Func::lower_ast(ctxt, func).into())
+        }
+        ast::ItemKind::Impl(impl_) => {
+            super::item::validate_unsupported_item_attrs(ctxt, impl_.attr_list(), "impl", None);
+            Some(Impl::lower_ast(ctxt, impl_).into())
+        }
+        ast::ItemKind::ImplTrait(impl_trait) => {
+            super::item::validate_unsupported_item_attrs(
+                ctxt,
+                impl_trait.attr_list(),
+                "impl trait",
+                None,
+            );
+            Some(ImplTrait::lower_ast(ctxt, impl_trait).into())
+        }
+        _ => {
+            ctxt.record_generation_error(
+                item.syntax().text_range(),
+                "item quotation supports function, impl, and trait impl declarations",
+            );
+            None
+        }
+    }
+}
+
+pub(super) fn lower_generated_item_code<'db>(ctxt: &mut FileLowerCtxt<'db>, code: &FrozenCode) {
+    match code {
+        FrozenCode::Empty { .. } => {}
+        FrozenCode::Template {
+            kind: FrozenCodeKind::Item,
+            quote_file,
+            quote_range,
+            producer_module,
+            producer_block,
+            holes,
+        } => {
+            let (quote, frame) = ctxt.resolve_quote_template(
+                quote_file,
+                *quote_range,
+                *producer_module,
+                *producer_block,
+                false,
+                holes.clone(),
+            );
+            let quote_top_mod = frame.quote_top_mod;
+            ctxt.quote_frames.push(frame);
+            if let Some(item_list) = quote.item_list() {
+                for child in item_list.syntax().children() {
+                    if let Some(item) = ast::Item::cast(child.clone()) {
+                        if let Some(lowered) = lower_quoted_ast_item(ctxt, item) {
+                            ctxt.builder.set_quoted_item_origin(
+                                lowered,
+                                quote_top_mod,
+                                *producer_module,
+                                *producer_block,
+                            );
+                        }
+                    } else if let Some(hole) = ast::QuoteHole::cast(child) {
+                        if let Some(FrozenHoleValue::Code(nested)) =
+                            ctxt.current_hole(hole.syntax().text_range())
+                        {
+                            lower_generated_item_code(ctxt, &nested);
+                        } else {
+                            ctxt.record_generation_error(
+                                hole.syntax().text_range(),
+                                "item-level quotation hole requires Code<Item> splice",
+                            );
+                        }
+                    }
+                }
+            } else if let Some(block) = quote.body() {
+                for item in block.items() {
+                    if let Some(lowered) = lower_quoted_ast_item(ctxt, item) {
+                        ctxt.builder.set_quoted_item_origin(
+                            lowered,
+                            quote_top_mod,
+                            *producer_module,
+                            *producer_block,
+                        );
+                    }
+                }
+                for stmt in block.stmts() {
+                    if let ast::StmtKind::Expr(expr_stmt) = stmt.kind()
+                        && let Some(expr) = expr_stmt.expr()
+                        && let ast::ExprKind::QuoteHole(hole) = expr.kind()
+                    {
+                        if let Some(FrozenHoleValue::Code(nested)) =
+                            ctxt.current_hole(hole.syntax().text_range())
+                        {
+                            lower_generated_item_code(ctxt, &nested);
+                        } else {
+                            ctxt.record_generation_error(
+                                hole.syntax().text_range(),
+                                "item-level quotation hole requires Code<Item> splice",
+                            );
+                        }
+                    } else {
+                        ctxt.record_generation_error(
+                            stmt.syntax().text_range(),
+                            "item quotation requires item declarations",
+                        );
+                    }
+                }
+            } else {
+                ctxt.record_generation_error(
+                    *quote_range,
+                    "item quotation requires item declarations",
+                );
+            }
+            ctxt.pop_quote_frame();
+        }
+        _ => {
+            let range = ctxt
+                .quote_frames
+                .last()
+                .map_or_else(|| parser::TextRange::empty(0.into()), |f| f.quote_range);
+            ctxt.record_generation_error(range, "item-level quotation splice requires Code<Item>");
+        }
+    }
+}
+
+/// Lower the bounded explicit-derive function inside its authored impl header.
+pub(super) fn lower_derive_method<'db>(ctxt: &mut FileLowerCtxt<'db>, code: &FrozenCode) {
+    let FrozenCode::Template {
+        kind: FrozenCodeKind::Item,
+        quote_file,
+        quote_range,
+        producer_module,
+        producer_block,
+        holes,
+    } = code
+    else {
+        ctxt.record_generation_error(
+            parser::TextRange::empty(0.into()),
+            "bounded derive requires one function template",
+        );
+        return;
+    };
+    let (quote, frame) = ctxt.resolve_quote_template(
+        quote_file,
+        *quote_range,
+        *producer_module,
+        *producer_block,
+        false,
+        holes.clone(),
+    );
+    let quote_top_mod = frame.quote_top_mod;
+    let items = quote
+        .item_list()
+        .map(|list| list.into_iter().collect::<Vec<_>>())
+        .or_else(|| quote.body().map(|block| block.items().collect::<Vec<_>>()))
+        .unwrap_or_default();
+    let [item] = items.as_slice() else {
+        ctxt.record_generation_error(
+            *quote_range,
+            "bounded derive requires one function template",
+        );
+        return;
+    };
+    let Some(ast::ItemKind::Func(function)) = item.kind() else {
+        ctxt.record_generation_error(
+            *quote_range,
+            "bounded derive requires one function template",
+        );
+        return;
+    };
+    ctxt.quote_frames.push(frame);
+    super::item::validate_func_attrs(
+        ctxt,
+        function.attr_list(),
+        "fn",
+        function.sig().name().map(|name| name.text().to_string()),
+        true,
+    );
+    let generated = Func::lower_ast(ctxt, function);
+    ctxt.pop_quote_frame();
+    ctxt.builder.defer_quoted_item_origin(
+        generated.into(),
+        quote_top_mod,
+        *producer_module,
+        *producer_block,
+    );
+}
+
+/// Scoped providers publish only a named implementation, never an ambient one.
+fn lower_scoped_derive<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    scoped: &common::generation::FrozenScopedImpl,
+    code: &FrozenCode,
+) {
+    use crate::hir_def::{
+        AttrListId, GenericParamListId, IdentId, ImplTraitModifiers, Partial, PathId,
+        TrackedItemVariant, TraitRefId, TypeId, TypeKind, Visibility, WhereClauseId,
+    };
+    let db = ctxt.db();
+    let path = |segments: &[String]| {
+        let segments = segments.iter().map(String::as_str).collect::<Vec<_>>();
+        PathId::from_segments(db, &segments)
+    };
+    let trait_ref = TraitRefId::new(db, Partial::Present(path(&scoped.trait_path)));
+    let ty = TypeId::new(
+        db,
+        TypeKind::Path(Partial::Present(path(&scoped.target_path))),
+    );
+    let idx = ctxt.next_impl_trait_idx();
+    let id = ctxt.joined_id(TrackedItemVariant::ImplTrait(idx));
+    ctxt.enter_item_scope(id, false);
+    lower_derive_method(ctxt, code);
+    let implementation = ImplTrait::new(
+        db,
+        id,
+        Partial::Present(trait_ref),
+        Partial::Present(ty),
+        AttrListId::new(db, vec![]),
+        GenericParamListId::new(db, vec![]),
+        WhereClauseId::new(db, vec![]),
+        vec![],
+        vec![],
+        vec![],
+        ImplTraitModifiers {
+            is_unsafe: false,
+            selection_name: Some(IdentId::new(db, scoped.selection_name.clone())),
+            vis: Visibility::Public,
+        },
+        ctxt.top_mod(),
+        crate::span::HirOrigin::synthetic(),
+    );
+    ctxt.leave_item_scope(implementation);
 }
