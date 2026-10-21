@@ -232,6 +232,45 @@ actor AmbiguousSurface uses (GpuProgram<WebGpuBackend>) {
 }
 
 #[test]
+fn scalar_projection_must_target_an_f32_leaf() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/nested_param_binding_actor");
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("src")).unwrap();
+    std::fs::copy(root.join("fe.toml"), temp.path().join("fe.toml")).unwrap();
+    let source = std::fs::read_to_string(root.join("src/lib.fe"))
+        .unwrap()
+        .replace(".projected(\"head\")", ".projected(\"marker\")");
+    let scalar = std::fs::read_to_string(root.join("src/scalar.fe"))
+        .unwrap()
+        .replace("tail: T }", "tail: T, marker: u32 }")
+        .replace(
+            "Self { head: value, tail: self.tail }",
+            "Self { head: value, tail: self.tail, marker: self.marker }",
+        )
+        .replace("More {", "More { marker: 0,");
+    std::fs::write(temp.path().join("src/lib.fe"), source).unwrap();
+    std::fs::write(temp.path().join("src/scalar.fe"), scalar).unwrap();
+    let url = url::Url::from_directory_path(temp.path()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(!driver::init_ingot(&mut db, &url));
+    let top = db
+        .workspace()
+        .containing_ingot(&db, url)
+        .unwrap()
+        .root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let error = WebBundle::compile(&db, top, WebBuildOptions::render("shade", None))
+        .err()
+        .expect("wrong scalar type must not compile a bundle");
+    assert!(
+        error.to_string().contains("must be an f32 scalar leaf"),
+        "{error}"
+    );
+}
+
+#[test]
 fn typed_update_does_not_grant_access_to_private_nested_fields() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/nested_param_binding_actor");
