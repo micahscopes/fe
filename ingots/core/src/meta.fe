@@ -33,7 +33,8 @@ pub struct Item {}
 pub struct Where {}
 
 /// A Fe-authored query family applies this trait to each reflected field type.
-/// The implementation's ordinary prerequisites must hold before evaluation.
+/// Only ordinary implementations are supported: field queries run outside the
+/// caller's `with` choices, and their ordinary prerequisites must hold.
 pub trait FieldQuery<R> {
     const fn evaluate() -> R
 }
