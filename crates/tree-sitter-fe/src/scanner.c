@@ -363,21 +363,47 @@ static bool scan_word(TSLexer *lexer, const char *word) {
   return !is_ident_char(lexer->lookahead);
 }
 
+// Lookahead after mark_end must never skip: skipping would move the start of
+// the already marked quote/generic token. The opening /* is consumed here.
+static bool advance_quote_block_comment(TSLexer *lexer) {
+  int depth = 1;
+  while (depth > 0 && !lexer->eof(lexer)) {
+    if (lexer->lookahead == '*') {
+      advance(lexer);
+      if (lexer->lookahead == '/') { advance(lexer); depth--; }
+    } else if (lexer->lookahead == '/') {
+      advance(lexer);
+      if (lexer->lookahead == '*') { advance(lexer); depth++; }
+    } else {
+      advance(lexer);
+    }
+  }
+  return depth == 0;
+}
+
 // Ignore trivia tokens, but not a standalone newline, just like the Rust
 // parser's current_kind_same_line. A newline inside a block comment remains
 // part of that single comment token.
-static bool skip_quote_trivia(TSLexer *lexer) {
+static bool skip_quote_trivia(TSLexer *lexer, bool allow_newlines) {
   for (;;) {
-    while (lexer->lookahead == ' ' || lexer->lookahead == '\t' || lexer->lookahead == '\r') advance(lexer);
-    if (lexer->lookahead != '/') return lexer->lookahead != '\n';
-    advance_over_comment(lexer);
+    while (lexer->lookahead == ' ' || lexer->lookahead == '\t' || lexer->lookahead == '\r' || (allow_newlines && lexer->lookahead == '\n')) advance(lexer);
+    if (lexer->lookahead != '/') return allow_newlines || lexer->lookahead != '\n';
+    advance(lexer);
+    if (lexer->lookahead == '/') {
+      while (!lexer->eof(lexer) && lexer->lookahead != '\n') advance(lexer);
+      if (!allow_newlines) return false;
+      continue;
+    }
+    if (lexer->lookahead != '*') return false; // A division operator is not trivia.
+    advance(lexer);
+    if (!advance_quote_block_comment(lexer)) return false;
   }
 }
 
 static bool scan_quote_keyword(TSLexer *lexer) {
   if (!scan_word(lexer, "quote")) return false;
   lexer->mark_end(lexer);
-  if (!skip_quote_trivia(lexer)) return false;
+  if (!skip_quote_trivia(lexer, false)) return false;
   if (lexer->lookahead == '(') {
     int depth = 0;
     do {
@@ -388,7 +414,7 @@ static bool scan_quote_keyword(TSLexer *lexer) {
       if (lexer->lookahead == '/') { advance_over_comment(lexer); continue; }
       advance(lexer);
     } while (depth > 0);
-    if (!skip_quote_trivia(lexer)) return false;
+    if (!skip_quote_trivia(lexer, false)) return false;
   }
   return lexer->lookahead == '{';
 }
@@ -538,7 +564,7 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
               continue;
             case '$': {
               advance(lexer);
-              if (lexer->lookahead != '{') goto not_generic;
+              if (!skip_quote_trivia(lexer, true) || lexer->lookahead != '{') goto not_generic;
               int splice_depth = 1;
               advance(lexer);
               while (splice_depth > 0 && !lexer->eof(lexer)) {
