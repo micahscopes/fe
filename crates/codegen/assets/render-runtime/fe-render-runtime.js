@@ -3160,6 +3160,9 @@ export class FeSurfaceElement extends HTMLElement {
    * without allocating a canvas swap chain. */
   async _prepareReadyFrame() {
     if (this._graph && !this._hasRenderPass) return;
+    // A declared live surface presents immediately. Creating and reading back
+    // a disposable poster would allocate and compile the same graph twice.
+    if (this.getAttribute("state") === "live") return;
     await this._renderPosterWithRecovery();
   }
 
@@ -3364,7 +3367,7 @@ export class FeSurfaceElement extends HTMLElement {
       // Already presenting (webgpu, kept configured) or cheap to re-run
       // (wasm-2d); "live" is a state/event transition here, not new work.
       let gpu = null;
-      if (this._mode === "webgpu") {
+      if (this._mode !== "wasm-2d") {
         gpu = await this._ensurePipeline();
         if (!gpu) {
           if (!this._kernel) {
@@ -3374,10 +3377,13 @@ export class FeSurfaceElement extends HTMLElement {
             return;
           }
           this._mode = "wasm-2d";
-        } else if (!this._adoptedContext) {
-          const context = this._adoptedCanvas.getContext("webgpu");
-          context.configure({ device: gpu.device, format: gpu.format, alphaMode: "opaque" });
-          this._adoptedContext = context;
+        } else {
+          this._mode = "webgpu";
+          if (!this._adoptedContext) {
+            const context = this._adoptedCanvas.getContext("webgpu");
+            context.configure({ device: gpu.device, format: gpu.format, alphaMode: "opaque" });
+            this._adoptedContext = context;
+          }
         }
       }
       this._applyBackingExtent(gpu);
@@ -3418,6 +3424,7 @@ export class FeSurfaceElement extends HTMLElement {
       this._enterLive();
       return;
     }
+    this._mode = "webgpu";
     this._applyBackingExtent(gpu);
     this._createLiveCanvas();
     this._liveCanvas.width = this._backingWidth;

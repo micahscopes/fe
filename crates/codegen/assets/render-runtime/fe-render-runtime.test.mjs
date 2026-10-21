@@ -830,6 +830,51 @@ test("ordinary poster failures preserve the original error outside device recove
   assert.equal(surface._posterRecoveryActive, false);
 });
 
+test("declared live surfaces skip disposable poster work while gallery modes retain it", async () => {
+  for (const mode of ["live", "preview", "frozen", "auto", null]) {
+    const surface = Object.create(FeSurfaceElement.prototype);
+    surface._graph = true;
+    surface._hasRenderPass = true;
+    surface.getAttribute = name => name === "state" ? mode : null;
+    let posters = 0;
+    surface._renderPosterWithRecovery = async () => { posters++; };
+    await surface._prepareReadyFrame();
+    assert.equal(posters, mode === "live" ? 0 : 1, `mode=${mode}`);
+  }
+});
+
+test("direct live rendering establishes WebGPU mode without a poster for owned and adopted canvases", async () => {
+  const previousUsage = globalThis.GPUTextureUsage;
+  globalThis.GPUTextureUsage = { RENDER_ATTACHMENT: 16, COPY_SRC: 1 };
+  try {
+  for (const adopted of [false, true]) {
+    const surface = Object.create(FeSurfaceElement.prototype);
+    const gpu = { device: {}, format: "bgra8unorm" };
+    const context = { configure() {} };
+    const canvas = { getContext: () => context };
+    Object.assign(surface, {
+      _fsm: "ready", _mode: null, _graph: true, _hasRenderPass: true,
+      _adoptedCanvas: adopted ? canvas : null, _posterCanvas: {},
+      _uniforms: [1], _backingWidth: 512, _backingHeight: 512,
+      _deliverSurfaceLifecycle() {}, _applyBackingExtent() {},
+      _resizePresentationCanvases() {},
+      _createLiveCanvas() { this._liveCanvas = canvas; },
+      _ensurePipeline: async () => gpu,
+      _enterLive() { this._fsm = "live"; },
+    });
+    let frames = 0;
+    surface._presentOn = async () => { frames++; };
+    await surface._goLiveOnce();
+    assert.equal(surface._mode, "webgpu");
+    assert.equal(surface._fsm, "live");
+    assert.equal(frames, 1);
+  }
+  } finally {
+    if (previousUsage === undefined) delete globalThis.GPUTextureUsage;
+    else globalThis.GPUTextureUsage = previousUsage;
+  }
+});
+
 test("compute-only pass graphs defer work until live and require no canvas", async () => {
   const surface = Object.create(FeSurfaceElement.prototype);
   surface._graph = true;
