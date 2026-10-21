@@ -655,7 +655,7 @@ impl Param {
     /// The path is relative to this declaration's corresponding state value.
     pub const fn projected(self, _ leaf: String<31>) -> Param {
         let mut result = self
-        result.projection = ChoiceLabel::from_string(leaf)
+        result.projection = ChoiceLabel::from_string(value: leaf)
         result
     }
 
