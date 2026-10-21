@@ -257,12 +257,19 @@ pub fn prepare_file(
             let path = args[0]
                 .key()
                 .ok_or_else(|| error(range, "generation provider must be an item path".into()))?;
+            let segments = path.segments().map(|segment| {
+                if segment.generic_args().is_some() || segment.qualified_type().is_some() {
+                    return Err(error(segment.syntax().text_range(),
+                        "generation provider path does not support generic or qualified segments".into()));
+                }
+                segment.ident().map(|ident| ident.text().to_string()).ok_or_else(|| {
+                    error(segment.syntax().text_range(), "generation provider path requires identifier segments".into())
+                })
+            }).collect::<Result<Vec<_>, _>>()?;
+            let segments = segments.iter().map(String::as_str).collect::<Vec<_>>();
             let resolved = hir::analysis::name_resolution::resolve_path(
                 db,
-                hir::hir_def::PathId::from_segments(
-                    db,
-                    &path.text().to_string().split("::").collect::<Vec<_>>(),
-                ),
+                hir::hir_def::PathId::from_segments(db, &segments),
                 module.scope(),
                 hir::analysis::ty::trait_resolution::PredicateListId::empty_list(db),
                 true,
