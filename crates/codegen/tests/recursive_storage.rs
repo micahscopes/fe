@@ -2,7 +2,6 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{WebActorResourceElement, WebBuildOptions, WebBundle, WebScalarKind};
-use hir::hir_def::HirIngot;
 use url::Url;
 
 const NESTED: &str = include_str!("fixtures/actor_recursive_storage/src/lib.fe");
@@ -36,6 +35,67 @@ fn scalar_kinds(words: usize) -> Vec<WebScalarKind> {
         .collect()
 }
 
+fn roundtrip_inputs() -> Vec<Vec<u8>> {
+    [18, 22, 10]
+        .into_iter()
+        .map(|words| {
+            scalar_kinds(words)
+                .into_iter()
+                .cycle()
+                .take(words * 2)
+                .enumerate()
+                .flat_map(|(index, scalar)| {
+                    let bits = if scalar == WebScalarKind::U32 {
+                        0x8000_0100u32 + index as u32
+                    } else if index == 0 {
+                        0x8000_0000 // signed zero survives a whole-value copy
+                    } else {
+                        (-(index as f32 + 0.25)).to_bits()
+                    };
+                    bits.to_le_bytes()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+// Export precisely the native GPU fixture for a browser with a remote adapter.
+// Merely writing these files is not a GPU execution or a passing GPU gate.
+fn dump_fixture(label: &str, bundle: &WebBundle) {
+    let Some(root) = std::env::var_os("FE_RECURSIVE_STORAGE_DUMP") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(root).join(label);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("manifest.json"),
+        serde_json::to_vec_pretty(&bundle.manifest).unwrap(),
+    )
+    .unwrap();
+    for (index, pass) in bundle.pass_wgsl.iter().enumerate() {
+        std::fs::write(directory.join(format!("pass-{index}.wgsl")), &pass.source).unwrap();
+    }
+    std::fs::write(
+        directory.join("roundtrip.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": 1,
+            "computePass": 0,
+            "entryPoint": "main",
+            "bindGroup": 0,
+            "bufferSizes": [144, 144, 176, 176, 80, 80, 256],
+            "inputBindings": [0, 2, 4],
+            "outputBindings": [1, 3, 5],
+            "inputBytes": roundtrip_inputs(),
+            "outputInitialByte": 205,
+            "trapBinding": 6,
+            "trapExpectedByte": 0,
+            "workgroups": [1, 1, 1]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 fn flat_source() -> String {
     let start = NESTED.find("struct Pair<T>").unwrap();
     let end = NESTED.find("fn copy<T").unwrap();
@@ -61,6 +121,8 @@ fn flat_source() -> String {
 fn nested_generic_storage_preserves_flat_72_88_40_byte_layouts() {
     let nested = compile(NESTED).expect("nested generic storage bundle");
     let flat = compile(&flat_source()).expect("legacy flat storage bundle");
+    dump_fixture("nested", &nested);
+    dump_fixture("flat", &flat);
     assert_eq!(nested.manifest.resources.len(), 6);
     for (index, (actual, legacy)) in nested
         .manifest
@@ -186,25 +248,7 @@ fn execute(bundle: &WebBundle) {
         })
         .collect::<Vec<_>>();
     let mut expected = Vec::new();
-    for (pair, words) in [18, 22, 10].into_iter().enumerate() {
-        let bytes = scalar_kinds(words)
-            .into_iter()
-            .cycle()
-            .take(words * 2)
-            .enumerate()
-            .flat_map(|(index, scalar)| {
-                let bits = if scalar == WebScalarKind::U32 {
-                    0x8000_0100u32 + index as u32
-                } else if index == 0 {
-                    0x8000_0000
-                }
-                // signed zero survives a whole-value copy
-                else {
-                    (-(index as f32 + 0.25)).to_bits()
-                };
-                bits.to_le_bytes()
-            })
-            .collect::<Vec<_>>();
+    for (pair, bytes) in roundtrip_inputs().into_iter().enumerate() {
         queue.write_buffer(&buffers[pair * 2], 0, &bytes);
         queue.write_buffer(&buffers[pair * 2 + 1], 0, &vec![0xcd; bytes.len()]);
         expected.extend(bytes);

@@ -5505,7 +5505,7 @@ where
         })?;
         let element = match shape {
           SemanticResourceElement::Scalar(scalar) => GpuResourceElementType::Scalar(scalar_type(scalar)),
-          SemanticResourceElement::Record { name, fields } => {
+          SemanticResourceElement::Record { fields, .. } => {
             // The shared semantic plan supplies declaration-order DFS leaves.
             // Keep the physical resource flat: load/store adapt those same
             // leaves to/from the authored nested value at the storage boundary.
@@ -5519,9 +5519,15 @@ where
                         .to_owned(),
                 ));
             };
-            let name = name.unwrap_or_else(|| {
-                    format!("gpu_resource_record_{}", self.resource_element_cache.len())
-                });
+            // Source names are not type identities: Packet<T, U> can have
+            // several instantiated layouts in one shader. The cache is keyed
+            // by the concrete semantic element type; give each entry a private
+            // physical name, as for shader-private aggregate layouts. This
+            // does not change manifest names, leaf order, offsets or stride.
+            let name = format!(
+                "fe_shader_storage_layout_{}",
+                self.resource_element_cache.len()
+            );
             let ty = self.builder.declare_struct_type(&name, &field_tys, false);
             GpuResourceElementType::Record {
                 ty,
