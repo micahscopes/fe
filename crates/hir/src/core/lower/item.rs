@@ -1095,7 +1095,7 @@ impl<'db> ImplTrait<'db> {
         let file_url = ctxt.top_mod().file(db).url(db);
         let plan = db
             .generation_inputs()
-            .functions(db)
+            .requests(db)
             .iter()
             .find(|plan| {
                 Some(&plan.target_file) == file_url.as_ref()
@@ -1103,44 +1103,7 @@ impl<'db> ImplTrait<'db> {
             })
             .cloned();
         if let Some(plan) = plan {
-            let root = super::top_mod_ast(db, ctxt.top_mod());
-            let quote = root
-                .syntax()
-                .descendants()
-                .filter_map(ast::QuoteExpr::cast)
-                .find(|quote| quote.syntax().text_range() == plan.quote_range)
-                .expect("frozen method quote belongs to unchanged source");
-            ctxt.generation_holes = crate::core::meta::quote_holes(&quote)
-                .expect("validated holes")
-                .into_iter()
-                .map(|hole| hole.syntax().text_range())
-                .zip(plan.holes)
-                .collect();
-            let ast::ItemKind::Func(function) = quote
-                .body()
-                .unwrap()
-                .items()
-                .next()
-                .unwrap()
-                .kind()
-                .unwrap()
-            else {
-                unreachable!("checked single function template")
-            };
-            validate_func_attrs(
-                ctxt,
-                function.attr_list(),
-                "fn",
-                function.sig().name().map(|name| name.text().to_string()),
-                true,
-            );
-            let generated = Func::lower_ast(ctxt, function);
-            ctxt.generation_holes.clear();
-            ctxt.builder.defer_quoted_function_origin(
-                generated,
-                plan.producer_module,
-                plan.producer_block,
-            );
+            super::generated::lower_derive_method(ctxt, &plan.code);
         }
 
         let impl_trait = Self::new(

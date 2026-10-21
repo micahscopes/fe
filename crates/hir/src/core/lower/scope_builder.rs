@@ -429,7 +429,7 @@ impl<'db> ScopeGraphBuilder<'db> {
             .iter()
             .find_map(|(node, (scope, _))| (*scope == ScopeId::Item(item)).then_some(node))
             .expect("generated item scope");
-        let publication = self
+        let (publication_node, publication) = self
             .graph
             .edges
             .get(&item_node)
@@ -438,14 +438,21 @@ impl<'db> ScopeGraphBuilder<'db> {
                     .iter()
                     .find(|(_, kind)| matches!(kind, EdgeKind::Lex(_)))
             })
-            .map(|(node, _)| self.graph.nodes[*node].0)
-            .unwrap_or_else(|| self.top_mod.scope());
+            .map(|(node, _)| (*node, self.graph.nodes[*node].0))
+            .expect("generated item retains its publication scope");
         self.graph
             .edges
             .entry(item_node)
             .or_default()
             .retain(|(_, kind)| !matches!(kind, EdgeKind::Lex(_)));
         self.graph.nodes[item_node].1.publication_parent = Some(publication);
+        if matches!(
+            publication,
+            ScopeId::Item(ItemKind::ImplTrait(_) | ItemKind::Impl(_) | ItemKind::Trait(_))
+        ) {
+            self.graph
+                .add_edge(item_node, publication_node, EdgeKind::self_ty());
+        }
         let lexical_scope = self.resolve_producer_scope(quote_top_mod, producer, producer_block);
         if quote_top_mod != self.top_mod {
             self.graph
