@@ -915,6 +915,12 @@ impl<'db> ItemCode<'db> {
                         )),
                         SemConstValue::Meta { value, .. } => match value {
                             MetaValue::Record(record) => {
+                                let adt = record.ty().adt_def(db)
+                                    .ok_or("record splice has no authored declaration")?;
+                                let identity_ty = TyId::foldl(db, TyId::adt(db, adt), adt.params(db));
+                                if record.ty() != identity_ty {
+                                    return Err("record splices from instantiated generic records are not supported yet; the generated type would lose its actual arguments");
+                                }
                                 Ok(FrozenHoleValue::Record(record.freeze(db)?))
                             }
                             MetaValue::Field(field) => {
