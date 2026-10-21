@@ -1654,6 +1654,11 @@ export class FeSurfaceElement extends HTMLElement {
     this._surfaceScheduleKernel = null;
     this._surfaceRecoveryKernel = null;
     this._surfaceQualityKernel = null;
+    this._surfaceLocationKernel = null;
+    this._surfaceLocationListeners = null;
+    this._suppressLocationEcho = false;
+    this._lastSyncedLocationHash = null;
+    this._lastAppliedLocationHref = null;
     this._passActivationKernels = [];
     this._passPreparationKernels = [];
     this._passPreparationObserver = null;
@@ -1799,6 +1804,9 @@ export class FeSurfaceElement extends HTMLElement {
         return;
       }
       this._startScopedTasks();
+      if (this._surfaceLocationKernel) {
+        this._wireSurfaceLocationListeners();
+      }
       if (this._fsm === "live") {
         this._wireSuspendObserver();
         this._wireResizeObserver();
@@ -1811,6 +1819,7 @@ export class FeSurfaceElement extends HTMLElement {
   disconnectedCallback() {
     const hadScopedTasks = this._scopedTaskMachines !== null;
     this._stopScopedTasks();
+    this._unwireSurfaceLocationListeners();
     this._scopedTasksNeedReboot = hadScopedTasks;
     this._suspendObserver?.disconnect();
     this._activationObserver?.disconnect();
@@ -2015,6 +2024,19 @@ export class FeSurfaceElement extends HTMLElement {
         }
         this._surfaceTransitionStateResident = true;
       }
+      this._surfaceLocationKernel = instance?.exports.fe_surface_location_v1 ?? null;
+      if (this._surfaceLocationKernel !== null) {
+        if (typeof this._surfaceLocationKernel !== "function") {
+          throw new Error("fe render runtime: surface location export is not callable");
+        }
+        const expectedLocationArity = 6 + this._resources.length;
+        if (this._surfaceLocationKernel.length !== expectedLocationArity) {
+          throw new Error(
+            `fe render runtime: surface location export has arity ${this._surfaceLocationKernel.length}; expected ${expectedLocationArity}`,
+          );
+        }
+        this._surfaceTransitionStateResident = true;
+      }
       if (this._surfaceTransitionStateResident) {
         const replaceState = instance?.exports.fe_surface_state_replace_v1;
         if (typeof replaceState !== "function") {
@@ -2024,7 +2046,11 @@ export class FeSurfaceElement extends HTMLElement {
         }
         this._surfaceStateReplaceKernel = replaceState;
       }
-      if (this._surfaceTransitionSchedule === "resident" || this._gpuReadbackKernel) {
+      if (
+        this._surfaceTransitionSchedule === "resident" ||
+        this._gpuReadbackKernel ||
+        this._surfaceLocationKernel
+      ) {
         this._attachSurfaceByteTransport(instance.exports);
       }
       const surfaceScheduleV2 = instance?.exports.fe_surface_schedule_v2;
@@ -2111,6 +2137,11 @@ export class FeSurfaceElement extends HTMLElement {
       this._startScopedTasks();
 
       if (!this._adoptedCanvas) this._ensureStage();
+      this._applyBackingExtent(null);
+      if (this._surfaceLocationKernel) {
+        this._wireSurfaceLocationListeners();
+        this._syncSurfaceLocation(true, false);
+      }
       // Publish inspectable artifact links as soon as the manifest has been
       // resolved. They remain useful diagnostics even when poster rendering
       // subsequently fails because this browser has no usable WebGPU device.
@@ -2263,7 +2294,11 @@ export class FeSurfaceElement extends HTMLElement {
       throw new Error("fe render runtime: surface quality facts must be finite");
     }
     if (this._surfaceQualityKernel) {
-      const reply = this._runWasmArenaEpoch(() => this._surfaceQualityKernel(...facts));
+      const qualityArgs =
+        this._surfaceQualityKernel.length === facts.length + this._uniforms.length
+          ? [...facts, ...this._uniforms]
+          : facts;
+      const reply = this._runWasmArenaEpoch(() => this._surfaceQualityKernel(...qualityArgs));
       const extent = Array.isArray(reply) ? reply : [reply];
       if (
         extent.length !== 2 ||
@@ -2337,6 +2372,9 @@ export class FeSurfaceElement extends HTMLElement {
         : null;
       if (!this._applyBackingExtent(gpu)) return;
       this._resizePresentationCanvases();
+      if (this._surfaceLocationKernel) {
+        this._syncSurfaceLocation(false, false);
+      }
       await this._render();
     } finally {
       this._resizePending = false;
@@ -3603,6 +3641,11 @@ export class FeSurfaceElement extends HTMLElement {
     this._recoveryObservedLoss = false;
     this._recoveryWasLive = false;
     this._surfaceQualityKernel = null;
+    this._unwireSurfaceLocationListeners();
+    this._surfaceLocationKernel = null;
+    this._suppressLocationEcho = false;
+    this._lastSyncedLocationHash = null;
+    this._lastAppliedLocationHref = null;
     this._passActivationKernels = [];
     this._passPreparationKernels = [];
     this._unwireResizeObserver();
@@ -3766,6 +3809,113 @@ export class FeSurfaceElement extends HTMLElement {
     } else {
       this._queueGestureRender(next);
     }
+  }
+
+  _wireSurfaceLocationListeners() {
+    if (this._surfaceLocationListeners || typeof globalThis.addEventListener !== "function") {
+      return;
+    }
+    const onLocationChange = () => {
+      if (this._suppressLocationEcho || !this._surfaceLocationKernel) return;
+      const currentHref = String(globalThis.location?.href ?? "");
+      const currentHash = String(globalThis.location?.hash ?? "");
+      if (
+        currentHref === this._lastAppliedLocationHref &&
+        currentHash === this._lastSyncedLocationHash
+      ) {
+        return;
+      }
+      this._syncSurfaceLocation(true, true);
+    };
+    globalThis.addEventListener("popstate", onLocationChange);
+    globalThis.addEventListener("hashchange", onLocationChange);
+    this._surfaceLocationListeners = { onLocationChange };
+  }
+
+  _unwireSurfaceLocationListeners() {
+    if (!this._surfaceLocationListeners || typeof globalThis.removeEventListener !== "function") {
+      this._surfaceLocationListeners = null;
+      return;
+    }
+    const { onLocationChange } = this._surfaceLocationListeners;
+    globalThis.removeEventListener("popstate", onLocationChange);
+    globalThis.removeEventListener("hashchange", onLocationChange);
+    this._surfaceLocationListeners = null;
+  }
+
+  _syncSurfaceLocation(applyInput = false, fromNavigationEvent = false) {
+    if (!this._surfaceLocationKernel) return null;
+    if (this._suppressLocationEcho && applyInput && fromNavigationEvent) return null;
+    const href = String(globalThis.location?.href ?? "");
+    const result = this._runWasmArenaEpoch(() => {
+      const encoded = applyInput ? new TextEncoder().encode(href) : new Uint8Array(0);
+      const inputPtr = encoded.byteLength > 0
+        ? this._surfaceTransitionAlloc(encoded.byteLength, 1)
+        : 0;
+      const outputCap = 256;
+      const outputPtr = this._surfaceTransitionAlloc(outputCap, 1);
+      const outputLenPtr = this._surfaceTransitionAlloc(4, 4);
+      const memory = this._surfaceTransitionMemory;
+      if (encoded.byteLength > 0) {
+        new Uint8Array(memory.buffer, inputPtr, encoded.byteLength).set(encoded);
+      }
+      const view = new DataView(memory.buffer);
+      view.setUint32(outputLenPtr, 0, true);
+      const reply = this._surfaceLocationKernel(
+        applyInput ? 1 : 0,
+        inputPtr,
+        encoded.byteLength,
+        outputPtr,
+        outputCap,
+        outputLenPtr,
+        ...this._surfaceResourceArgs(),
+      );
+      const next = this._surfaceReplyValues(reply, "typed surface location transition");
+      const afterView = new DataView(memory.buffer);
+      const outLen = afterView.getUint32(outputLenPtr, true);
+      const outHash = outLen > 0 && outputPtr + outLen <= memory.buffer.byteLength
+        ? new TextDecoder().decode(new Uint8Array(memory.buffer, outputPtr, outLen))
+        : "";
+      return { next, outHash };
+    });
+    if (!result?.next) return null;
+    if (applyInput) {
+      this._uniforms = result.next;
+      if (this._applyBackingExtent(this._gpu)) {
+        this._resizePresentationCanvases();
+      }
+      this._refreshControlValues();
+    }
+    if (result.outHash && typeof globalThis.history?.replaceState === "function") {
+      const currentUrl = new URL(href || "http://localhost/");
+      const currentHash = currentUrl.hash;
+      const shouldReplace = applyInput
+        ? (currentHash.length > 0 && currentHash !== result.outHash)
+        : currentHash !== result.outHash;
+      if (shouldReplace) {
+        currentUrl.hash = result.outHash;
+        this._suppressLocationEcho = true;
+        try {
+          globalThis.history.replaceState(globalThis.history.state, "", currentUrl.href);
+        } finally {
+          this._suppressLocationEcho = false;
+        }
+      }
+      this._lastSyncedLocationHash = String(globalThis.location?.hash || "");
+      this._lastAppliedLocationHref = String(globalThis.location?.href ?? "");
+    }
+    if (applyInput && fromNavigationEvent) {
+      if (this._fsm === "live") {
+        if (this._surfaceScheduleKernel) {
+          this._realizeSurfaceSchedule(this._runSurfaceSchedule(SurfaceEventKind.StateChanged));
+        }
+        void this._render().catch((error) => this._fail(error));
+      } else if (this._fsm === "ready") {
+        void this._prepareReadyFrame().catch((error) => this._fail(error));
+      }
+      this._dispatch("fe-frame", { params: this._paramsSnapshot() });
+    }
+    return result;
   }
 
   async _bootCanonicalActor(wasm) {
@@ -4111,12 +4261,18 @@ export class FeSurfaceElement extends HTMLElement {
         : this._runSurfaceTransition(event);
       if (!next) return;
       this._uniforms = next;
+      if (this._surfaceLocationKernel) {
+        this._syncSurfaceLocation(false, false);
+      }
       void this._render().catch((error) => this._fail(error));
       return;
     }
 
     const next = this._uniforms.slice();
     next[index] = value;
+    if (this._surfaceLocationKernel) {
+      this._syncSurfaceLocation(false, false);
+    }
     void this._render(next).catch((error) => this._fail(error));
   }
 
@@ -4421,6 +4577,9 @@ export class FeSurfaceElement extends HTMLElement {
   _queueGestureRender(next) {
     this._uniforms = next;
     this._refreshControlValues();
+    if (this._surfaceLocationKernel) {
+      this._syncSurfaceLocation(false, false);
+    }
     if (this._fsm !== "live") return;
     this._gestureDirty = true;
     this._scheduleGestureFrame();
@@ -4450,6 +4609,12 @@ export class FeSurfaceElement extends HTMLElement {
       this._realizeSurfaceSchedule(decision);
       if (!decision?.present) return;
 
+      const hadUserEvent = this._pendingSurfaceEvents.some(
+        (event) =>
+          event.eventKind !== SurfaceEventKind.AnimationFrame &&
+          event.eventKind !== SurfaceEventKind.GpuComplete &&
+          event.eventKind !== SurfaceEventKind.StateChanged,
+      );
       const events = [
         ...this._pendingSurfaceEvents.splice(0),
         this._surfaceBoundaryEvent(SurfaceEventKind.AnimationFrame, timestamp),
@@ -4461,6 +4626,9 @@ export class FeSurfaceElement extends HTMLElement {
       if (next) {
         this._uniforms = next;
         this._refreshControlValues();
+        if (hadUserEvent && this._surfaceLocationKernel) {
+          this._syncSurfaceLocation(false, false);
+        }
       }
       try {
         await this._render();

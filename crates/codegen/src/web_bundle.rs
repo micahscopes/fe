@@ -101,6 +101,8 @@ const TYPED_SURFACE_STATE_REPLACE_EXPORT: &str = "fe_surface_state_replace_v1";
 /// nominal `InitialState` role; its source name remains application vocabulary.
 const SURFACE_INITIALIZER_EXPORT: &str = "fe_surface_initialize_v1";
 const ACTOR_NOTIFICATION_EXPORT: &str = "fe_surface_actor_message_v1";
+const SURFACE_LOCATION_EXPORT: &str = "fe_surface_location_v1";
+const SURFACE_CONTACT_EXPORT: &str = "fe_surface_contact_v1";
 /// Fixed binary discovery point for a resident Fe presentation policy. The
 /// policy's authored behavior name and private state never enter the manifest.
 const TYPED_SURFACE_SCHEDULE_EXPORT: &str = "fe_surface_schedule_v2";
@@ -3347,6 +3349,121 @@ struct TypedGpuReadbackContract {
     actor_param_is_resource: Vec<bool>,
 }
 
+fn resolve_std_web_nominal_ty<'db>(
+    db: &'db DriverDataBase,
+    scope: hir::hir_def::scope_graph::ScopeId<'db>,
+    type_name: &str,
+) -> Option<TyId<'db>> {
+    let web_path = format!("std::web::{type_name}");
+    let view_path = format!("std::web::view::{type_name}");
+    let contacts_path = format!("std::web::surface_contacts::{type_name}");
+    hir::analysis::ty::corelib::resolve_lib_type_path(db, scope, &web_path)
+        .or_else(|| hir::analysis::ty::corelib::resolve_lib_type_path(db, scope, &view_path))
+        .or_else(|| hir::analysis::ty::corelib::resolve_lib_type_path(db, scope, &contacts_path))
+        .map(|ty| normalized_semantic_ty(db, ty))
+}
+
+fn is_std_web_nominal_ty(
+    db: &DriverDataBase,
+    scope: hir::hir_def::scope_graph::ScopeId<'_>,
+    ty: TyId<'_>,
+    expected_name: &str,
+) -> bool {
+    resolve_std_web_nominal_ty(db, scope, expected_name)
+        .is_some_and(|expected| normalized_semantic_ty(db, ty) == expected)
+}
+
+fn behavior_has_std_web_role(
+    db: &DriverDataBase,
+    behavior: hir::hir_def::Func<'_>,
+    role_name: &str,
+) -> bool {
+    behavior
+        .actor_roles(db)
+        .data(db)
+        .iter()
+        .filter_map(|role| role.key_path.to_opt())
+        .filter_map(|path| resolve_metadata_ty(db, path, behavior.scope()))
+        .any(|ty| is_std_web_nominal_ty(db, behavior.scope(), ty, role_name))
+}
+
+fn behavior_is_surface_location(
+    db: &DriverDataBase,
+    behavior: hir::hir_def::Func<'_>,
+) -> bool {
+    behavior_has_std_web_role(db, behavior, "SurfaceLocationTransition")
+}
+
+fn behavior_is_surface_contact(
+    db: &DriverDataBase,
+    behavior: hir::hir_def::Func<'_>,
+) -> bool {
+    behavior_has_std_web_role(db, behavior, "SurfaceContactTransition")
+}
+
+fn canonical_surface_location_event_type() -> CanonicalType {
+    CanonicalType::Record(vec![
+        CanonicalField::new("apply_input", CanonicalType::Bool),
+        CanonicalField::new("input_ptr", CanonicalType::U32),
+        CanonicalField::new("input_len", CanonicalType::U32),
+        CanonicalField::new("out_ptr", CanonicalType::U32),
+        CanonicalField::new("out_cap", CanonicalType::U32),
+        CanonicalField::new("out_len_ptr", CanonicalType::U32),
+    ])
+}
+
+fn canonical_pointer_phase_type() -> CanonicalType {
+    CanonicalType::Variant(
+        ["down", "move", "up", "cancel", "lost_capture"]
+            .into_iter()
+            .map(|name| CanonicalVariant {
+                name: name.to_owned(),
+                fields: Vec::new(),
+            })
+            .collect(),
+    )
+}
+
+fn canonical_pointer_device_type() -> CanonicalType {
+    CanonicalType::Variant(
+        ["mouse", "pen", "touch", "other"]
+            .into_iter()
+            .map(|name| CanonicalVariant {
+                name: name.to_owned(),
+                fields: Vec::new(),
+            })
+            .collect(),
+    )
+}
+
+fn canonical_surface_contact_event_type() -> CanonicalType {
+    CanonicalType::Record(vec![
+        CanonicalField::new(
+            "sample",
+            CanonicalType::Record(vec![
+                CanonicalField::new("phase", canonical_pointer_phase_type()),
+                CanonicalField::new("device", canonical_pointer_device_type()),
+                CanonicalField::new("pointer_id", CanonicalType::U32),
+                CanonicalField::new("client_x", CanonicalType::F32),
+                CanonicalField::new("client_y", CanonicalType::F32),
+                CanonicalField::new("buttons", CanonicalType::U32),
+                CanonicalField::new("primary", CanonicalType::Bool),
+                CanonicalField::new("pressure", CanonicalType::F32),
+                CanonicalField::new("timestamp", CanonicalType::F32),
+            ]),
+        ),
+        CanonicalField::new(
+            "bounds",
+            CanonicalType::Record(vec![
+                CanonicalField::new("left", CanonicalType::F32),
+                CanonicalField::new("top", CanonicalType::F32),
+                CanonicalField::new("width", CanonicalType::F32),
+                CanonicalField::new("height", CanonicalType::F32),
+            ]),
+        ),
+    ])
+}
+
 /// Task notifications share the render actor's resident non-resource state.
 /// Message identity and layout are derived from Fe, never an authored route.
 struct ActorNotificationContract {
@@ -3366,8 +3483,16 @@ fn actor_notification_contract(
     let actor = actors.iter().find(|a| a.state.name(db).to_opt()
         .is_some_and(|name| name.data(db) == &program.actor))
         .ok_or_else(|| WebBundleError::EntryDerivation("missing render actor".into()))?;
-    let behaviors = actor.behaviors.iter().copied()
-        .filter(|b| crate::resident_actor::behavior_is_resident(db, *b)).collect::<Vec<_>>();
+    let behaviors = actor
+        .behaviors
+        .iter()
+        .copied()
+        .filter(|b| {
+            crate::resident_actor::behavior_is_resident(db, *b)
+                && !behavior_is_surface_location(db, *b)
+                && !behavior_is_surface_contact(db, *b)
+        })
+        .collect::<Vec<_>>();
     let behavior = match behaviors.as_slice() {
         [] => return Ok(None),
         [behavior] => *behavior,
@@ -3381,7 +3506,18 @@ fn actor_notification_contract(
         return Err(WebBundleError::EntryDerivation(format!(
             "notification `{source_entry}` must take one message followed by complete actor state")));
     }
-    let event = canonical_type_from_semantic(db, *args[0].skip_binder(), "actor_notification")
+    let event_ty = *args[0].skip_binder();
+    if is_std_web_nominal_ty(db, behavior.scope(), event_ty, "SurfaceLocationEvent") {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "notification `{source_entry}` takes std::web::SurfaceLocationEvent and must declare the nominal std::web::SurfaceLocationTransition role"
+        )));
+    }
+    if is_std_web_nominal_ty(db, behavior.scope(), event_ty, "SurfaceContactEvent") {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "notification `{source_entry}` takes std::web::SurfaceContactEvent and must declare the nominal std::web::SurfaceContactTransition role"
+        )));
+    }
+    let event = canonical_type_from_semantic(db, event_ty, "actor_notification")
         .map_err(|e| WebBundleError::EntryDerivation(e.to_string()))?;
     if !matches!(event, CanonicalType::Record(_)) {
         return Err(WebBundleError::EntryDerivation("actor notification must be a named record".into()));
@@ -3428,6 +3564,239 @@ fn actor_notification_contract(
         state_tag_limits, actor_param_is_resource }))
 }
 
+struct NominalResidentLaneContract {
+    export_name: &'static str,
+    lane_label: &'static str,
+    source_entry: String,
+    event_fields: usize,
+    event_tag_limits: Vec<(usize, u32)>,
+    state_tag_limits: Vec<(usize, u32)>,
+    actor_param_is_resource: Vec<bool>,
+    params: Vec<WebControlWasmType>,
+    results: Vec<WebControlWasmType>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn nominal_resident_lane_contract(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+    resource_field_indices: &[u32],
+    lane_label: &'static str,
+    role_name: &'static str,
+    event_name: &'static str,
+    export_name: &'static str,
+    expected_event: CanonicalType,
+    behavior_predicate: fn(&DriverDataBase, hir::hir_def::Func<'_>) -> bool,
+) -> Result<Option<NominalResidentLaneContract>, WebBundleError> {
+    let Some(actor_name) = gpu_actor_name_for_entry(db, top_mod, source_entry) else {
+        return Ok(None);
+    };
+    let actors = semantic_actors(db, top_mod);
+    let actor = actors
+        .iter()
+        .find(|actor| {
+            actor_is_gpu_program(db, actor)
+                && actor
+                    .state
+                    .name(db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(db) == &actor_name)
+        })
+        .ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "GPU actor `{actor_name}` has no semantic declaration"
+            ))
+        })?;
+    let behaviors = actor
+        .behaviors
+        .iter()
+        .copied()
+        .filter(|b| behavior_predicate(db, *b))
+        .collect::<Vec<_>>();
+    let behavior = match behaviors.as_slice() {
+        [] => return Ok(None),
+        [behavior] => *behavior,
+        _ => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "render actor must have at most one {role_name} target"
+            )));
+        }
+    };
+    let lane_entry = behavior.name(db).to_opt().unwrap().data(db).to_owned();
+    let args = behavior.arg_tys(db);
+    let fields = actor.state.hir_fields(db).data(db);
+    if args.len() != fields.len() + 1 {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "{lane_label} transition `{lane_entry}` must take one {event_name} followed by complete actor state"
+        )));
+    }
+    let event_ty = *args[0].skip_binder();
+    if !is_std_web_nominal_ty(db, behavior.scope(), event_ty, event_name) {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "{lane_label} transition `{lane_entry}` must take the nominal std::web::{event_name} record"
+        )));
+    }
+    let event = canonical_type_from_semantic(db, event_ty, lane_label)
+        .map_err(|e| WebBundleError::EntryDerivation(e.to_string()))?;
+    if event != expected_event {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "{lane_label} transition `{lane_entry}` differs from the fixed {event_name} ABI: expected {expected_event:?}, got {event:?}"
+        )));
+    }
+    let mut event_tag_limits = Vec::new();
+    let event_fields = surface_scalar_tag_limits(&event, lane_label, 0, &mut event_tag_limits)?;
+    let mut params = Vec::new();
+    append_canonical_wasm_types(&event, &mut params, lane_label)?;
+    if event_fields != params.len() {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "inconsistent {lane_label} event layout"
+        )));
+    }
+    let mut state = Vec::new();
+    let mut actor_param_is_resource = Vec::new();
+    for (index, (field, arg)) in fields.iter().zip(&args[1..]).enumerate() {
+        let declared = lower_hir_ty(
+            db,
+            field.type_ref().to_opt().ok_or_else(|| {
+                WebBundleError::EntryDerivation(format!("unresolved {lane_label} state field"))
+            })?,
+            actor.state.scope(),
+            PredicateListId::empty_list(db),
+        );
+        if normalized_semantic_ty(db, declared) != normalized_semantic_ty(db, *arg.skip_binder()) {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "{lane_label} state argument differs from actor field"
+            )));
+        }
+        if resource_field_indices.contains(&(index as u32)) {
+            actor_param_is_resource.push(true);
+            params.push(WebControlWasmType::I32);
+            continue;
+        }
+        let canonical = canonical_type_from_semantic(db, declared, lane_label)
+            .map_err(|e| WebBundleError::EntryDerivation(e.to_string()))?;
+        let mut lanes = Vec::new();
+        append_canonical_wasm_types(&canonical, &mut lanes, lane_label)?;
+        actor_param_is_resource.extend(std::iter::repeat_n(false, lanes.len()));
+        let name = field.name.to_opt().ok_or_else(|| {
+            WebBundleError::EntryDerivation(format!("unnamed {lane_label} state field"))
+        })?;
+        state.push(CanonicalField::new(name.data(db).to_owned(), canonical));
+    }
+    let state = CanonicalType::Record(state);
+    let returned = canonical_type_from_semantic(db, behavior.return_ty(db), lane_label)
+        .map_err(|e| WebBundleError::EntryDerivation(e.to_string()))?;
+    if returned != state {
+        return Err(WebBundleError::EntryDerivation(format!(
+            "{lane_label} transition `{lane_entry}` must return complete non-resource actor state: expected {state:?}, got {returned:?}"
+        )));
+    }
+    let mut results = Vec::new();
+    append_canonical_wasm_types(&returned, &mut results, lane_label)?;
+    let mut state_tag_limits = Vec::new();
+    surface_scalar_tag_limits(&state, lane_label, 0, &mut state_tag_limits)?;
+    Ok(Some(NominalResidentLaneContract {
+        export_name,
+        lane_label,
+        source_entry: lane_entry,
+        event_fields,
+        event_tag_limits,
+        state_tag_limits,
+        actor_param_is_resource,
+        params,
+        results,
+    }))
+}
+
+fn surface_location_contract(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+    resource_field_indices: &[u32],
+) -> Result<Option<NominalResidentLaneContract>, WebBundleError> {
+    nominal_resident_lane_contract(
+        db,
+        top_mod,
+        source_entry,
+        resource_field_indices,
+        "surface location",
+        "SurfaceLocationTransition",
+        "SurfaceLocationEvent",
+        SURFACE_LOCATION_EXPORT,
+        canonical_surface_location_event_type(),
+        behavior_is_surface_location,
+    )
+}
+
+fn surface_contact_contract(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    source_entry: &str,
+    resource_field_indices: &[u32],
+) -> Result<Option<NominalResidentLaneContract>, WebBundleError> {
+    nominal_resident_lane_contract(
+        db,
+        top_mod,
+        source_entry,
+        resource_field_indices,
+        "surface contact",
+        "SurfaceContactTransition",
+        "SurfaceContactEvent",
+        SURFACE_CONTACT_EXPORT,
+        canonical_surface_contact_event_type(),
+        behavior_is_surface_contact,
+    )
+}
+
+fn with_nominal_resident_lane(
+    options: WasmCompileOptions,
+    contract: &NominalResidentLaneContract,
+    is_auxiliary: bool,
+) -> WasmCompileOptions {
+    let options = if is_auxiliary {
+        options.with_resident_actor_aux_transition_checked(
+            &contract.source_entry,
+            contract.export_name,
+            contract.event_fields,
+            contract.actor_param_is_resource.clone(),
+            contract.event_tag_limits.clone(),
+            contract.state_tag_limits.clone(),
+        )
+    } else {
+        options.with_resident_actor_transition_checked(
+            &contract.source_entry,
+            contract.export_name,
+            TYPED_SURFACE_STATE_REPLACE_EXPORT,
+            contract.event_fields,
+            contract.actor_param_is_resource.clone(),
+            contract.event_tag_limits.clone(),
+            contract.state_tag_limits.clone(),
+        )
+    };
+    options.with_canonical_arena()
+}
+
+fn verify_nominal_resident_lane_export(
+    wasm: &[u8],
+    contract: &NominalResidentLaneContract,
+) -> Result<(), WebBundleError> {
+    let (params, results) =
+        wasm_export_signature(wasm, contract.export_name).ok_or_else(|| {
+            WebBundleError::SurfaceProjection(format!(
+                "{} transition `{}` has no fixed Wasm export `{}`",
+                contract.lane_label, contract.source_entry, contract.export_name
+            ))
+        })?;
+    if params != contract.params || results != contract.results {
+        return Err(WebBundleError::SurfaceProjection(format!(
+            "{} transition `{}` has measured Wasm signature {params:?} -> {results:?}; expected {:?} -> {:?}",
+            contract.lane_label, contract.source_entry, contract.params, contract.results
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TypedSurfaceScheduleContract {
     event_fields: usize,
@@ -3451,6 +3820,7 @@ struct ResolvedSurfaceSchedulePolicy<'db> {
 struct TypedSurfaceQualityContract {
     fact_fields: usize,
     decision_fields: usize,
+    fact_tag_limits: Vec<(usize, u32)>,
 }
 
 /// An ordinary Fe policy selected solely from the actor's nominal
@@ -4776,13 +5146,48 @@ fn resolve_pass_preparation_policy<'db>(
     }))
 }
 
-fn surface_quality_function_shape(db: &DriverDataBase, func: Func<'_>) -> bool {
+fn canonical_surface_quality_state_matches(
+    state: &CanonicalType,
+    expected_state: Option<&CanonicalType>,
+) -> bool {
+    let Some(expected) = expected_state else {
+        return false;
+    };
+    if state == expected {
+        return true;
+    }
+    if let CanonicalType::Record(fields) = expected
+        && let [single] = fields.as_slice()
+    {
+        return *state == single.ty;
+    }
+    false
+}
+
+fn surface_quality_function_shape(
+    db: &DriverDataBase,
+    func: Func<'_>,
+    expected_state: Option<&CanonicalType>,
+) -> bool {
     let arg_tys = func.arg_tys(db);
-    arg_tys.len() == 1
+    let facts_and_return_ok = !arg_tys.is_empty()
         && nominal_attrs(db, *arg_tys[0].skip_binder())
             .is_some_and(|attrs| attrs.is_web_surface_quality_facts(db))
         && nominal_attrs(db, func.return_ty(db))
-            .is_some_and(|attrs| attrs.is_web_surface_backing_extent(db))
+            .is_some_and(|attrs| attrs.is_web_surface_backing_extent(db));
+    if !facts_and_return_ok {
+        return false;
+    }
+    match arg_tys.len() {
+        1 => true,
+        2 => canonical_type_from_semantic(
+            db,
+            *arg_tys[1].skip_binder(),
+            "surface_quality_state",
+        )
+        .is_ok_and(|state| canonical_surface_quality_state_matches(&state, expected_state)),
+        _ => false,
+    }
 }
 
 /// Resolve the backing policy selected on the GPU actor itself. Actor-level
@@ -4792,6 +5197,7 @@ fn resolve_surface_quality_policy<'db>(
     db: &'db DriverDataBase,
     top_mod: TopLevelMod<'db>,
     source_entry: &str,
+    resource_field_indices: &[u32],
 ) -> Result<Option<ResolvedSurfaceQualityPolicy<'db>>, WebBundleError> {
     let actors = semantic_actors(db, top_mod);
     let Some(actor) = actors.iter().find(|actor| {
@@ -4816,6 +5222,8 @@ fn resolve_surface_quality_policy<'db>(
             )));
         }
     };
+    let expected_state = actor_state_shape(db, top_mod, source_entry, resource_field_indices)?
+        .map(|(state, _)| state);
     let policy_name = policy_ty.pretty_print(db);
     let policy_ingot = policy_ty.ingot(db).ok_or_else(|| {
         WebBundleError::SurfaceProjection(format!(
@@ -4832,7 +5240,7 @@ fn resolve_surface_quality_policy<'db>(
             func.vis(db) == Visibility::Public
                 && !func.is_extern(db)
                 && func.body(db).is_some()
-                && surface_quality_function_shape(db, *func)
+                && surface_quality_function_shape(db, *func, expected_state.as_ref())
         })
         .collect::<Vec<_>>();
     let func = match candidates.as_slice() {
@@ -4849,7 +5257,8 @@ fn resolve_surface_quality_policy<'db>(
             )));
         }
     };
-    let contract = typed_surface_quality_contract(db, func, &policy_name)?;
+    let contract =
+        typed_surface_quality_contract(db, func, &policy_name, expected_state.as_ref())?;
     Ok(Some(ResolvedSurfaceQualityPolicy { func, contract }))
 }
 
@@ -4857,11 +5266,12 @@ fn typed_surface_quality_contract(
     db: &DriverDataBase,
     func: Func<'_>,
     policy_name: &str,
+    expected_state: Option<&CanonicalType>,
 ) -> Result<TypedSurfaceQualityContract, WebBundleError> {
     let arg_tys = func.arg_tys(db);
-    if arg_tys.len() != 1 {
+    if arg_tys.len() != 1 && arg_tys.len() != 2 {
         return Err(WebBundleError::SurfaceProjection(format!(
-            "SurfaceQuality policy `{policy_name}` must take exactly one SurfaceQualityFacts record; found {} semantic arguments",
+            "SurfaceQuality policy `{policy_name}` must take SurfaceQualityFacts (optionally followed by actor state); found {} semantic arguments",
             arg_tys.len()
         )));
     }
@@ -4889,7 +5299,7 @@ fn typed_surface_quality_contract(
         )));
     }
     let mut fact_tag_limits = Vec::new();
-    let fact_fields =
+    let mut fact_fields =
         surface_scalar_tag_limits(&facts, "surface_quality_facts", 0, &mut fact_tag_limits)?;
     let mut extent_tag_limits = Vec::new();
     let decision_fields =
@@ -4899,9 +5309,27 @@ fn typed_surface_quality_contract(
             "SurfaceQuality policy `{policy_name}` must flatten to 8 fact and 2 extent leaves; got {fact_fields} and {decision_fields}"
         )));
     }
+    if arg_tys.len() == 2 {
+        let state_ty = *arg_tys[1].skip_binder();
+        let state = canonical_type_from_semantic(db, state_ty, "surface_quality_state")
+            .map_err(|error| WebBundleError::SurfaceProjection(error.to_string()))?;
+        if !canonical_surface_quality_state_matches(&state, expected_state) {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "SurfaceQuality policy `{policy_name}` state argument differs from owning actor state: expected {expected_state:?}; got {state:?}"
+            )));
+        }
+        let state_fields = surface_scalar_tag_limits(
+            &state,
+            "surface_quality_state",
+            fact_fields,
+            &mut fact_tag_limits,
+        )?;
+        fact_fields += state_fields;
+    }
     Ok(TypedSurfaceQualityContract {
         fact_fields,
         decision_fields,
+        fact_tag_limits,
     })
 }
 
@@ -5270,7 +5698,7 @@ fn with_typed_surface_quality(
         contract.fact_fields,
         0,
         contract.decision_fields,
-        Vec::new(),
+        contract.fact_tag_limits.clone(),
         Vec::new(),
     )
 }
@@ -7330,8 +7758,18 @@ impl WebBundle {
                 "GPU actor pass graphs do not yet carry Wasm message lanes".to_owned(),
             ));
         }
+        let resource_field_indices = program
+            .resources
+            .iter()
+            .map(|resource| resource.field_index)
+            .collect::<Vec<_>>();
         let control_export = actor_update_export_name(db, top_mod, &options.source_entry)?;
-        let quality_policy = resolve_surface_quality_policy(db, top_mod, &options.source_entry)?;
+        let quality_policy = resolve_surface_quality_policy(
+            db,
+            top_mod,
+            &options.source_entry,
+            &resource_field_indices,
+        )?;
         let recovery_policy = resolve_surface_recovery_policy(db, top_mod, &options.source_entry)?;
         match options.mode {
             WebBundleMode::Render => {
@@ -7391,11 +7829,6 @@ impl WebBundle {
             &program, readback.as_ref().map(|contract| contract.binding),
         )?;
         let resource_assets = select_resource_assets(&resources, &options.resource_assets)?;
-        let resource_field_indices = program
-            .resources
-            .iter()
-            .map(|resource| resource.field_index)
-            .collect::<Vec<_>>();
         let mut pass_activation_policies = Vec::<ResolvedPassActivationPolicy<'_>>::new();
         let mut stage_activation_indices = Vec::with_capacity(program.stages.len());
         let mut pass_preparation_policies = Vec::<ResolvedPassPreparationPolicy<'_>>::new();
@@ -7736,6 +8169,18 @@ impl WebBundle {
         )?;
         let scoped_task_count = scoped_task_entries.len() + scoped_task_instances.len();
         let notification = actor_notification_contract(db, top_mod, &program)?;
+        let location = surface_location_contract(
+            db,
+            top_mod,
+            &options.source_entry,
+            &resource_field_indices,
+        )?;
+        let contact = surface_contact_contract(
+            db,
+            top_mod,
+            &options.source_entry,
+            &resource_field_indices,
+        )?;
         let mut scoped_tasks = Vec::new();
         let mut structured_children = Vec::new();
         let (wasm, control, has_fe_schedule) = if control_export.is_some()
@@ -7748,6 +8193,8 @@ impl WebBundle {
             || !publications.is_empty()
             || scoped_task_count != 0
             || notification.is_some()
+            || location.is_some()
+            || contact.is_some()
         {
             // A pass graph remains GPU-only for all rendering and resource
             // work. Its optional Wasm artifact contains only Fe-authored state
@@ -7800,9 +8247,32 @@ impl WebBundle {
                 return Err(WebBundleError::SurfaceProjection(
                     "task notifications require resident SurfaceScheduling when combined with surface controls".into()));
             }
+            let location_is_auxiliary = readback.is_some()
+                || notification.is_some()
+                || typed_transition.as_ref().is_some_and(|c| c.scheduled);
+            if location.is_some() && control_export.is_some()
+                && !typed_transition.as_ref().is_some_and(|c| c.scheduled) {
+                return Err(WebBundleError::SurfaceProjection(
+                    "surface location transitions require resident SurfaceScheduling when combined with surface controls".into()));
+            }
+            let contact_is_auxiliary = readback.is_some()
+                || notification.is_some()
+                || location.is_some()
+                || typed_transition.as_ref().is_some_and(|c| c.scheduled);
+            if contact.is_some() && control_export.is_some()
+                && !typed_transition.as_ref().is_some_and(|c| c.scheduled) {
+                return Err(WebBundleError::SurfaceProjection(
+                    "surface contact transitions require resident SurfaceScheduling when combined with surface controls".into()));
+            }
             let mut control_entries = Vec::new();
             if let Some(notification) = &notification {
                 control_entries.push(notification.source_entry.clone());
+            }
+            if let Some(location) = &location {
+                control_entries.push(location.source_entry.clone());
+            }
+            if let Some(contact) = &contact {
+                control_entries.push(contact.source_entry.clone());
             }
             control_entries.extend(scoped_task_entries);
             if let Some(control_export) = control_export.as_deref() {
@@ -7911,6 +8381,14 @@ impl WebBundle {
                         notification.state_tag_limits.clone())
                 }.with_canonical_arena();
             }
+            if let Some(location) = &location {
+                wasm_options =
+                    with_nominal_resident_lane(wasm_options, location, location_is_auxiliary);
+            }
+            if let Some(contact) = &contact {
+                wasm_options =
+                    with_nominal_resident_lane(wasm_options, contact, contact_is_auxiliary);
+            }
             if let Some(initializer) = initializer.as_ref() {
                 wasm_options = with_surface_initializer(wasm_options, initializer);
             }
@@ -7992,6 +8470,12 @@ impl WebBundle {
             }
             if let Some(readback) = readback.as_ref() {
                 verify_typed_gpu_readback_exports(&wasm, readback)?;
+            }
+            if let Some(location) = location.as_ref() {
+                verify_nominal_resident_lane_export(&wasm, location)?;
+            }
+            if let Some(contact) = contact.as_ref() {
+                verify_nominal_resident_lane_export(&wasm, contact)?;
             }
             for (index, policy) in pass_activation_policies.iter().enumerate() {
                 verify_typed_pass_activation_export(
@@ -8122,7 +8606,8 @@ impl WebBundle {
         // would need `control_export` routed around canonical-lane derivation
         // too, so that unsupported combination remains fail-closed.
         let control_export = actor_update_export_name(db, top_mod, &options.source_entry)?;
-        let quality_policy = resolve_surface_quality_policy(db, top_mod, &options.source_entry)?;
+        let quality_policy =
+            resolve_surface_quality_policy(db, top_mod, &options.source_entry, &[])?;
         let recovery_policy = resolve_surface_recovery_policy(db, top_mod, &options.source_entry)?;
         let typed_transition = control_export
             .as_deref()
@@ -8144,6 +8629,24 @@ impl WebBundle {
             &options.source_entry,
         )?;
         let initializer = surface_initializer_contract(db, top_mod, &options.source_entry, &[])?;
+        let location = surface_location_contract(db, top_mod, &options.source_entry, &[])?;
+        if location.is_some()
+            && control_export.is_some()
+            && !typed_transition.as_ref().is_some_and(|c| c.scheduled)
+        {
+            return Err(WebBundleError::SurfaceProjection(
+                "surface location transitions require resident SurfaceScheduling when combined with surface controls".into(),
+            ));
+        }
+        let contact = surface_contact_contract(db, top_mod, &options.source_entry, &[])?;
+        if contact.is_some()
+            && control_export.is_some()
+            && !typed_transition.as_ref().is_some_and(|c| c.scheduled)
+        {
+            return Err(WebBundleError::SurfaceProjection(
+                "surface contact transitions require resident SurfaceScheduling when combined with surface controls".into(),
+            ));
+        }
         let (scoped_task_entries, scoped_task_instances) =
             render_actor_scoped_task_entries(db, top_mod, &options.source_entry, &[])?;
         // Canonical actor messages and the surface-control transition are two
@@ -8255,6 +8758,12 @@ impl WebBundle {
         if let Some(initializer) = initializer.as_ref() {
             wasm_entries.push(initializer.source_entry.clone());
         }
+        if let Some(location) = location.as_ref() {
+            wasm_entries.push(location.source_entry.clone());
+        }
+        if let Some(contact) = contact.as_ref() {
+            wasm_entries.push(contact.source_entry.clone());
+        }
         wasm_entries.extend(scoped_task_entries.iter().cloned());
         let mut seen_wasm_entries = std::collections::BTreeSet::new();
         wasm_entries.retain(|entry| seen_wasm_entries.insert(entry.clone()));
@@ -8317,6 +8826,17 @@ impl WebBundle {
                 contract,
             );
         }
+        if let Some(location) = location.as_ref() {
+            let location_is_auxiliary = typed_transition.as_ref().is_some_and(|c| c.scheduled);
+            wasm_options =
+                with_nominal_resident_lane(wasm_options, location, location_is_auxiliary);
+        }
+        if let Some(contact) = contact.as_ref() {
+            let contact_is_auxiliary = location.is_some()
+                || typed_transition.as_ref().is_some_and(|c| c.scheduled);
+            wasm_options =
+                with_nominal_resident_lane(wasm_options, contact, contact_is_auxiliary);
+        }
         if let Some(initializer) = initializer.as_ref() {
             wasm_options = with_surface_initializer(wasm_options, initializer);
         }
@@ -8360,6 +8880,12 @@ impl WebBundle {
             .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
         if let Some(initializer) = initializer.as_ref() {
             verify_surface_initializer_export(&wasm, initializer)?;
+        }
+        if let Some(location) = location.as_ref() {
+            verify_nominal_resident_lane_export(&wasm, location)?;
+        }
+        if let Some(contact) = contact.as_ref() {
+            verify_nominal_resident_lane_export(&wasm, contact)?;
         }
         let control = control_export
             .as_deref()
@@ -10283,5 +10809,424 @@ if (!rejected) throw new Error("mixed direct and indirect draw was accepted");
         assert!(declarations.contains("readonly tag: \"data\";"));
         assert!(declarations.contains("payload: Uint8Array;"));
         assert!(declarations.contains("export type DeliverRequest"));
+    }
+
+    #[test]
+    fn nominal_surface_location_coexists_with_notification_and_state_aware_quality() {
+        let compile_source = |name: &str, source: &str| {
+            let mut db = DriverDataBase::default();
+            let std_contacts_url = Url::parse("builtin-std:/src/web/surface_contacts.fe").unwrap();
+            if db.workspace().get(&db, &std_contacts_url).is_none() {
+                let std_view_url = Url::parse("builtin-std:/src/web/view.fe").unwrap();
+                let std_view_file = db.workspace().get(&db, &std_view_url).unwrap();
+                let std_view_text = format!(
+                    "{}\n\
+                     pub struct SurfaceContactTransition {{}}\n\
+                     pub struct SurfaceContactBounds {{\n\
+                         pub left: f32,\n\
+                         pub top: f32,\n\
+                         pub width: f32,\n\
+                         pub height: f32,\n\
+                     }}\n\
+                     impl Copy for SurfaceContactBounds {{}}\n\
+                     pub struct SurfaceContactEvent {{\n\
+                         pub sample: super::component_events::PointerSample,\n\
+                         pub bounds: SurfaceContactBounds,\n\
+                     }}\n\
+                     impl Copy for SurfaceContactEvent {{}}\n",
+                    std_view_file.text(&db)
+                );
+                db.workspace()
+                    .touch(&mut db, std_view_url, Some(std_view_text));
+            }
+            let url = Url::parse(&format!("file:///{name}.fe")).unwrap();
+            db.workspace()
+                .touch(&mut db, url.clone(), Some(source.to_string()));
+            let file = db.workspace().get(&db, &url).unwrap();
+            WebBundle::compile(
+                &db,
+                db.top_mod(file),
+                WebBuildOptions::render("display", None),
+            )
+        };
+
+        let lookalike_only = r#"
+use core::marker::Copy
+use std::webgpu::{
+    ComputeSurface, FixedDispatch, FragmentSurface, GpuProgram,
+    ContinuousFrames, StorageBuffer, SurfaceScheduling, SurfaceTransition,
+    Workgroup, WebGpuBackend,
+}
+use std::web::view::{Extent, Param, Surface, SurfaceEvent}
+
+pub struct LookalikeNotice {
+    pub apply_input: bool,
+    pub input_ptr: u32,
+    pub input_len: u32,
+    pub out_ptr: u32,
+    pub out_cap: u32,
+    pub out_len_ptr: u32,
+}
+impl Copy for LookalikeNotice {}
+
+pub struct FixtureParams { pub res: Param }
+pub struct FixtureState { pub res: f32 }
+impl Copy for FixtureState {}
+pub struct FixtureEnvelope { pub state: FixtureState }
+impl Copy for FixtureEnvelope {}
+
+actor LookalikeActor uses (GpuProgram<WebGpuBackend>) {
+    scratch: StorageBuffer<u32, 4>,
+    state: FixtureState,
+
+    const fn view() -> Surface<FixtureParams> {
+        Surface {
+            extent: Extent::square(1024),
+            params: FixtureParams { res: Param::extent_x() },
+        }
+    }
+
+    fn step(self) uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>) {
+        self.scratch.store(index: 0, value: 1)
+    }
+
+    fn display(self, _ px: i32, _ py: i32) -> i32 uses (FragmentSurface) {
+        0
+    }
+
+    fn navigate(self, _ event: own SurfaceEvent) -> FixtureEnvelope
+        uses (SurfaceTransition, SurfaceScheduling<ContinuousFrames>)
+    {
+        FixtureEnvelope { state: self.state }
+    }
+
+    fn on_notice(self, notice: own LookalikeNotice) -> FixtureEnvelope
+        uses (core::actor::ResidentTransition)
+    {
+        let bump: f32 = if notice.apply_input { 1.0 } else { 2.0 }
+        FixtureEnvelope { state: FixtureState { res: self.state.res + bump } }
+    }
+}
+"#;
+        let lookalike_bundle = compile_source("lookalike_only", lookalike_only).unwrap();
+        let lookalike_exports = wasm_function_export_names(&lookalike_bundle.wasm);
+        assert!(
+            lookalike_exports.iter().any(|n| n == ACTOR_NOTIFICATION_EXPORT),
+            "identically shaped ResidentTransition must emit {ACTOR_NOTIFICATION_EXPORT}: {lookalike_exports:?}"
+        );
+        assert!(
+            !lookalike_exports.iter().any(|n| n == SURFACE_LOCATION_EXPORT),
+            "identically shaped ResidentTransition must NOT emit {SURFACE_LOCATION_EXPORT}: {lookalike_exports:?}"
+        );
+        assert!(
+            !lookalike_exports.iter().any(|n| n == SURFACE_CONTACT_EXPORT),
+            "identically shaped ResidentTransition must NOT emit {SURFACE_CONTACT_EXPORT}: {lookalike_exports:?}"
+        );
+
+        let contact_lookalike_only = r#"
+use core::marker::Copy
+use std::webgpu::{
+    ComputeSurface, FixedDispatch, FragmentSurface, GpuProgram,
+    ContinuousFrames, StorageBuffer, SurfaceScheduling, SurfaceTransition,
+    Workgroup, WebGpuBackend,
+}
+use std::web::component_events::PointerSample
+use std::web::view::{Extent, Param, Surface, SurfaceEvent}
+
+pub struct LookalikeBounds {
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+}
+impl Copy for LookalikeBounds {}
+
+pub struct LookalikeContact {
+    pub sample: PointerSample,
+    pub bounds: LookalikeBounds,
+}
+impl Copy for LookalikeContact {}
+
+pub struct FixtureParams { pub res: Param }
+pub struct FixtureState { pub res: f32 }
+impl Copy for FixtureState {}
+pub struct FixtureEnvelope { pub state: FixtureState }
+impl Copy for FixtureEnvelope {}
+
+actor ContactLookalikeActor uses (GpuProgram<WebGpuBackend>) {
+    scratch: StorageBuffer<u32, 4>,
+    state: FixtureState,
+
+    const fn view() -> Surface<FixtureParams> {
+        Surface {
+            extent: Extent::square(1024),
+            params: FixtureParams { res: Param::extent_x() },
+        }
+    }
+
+    fn step(self) uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>) {
+        self.scratch.store(index: 0, value: 1)
+    }
+
+    fn display(self, _ px: i32, _ py: i32) -> i32 uses (FragmentSurface) {
+        0
+    }
+
+    fn navigate(self, _ event: own SurfaceEvent) -> FixtureEnvelope
+        uses (SurfaceTransition, SurfaceScheduling<ContinuousFrames>)
+    {
+        FixtureEnvelope { state: self.state }
+    }
+
+    fn on_notice(self, notice: own LookalikeContact) -> FixtureEnvelope
+        uses (core::actor::ResidentTransition)
+    {
+        FixtureEnvelope { state: FixtureState { res: self.state.res + notice.bounds.width } }
+    }
+}
+"#;
+        let contact_lookalike_bundle =
+            compile_source("contact_lookalike_only", contact_lookalike_only).unwrap();
+        let contact_lookalike_exports =
+            wasm_function_export_names(&contact_lookalike_bundle.wasm);
+        assert!(
+            contact_lookalike_exports
+                .iter()
+                .any(|n| n == ACTOR_NOTIFICATION_EXPORT),
+            "13-lane contact lookalike on ResidentTransition must emit {ACTOR_NOTIFICATION_EXPORT}: {contact_lookalike_exports:?}"
+        );
+        assert!(
+            !contact_lookalike_exports
+                .iter()
+                .any(|n| n == SURFACE_CONTACT_EXPORT),
+            "13-lane contact lookalike on ResidentTransition must NOT emit {SURFACE_CONTACT_EXPORT}: {contact_lookalike_exports:?}"
+        );
+
+        let wrong_nominal_event = lookalike_only.replace(
+            "uses (core::actor::ResidentTransition)",
+            "uses (std::web::SurfaceLocationTransition)",
+        );
+        let error = compile_source("wrong_nominal_event", &wrong_nominal_event)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("must take the nominal std::web::SurfaceLocationEvent record"),
+            "{error}"
+        );
+
+        let wrong_contact_event = contact_lookalike_only.replace(
+            "uses (core::actor::ResidentTransition)",
+            "uses (std::web::SurfaceContactTransition)",
+        );
+        let contact_error = compile_source("wrong_contact_event", &wrong_contact_event)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            contact_error.contains("must take the nominal std::web::SurfaceContactEvent record"),
+            "{contact_error}"
+        );
+
+        let missing_location_role = lookalike_only
+            .replace("notice: own LookalikeNotice", "notice: own std::web::SurfaceLocationEvent");
+        let missing_location_role_error =
+            compile_source("missing_location_role", &missing_location_role)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            missing_location_role_error
+                .contains("must declare the nominal std::web::SurfaceLocationTransition role"),
+            "{missing_location_role_error}"
+        );
+
+        let missing_contact_role = contact_lookalike_only
+            .replace("notice: own LookalikeContact", "notice: own std::web::SurfaceContactEvent");
+        let missing_contact_role_error =
+            compile_source("missing_contact_role", &missing_contact_role)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            missing_contact_role_error
+                .contains("must declare the nominal std::web::SurfaceContactTransition role"),
+            "{missing_contact_role_error}"
+        );
+
+        let coexistence_source = r#"
+use core::marker::Copy
+use std::webgpu::{
+    ComputeSurface, FixedDispatch, FragmentSurface, GpuProgram,
+    ContinuousFrames, StorageBuffer, SurfaceBackingExtent, SurfaceQuality,
+    SurfaceQualityFacts, SurfaceScheduling, SurfaceTransition, Workgroup,
+    WebGpuBackend,
+}
+use std::web::{
+    Extent, Param, Surface, SurfaceContactEvent, SurfaceContactTransition,
+    SurfaceEvent, SurfaceLocationEvent, SurfaceLocationTransition,
+}
+
+pub struct LookalikeNotice {
+    pub apply_input: bool,
+    pub input_ptr: u32,
+    pub input_len: u32,
+    pub out_ptr: u32,
+    pub out_cap: u32,
+    pub out_len_ptr: u32,
+}
+impl Copy for LookalikeNotice {}
+
+pub struct FixtureParams { pub res: Param }
+pub struct FixtureState { pub res: f32 }
+impl Copy for FixtureState {}
+pub struct FixtureEnvelope { pub state: FixtureState }
+impl Copy for FixtureEnvelope {}
+
+pub struct StateAwareBacking {}
+impl StateAwareBacking {
+    pub fn choose(
+        _ facts: own SurfaceQualityFacts,
+        _ state: own FixtureEnvelope,
+    ) -> SurfaceBackingExtent {
+        let side: f32 = if state.state.res >= 1.0 {
+            state.state.res
+        } else {
+            facts.css_width
+        }
+        SurfaceBackingExtent { width: side, height: side }
+    }
+}
+
+actor CoexistenceActor uses (
+    GpuProgram<WebGpuBackend>,
+    SurfaceQuality<StateAwareBacking>,
+) {
+    scratch: StorageBuffer<u32, 4>,
+    state: FixtureState,
+
+    const fn view() -> Surface<FixtureParams> {
+        Surface {
+            extent: Extent::square(2048),
+            params: FixtureParams { res: Param::extent_x() },
+        }
+    }
+
+    fn step(self) uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>) {
+        self.scratch.store(index: 0, value: 1)
+    }
+
+    fn display(self, _ px: i32, _ py: i32) -> i32 uses (FragmentSurface) {
+        0
+    }
+
+    fn navigate(self, _ event: own SurfaceEvent) -> FixtureEnvelope
+        uses (SurfaceTransition, SurfaceScheduling<ContinuousFrames>)
+    {
+        FixtureEnvelope { state: self.state }
+    }
+
+    fn on_notice(self, notice: own LookalikeNotice) -> FixtureEnvelope
+        uses (core::actor::ResidentTransition)
+    {
+        let delta: f32 = if notice.apply_input { 10.0 } else { 20.0 }
+        FixtureEnvelope { state: FixtureState { res: self.state.res + delta } }
+    }
+
+    fn sync_location(self, event: own SurfaceLocationEvent) -> FixtureEnvelope
+        uses (SurfaceLocationTransition)
+    {
+        let next: f32 = if event.apply_input { 1024.0 } else { self.state.res }
+        FixtureEnvelope { state: FixtureState { res: next } }
+    }
+
+    fn on_contact(self, contact: own SurfaceContactEvent) -> FixtureEnvelope
+        uses (SurfaceContactTransition)
+    {
+        FixtureEnvelope {
+            state: FixtureState {
+                res: self.state.res + contact.bounds.width,
+            },
+        }
+    }
+}
+"#;
+        let bundle = compile_source("coexistence", coexistence_source).unwrap();
+        let exports = wasm_function_export_names(&bundle.wasm);
+        assert!(
+            exports.iter().any(|n| n == ACTOR_NOTIFICATION_EXPORT),
+            "coexistence bundle must export {ACTOR_NOTIFICATION_EXPORT}: {exports:?}"
+        );
+        assert!(
+            exports.iter().any(|n| n == SURFACE_LOCATION_EXPORT),
+            "coexistence bundle must export {SURFACE_LOCATION_EXPORT}: {exports:?}"
+        );
+        assert!(
+            exports.iter().any(|n| n == SURFACE_CONTACT_EXPORT),
+            "coexistence bundle must export {SURFACE_CONTACT_EXPORT}: {exports:?}"
+        );
+        assert!(
+            exports.iter().any(|n| n == TYPED_SURFACE_QUALITY_EXPORT),
+            "coexistence bundle must export {TYPED_SURFACE_QUALITY_EXPORT}: {exports:?}"
+        );
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &bundle.wasm).unwrap();
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        let replace = instance
+            .get_typed_func::<f32, ()>(&mut store, TYPED_SURFACE_STATE_REPLACE_EXPORT)
+            .unwrap();
+        let location = instance
+            .get_typed_func::<(i32, i32, i32, i32, i32, i32, i32), f32>(
+                &mut store,
+                SURFACE_LOCATION_EXPORT,
+            )
+            .unwrap();
+        let notify = instance
+            .get_typed_func::<(i32, i32, i32, i32, i32, i32, i32), f32>(
+                &mut store,
+                ACTOR_NOTIFICATION_EXPORT,
+            )
+            .unwrap();
+        let contact = instance
+            .get_typed_func::<(i32, i32, i32, f32, f32, i32, i32, f32, f32, f32, f32, f32, f32, i32), f32>(
+                &mut store,
+                SURFACE_CONTACT_EXPORT,
+            )
+            .unwrap();
+        let quality = instance
+            .get_typed_func::<(f32, f32, f32, f32, f32, f32, i32, i32, f32), (f32, f32)>(
+                &mut store,
+                TYPED_SURFACE_QUALITY_EXPORT,
+            )
+            .unwrap();
+
+        replace.call(&mut store, 0.0).unwrap();
+        assert_eq!(
+            quality
+                .call(
+                    &mut store,
+                    (512.0, 512.0, 1.0, 2048.0, 2048.0, 2048.0, 0, 1, 0.0)
+                )
+                .unwrap(),
+            (512.0, 512.0)
+        );
+        let after_location = location.call(&mut store, (1, 0, 0, 0, 0, 0, 0)).unwrap();
+        assert_eq!(after_location, 1024.0);
+        assert_eq!(
+            quality
+                .call(
+                    &mut store,
+                    (512.0, 512.0, 1.0, 2048.0, 2048.0, 2048.0, 0, 1, after_location)
+                )
+                .unwrap(),
+            (1024.0, 1024.0)
+        );
+        let after_notify = notify.call(&mut store, (1, 0, 0, 0, 0, 0, 0)).unwrap();
+        assert_eq!(after_notify, 1034.0);
+        let after_contact = contact
+            .call(
+                &mut store,
+                (0, 2, 1, 100.0, 120.0, 1, 1, 0.5, 16.0, 0.0, 0.0, 64.0, 64.0, 0),
+            )
+            .unwrap();
+        assert_eq!(after_contact, 1098.0);
     }
 }
