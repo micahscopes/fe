@@ -8295,6 +8295,18 @@ impl<'db> BodyLocalStoragePlan<'db> {
                         )));
                     }
                     values[idx] = Some(LocalValueRepresentation::Single(Type::I32));
+                    // A projected by-value parameter can need addressable
+                    // storage without having an indirect call ABI. Its caller
+                    // still supplies flat scalar leaves; materialize an owned
+                    // copy in the prologue instead of binding the first leaf
+                    // as an arena pointer. Explicit indirect parameters already
+                    // receive the caller's independently owned copy.
+                    if body.signature.params.iter().any(|param| param.local == local_id)
+                        && !module.indirect_aggregate_params.get(&body.owner)
+                            .is_some_and(|params| params.contains(&local_id))
+                    {
+                        materialized_param_slots.insert(local_id);
+                    }
                     continue;
                 }
                 if matches!(local.root, RuntimeLocalRoot::Slot(_)) {
