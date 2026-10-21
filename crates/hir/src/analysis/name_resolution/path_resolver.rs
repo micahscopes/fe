@@ -1305,8 +1305,7 @@ fn trait_arg_path_error<'db>(
                         ty.is_const_ty(db)
                             || matches!(
                                 ty.base_ty(db).data(db),
-                                TyData::TyBase(TyBase::TraitCtor(_))
-                                    | TyData::ConstraintTerm(_)
+                                TyData::TyBase(TyBase::TraitCtor(_)) | TyData::ConstraintTerm(_)
                             )
                     }) =>
                 {

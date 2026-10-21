@@ -1162,9 +1162,9 @@ impl<'db> ItemCode<'db> {
                 if let Some(items) = quote.item_list() {
                     for item in items {
                         if let Some(ast::ItemKind::Func(function)) = item.kind()
-                            && function
-                                .attr_list()
-                                .is_some_and(|attrs| attrs.normal_attrs_named("generate").next().is_some())
+                            && function.attr_list().is_some_and(|attrs| {
+                                attrs.normal_attrs_named("generate").next().is_some()
+                            })
                         {
                             return Err("quoted functions cannot carry #[generate] attributes");
                         }
@@ -1200,9 +1200,9 @@ impl<'db> ItemCode<'db> {
                 }
                 for item in items {
                     if let Some(ast::ItemKind::Func(function)) = item.kind()
-                        && function
-                            .attr_list()
-                            .is_some_and(|attrs| attrs.normal_attrs_named("generate").next().is_some())
+                        && function.attr_list().is_some_and(|attrs| {
+                            attrs.normal_attrs_named("generate").next().is_some()
+                        })
                     {
                         return Err("quoted functions cannot carry #[generate] attributes");
                     }
