@@ -15,11 +15,11 @@ error[2-0002]: `Tr` is not found
 13 │     let y: <a::S as Tr>::Baz
    │                     ^^ `Tr` is not found
 
-error[2-0006]: expected type item here
-   ┌─ qualified_type_not_found.fe:15:13
+error[2-0002]: `X` is not found
+   ┌─ qualified_type_not_found.fe:15:26
    │
 15 │     let _: <Bar as Bar>::X
-   │             ^^^ expected type here, but found trait `Bar`
+   │                          ^ `X` is not found
 
 error[2-0007]: expected trait item here
    ┌─ qualified_type_not_found.fe:14:21
