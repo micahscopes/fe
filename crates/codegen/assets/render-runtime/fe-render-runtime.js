@@ -4061,7 +4061,7 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   _finishSurfaceContactScope(cancelled) {
-    if (!this._surfaceContactKernel || cancelled.length === 0) return;
+    if (!this._surfaceContactKernel) return;
     // The queue contains only input retained by the Fe policy. Closing this
     // input scope consumes that retained prefix before cancelling its captures;
     // it never restores dropped events or requests presentation.
@@ -4076,9 +4076,12 @@ export class FeSurfaceElement extends HTMLElement {
     const listeners = this._gestureListeners;
     if (!listeners) return;
     if (listeners.disposeContacts) {
-      listeners.disposeContacts(cancelled => this._finishSurfaceContactScope(cancelled));
-      listeners.canvas.removeEventListener("wheel", listeners.onWheel);
-      this._gestureListeners = null;
+      try {
+        listeners.disposeContacts(cancelled => this._finishSurfaceContactScope(cancelled));
+      } finally {
+        listeners.canvas.removeEventListener("wheel", listeners.onWheel);
+        this._gestureListeners = null;
+      }
       return;
     }
     const { canvas, onPointerDown, onPointerMove, onPointerUp, onWheel, touchAction } = listeners;
@@ -4356,15 +4359,17 @@ export class FeSurfaceElement extends HTMLElement {
       if (pending.length) {
         next = this._runSurfaceEventBatch(pending);
         pending = [];
+        return next !== null;
       }
+      return true;
     };
     for (const event of events) {
       if (event.lane === "contact") {
-        flush();
+        if (!flush()) return null;
         next = this._runSurfaceContact(event.contact);
       } else pending.push(event);
     }
-    flush();
+    if (!flush()) return null;
     return next;
   }
 

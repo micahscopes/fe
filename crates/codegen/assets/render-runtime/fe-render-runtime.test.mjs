@@ -2806,3 +2806,25 @@ test("opted-in contacts replace legacy pointer delivery and keep wheel transport
   surface._unwireGestures();
   assert.equal(listeners.size, 0);
 });
+
+
+test("ending a contact scope drains a retained up even after capture already ended", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._surfaceContactKernel = () => {};
+  surface._pendingSurfaceEvents = [{ lane: "contact", contact: { phase: SurfaceContactPhase.Up } }];
+  let delivered;
+  surface._runSurfaceFrame = events => { delivered = events; return [0]; };
+  surface._refreshControlValues = () => {};
+  surface._runSurfaceContact = () => { throw new Error("no captured contact remains to cancel"); };
+  surface._finishSurfaceContactScope([]);
+  assert.equal(delivered[0].contact.phase, SurfaceContactPhase.Up);
+  assert.deepEqual(surface._pendingSurfaceEvents, []);
+  assert.deepEqual(surface._uniforms, [0]);
+});
+
+test("failed legacy batches cannot resume through a later contact in the same queue", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._runSurfaceEventBatch = () => null;
+  surface._runSurfaceContact = () => { throw new Error("failed transition must stop this batch"); };
+  assert.equal(surface._runSurfaceFrame([{ name: "invalid legacy reply" }, { lane: "contact", contact: {} }]), null);
+});
