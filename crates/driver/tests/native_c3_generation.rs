@@ -189,7 +189,7 @@ const fn check_ordinary_and_named() -> usize {
     assert!(diags.is_empty(), "{}", diags.format_diags(&output));
     let func = module
         .all_funcs(&output)
-        .into_iter()
+        .iter()
         .find(|f| {
             f.name(&output)
                 .to_opt()
