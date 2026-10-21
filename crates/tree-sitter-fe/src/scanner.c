@@ -8,6 +8,7 @@ enum TokenType {
   BLOCK_COMMENT_END,
   GENERIC_OPEN,
   COMPARISON_LT,
+  QUOTE_KEYWORD,
 };
 
 void *tree_sitter_fe_external_scanner_create(void) { return NULL; }
@@ -348,6 +349,38 @@ static bool can_follow_generic_path_expr(TSLexer *lexer) {
   return true;
 }
 
+static bool is_ident_char(int32_t c) {
+  return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9');
+}
+
+// Consumes `word` when it is the whole identifier at the lookahead.
+static bool scan_word(TSLexer *lexer, const char *word) {
+  for (const char *c = word; *c; c++) {
+    if (lexer->lookahead != *c) return false;
+    advance(lexer);
+  }
+  return !is_ident_char(lexer->lookahead);
+}
+
+// Ignore trivia tokens, but not a standalone newline, just like the Rust
+// parser's current_kind_same_line. A newline inside a block comment remains
+// part of that single comment token.
+static bool skip_quote_trivia(TSLexer *lexer) {
+  for (;;) {
+    while (lexer->lookahead == ' ' || lexer->lookahead == '\t' || lexer->lookahead == '\r') advance(lexer);
+    if (lexer->lookahead != '/') return lexer->lookahead != '\n';
+    advance_over_comment(lexer);
+  }
+}
+
+static bool scan_quote_keyword(TSLexer *lexer) {
+  if (!scan_word(lexer, "quote")) return false;
+  lexer->mark_end(lexer);
+  return skip_quote_trivia(lexer) && lexer->lookahead == '{';
+}
+
+
 bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
                                           const bool *valid_symbols) {
   (void)payload;
@@ -369,6 +402,18 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
     }
     // Automatic semicolon not needed -- fall through to check other tokens
   }
+
+  if (valid_symbols[QUOTE_KEYWORD]) {
+    while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
+           lexer->lookahead == '\r' || lexer->lookahead == '\n') {
+      skip(lexer);
+    }
+    if (lexer->lookahead == 'q') {
+      lexer->result_symbol = QUOTE_KEYWORD;
+      return scan_quote_keyword(lexer);
+    }
+  }
+
 
   // Disambiguate '<': generic open vs comparison less-than.
   // When both are valid, try generic first (lookahead for matching '>').
