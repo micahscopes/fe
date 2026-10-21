@@ -290,16 +290,18 @@ impl Score for Other with (Provider)
 fn local_shadowing_of_constraint_rejects_arrow_constraint_kind_bound() {
     use fe_hir::test_db::initialize_test_analysis_pass;
 
-    let mut db = HirAnalysisTestDb::default();
-    let file = db.new_stand_alone(
-        "shadowed-constraint-kind.fe".into(),
+    for source in [
         "trait Constraint {}\ntrait CustomDerive<G: * -> Constraint> {}\n",
-    );
-    let (module, _) = db.top_mod(file);
-    let mut pass_manager = initialize_test_analysis_pass();
-    let diags = pass_manager.run_on_module(&db, module);
-    assert!(
-        !diags.is_empty(),
-        "shadowed Constraint in `* -> Constraint` must be rejected by kind lowering"
-    );
+        "mod core { pub mod obligations { pub trait Constraint {} } }\nuse ingot::core::obligations::Constraint\ntrait CustomDerive<G: * -> Constraint> {}\n",
+    ] {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone("shadowed-constraint-kind.fe".into(), source);
+        let (module, _) = db.top_mod(file);
+        let mut pass_manager = initialize_test_analysis_pass();
+        let diags = pass_manager.run_on_module(&db, module);
+        assert!(
+            !diags.is_empty(),
+            "shadowed Constraint in `* -> Constraint` must be rejected by kind lowering: {source}"
+        );
+    }
 }
