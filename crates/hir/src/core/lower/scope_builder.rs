@@ -353,34 +353,34 @@ impl<'db> ScopeGraphBuilder<'db> {
                 .collect()
         };
         if let Some(range) = producer_block
-            && let Some(scope) = scopes.iter().copied().find_map(|scope| {
+            && let Some(scope) = scopes.iter().copied().find(|&scope| {
                 let ScopeId::Block(body, expression) = scope else {
-                    return None;
+                    return false;
                 };
                 let crate::span::HirOrigin::Raw(ptr) =
                     body.source_map(self.db).expr_map.node_to_source(expression)
                 else {
-                    return None;
+                    return false;
                 };
                 let expr_node = ptr.to_node(root.syntax());
                 let matches_range = expr_node.syntax().text_range() == range
                     || parser::ast::UnsafeExpr::cast(expr_node.syntax().clone())
                         .and_then(|u| u.block())
                         .is_some_and(|b| b.syntax().text_range() == range);
-                matches_range.then_some(scope)
+                matches_range
             })
         {
             return scope;
         }
         if let Some(range) = producer
-            && let Some(scope) = scopes.iter().copied().find_map(|scope| {
+            && let Some(scope) = scopes.iter().copied().find(|&scope| {
                 let ScopeId::Item(ItemKind::Mod(mod_)) = scope else {
-                    return None;
+                    return false;
                 };
                 let crate::span::HirOrigin::Raw(ptr) = mod_.origin(self.db) else {
-                    return None;
+                    return false;
                 };
-                (ptr.to_node(root.syntax()).syntax().text_range() == range).then_some(scope)
+                ptr.to_node(root.syntax()).syntax().text_range() == range
             })
         {
             return scope;

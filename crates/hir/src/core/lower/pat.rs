@@ -375,9 +375,7 @@ impl<'db> Pat<'db> {
             ast::ExprKind::QuoteHole(hole) => {
                 use common::generation::{FrozenHoleValue, FrozenScalar};
                 match ctxt.f_ctxt.current_hole(hole.syntax().text_range()) {
-                    Some(FrozenHoleValue::Code(code)) => {
-                        return Self::lower_code(ctxt, &code, origin_ast);
-                    }
+                    Some(FrozenHoleValue::Code(code)) => Self::lower_code(ctxt, &code, origin_ast),
                     Some(FrozenHoleValue::Scalar(FrozenScalar::Bool(value))) => ctxt.push_pat(
                         Pat::Lit(Partial::Present(LitKind::Bool(value))),
                         HirOrigin::raw(origin_ast),

@@ -1419,17 +1419,17 @@ module.exports = grammar({
       ))),
     )),
 
-    path_pattern: $ => prec(1, $._pattern_path),
+    path_pattern: $ => prec(1, alias($._pattern_path, $.path)),
 
     path_tuple_pattern: $ => prec(2, seq(
-      $._pattern_path,
+      alias($._pattern_path, $.path),
       '(',
       sepTrailing($._pattern, ','),
       ')',
     )),
 
     record_pattern: $ => prec(3, seq(
-      $._pattern_path,
+      alias($._pattern_path, $.path),
       '{',
       sepTrailing($.record_pattern_field, ','),
       '}',
