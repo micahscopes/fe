@@ -712,7 +712,7 @@ fn tree_sitter_agrees_on_composed_quotation_and_enum_reflection_examples() {
         include_str!(
             "../test_files/quotation/field_type_queries_and_abi_derive_helpers_evaluate_in_provider.fe"
         ),
-        "const fn make() { quote(other // binder\n) { impl ${record} { fn test(self) { ${body} } } } }",
+        "const fn make() { quote(other) { impl ${record} { fn test(self) { ${body} } } } }",
         "const fn make() { quote { fn f() -> Wrapper<$ {ty}> { make() } } }",
         "const fn make() { quote { fn f() -> Wrapper<$\n{ty}> { make() } } }",
         "const fn make() { quote { fn f() -> Wrapper<$// comment\n{ty}> { make() } } }",
