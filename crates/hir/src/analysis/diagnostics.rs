@@ -5396,7 +5396,7 @@ impl DiagnosticVoucher for TraitLowerDiag<'_> {
                 Severity::Error,
                 "this trait cannot have a named implementation",
                 format!(
-                    "`{}` chooses a storage location or an encoding where no `with` reaches, so it has only ordinary implementations",
+                    "`{}` is used by the compiler where no `with` reaches, so it has only ordinary implementations",
                     trait_
                         .name(db)
                         .to_opt()

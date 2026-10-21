@@ -812,7 +812,7 @@ pub(crate) enum NamedOutputMismatch<'db> {
 /// another location, or encode it another way, under a `with` than without
 /// it, so they have none. Every core trait lowering resolves is listed here
 /// (a guard checks it).
-const UNIQUE_CORE_TRAITS: [&[&str]; 8] = [
+const UNIQUE_CORE_TRAITS: [&[&str]; 9] = [
     &["ops", "StateIndex"],
     &["ops", "LaneCodec"],
     &["abi", "Abi"],
@@ -821,6 +821,8 @@ const UNIQUE_CORE_TRAITS: [&[&str]; 8] = [
     &["abi", "Decode"],
     &["error", "ErrorVariant"],
     &["contracts", "ContractHost"],
+    // Reflected field queries evaluate outside caller choice frames.
+    &["meta", "FieldQuery"],
 ];
 
 /// Whether `trait_` may have no named implementation: one of
