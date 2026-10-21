@@ -694,3 +694,25 @@ fn tree_sitter_agrees_on_basic_quotation_and_contextual_quote_names() {
         assert_eq!(count, expected_quotes, "{source}");
     }
 }
+
+#[test]
+fn tree_sitter_agrees_on_composed_quotation_and_enum_reflection_examples() {
+    let mut parser = new_parser();
+    for source in [
+        include_str!(
+            "../test_files/quotation/generic_struct_within_with_fold_fields_and_field_type_splice.fe"
+        ),
+        include_str!(
+            "../test_files/quotation/enum_eq_across_unit_tuple_record_and_generic_enums_with_hygienic_binders.fe"
+        ),
+        include_str!(
+            "../test_files/quotation/field_type_queries_and_abi_derive_helpers_evaluate_in_provider.fe"
+        ),
+        "const fn make() { quote(other /* binder */) { impl ${record} { fn test(self) { ${body} } } } }",
+    ] {
+        let (_, errors) = parse_source_file(source, RecoveryMode::NoRecover);
+        assert!(errors.is_empty(), "{errors:?}\n{source}");
+        let errors = parse_errors(&mut parser, source);
+        assert!(errors.is_empty(), "{errors:?}\n{source}");
+    }
+}
