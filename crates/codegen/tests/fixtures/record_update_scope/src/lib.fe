@@ -12,12 +12,13 @@ impl Derive<GuardedUpdate> for GuardedProvider {
         let mut result = quote { true }
         for field in reflect.fields() {
             let update = builder.record_update(builder.self_ref())
-            let update = builder.with_field(update, field, quote(denominator) { 10 / denominator })
+            let quotient = builder.call(builder.self_ref(), "quotient", builder.arg_ref("denominator"))
+            let update = builder.with_field(update, field, quotient)
             let value = builder.field_get(update, field)
             // Reuse the same handle twice. Both evaluations belong to this
             // short-circuit operand, including their temporary bindings.
             result = quote(denominator) {
-                denominator == 0 || (${value} == 10 / denominator && ${value} == 10 / denominator)
+                denominator == 0 || (${value} == ${quotient} && ${value} == ${quotient})
             }
         }
         builder.emit_method("guarded", result)
@@ -28,6 +29,9 @@ impl Derive<GuardedUpdate> for GuardedProvider {
 
 struct Value { value: u32 }
 impl Copy for Value {}
+impl Value {
+    fn quotient(self, _ denominator: u32) -> u32 { 10 / denominator }
+}
 derive GuardedUpdate for Value using GuardedProvider
 
 pub fn edit(index: u32) -> bool {
