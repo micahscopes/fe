@@ -662,6 +662,7 @@ fn tree_sitter_agrees_on_bounded_native_derive_surface() {
         include_str!("../../../ingots/core/src/derive.fe"),
         "impl Score for Pair with (Fields)\nimpl Score for Pair as Zero with (mod_::Provider)\n",
         "impl Score for Pair with (Provider<u256>)\n",
+        "pub impl Score for Pair as Chosen with (Provider)\n",
         "trait Constraint {}\ntrait Holder<T: Constraint> {}\n",
         "impl Score for Pair as Ordinary where true { fn score() -> usize { 7 } }\n",
     ] {
@@ -768,4 +769,33 @@ fn tree_sitter_highlight_query_accepts_pattern_paths() {
         include_str!("../../tree-sitter-fe/queries/highlights.scm"),
     )
     .expect("highlight query must match the generated editor node structure");
+}
+
+#[test]
+fn tree_sitter_agrees_on_named_impl_visibility_and_supported_for_syntax() {
+    let mut parser = new_parser();
+    for source in [
+        "impl Price for Item as Wholesale {}",
+        "pub impl Price for Item as Wholesale {}",
+        "pub unsafe impl Price for Item as Wholesale {}",
+        "pub impl<T> Price for Item<T> as Wholesale where T: Copy {}",
+        "fn run() { for x in xs {} }",
+        "fn run() { for x in by {} }",
+    ] {
+        let (_, native_errors) = parse_source_file(source, RecoveryMode::NoRecover);
+        assert!(native_errors.is_empty(), "{source}: {native_errors:?}");
+        let web_errors = parse_errors(&mut parser, source);
+        assert!(web_errors.is_empty(), "{source}: {web_errors:?}");
+    }
+    for source in [
+        "pub impl Price for Item {}",
+        "fn run() { for x in xs by driver {} }",
+    ] {
+        let (_, native_errors) = parse_source_file(source, RecoveryMode::NoRecover);
+        assert!(!native_errors.is_empty(), "native parser accepted {source}");
+        assert!(
+            !parse_errors(&mut parser, source).is_empty(),
+            "browser parser accepted {source}",
+        );
+    }
 }
