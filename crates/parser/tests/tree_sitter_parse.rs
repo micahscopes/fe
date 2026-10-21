@@ -673,7 +673,7 @@ fn tree_sitter_agrees_on_basic_quotation_and_contextual_quote_names() {
         ("fn ordinary() { quote(1, 2) }", 0),
         ("fn ordinary() { let quote = 8\n quote / { 2 } }", 0),
         ("fn ordinary() { quote(1) / { 2 } }", 0),
-        ("fn ordinary() { quote\n { 1 } }", 0),
+        ("fn ordinary() { quote\n {} }", 0),
     ] {
         let (green, errors) = parse_source_file(source, RecoveryMode::NoRecover);
         assert!(errors.is_empty(), "{source}: {errors:?}");
