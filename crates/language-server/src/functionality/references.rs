@@ -200,7 +200,16 @@ mod tests {
             let mut buffer = writer.buffer();
             let config = term::Config::default();
 
-            for top_mod in self.top_mod_to_file.keys() {
+            // Salsa identities and hash iteration do not define a file order.
+            let mut top_mods = self.top_mod_to_file.keys().copied().collect::<Vec<_>>();
+            top_mods.sort_by_key(|top_mod| {
+                self.code_span_files
+                    .get(self.top_mod_to_file[top_mod])
+                    .unwrap()
+                    .name()
+                    .clone()
+            });
+            for top_mod in &top_mods {
                 if !self.properties.contains_key(top_mod) {
                     continue;
                 }
