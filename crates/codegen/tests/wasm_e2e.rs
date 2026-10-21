@@ -3541,6 +3541,46 @@ pub fn constant_bits_to_f32() -> f32 {
 }
 
 #[test]
+fn runtime_integer_masks_survive_float_bitcasts_on_wasm() {
+    let source = r#"
+extern { const fn __bitcast<From, To>(_: From) -> To }
+pub fn masked_word(_ raw: u32) -> u32 {
+    2139095040 | (raw & 2147483648)
+}
+pub fn masked_float(_ raw: u32) -> f32 {
+    let bits: u32 = 2139095040 | (raw & 2147483648)
+    __bitcast<u32, f32>(bits)
+}
+pub fn masked_float_input(_ raw: f32) -> f32 {
+    let word: u32 = __bitcast<f32, u32>(raw)
+    let bits: u32 = 2139095040 | (word & 2147483648)
+    __bitcast<u32, f32>(bits)
+}
+"#;
+    // Web bundles use the size pipeline. O0 distinguishes lowering from
+    // optimization; O2 exercises the other pipeline that shares this analysis.
+    for level in [OptLevel::O0, OptLevel::Os, OptLevel::O2] {
+        let wasm = compile_to_wasm_at("runtime_mask_float.fe", source, level);
+        let (mut store, instance) = instantiate(&wasm);
+        let word = instance.get_typed_func::<i32, i32>(&mut store, "masked_word").unwrap();
+        let float = instance.get_typed_func::<i32, f32>(&mut store, "masked_float").unwrap();
+        let from_float = instance.get_typed_func::<f32, f32>(&mut store, "masked_float_input").unwrap();
+        for raw in [
+            0u32, 1, 0x3f80_0000, 0x7f7f_ffff, 0x7f80_0000, 0x7fc0_0001,
+            0x8000_0000, 0x8000_0001, 0xbf80_0000, 0xff7f_ffff,
+            0xff80_0000, 0xffc0_0001, u32::MAX,
+        ] {
+            let expected = 0x7f80_0000 | (raw & 0x8000_0000);
+            assert_eq!(word.call(&mut store, raw as i32).unwrap() as u32, expected);
+            assert_eq!(float.call(&mut store, raw as i32).unwrap().to_bits(), expected,
+                "integer -> float, raw={raw:08x}, optimization={level}");
+            assert_eq!(from_float.call(&mut store, f32::from_bits(raw)).unwrap().to_bits(), expected,
+                "float -> integer -> float, raw={raw:08x}, optimization={level}");
+        }
+    }
+}
+
+#[test]
 fn recursive_mvt2_f32_render_executes_on_wasm() {
     let source = include_str!("fixtures/spirv/mvt2_f32_render.fe");
     let wasm = compile_to_wasm("wasm_mvt2_f32_render.fe", source);
