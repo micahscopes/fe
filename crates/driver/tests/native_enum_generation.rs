@@ -18,7 +18,8 @@ fn concrete_enum_request_publishes_into_original_header_once() {
     );
     let output = prepare_file(&input, file).unwrap().unwrap();
     assert!(input.generation_inputs().functions(&input).is_empty());
-    let plans = output.generation_inputs().functions(&output);
+    assert!(input.generation_inputs().requests(&input).is_empty());
+    let plans = output.generation_inputs().requests(&output);
     assert_eq!(plans.len(), 1);
     assert!(plans[0].request_impl.is_some());
     let output_file = output
