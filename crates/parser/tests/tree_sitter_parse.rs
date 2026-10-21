@@ -736,6 +736,8 @@ fn tree_sitter_agrees_on_composed_quotation_and_enum_reflection_examples() {
         ),
         "const fn make() { quote(other /* binder */) { impl ${record} { fn test(self) { ${body} } } } }",
         "const fn make() { quote { fn f() -> Wrapper<$ {ty}> { make() } } }",
+        "const fn make() { quote { fn f() -> Wrapper<$\n{ty}> { make() } } }",
+        "const fn make() { quote { fn f() -> Wrapper<$// comment\n{ty}> { make() } } }",
         "const fn make() { quote { fn f() -> Wrapper<$/* comment */{ty}> { make() } } }",
         "const fn make() { quote { fn f() -> Wrapper<$/* comment\n continued */{ty}> { make() } } }",
     ] {
