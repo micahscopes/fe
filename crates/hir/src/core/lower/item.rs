@@ -815,8 +815,33 @@ fn merge_target_record_generics<'db>(
         .map(|p| super::types::bind_generic_param_to_scope(db, p, item))
         .collect();
     for param in explicit_params.data(db) {
-        if !params.iter().any(|p| p.name() == param.name()) {
+        let Some(copied) = params.iter_mut().find(|p| p.name() == param.name()) else {
             params.push(param.clone());
+            continue;
+        };
+        use crate::hir_def::params::GenericParam;
+        match (copied, param) {
+            (GenericParam::Type(target), GenericParam::Type(explicit)) => {
+                // Both declarations refer to the copied target binder. Extra trait
+                // bounds strengthen that binder; a different kind or default cannot
+                // be merged merely by keeping one declaration.
+                if explicit.default_ty.is_some()
+                    || explicit.bounds.iter().any(|bound| {
+                        matches!(bound, TypeBound::Kind(_)) && !target.bounds.contains(bound)
+                    })
+                {
+                    ctxt.record_generation_error(hole.syntax().text_range(),
+                        "quoted impl redeclares a target generic parameter with an unsupported kind or default; use additional where bounds instead");
+                    continue;
+                }
+                for bound in &explicit.bounds {
+                    if !target.bounds.contains(bound) {
+                        target.bounds.push(bound.clone());
+                    }
+                }
+            }
+            _ => ctxt.record_generation_error(hole.syntax().text_range(),
+                "quoted impl redeclares a target generic parameter with an incompatible type or const declaration"),
         }
     }
     let mut predicates: Vec<_> = record_where
