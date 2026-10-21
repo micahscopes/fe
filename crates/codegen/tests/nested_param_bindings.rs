@@ -8,8 +8,18 @@ use hir::hir_def::HirIngot;
 
 #[test]
 fn generic_nested_controls_preserve_private_tails_and_resolve_uniform_offsets() {
+    assert_nested_runtime("nested_param_binding_actor");
+}
+
+#[test]
+fn app_owned_projection_of_external_expansion_preserves_layout_and_private_tails() {
+    assert_nested_runtime("nested_param_external_actor");
+}
+
+fn assert_nested_runtime(fixture: &str) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/nested_param_binding_actor")
+        .join("tests/fixtures")
+        .join(fixture)
         .canonicalize()
         .unwrap();
     let url = url::Url::from_directory_path(path).unwrap();
@@ -20,7 +30,7 @@ fn generic_nested_controls_preserve_private_tails_and_resolve_uniform_offsets() 
         .containing_ingot(&db, url)
         .unwrap()
         .root_mod(&db);
-    let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+    let diagnostics = db.run_on_ingot(top.ingot(&db)).format_diags(&db);
     assert!(diagnostics.is_empty(), "{diagnostics}");
 
     let package = mir::build_wasm_runtime_package_for_entry(&db, top, "edit").unwrap();
@@ -160,7 +170,7 @@ fn invalid_relative_projection_is_a_diagnostic_not_a_fallback() {
             .containing_ingot(&db, url)
             .unwrap()
             .root_mod(&db);
-        let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+        let diagnostics = db.run_on_ingot(top.ingot(&db)).format_diags(&db);
         assert!(diagnostics.is_empty(), "{diagnostics}");
         let error = WebBundle::compile(&db, top, WebBuildOptions::render("shade", None))
             .err()
@@ -222,7 +232,7 @@ actor AmbiguousSurface uses (GpuProgram<WebGpuBackend>) {
             .containing_ingot(&db, url)
             .unwrap()
             .root_mod(&db);
-        let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+        let diagnostics = db.run_on_ingot(top.ingot(&db)).format_diags(&db);
         assert!(diagnostics.is_empty(), "{diagnostics}");
         let error = WebBundle::compile(&db, top, WebBuildOptions::render("shade", None))
             .err()
@@ -259,7 +269,7 @@ fn scalar_projection_must_target_an_f32_leaf() {
         .containing_ingot(&db, url)
         .unwrap()
         .root_mod(&db);
-    let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+    let diagnostics = db.run_on_ingot(top.ingot(&db)).format_diags(&db);
     assert!(diagnostics.is_empty(), "{diagnostics}");
     let error = WebBundle::compile(&db, top, WebBuildOptions::render("shade", None))
         .err()
@@ -304,7 +314,7 @@ fn typed_update_does_not_grant_access_to_private_nested_fields() {
         .containing_ingot(&db, url)
         .unwrap()
         .root_mod(&db);
-    let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+    let diagnostics = db.run_on_ingot(top.ingot(&db)).format_diags(&db);
     assert!(
         diagnostics.contains("error[2-0003]") && diagnostics.contains("`head` is not visible"),
         "{diagnostics}"
@@ -325,7 +335,7 @@ fn record_updates_remain_inside_their_short_circuit_operand() {
         .containing_ingot(&db, url)
         .unwrap()
         .root_mod(&db);
-    let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+    let diagnostics = db.run_on_ingot(top.ingot(&db)).format_diags(&db);
     assert!(diagnostics.is_empty(), "{diagnostics}");
     let package = mir::build_wasm_runtime_package_for_entry(&db, top, "edit").unwrap();
     let artifact =
@@ -345,4 +355,44 @@ fn record_updates_remain_inside_their_short_circuit_operand() {
             "denominator {index}"
         );
     }
+}
+
+#[test]
+fn external_projection_impl_in_child_module_is_diagnosed() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("src")).unwrap();
+    let dependency = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/nested_param_expansion");
+    std::fs::write(temp.path().join("fe.toml"), format!(
+        "[ingot]\nname=\"orphan_projection\"\nversion=\"0.1.0\"\n[dependencies]\nexpansion=\"{}\"\n",
+        dependency.display(),
+    )).unwrap();
+    std::fs::write(
+        temp.path().join("src/lib.fe"),
+        "pub fn edit() -> bool { true }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("src/adapter.fe"),
+        r#"
+use core::marker::Copy
+use std::web::view::ParamValue
+use expansion::More
+impl<T: Copy> ParamValue for More<T> {
+    fn param_value(self) -> f32 { self.head() }
+    fn with_param_value(self, _ value: f32) -> Self { self.replace(value) }
+}
+"#,
+    )
+    .unwrap();
+    let url = url::Url::from_directory_path(temp.path()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(!driver::init_ingot(&mut db, &url));
+    let ingot = db.workspace().containing_ingot(&db, url).unwrap();
+    let diagnostics = db.run_on_ingot(ingot).format_diags(&db);
+    assert!(
+        diagnostics.contains("error[5-0000]")
+            && diagnostics.contains("external trait cannot be implemented for external type"),
+        "{diagnostics}"
+    );
 }

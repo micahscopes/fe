@@ -1,0 +1,100 @@
+use core::actor::InitialState
+use core::marker::Copy
+use std::web::view::{
+    ApplyParamBindings, Extent, Param, ParamBindingsProvider, ParamReadout,
+    ParamValue, Surface, SurfaceEvent, SurfaceEventKind, SurfaceState,
+}
+use std::webgpu::{FragmentSurface, GpuProgram, SurfaceTransition, WebGpuBackend}
+use expansion::Expansion
+
+// This ingot owns the optional browser projection, so ordinary trait ownership
+// holds without coupling the reusable expansion library to std::web.
+struct Coordinate { value: Expansion<4> }
+impl Copy for Coordinate {}
+impl ParamValue for Coordinate {
+    fn param_value(self) -> f32 { self.value.head() }
+    fn with_param_value(self, _ value: f32) -> Self {
+        Self { value: self.value.replace(value) }
+    }
+}
+fn coordinate(_ head: f32) -> Coordinate { Coordinate { value: expansion::expansion(head) } }
+fn valid_tail(_ coordinate: Coordinate) -> bool { expansion::valid_tail(coordinate.value) }
+
+pub struct Pair<T> { pub re: T, pub im: T }
+impl<T: Copy> Copy for Pair<T> {}
+struct Camera { center: Pair<Coordinate>, zoom: f32, resolution: f32 }
+impl Copy for Camera {}
+struct State { camera: Camera, hidden: f32, clock: f32, phase: f32, weight: f32, ticks: f32 }
+// Deliberately no Copy impl on the root: the borrowed derive reconstructs
+// it once from its Copy fields, preserving the legacy flat-state contract.
+struct Envelope { state: State }
+
+// Declaration order intentionally differs from the uniform's leaf order.
+type CoordinateControls<T> = Pair<T>
+struct CameraParams { zoom: Param, center: CoordinateControls<Param> }
+struct Params { ticks: Param, camera: CameraParams }
+impl SurfaceState for State { type Params = Params }
+derive ApplyParamBindings for State using ParamBindingsProvider<Params>
+
+const fn params() -> Params {
+    Params {
+        ticks: Param::readout(ParamReadout::Scalar),
+        camera: CameraParams {
+            zoom: Param::range(min: 0.5, max: 8.0, init: 2.0),
+            center: Pair {
+                re: Param::range(min: -8.0, max: 8.0, init: 1.0).projected("value.head"),
+                im: Param::range(min: -8.0, max: 8.0, init: -1.0).projected("value.head"),
+            },
+        },
+    }
+}
+
+fn initial_state() -> State {
+    State {
+        camera: Camera {
+            center: Pair { re: coordinate(1.0), im: coordinate(-1.0) },
+            zoom: 2.0,
+            resolution: 32.0,
+        },
+        hidden: 11.0,
+        clock: 13.0,
+        phase: 19.0,
+        weight: 23.0,
+        ticks: 17.0,
+    }
+}
+
+pub fn edit(index: u32) -> bool {
+    let event = SurfaceEvent {
+        pointer_x: 0.0, pointer_y: 0.0, delta_x: 0.0, delta_y: 0.0,
+        wheel_delta: 0.0, wheel_mode: 0, buttons: 0, timestamp: 0.0,
+        width: 32.0, height: 32.0, event_kind: SurfaceEventKind::ParamEdit,
+        param_index: index, param_value: 3.0,
+    }
+    let after = initial_state().apply_param_bindings(params(), event)
+    after.camera.zoom == (if index == 1 { 3.0 } else { 2.0 })
+        && after.camera.center.re.param_value() == (if index == 2 { 3.0 } else { 1.0 })
+        && after.camera.center.im.param_value() == (if index == 3 { 3.0 } else { -1.0 })
+        && valid_tail(after.camera.center.re) && valid_tail(after.camera.center.im)
+        && after.camera.resolution == 32.0
+        && after.hidden == 11.0 && after.clock == 13.0
+        && after.phase == 19.0 && after.weight == 23.0 && after.ticks == 17.0
+}
+
+actor NestedSurface uses (GpuProgram<WebGpuBackend>) {
+    state: State,
+
+    const fn view() -> Surface<Params> {
+        Surface { extent: Extent::square(32), params: params() }
+    }
+
+    fn initial() -> Envelope uses (InitialState) {
+        Envelope { state: initial_state() }
+    }
+
+    fn control(self, event: own SurfaceEvent) -> Envelope uses (SurfaceTransition) {
+        Envelope { state: self.state.apply_param_bindings(params(), event) }
+    }
+
+    fn shade(self, x: i32, y: i32) -> i32 uses (FragmentSurface) { -1 }
+}

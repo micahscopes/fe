@@ -233,3 +233,11 @@ library obligation. Path/shape/type checking rejects nonexistent, ambiguous,
 non-scalar and wrong-scalar targets; it does not prove an arbitrary method
 body implements the declared interpretation. Tests must establish that law
 for each projection adapter, including unchanged private tails.
+
+Projection implementations obey ordinary trait ownership: implement ParamValue
+in the value type's ingot, or wrap an external value in an application-owned
+semantic record. A wrapper adds a path segment (for example `value.head`) but
+no scalar uniform leaves. Implementing std's trait for another ingot's type
+is an orphan implementation and is rejected. Ingot validation must check all
+modules with `run_on_ingot`; checking only the root module cannot certify
+adapters declared in child modules.

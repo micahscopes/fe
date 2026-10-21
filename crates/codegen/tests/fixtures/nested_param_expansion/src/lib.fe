@@ -1,0 +1,39 @@
+use core::marker::Copy
+
+// A reusable scalar ingot with a private representation and no web dependency.
+// Applications use public whole-value operations to preserve trailing words.
+pub struct Last { value: f32 }
+pub struct More<T> { head: f32, tail: T }
+impl Copy for Last {}
+impl<T: Copy> Copy for More<T> {}
+
+pub recursive type fn Expansion<const N: usize>() -> (*) {
+    match N {
+        0 => Last
+        1 => Last
+        _ => More<Expansion<{N - 1}>>
+    }
+}
+
+impl<T: Copy> More<T> {
+    pub fn head(self) -> f32 { self.head }
+    pub fn replace(self, _ value: f32) -> Self {
+        Self { head: value, tail: self.tail }
+    }
+}
+
+pub fn expansion(_ head: f32) -> Expansion<4> {
+    More {
+        head: head,
+        tail: More {
+            head: 0.125,
+            tail: More { head: -0.0625, tail: Last { value: 0.03125 } },
+        },
+    }
+}
+
+pub fn valid_tail(_ value: Expansion<4>) -> bool {
+    value.tail.head == 0.125
+        && value.tail.tail.head == -0.0625
+        && value.tail.tail.tail.value == 0.03125
+}

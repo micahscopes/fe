@@ -1,0 +1,5 @@
+[ingot]
+name="nested_wrapper"
+version="0.1.0"
+[dependencies]
+expansion="../nested_param_expansion"
