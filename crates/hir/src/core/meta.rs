@@ -933,6 +933,17 @@ impl<'db> ItemCode<'db> {
                                 Ok(FrozenHoleValue::Field(field.freeze(db)?))
                             }
                             MetaValue::FieldType(field) => {
+                                let record = field.record();
+                                let adt = record.ty().adt_def(db)
+                                    .ok_or("field type splice has no authored record")?;
+                                let identity = RecordInput {
+                                    ty: TyId::foldl(db, TyId::adt(db, adt), adt.params(db)),
+                                    ..record
+                                };
+                                let authored_field = RecordField { record: identity, index: field.index() };
+                                if field.ty(db) != authored_field.ty(db) {
+                                    return Err("field type splices from instantiated generic records are not supported yet; the generated type would lose its actual arguments");
+                                }
                                 Ok(FrozenHoleValue::FieldType(field.freeze(db)?))
                             }
                         },
