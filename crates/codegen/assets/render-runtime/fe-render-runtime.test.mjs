@@ -991,6 +991,36 @@ test("fixed host rejects malformed Fe backing decisions without choosing a repla
   }
 });
 
+test("state-aware quality receives facts followed by complete current actor state", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._surface = { extent: { width: 512, height: 512 } };
+  surface._stage = { style: {}, getBoundingClientRect: () => ({ width: 200, height: 100 }) };
+  surface._uniforms = [416, 208];
+  surface._runWasmArenaEpoch = call => call();
+  let received;
+  surface._surfaceQualityKernel = function(a, b, c, d, e, f, g, h, width, height) {
+    received = [...arguments];
+    return [width, height];
+  };
+  const extent = surface._computeBackingExtent(null);
+  assert.deepEqual(received.slice(0, 2), [200, 100]);
+  assert.deepEqual(received.slice(8), [416, 208]);
+  assert.deepEqual(extent, { width: 416, height: 208 });
+  surface._uniforms = [320, 160];
+  assert.deepEqual(surface._computeBackingExtent(null), { width: 320, height: 160 });
+});
+
+test("state-aware quality rejects an ABI mismatch before calling Fe", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._surface = { extent: { width: 512, height: 512 } };
+  surface._stage = { style: {}, getBoundingClientRect: () => ({ width: 200, height: 100 }) };
+  surface._uniforms = [416];
+  surface._surfaceQualityKernel = function(a, b, c, d, e, f, g, h, width, height) {
+    assert.fail("A mismatched state must not reach the policy");
+  };
+  assert.throws(() => surface._computeBackingExtent(null), /quality state does not match its ABI/);
+});
+
 test("live resize re-runs the Fe policy against current GPU facts and realizes its extent", async () => {
   const gpu = { device: { limits: { maxTextureDimension2D: 2048 } } };
   const surface = Object.create(FeSurfaceElement.prototype);

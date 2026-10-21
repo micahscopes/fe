@@ -2371,9 +2371,14 @@ export class FeSurfaceElement extends HTMLElement {
       throw new Error("fe render runtime: surface quality facts must be finite");
     }
     if (this._surfaceQualityKernel) {
+      const state = this._uniforms ?? [];
+      const arity = this._surfaceQualityKernel.length;
+      if (arity > facts.length && arity !== facts.length + state.length) {
+        throw new Error("fe render runtime: surface quality state does not match its ABI");
+      }
       const qualityArgs =
-        this._surfaceQualityKernel.length === facts.length + this._uniforms.length
-          ? [...facts, ...this._uniforms]
+        arity === facts.length + state.length
+          ? [...facts, ...state]
           : facts;
       const reply = this._runWasmArenaEpoch(() => this._surfaceQualityKernel(...qualityArgs));
       const extent = Array.isArray(reply) ? reply : [reply];
