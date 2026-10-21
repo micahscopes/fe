@@ -156,7 +156,24 @@ const fn check_generic_bound_delivery() -> u256 {
 
     // Verify single-pass authored-only input rule (RD117) and deduplication:
     // (Score, Pair), (ItemScore, Pair), and (Score, Choice) were demanded across multiple expressions/functions, producing 3 plans.
-    assert_eq!(output.generation_inputs().functions(&output).len(), 3);
+    let module = output.top_mod(
+        output
+            .workspace()
+            .get(
+                &output,
+                &Url::parse("file:///tmp/scoped-on-demand-derive.fe").unwrap(),
+            )
+            .unwrap(),
+    );
+    let generated = module
+        .all_impl_traits(&output)
+        .iter()
+        .filter(|implementation| implementation.selection_name(&output).is_some())
+        .count();
+    assert_eq!(
+        generated, 3,
+        "each distinct scoped demand has one named implementation"
+    );
     let url = Url::parse("file:///tmp/scoped-on-demand-derive.fe").unwrap();
     let output_file = output.workspace().get(&output, &url).unwrap();
     let second_pass_err = prepare_file(&output, output_file)
@@ -1060,4 +1077,43 @@ const fn run() -> u256 {
         prepare(source).expect("prove<Trait<Target>>() under with (Provider) should succeed");
     // inside = 52 + 52 = 104; outside = 10 -> 10410
     assert_eq!(eval_const_fn_u256(&output, "run"), "10410");
+}
+
+#[test]
+fn scoped_derive_preserves_private_producer_helper_and_refuses_generic_targets() {
+    let source = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+trait Value { const fn value() -> u256 }
+struct Pair {}
+mod author {
+    use super::Value
+    use core::derive::Derive
+    use core::meta::{Code, Item, Record}
+    const fn helper() -> u256 { 7 }
+    pub struct Provider {}
+    impl Derive<Value> for Provider {
+        const fn derive(_ record: Record) -> Code<Item> {
+            quote { const fn value() -> u256 { helper() } }
+        }
+    }
+}
+const fn helper() -> u256 { 99 }
+const fn observe() -> u256 {
+    with (author::Provider) { Pair::value() }
+}
+"#;
+    let output = prepare(source).unwrap();
+    assert_eq!(eval_const_fn_u256(&output, "observe"), "7");
+    for target in ["Box<u8>", "Box<u256>"] {
+        let generic = source
+            .replace("struct Pair {}", "struct Box<T> { value: T }")
+            .replace("Pair::value()", &format!("<{target} as Value>::value()"));
+        let error = prepare_err(&generic);
+        assert!(
+            error.contains(
+                "scoped on-demand derive for generic record targets is not supported yet"
+            ),
+            "{target}: {error}"
+        );
+    }
 }

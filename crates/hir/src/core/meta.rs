@@ -1650,6 +1650,9 @@ pub fn scoped_derive_provider<'db>(
     let span: crate::span::DynLazySpan<'db> = scope
         .name_span(db)
         .unwrap_or_else(|| scope.top_mod(db).span().into());
+    if !target_ty.generic_args(db).is_empty() {
+        return Err("scoped on-demand derive for generic record targets is not supported yet; the generated target would lose its actual arguments".into());
+    }
     let goal = TraitInstId::new_simple(db, trait_def, vec![target_ty]);
     if crate::analysis::ty::permits::is_canonical_trait(db, goal.def(db)) {
         return Err(

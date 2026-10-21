@@ -172,6 +172,7 @@ pub(crate) fn scope_graph_impl<'db>(
     }
     ctxt.builder.apply_quoted_function_origins();
     generated::append_functions(&mut ctxt);
+    ctxt.builder.apply_quoted_function_origins();
     ctxt.leave_item_scope(top_mod);
 
     ctxt.build()
