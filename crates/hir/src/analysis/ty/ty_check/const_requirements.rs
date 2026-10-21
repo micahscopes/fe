@@ -13,13 +13,14 @@ use crate::analysis::ty::canonical::Canonicalized;
 use crate::analysis::ty::trait_choice::{
     Choice, Delivery, SlotChoices, SlotRef, body_deliveries, own_slots,
 };
+use crate::analysis::ty::trait_resolution::mentions_ty;
 use crate::analysis::ty::{
     const_ty::ConstBodyLowering,
     subst::substitute_complete,
     ty_lower::{CompleteSubst, SubstError, lower_hir_ty_with_resolutions, lower_type_alias},
 };
 use crate::hir_def::{GenericArg, GenericArgListId, ItemKind, UnOp, scope_graph::ScopeId};
-use crate::semantic::constraints_for;
+use crate::semantic::{constraints_for, param_env};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PredicateKey<'db> {
@@ -868,7 +869,7 @@ impl<'a, 'db> BodyRequirements<'a, 'db> {
                 self.check_callee_headers(expr, func, args);
                 self.discharge_callee_conditions(expr, func, args);
             }
-            CallableDef::VariantCtor(_) => {
+            CallableDef::VariantCtor(_) | CallableDef::StructCtor(_) => {
                 self.check_constructor_value(expr, data, definition, args);
             }
         }
@@ -1137,9 +1138,26 @@ fn positioned_const_bodies<'db>(
 /// are not found here. Resolution does not reject them either, and nothing
 /// evaluates them. The explicit arguments of a callable are applied with the
 /// call, so its uses check them (`expression_const_bodies`).
+fn zip_const_param_bodies<'db>(
+    db: &'db dyn HirAnalysisDb,
+    args: GenericArgListId<'db>,
+    params: &[TyId<'db>],
+    found: &mut Vec<(Body<'db>, TyId<'db>)>,
+) {
+    for (arg, param) in args.data(db).iter().zip(params) {
+        if let GenericArg::Const(arg) = arg
+            && let Partial::Present(body) = arg.value
+            && let Some(expected) = param.const_ty_ty(db)
+        {
+            found.push((body, expected));
+        }
+    }
+}
+
 fn segment_const_args<'db>(
     db: &'db dyn HirAnalysisDb,
     path: PathId<'db>,
+    scope: ScopeId<'db>,
     resolutions: &[(PathId<'db>, PathRes<'db>)],
 ) -> Vec<(Body<'db>, TyId<'db>)> {
     let mut found = Vec::new();
@@ -1156,20 +1174,23 @@ fn segment_const_args<'db>(
             .rev()
             .find_map(|(resolved, res)| (*resolved == current).then_some(res))
         else {
+            if let crate::analysis::name_resolution::path_resolver::ImplNameRes::Found(impl_trait) =
+                crate::analysis::name_resolution::path_resolver::resolve_impl_name(
+                    db, current, scope,
+                )
+            {
+                let params =
+                    crate::analysis::ty::ty_lower::collect_generic_params(db, impl_trait.into())
+                        .params(db);
+                zip_const_param_bodies(db, args, params, &mut found);
+            }
             continue;
         };
         match res {
             // An alias's arguments are its own parameters', whether or not the
             // aliased type uses them.
             PathRes::TyAlias(alias, _) => {
-                for (arg, param) in args.data(db).iter().zip(alias.params(db)) {
-                    if let GenericArg::Const(arg) = arg
-                        && let Partial::Present(body) = arg.value
-                        && let Some(expected) = param.const_ty_ty(db)
-                    {
-                        found.push((body, expected));
-                    }
-                }
+                zip_const_param_bodies(db, args, alias.params(db), &mut found);
             }
             res => found.extend(positioned_const_bodies(
                 db,
@@ -1371,40 +1392,37 @@ fn expression_const_bodies<'db>(
     };
     // Arguments of the path's segments, which path resolution applies, each
     // checked against its segment's own resolution (`segment_const_args`).
-    let segment_args = |path: PathId<'db>, value: bool| {
+    let segment_args = |path: PathId<'db>, scope: ScopeId<'db>, value: bool| {
         if path_const_bodies(db, path).is_empty() {
             return Vec::new();
         }
         let lowering_cx = LoweringContext::deferred().recording_resolutions();
         let resolve = |value| {
-            resolve_path_with_minter(
-                db,
-                path,
-                body.scope(),
-                typed.assumptions(),
-                value,
-                &lowering_cx,
-            )
+            resolve_path_with_minter(db, path, scope, typed.assumptions(), value, &lowering_cx)
         };
         // A tail that is not a value can still be a type, as a record's is.
         if resolve(value).is_err() {
             let _ = resolve(!value);
         }
-        segment_const_args(db, path, &lowering_cx.into_resolutions())
+        segment_const_args(db, path, scope, &lowering_cx.into_resolutions())
     };
 
+    let lex = super::env::body_lexical_env(db, body);
     let mut found: Vec<(Body<'db>, TyId<'db>)> = Vec::new();
     for (expr, data) in body.exprs(db).iter() {
+        let expr_scope = lex.expr_scope(expr).unwrap_or(body.scope());
         let entries = match data.borrowed().to_opt() {
             Some(Expr::ArrayRep(_, len)) => {
                 len.to_opt().zip(array_length_ty(db)).into_iter().collect()
             }
             Some(Expr::Path(Partial::Present(path))) => {
-                let mut entries = segment_args(*path, true);
+                let mut entries = segment_args(*path, expr_scope, true);
                 entries.extend(explicit_args(expr, path.generic_args(db)));
                 entries
             }
-            Some(Expr::RecordInit(Partial::Present(path), _)) => segment_args(*path, false),
+            Some(Expr::RecordInit(Partial::Present(path), _)) => {
+                segment_args(*path, expr_scope, false)
+            }
             Some(Expr::MethodCall(_, _, args, _)) => explicit_args(expr, *args),
             _ => Vec::new(),
         };
@@ -1417,7 +1435,7 @@ fn expression_const_bodies<'db>(
             | Pat::Record(Partial::Present(path), _),
         ) = pat.borrowed().to_opt()
         {
-            found.extend(segment_args(*path, true));
+            found.extend(segment_args(*path, body.scope(), true));
         }
     }
     // A body appears in one position, but two lookups can both find it.
@@ -1757,6 +1775,11 @@ fn formation_cycle_recover<'db>(
 
 /// The assumptions a type written at `scope` is lowered with.
 fn assumptions_at<'db>(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> PredicateListId<'db> {
+    constraints_for(db, enclosing_item(db, scope))
+}
+
+/// The item `scope` is in, outside any body.
+fn enclosing_item<'db>(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> ItemKind<'db> {
     let mut enclosing = scope;
     while matches!(enclosing.item(), ItemKind::Body(_)) {
         let Some(parent) = enclosing.parent(db) else {
@@ -1764,7 +1787,7 @@ fn assumptions_at<'db>(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> Predi
         };
         enclosing = parent;
     }
-    constraints_for(db, enclosing.item())
+    enclosing.item()
 }
 
 /// The applications that the types written in `owner`'s signature and body
@@ -1839,6 +1862,9 @@ struct WrittenType<'db> {
     lowered: Option<TyId<'db>>,
     /// The constrained applications its paths passed through.
     applications: Vec<TyId<'db>>,
+    /// Whether it is in an argument its alias drops, which no expansion
+    /// holds for its position to check.
+    dropped: bool,
     /// The index of the first entry nested in this type.
     nested_from: usize,
 }
@@ -1867,8 +1893,11 @@ fn written_types_query<'db>(
     use crate::span::types::LazyTySpan;
     use crate::visitor::{
         Visitor, VisitorCtxt,
-        prelude::{LazyBodySpan, LazyExprSpan, LazyItemSpan, LazyTraitRefSpan},
-        walk_body, walk_expr, walk_item, walk_path, walk_trait_ref, walk_type,
+        prelude::{
+            LazyBodySpan, LazyExprSpan, LazyGenericArgListSpan, LazyItemSpan, LazyTraitRefSpan,
+        },
+        walk_body, walk_expr, walk_generic_arg_list, walk_item, walk_path, walk_trait_ref,
+        walk_type,
     };
     struct Collector<'db> {
         db: &'db dyn HirAnalysisDb,
@@ -1879,6 +1908,10 @@ fn written_types_query<'db>(
         /// and finds them with the same rule (`written_type_const_args`).
         defaults: FxHashSet<crate::hir_def::TypeId<'db>>,
         default_depth: usize,
+        /// The arguments of the alias path being walked, each with whether
+        /// the alias drops it, and how deep the walk is inside one dropped.
+        alias_args: Option<(GenericArgListId<'db>, Vec<bool>)>,
+        dropped_depth: usize,
     }
     impl<'db> Visitor<'db> for Collector<'db> {
         // Nested items and bodies are their own regions.
@@ -1937,6 +1970,26 @@ fn written_types_query<'db>(
             let scope = ctxt.scope();
             let span = ctxt.span().map(Into::into);
             self.written_type(hir_ty, scope, span, |this| walk_type(this, ctxt, hir_ty));
+        }
+
+        fn visit_generic_arg_list(
+            &mut self,
+            ctxt: &mut VisitorCtxt<'db, LazyGenericArgListSpan<'db>>,
+            args: GenericArgListId<'db>,
+        ) {
+            let alias_args = self
+                .alias_args
+                .take_if(|(alias_args, _)| *alias_args == args);
+            let (Some((_, dropped)), Some(span)) = (alias_args, ctxt.span()) else {
+                return walk_generic_arg_list(self, ctxt, args);
+            };
+            for (idx, arg) in args.data(self.db).iter().enumerate() {
+                let in_dropped = dropped.get(idx).copied().unwrap_or_default();
+                self.dropped_depth += usize::from(in_dropped);
+                let mut arg_ctxt = VisitorCtxt::new(self.db, ctxt.scope(), span.clone().arg(idx));
+                self.visit_generic_arg(&mut arg_ctxt, arg);
+                self.dropped_depth -= usize::from(in_dropped);
+            }
         }
 
         // A `with` key is a type written in the body, whose paths are
@@ -2012,14 +2065,34 @@ fn written_types_query<'db>(
                     self.entries.push(WrittenEntry::ConstBodies(bodies));
                 }
             }
+            let alias_args = match hir_ty.data(db) {
+                TypeKind::Path(Partial::Present(path)) => {
+                    match resolve_path(db, *path, scope, assumptions, false) {
+                        Ok(PathRes::TyAlias(alias, _)) => {
+                            let expansion = *alias.alias_to.skip_binder();
+                            let dropped = alias
+                                .params(db)
+                                .iter()
+                                .map(|&param| !mentions_ty(db, expansion, param))
+                                .collect();
+                            Some((path.generic_args(db), dropped))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let enclosing_alias_args = std::mem::replace(&mut self.alias_args, alias_args);
             let nested_from = self.entries.len();
             walk_nested(self);
+            self.alias_args = enclosing_alias_args;
             if let Some(span) = span {
                 self.entries.push(WrittenEntry::Type(WrittenType {
                     span,
                     scope,
                     lowered: (!ty.has_invalid(db)).then_some(ty),
                     applications,
+                    dropped: self.dropped_depth > 0,
                     nested_from,
                 }));
             }
@@ -2033,6 +2106,8 @@ fn written_types_query<'db>(
         entries: Vec::new(),
         defaults: FxHashSet::default(),
         default_depth: 0,
+        alias_args: None,
+        dropped_depth: 0,
     };
     collector.visit_item(&mut VisitorCtxt::with_item(db, root), root);
     collector.entries
@@ -2060,7 +2135,36 @@ fn written_type_check_query<'db>(
     let mut diags = Vec::new();
     // The failing application each entry reported, if any.
     let mut reported: Vec<Option<TyId<'db>>> = Vec::with_capacity(entries.len());
+    // Whether each entry reported itself ill-formed.
+    let mut ill_formed: Vec<bool> = Vec::with_capacity(entries.len());
     for entry in entries {
+        // A type in an argument its alias drops is checked for its bounds
+        // here, where it is written, once for the innermost one that fails.
+        ill_formed.push(match entry {
+            WrittenEntry::Type(written)
+                if written.dropped && !ill_formed[written.nested_from..].contains(&true) =>
+            {
+                written.lowered.is_some_and(|ty| {
+                    let solve_cx = TraitSolveCx::new(db, written.scope)
+                        .with_assumptions(param_env(db, enclosing_item(db, written.scope)));
+                    let WellFormedness::IllFormed { goal, subgoal } = check_ty_wf(db, solve_cx, ty)
+                    else {
+                        return false;
+                    };
+                    diags.push(FuncBodyDiag::Ty(
+                        TraitConstraintDiag::TraitBoundNotSat {
+                            span: written.span.clone(),
+                            primary_goal: goal,
+                            unsat_subgoal: subgoal,
+                            required_by: None,
+                        }
+                        .into(),
+                    ));
+                    true
+                })
+            }
+            _ => false,
+        });
         let report = match entry {
             WrittenEntry::ConstBodies(bodies) => {
                 for &(body, expected) in bodies {
@@ -2182,7 +2286,7 @@ fn trait_ref_const_args<'db>(
     }
     let lowering_cx = LoweringContext::deferred().recording_resolutions();
     let _ = resolve_path_with_minter(db, path, scope, assumptions, false, &lowering_cx);
-    segment_const_args(db, path, &lowering_cx.into_resolutions())
+    segment_const_args(db, path, scope, &lowering_cx.into_resolutions())
 }
 
 /// The anonymous constants written directly in `hir_ty`, each with the type
@@ -2208,7 +2312,7 @@ fn written_const_args<'db>(
                 assumptions,
                 ConstBodyLowering::Deferred,
             );
-            segment_const_args(db, *path, &resolutions)
+            segment_const_args(db, *path, scope, &resolutions)
         }
         _ => Vec::new(),
     }
@@ -2723,23 +2827,26 @@ pub(super) fn reached_bounds_at_call<'db>(
     callable: &Callable<'db>,
     direct: bool,
 ) -> Vec<TraitInstId<'db>> {
-    facts_at_call(
+    let mut reached = Vec::new();
+    for fact in facts_at_call(
         db,
         callable,
         direct,
         scope,
         typed.assumptions(),
         &mut Walk::new(),
-    )
-    .into_iter()
-    .filter_map(|fact| match fact {
-        EdgeFact::Reaches {
-            choice: Choice::Slot(SlotRef::Bound(slot)),
-            ..
-        } => Some(slot),
-        _ => None,
-    })
-    .collect()
+    ) {
+        if let EdgeFact::Reaches { choice, .. } = fact {
+            choice.for_each_choice(db, &mut |item| {
+                if let Choice::Slot(SlotRef::Bound(slot)) = item
+                    && !reached.contains(&slot)
+                {
+                    reached.push(slot);
+                }
+            });
+        }
+    }
+    reached
 }
 
 /// Every condition a call checks or owes under the choices it delivers.
@@ -2880,23 +2987,22 @@ pub(crate) fn owed_checks<'db>(db: &'db dyn HirAnalysisDb, func: Func<'db>) -> V
                     &mut owed,
                 ),
                 EdgeFact::Condition(_) => {}
-                EdgeFact::Reaches {
-                    choice: Choice::Slot(SlotRef::Bound(slot)),
-                    ..
-                } => push(
-                    OwedCheck::Reaches {
-                        slot,
-                        signature: false,
-                    },
-                    &mut owed,
-                ),
-                // Refused where `func` itself is checked.
-                EdgeFact::Reaches { .. } => {}
-                EdgeFact::OpenedCondition {
-                    choice: Choice::Slot(SlotRef::Bound(slot)),
-                } => push(OwedCheck::OpenedCondition { slot }, &mut owed),
-                // Refused where `func` itself is checked.
-                EdgeFact::OpenedCondition { .. } => {}
+                EdgeFact::Reaches { choice, .. } => choice.for_each_choice(db, &mut |item| {
+                    if let Choice::Slot(SlotRef::Bound(slot)) = item {
+                        push(
+                            OwedCheck::Reaches {
+                                slot,
+                                signature: false,
+                            },
+                            &mut owed,
+                        );
+                    }
+                }),
+                EdgeFact::OpenedCondition { choice } => choice.for_each_choice(db, &mut |item| {
+                    if let Choice::Slot(SlotRef::Bound(slot)) = item {
+                        push(OwedCheck::OpenedCondition { slot }, &mut owed);
+                    }
+                }),
                 EdgeFact::NoEvidence { ty } => {
                     if ty.has_param(db) && !super::choice::holds_evidence(db, func.scope(), ty) {
                         push(OwedCheck::NoEvidence { param: ty }, &mut owed);

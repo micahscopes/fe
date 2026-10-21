@@ -168,8 +168,19 @@ impl super::Parse for BlockExprScope {
                 break;
             }
 
+            let in_quote_body = parser
+                .parents
+                .iter()
+                .rev()
+                .nth(1)
+                .is_some_and(|entry| entry.scope.syntax_kind() == SyntaxKind::QuoteExpr);
             // `unsafe {` starts an `unsafe` block, not an `unsafe fn` item.
-            if parser.current_kind().is_some_and(SyntaxKind::is_item_head)
+            if (parser.current_kind().is_some_and(SyntaxKind::is_item_head)
+                || (in_quote_body
+                    && matches!(
+                        parser.current_kind(),
+                        Some(SyntaxKind::Pound | SyntaxKind::DocComment)
+                    )))
                 && !matches!(
                     parser.peek_n_non_trivia(2).as_slice(),
                     [SyntaxKind::UnsafeKw, SyntaxKind::LBrace]

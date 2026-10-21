@@ -13,6 +13,7 @@ mod owner;
 mod pat;
 mod path;
 mod projection;
+pub(crate) use projection::constructed_variant;
 mod stmt;
 pub(crate) mod written_frames;
 
@@ -48,7 +49,7 @@ use crate::{
         BinOp, BindingMarker, Body, CondId, Const, Contract, ContractRecvArm, Expr, ExprId, Func,
         GenericParam, GenericParamOwner, LitKind, ManualContractRootAttr, Partial, Pat, PatId,
         PathId, StaticAssert, StaticAssertComparison, Stmt, StmtId, StringId, TypeId as HirTyId,
-        UnOp, WhereClauseOwner,
+        TypeKind, UnOp, WhereClauseOwner,
     },
     span::{
         DynLazySpan, expr::LazyExprSpan, pat::LazyPatSpan, path::LazyPathSpan, types::LazyTySpan,
@@ -84,18 +85,18 @@ use super::{
     assoc_const::{AssocConstUse, InherentConstUse},
     canonical::Canonical,
     diagnostics::{
-        BodyDiag, CallConstraintDiagInfo, FuncBodyDiag, MarkerPosition,
+        BodyDiag, CallConstraintDiagInfo, FuncBodyDiag, MarkerPosition, RevealedBy,
         StaticAssertComparisonValues, TraitConstraintDiag, TyDiagCollection, TyLowerDiag,
     },
     effects::{EffectKeyKind, ResolvedEffectKey, resolve_effect_key, rows::RowPath},
-    evidence::{
-        Evidence, EvidenceId, EvidenceList, impl_const_bound_evidence, instantiated_selection,
-    },
+    evidence::{Evidence, EvidenceList, impl_const_bound_evidence, instantiated_selection},
     generic_defaults::{GenericDefault, default_assumptions, generic_default},
+    instantiate_trait_self,
     trait_def::{TraitInstId, selected_assoc_const_body_template},
     trait_resolution::{
-        CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitSolveCx,
-        goal_query_has_no_distinct_solution, is_goal_query_satisfiable, is_goal_satisfiable,
+        CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitSolveCx, WellFormedness,
+        check_trait_inst_wf_without_self, check_ty_wf, goal_query_has_no_distinct_solution,
+        is_goal_query_satisfiable, is_goal_satisfiable,
     },
     ty_def::{
         BorrowKind, InvalidCause, Kind, MAX_INLINE_STRING_BYTES, StringFallback, TyId, TyVarSort,
@@ -106,32 +107,33 @@ use super::{
 };
 use crate::analysis::semantic::SemanticCodeRegionRef;
 use crate::analysis::semantic::{
-    BlockedInfo, ConstDependency, ConstUsePolicy, CtfeConfig, EffectProviderSubst, EvalOutcome,
-    GenericSubst, ImplEnv, RuntimeSizeError, SemConstId, SemConstScalar, SemConstValue, SemOrigin,
-    SemanticInstanceKey, const_computation_for_instance, describe_const_computation,
-    eval_body_owner_const, eval_const_instance, get_or_build_semantic_instance,
-    reify_runtime_const_for_ty, runtime_size_bytes_with_source,
+    BlockedInfo, ConstDependency, ConstUsePolicy, CtfeConfig, CtfeError, EffectProviderSubst,
+    EvalFailure, EvalOutcome, GenericSubst, ImplEnv, RuntimeSizeError, SemConstId, SemConstScalar,
+    SemConstValue, SemOrigin, SemanticInstanceKey, const_computation_for_instance,
+    describe_const_computation, eval_body_owner_const, eval_const_instance,
+    get_or_build_semantic_instance, reify_runtime_const_for_ty, runtime_size_bytes_with_source,
 };
 use crate::analysis::ty::ty_def::{ClosureTy, TyBase, TyData};
 use crate::analysis::ty::{
     closure::{CallableShape, CallableValue},
     const_ty::{
         CallableInputOrigin, ConstTyData, ConstTyId, LoweringContext, const_body_assumptions,
-        invalid_cause_from_eval_failure, origin_expr_for_const_eval_diag,
+        invalid_cause_from_eval_failure, origin_expr_for_const_eval_diag, root_ctfe_error,
     },
     normalize::{normalize_ty, normalize_with_trait_evidence},
     pattern_ir::{
         ConstructorKind, PatternAnalysisStatus, PatternStore, ValidatedPatId, ValidatedPatKind,
     },
     ty_error::{
-        collect_ty_lower_errors, diag_from_invalid_cause, normalization_limit_diag,
-        qualified_path_wf_diags,
+        collect_hir_ty_diags, collect_ty_lower_errors, diag_from_invalid_cause,
+        normalization_limit_diag, path_arg_diags, qualified_path_wf_diags,
     },
 };
 use crate::analysis::{
     HirAnalysisDb,
     name_resolution::{
-        PathRes, PathResError, diagnostics::PathResDiag, resolve_path_with_observer_and_minter,
+        ExpectedPathKind, PathRes, PathResError, PathResErrorKind, diagnostics::PathResDiag,
+        resolve_path, resolve_path_with_observer_and_minter,
     },
     ty::{
         ty_def::{TyFlags, inference_keys},
@@ -722,6 +724,93 @@ fn predicate_names_a_type<'db>(db: &'db dyn HirAnalysisDb, body: Body<'db>) -> b
     )
 }
 
+/// What an effect key that is neither a valid type nor trait key reports. A
+/// key whose path names a type or trait reports the error written in it, at
+/// that error; only a key naming neither is an unresolved effect.
+pub(crate) fn invalid_effect_key_diags<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: EffectParamOwner<'db>,
+    idx: usize,
+    key: HirTyId<'db>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+) -> Vec<FuncBodyDiag<'db>> {
+    let span = owner.effect_param_ty_span(db, idx);
+    let written = match key.data(db) {
+        TypeKind::Path(Partial::Present(path)) => {
+            let path_span = span.clone().into_path_type().path();
+            let arg_diags = || path_arg_diags(db, *path, path_span.clone(), scope, assumptions);
+            match resolve_path(db, *path, scope, assumptions, false) {
+                Ok(PathRes::Ty(_) | PathRes::TyAlias(..)) => {
+                    collect_hir_ty_diags(db, scope, key, span, assumptions)
+                }
+                Ok(PathRes::Trait(_)) => arg_diags(),
+                // A fault in the reference's own arguments, such as a const
+                // argument failing evaluation, is reported where it is written.
+                Err(err)
+                    if !matches!(
+                        err.kind,
+                        PathResErrorKind::NotFound { .. }
+                            | PathResErrorKind::TraitGenericArgType { .. }
+                    ) =>
+                {
+                    err.into_diag(db, *path, path_span, ExpectedPathKind::Trait)
+                        .into_iter()
+                        .collect()
+                }
+                Err(_) => arg_diags(),
+                Ok(_) => Vec::new(),
+            }
+        }
+        _ => collect_hir_ty_diags(db, scope, key, span, assumptions),
+    };
+    if written.is_empty() {
+        vec![BodyDiag::InvalidEffectKey { owner, key, idx }.into()]
+    } else {
+        written.into_iter().map(FuncBodyDiag::Ty).collect()
+    }
+}
+
+/// The diagnostic for an effect key that names a type or trait whose
+/// arguments do not satisfy their bounds. A trait key's `Self` is its
+/// provider, which answers for the trait's requirements on it; a default the
+/// key applies names it as the trait's own `Self`.
+pub(crate) fn effect_key_wf_diag<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: EffectParamOwner<'db>,
+    idx: usize,
+    key: &ResolvedEffectKey<'db>,
+    solve_cx: TraitSolveCx<'db>,
+) -> Option<FuncBodyDiag<'db>> {
+    let wf = match key {
+        ResolvedEffectKey::Type(schema) => check_ty_wf(db, solve_cx, schema.carrier),
+        ResolvedEffectKey::Trait(schema) => check_trait_inst_wf_without_self(
+            db,
+            solve_cx,
+            instantiate_trait_self(
+                db,
+                schema.clone().into_trait_inst(db),
+                schema.def.self_param(db),
+            ),
+        ),
+        ResolvedEffectKey::Row(_) | ResolvedEffectKey::Invalid | ResolvedEffectKey::Other => {
+            return None;
+        }
+    };
+    let WellFormedness::IllFormed { goal, subgoal } = wf else {
+        return None;
+    };
+    Some(FuncBodyDiag::Ty(
+        TraitConstraintDiag::TraitBoundNotSat {
+            span: owner.effect_param_ty_span(db, idx).into(),
+            primary_goal: goal,
+            unsat_subgoal: subgoal,
+            required_by: None,
+        }
+        .into(),
+    ))
+}
+
 #[salsa::tracked(return_ref)]
 pub fn check_static_assert<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -1225,9 +1314,20 @@ fn const_body_ctfe_diags_with_context<'db>(
             EvalOutcome::Ready(_) | EvalOutcome::Blocked(_) => return diags,
         }
     };
+    // A function is evaluated only through its callers, so a fault in one is
+    // revealed by what this body evaluates. A constant's declaration reports
+    // a fault in its own body.
+    let mut revealed_at = None;
     let cause = match outcome {
         Err(cause) => cause,
-        Ok(EvalOutcome::Failed(failure)) => invalid_cause_from_eval_failure(db, owner, failure),
+        Ok(EvalOutcome::Failed(failure)) => {
+            if let EvalFailure::Ctfe(error @ CtfeError::CalleeError { origin, .. }) = &failure
+                && matches!(root_ctfe_error(db, owner, error).0, BodyOwner::Func(..))
+            {
+                revealed_at = Some(origin_expr_for_const_eval_diag(db, body, *origin));
+            }
+            invalid_cause_from_eval_failure(db, owner, failure)
+        }
         Ok(EvalOutcome::Ready(value)) => {
             if matches!(value.value(db), SemConstValue::Description(..)) {
                 let cause = InvalidCause::ConstEvalInvariant {
@@ -1358,8 +1458,16 @@ fn const_body_ctfe_diags_with_context<'db>(
             }
             .into(),
         );
-    } else if let Some(diag) = TyId::invalid(db, cause).emit_diag(db, body.span().into()) {
-        diags.push(diag.into());
+    } else if let Some(fault) = TyId::invalid(db, cause).emit_diag(db, body.span().into()) {
+        diags.push(FuncBodyDiag::Ty(match revealed_at {
+            Some(expr) => TyLowerDiag::RevealedConstFault {
+                site: expr.span(body).into(),
+                revealed_by: RevealedBy::Evaluation,
+                fault: Box::new(fault),
+            }
+            .into(),
+            None => fault,
+        }));
     }
     diags
 }
@@ -1747,17 +1855,26 @@ impl<'db> TyChecker<'db> {
                 continue;
             };
 
-            if !matches!(
-                resolve_effect_key(self.db, key_ty, func.scope(), self.env.assumptions()),
-                ResolvedEffectKey::Type(_)
-                    | ResolvedEffectKey::Trait(_)
-                    | ResolvedEffectKey::Row(_)
-            ) {
-                self.push_diag(BodyDiag::InvalidEffectKey {
-                    owner: EffectParamOwner::Func(func),
-                    key: key_ty,
+            let key = resolve_effect_key(self.db, key_ty, func.scope(), self.env.assumptions());
+            if matches!(key, ResolvedEffectKey::Invalid | ResolvedEffectKey::Other) {
+                for diag in invalid_effect_key_diags(
+                    self.db,
+                    EffectParamOwner::Func(func),
                     idx,
-                });
+                    key_ty,
+                    func.scope(),
+                    self.env.assumptions(),
+                ) {
+                    self.push_diag(diag);
+                }
+            } else if let Some(diag) = effect_key_wf_diag(
+                self.db,
+                EffectParamOwner::Func(func),
+                idx,
+                &key,
+                TraitSolveCx::new(self.db, func.scope()).with_assumptions(self.env.assumptions()),
+            ) {
+                self.push_diag(diag);
             }
         }
     }
@@ -1808,7 +1925,7 @@ impl<'db> TyChecker<'db> {
             // A contract's bodies have no mode.
             if effect.mode == ModeMarker::MaybeMut {
                 self.push_diag(BodyDiag::MaybeMutWithoutMode {
-                    primary: owner.effect_param_ty_span(self.db, idx),
+                    primary: owner.effect_param_ty_span(self.db, idx).into(),
                 });
             }
             let Some(key_ty) = effect.key_ty.to_opt() else {
@@ -1817,12 +1934,23 @@ impl<'db> TyChecker<'db> {
 
             // Labeled effects are always type/trait keyed: `name: Type`.
             if effect.name.is_some() {
-                match resolve_effect_key(self.db, key_ty, contract.scope(), assumptions) {
+                let key = resolve_effect_key(self.db, key_ty, contract.scope(), assumptions);
+                if let Some(diag) = effect_key_wf_diag(
+                    self.db,
+                    owner,
+                    idx,
+                    &key,
+                    TraitSolveCx::new(self.db, contract.scope()).with_assumptions(assumptions),
+                ) {
+                    self.push_diag(diag);
+                    continue;
+                }
+                match key {
                     ResolvedEffectKey::Trait(schema) => {
                         let Some(root_effect_ty) = root_effect_ty else {
                             continue;
                         };
-                        let trait_req = super::instantiate_trait_self(
+                        let trait_req = instantiate_trait_self(
                             self.db,
                             schema.into_trait_inst(self.db),
                             root_effect_ty,
@@ -1855,14 +1983,24 @@ impl<'db> TyChecker<'db> {
                             });
                         }
                     }
-                    ResolvedEffectKey::Row(_)
-                    | ResolvedEffectKey::Invalid
-                    | ResolvedEffectKey::Other => {
+                    ResolvedEffectKey::Row(_) => {
                         self.push_diag(BodyDiag::InvalidEffectKey {
                             owner,
                             key: key_ty,
                             idx,
                         });
+                    }
+                    ResolvedEffectKey::Invalid | ResolvedEffectKey::Other => {
+                        for diag in invalid_effect_key_diags(
+                            self.db,
+                            owner,
+                            idx,
+                            key_ty,
+                            contract.scope(),
+                            assumptions,
+                        ) {
+                            self.push_diag(diag);
+                        }
                     }
                 }
                 continue;
@@ -1886,7 +2024,7 @@ impl<'db> TyChecker<'db> {
                             binding.provider.source
                     {
                         self.push_diag(BodyDiag::ImmutableContractFieldMutBinding {
-                            primary: owner.effect_param_ty_span(self.db, idx),
+                            primary: owner.effect_param_ty_span(self.db, idx).into(),
                             field: binding.requirement.binding_name,
                             field_span: crate::hir_def::FieldParent::Contract(field.contract)
                                 .field_name_span(field.index as usize),
@@ -3875,7 +4013,15 @@ impl<'db> TyChecker<'db> {
                 // implement subtyping.
                 let actual = actual.fold_with(self.db, &mut self.table);
                 if actual.is_never(self.db) {
-                    expected
+                    // A diverging expression takes the expected type, except
+                    // while that is still unknown: answering with the open
+                    // variable would hide that the expression diverges.
+                    let expected = expected.fold_with(self.db, &mut self.table);
+                    if matches!(expected.data(self.db), TyData::TyVar(_)) {
+                        actual
+                    } else {
+                        expected
+                    }
                 } else {
                     actual
                 }
@@ -4130,26 +4276,13 @@ pub enum RowArg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub enum ConstRef<'db> {
     Const(Const<'db>),
-    TraitConst {
-        use_: AssocConstUse<'db>,
-        /// The checker's proof of the use's trait goal, as for a call's
-        /// [`Callable`].
-        evidence: Option<EvidenceId<'db>>,
-        /// Proofs, in the checked body, of the bounds the trait's default
-        /// value body declares, by their places among the assumptions it is
-        /// checked under: the evidence that body's instance receives.
-        bound_evidence: Option<EvidenceList<'db>>,
-    },
+    TraitConst { use_: AssocConstUse<'db> },
     InherentConst(InherentConstUse<'db>),
 }
 
 impl<'db> ConstRef<'db> {
     pub fn trait_const(use_: AssocConstUse<'db>) -> Self {
-        Self::TraitConst {
-            use_,
-            evidence: None,
-            bound_evidence: None,
-        }
+        Self::TraitConst { use_ }
     }
 
     /// A trait constant's defining body, its declared type, the substitution
@@ -4160,14 +4293,11 @@ impl<'db> ConstRef<'db> {
         self,
         db: &'db dyn HirAnalysisDb,
     ) -> Option<(Body<'db>, TyId<'db>, CompleteSubst<'db>, EvidenceList<'db>)> {
-        let ConstRef::TraitConst {
-            use_,
-            evidence,
-            bound_evidence,
-        } = self
-        else {
+        let ConstRef::TraitConst { use_ } = self else {
             return None;
         };
+        let evidence = use_.evidence();
+        let bound_evidence = use_.bound_evidence();
         let resolved = instantiated_selection(db, evidence, use_.solve_cx(db), use_.inst())?;
         let (body, ty, subst) = selected_assoc_const_body_template(db, resolved, use_.name())?;
         let default = use_
@@ -4196,15 +4326,14 @@ impl<'db> ConstRef<'db> {
 
     /// Proves the constant use's trait goal in the checked body's context.
     pub(crate) fn record_evidence(&mut self, db: &'db dyn HirAnalysisDb) {
-        let ConstRef::TraitConst { use_, evidence, .. } = self else {
+        let ConstRef::TraitConst { use_ } = self else {
             return;
         };
         let solve_cx = use_.solve_cx(db);
-        let ev = use_
-            .choice()
-            .and_then(|choice| choice.to_evidence(db, solve_cx, Some(use_.inst())))
-            .or_else(|| super::evidence::prove(db, solve_cx, use_.inst()));
-        *evidence = ev;
+        let ev = match use_.choice() {
+            Some(choice) => choice.to_evidence(db, solve_cx, Some(use_.inst())),
+            None => super::evidence::prove(db, solve_cx, use_.inst()),
+        };
         *use_ = use_.with_evidence(ev);
     }
 }
@@ -4216,19 +4345,7 @@ impl<'db> TyVisitable<'db> for ConstRef<'db> {
     {
         match self {
             ConstRef::Const(_) => {}
-            ConstRef::TraitConst {
-                use_,
-                evidence,
-                bound_evidence,
-            } => {
-                use_.visit_with(visitor);
-                if let Some(evidence) = evidence {
-                    evidence.visit_with(visitor);
-                }
-                if let Some(bound_evidence) = bound_evidence {
-                    bound_evidence.visit_with(visitor);
-                }
-            }
+            ConstRef::TraitConst { use_ } => use_.visit_with(visitor),
             ConstRef::InherentConst(use_) => use_.visit_with(visitor),
         }
     }
@@ -4241,15 +4358,8 @@ impl<'db> TyFoldable<'db> for ConstRef<'db> {
     {
         match self {
             ConstRef::Const(const_def) => ConstRef::Const(const_def),
-            ConstRef::TraitConst {
-                use_,
-                evidence,
-                bound_evidence,
-            } => ConstRef::TraitConst {
+            ConstRef::TraitConst { use_ } => ConstRef::TraitConst {
                 use_: use_.fold_with(db, folder),
-                evidence: evidence.map(|evidence| evidence.fold_with(db, folder)),
-                bound_evidence: bound_evidence
-                    .map(|bound_evidence| bound_evidence.fold_with(db, folder)),
             },
             ConstRef::InherentConst(use_) => ConstRef::InherentConst(use_.fold_with(db, folder)),
         }
@@ -4846,15 +4956,8 @@ impl<'db> TypedBody<'db> {
         }
         for const_ref in tables.const_refs.values_mut().flatten() {
             match const_ref {
-                ConstRef::TraitConst {
-                    use_,
-                    evidence,
-                    bound_evidence,
-                } => {
+                ConstRef::TraitConst { use_ } => {
                     *use_ = use_.bind_evidence(db, bound);
-                    *evidence = evidence.map(|evidence| evidence.bind(db, bound));
-                    *bound_evidence =
-                        bound_evidence.map(|bound_evidence| bound_evidence.bind(db, bound));
                 }
                 ConstRef::InherentConst(use_) => {
                     *use_ = use_.bind_evidence(db, bound);
@@ -5613,7 +5716,14 @@ impl<'db> TypedBody<'db> {
 
         if let Some(SemanticExprLowering::Call { callable }) = self.semantic_expr_lowering(expr) {
             let args = call_like_expr_args(expr_data, self.tables.value_calls.contains(&expr))?;
-            if let CallableDef::VariantCtor(variant) = callable.callable_def() {
+            // Constructors build an aggregate: `Some(variant)` for tuple
+            // variants, `None` for tuple structs.
+            let ctor_variant = match callable.callable_def() {
+                CallableDef::VariantCtor(variant) => Some(Some(variant.idx)),
+                CallableDef::StructCtor(_) => Some(None),
+                _ => None,
+            };
+            if let Some(variant) = ctor_variant {
                 let mut sources = Vec::new();
                 for (field, arg) in args.into_iter().enumerate() {
                     let Some(mut field_sources) = self.forwarded_return_param_sources_from_expr(
@@ -5625,13 +5735,12 @@ impl<'db> TypedBody<'db> {
                     ) else {
                         continue;
                     };
-                    prefix_return_sources(
-                        &mut field_sources,
-                        &[ReturnProjectionStep::VariantField {
-                            variant: variant.idx,
-                            field: u16::try_from(field).ok()?,
-                        }],
-                    );
+                    let field = u16::try_from(field).ok()?;
+                    let projection = variant
+                        .map_or(ReturnProjectionStep::Field(field), |variant| {
+                            ReturnProjectionStep::VariantField { variant, field }
+                        });
+                    prefix_return_sources(&mut field_sources, &[projection]);
                     sources.extend(field_sources);
                 }
                 return (!sources.is_empty()).then_some(sources);
@@ -7165,7 +7274,7 @@ impl<'db> TyCheckerFinalizer<'db> {
     /// a `#[view]` type in a position a view type cannot take.
     fn check_view_call(&mut self, callable: &Callable<'db>, expr: ExprId, span: DynLazySpan<'db>) {
         let db = self.db;
-        if let CallableDef::VariantCtor(_) = callable.callable_def {
+        if let CallableDef::VariantCtor(_) | CallableDef::StructCtor(_) = callable.callable_def {
             let ty = self.body.expr_prop(db, expr).ty;
             return self.check_view_construction(ty, span);
         }
@@ -7237,6 +7346,10 @@ impl<'db> TyCheckerFinalizer<'db> {
             if matches!(self.body.yield_shape(expr), Some(Shape::Sum { .. })) {
                 return;
             }
+            let ty = self.body.expr_prop(db, expr).ty;
+            return self.check_state_only_value(ty, span, "constructed as a value");
+        }
+        if let CallableDef::StructCtor(_) = callable.callable_def {
             let ty = self.body.expr_prop(db, expr).ty;
             return self.check_state_only_value(ty, span, "constructed as a value");
         }

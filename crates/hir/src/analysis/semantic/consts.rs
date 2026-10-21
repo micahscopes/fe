@@ -53,18 +53,14 @@ impl<'db> SemConstId<'db> {
                     format!("<record {}>", record.ty().pretty_print(db))
                 }
                 crate::core::meta::MetaValue::Field(field) => {
-                    format!(
-                        "<field {}[{}]>",
-                        field.record().ty().pretty_print(db),
-                        field.index()
-                    )
+                    let name = field.name(db).map_or_else(
+                        || field.index().to_string(),
+                        |ident| ident.data(db).to_string(),
+                    );
+                    format!("<field {}.{name}>", field.record().ty().pretty_print(db))
                 }
                 crate::core::meta::MetaValue::FieldType(field) => {
-                    format!(
-                        "<field_type {}[{}]>",
-                        field.record().ty().pretty_print(db),
-                        field.index()
-                    )
+                    format!("<field_type {}>", field.ty(db).pretty_print(db))
                 }
             },
             SemConstValue::Tuple { elems, .. } => {

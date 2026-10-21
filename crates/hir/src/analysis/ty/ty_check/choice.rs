@@ -446,6 +446,20 @@ pub(crate) fn body_slot_uses<'db>(
 /// a trait call's) rather than a goal its callee or constant body declares.
 type TraitUse<'db> = (TraitInstId<'db>, Option<Choice<'db>>, bool);
 
+fn visit_known_impl_goals<'db>(
+    db: &'db dyn HirAnalysisDb,
+    known: KnownChoice<'db>,
+    f: &mut impl FnMut(TraitInstId<'db>, TraitInstId<'db>, Option<Choice<'db>>),
+) {
+    for (bound, goal) in known.impl_goals(db) {
+        let delivered = known.bound_choice(db, bound);
+        f(bound, goal, delivered);
+        if let Some(Choice::Known(inner)) = delivered {
+            visit_known_impl_goals(db, inner, f);
+        }
+    }
+}
+
 /// The trait uses behind `body_slot_uses`, each marked as a use's own slot or
 /// a declared goal: each trait constant, each call (expression calls and a
 /// `for` loop's protocol calls).
@@ -461,14 +475,21 @@ fn body_trait_uses<'db>(
         };
         for (goal, choice) in const_use_reads(db, cref) {
             let slot = slot_goal(db, goal);
-            uses.push((slot, choice, Some(slot) == own_slot));
+            uses.push((
+                slot,
+                choice,
+                Some(slot) == own_slot || (own_slot.is_some() && choice.is_some()),
+            ));
         }
     }
     let Some(body) = typed.body() else {
         return uses;
     };
     for (_, callable, _) in typed.recorded_calls(db) {
-        let own_slot = callable.trait_inst.map(|inst| slot_goal(db, inst));
+        let own_slot = callable
+            .trait_inst
+            .or_else(|| prove_goal(db, callable, |ty| ty))
+            .map(|inst| slot_goal(db, inst));
         if let Some(slot) = own_slot {
             uses.push((slot, callable.choice(), true));
         }
@@ -487,17 +508,35 @@ fn body_trait_uses<'db>(
             let delivered = slots
                 .iter()
                 .find_map(|(s, choice)| (*s == SlotRef::Bound(bound)).then_some(*choice));
-            uses.push((slot, delivered, Some(slot) == own_slot));
+            let is_own = Some(slot) == own_slot
+                || chosen.is_some_and(|known| known.bound_choice(db, bound).is_some());
+            uses.push((slot, delivered, is_own));
+            if let Some(Choice::Known(inner)) = delivered {
+                visit_known_impl_goals(db, inner, &mut |_, inner_goal, inner_delivered| {
+                    let inner_slot = slot_goal(db, inner_goal);
+                    let item = (
+                        inner_slot,
+                        inner_delivered,
+                        Some(inner_slot) == own_slot || inner_delivered.is_some(),
+                    );
+                    if !uses.contains(&item) {
+                        uses.push(item);
+                    }
+                });
+            }
         }
         if let Some(known) = chosen {
-            for (bound, goal) in known.impl_goals(db) {
+            visit_known_impl_goals(db, known, &mut |_, goal, delivered| {
                 let slot = slot_goal(db, goal);
-                let delivered = known.bound_choice(db, bound);
-                let item = (slot, delivered, Some(slot) == own_slot);
+                let item = (
+                    slot,
+                    delivered,
+                    Some(slot) == own_slot || delivered.is_some(),
+                );
                 if !uses.contains(&item) {
                     uses.push(item);
                 }
-            }
+            });
         }
     }
     uses
@@ -522,11 +561,7 @@ pub(super) fn owed_opened_conditions<'db>(
     let mut owed = Vec::new();
     let mut seen = Vec::new();
     for (goal, choice, own_slot) in body_trait_uses(db, typed) {
-        if own_slot
-            || choice.is_some_and(|c| !c.is_ordinary())
-            || own.contains(&goal)
-            || seen.contains(&goal)
-        {
+        if own_slot || choice.is_some() || own.contains(&goal) || seen.contains(&goal) {
             continue;
         }
         seen.push(goal);
@@ -636,7 +671,7 @@ pub(crate) fn const_use_reads<'db>(
     db: &'db dyn HirAnalysisDb,
     cref: ConstRef<'db>,
 ) -> Vec<(TraitInstId<'db>, Option<Choice<'db>>)> {
-    let (own, body, subst, delivered, impl_goals) = match cref {
+    let (own, body, subst, delivered, impl_goals, solve_cx) = match cref {
         ConstRef::TraitConst { use_: assoc, .. } => {
             let own = Some((assoc.inst(), assoc.choice()));
             // While inference runs, a goal can still hold inference variables;
@@ -660,6 +695,7 @@ pub(crate) fn const_use_reads<'db>(
                 subst,
                 assoc.delivered(),
                 assoc.selected_impl_goals(db),
+                assoc.solve_cx(db),
             )
         }
         ConstRef::InherentConst(use_) => {
@@ -683,7 +719,9 @@ pub(crate) fn const_use_reads<'db>(
             ) else {
                 return Vec::new();
             };
-            (None, body, subst, use_.delivered(), Vec::new())
+            let solve_cx =
+                TraitSolveCx::new(db, use_.origin_scope()).with_assumptions(use_.assumptions());
+            (None, body, subst, use_.delivered(), Vec::new(), solve_cx)
         }
         ConstRef::Const(_) => return Vec::new(),
     };
@@ -701,14 +739,54 @@ pub(crate) fn const_use_reads<'db>(
             .iter()
             .find_map(|(given, choice)| (*given == bound).then_some(*choice));
         reads.push((at_use, choice));
-    }
-    for (bound, at_use) in impl_goals {
-        let choice = chosen.and_then(|known| known.bound_choice(db, bound));
-        if !reads.iter().any(|(goal, _)| *goal == at_use) {
-            reads.push((at_use, choice));
+        if let Some(Choice::Known(inner)) = choice {
+            visit_known_impl_goals(db, inner, &mut |_, goal, delivered| {
+                if !reads.iter().any(|(existing, _)| *existing == goal) {
+                    reads.push((goal, delivered));
+                }
+            });
+        } else if choice.is_none() {
+            extend_goal_reads(db, solve_cx, std::iter::once(at_use), &mut reads);
         }
     }
+    if let Some(known) = chosen {
+        visit_known_impl_goals(db, known, &mut |_, at_use, choice| {
+            if !reads.iter().any(|(goal, _)| *goal == at_use) {
+                reads.push((at_use, choice));
+            }
+        });
+    } else {
+        extend_goal_reads(
+            db,
+            solve_cx,
+            own.and_then(|(inst, choice)| choice.is_none().then_some(inst))
+                .into_iter()
+                .chain(impl_goals.into_iter().map(|(_, at_use)| at_use)),
+            &mut reads,
+        );
+    }
     reads
+}
+
+fn extend_goal_reads<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    goals: impl IntoIterator<Item = TraitInstId<'db>>,
+    reads: &mut Vec<(TraitInstId<'db>, Option<Choice<'db>>)>,
+) {
+    for goal in goals {
+        let slot = slot_goal(db, goal);
+        if !reads.iter().any(|(existing, _)| *existing == slot) {
+            reads.push((slot, None));
+        }
+        ordinary_proof_reads(db, solve_cx, goal, |condition| {
+            let cond_slot = slot_goal(db, condition);
+            if !reads.iter().any(|(existing, _)| *existing == cond_slot) {
+                reads.push((cond_slot, None));
+            }
+            false
+        });
+    }
 }
 
 /// A type a callable's declaration states, with how a call instantiates it:
@@ -745,7 +823,7 @@ fn declared_tys<'db>(db: &'db dyn HirAnalysisDb, def: CallableDef<'db>) -> Vec<D
                 });
             }
         }
-        CallableDef::VariantCtor(_) => {}
+        CallableDef::VariantCtor(_) | CallableDef::StructCtor(_) => {}
     }
     tys
 }
@@ -884,13 +962,19 @@ fn type_slot_reads_into<'db>(
                 return;
             }
             match const_ty.data(db) {
-                ConstTyData::Abstract(expr, _) => {
-                    if let ConstExpr::TraitConst(assoc) = expr.data(db) {
+                ConstTyData::Abstract(expr, _) => match expr.data(db) {
+                    ConstExpr::TraitConst(assoc) => {
                         for (goal, _) in const_use_reads(db, ConstRef::trait_const(*assoc)) {
                             self.reads.push(slot_goal(db, goal));
                         }
                     }
-                }
+                    ConstExpr::InherentConst(use_) => {
+                        for (goal, _) in const_use_reads(db, ConstRef::InherentConst(*use_)) {
+                            self.reads.push(slot_goal(db, goal));
+                        }
+                    }
+                    _ => {}
+                },
                 ConstTyData::UnEvaluated {
                     body,
                     ty: Some(expected),
@@ -975,7 +1059,7 @@ impl<'db> TyChecker<'db> {
         let dependent = holds_refused_read(self.db, written)
             || type_slot_reads(self.db, ty)
                 .into_iter()
-                .any(|slot| self.env.frame_choice(frame, slot).is_some());
+                .any(|slot| self.env.frame_reaches_slot(frame, slot));
         if dependent {
             self.push_diag(BodyDiag::ChoiceDependentType { primary });
         }
@@ -1000,7 +1084,7 @@ impl<'db> TyChecker<'db> {
             self.env.assumptions(),
         )
         .into_iter()
-        .any(|slot| self.env.frame_choice(frame, slot).is_some());
+        .any(|slot| self.env.frame_reaches_slot(frame, slot));
         if dependent {
             self.push_diag(BodyDiag::ChoiceDependentType { primary });
         }
@@ -1026,7 +1110,7 @@ impl<'db> TyChecker<'db> {
             self.env.assumptions(),
         )
         .into_iter()
-        .any(|slot| self.env.frame_choice(frame, slot).is_some());
+        .any(|slot| self.env.frame_reaches_slot(frame, slot));
         if dependent {
             self.push_diag(BodyDiag::ChoiceDependentType { primary });
         }
@@ -1125,7 +1209,7 @@ impl<'db> TyChecker<'db> {
         let frame = self.env.choice_frames.current();
         let dependent = reads
             .into_iter()
-            .any(|slot| self.env.frame_choice(frame, slot).is_some());
+            .any(|slot| self.env.frame_reaches_slot(frame, slot));
         if dependent {
             self.push_diag(BodyDiag::ChoiceDependentType { primary });
         }
@@ -1147,7 +1231,7 @@ impl<'db> TyChecker<'db> {
         }
         let dependent = call_slot_reads(self.db, callable)
             .into_iter()
-            .any(|slot| self.env.frame_choice(frame, slot).is_some());
+            .any(|slot| self.env.frame_reaches_slot(frame, slot));
         if dependent {
             self.push_diag(BodyDiag::ChoiceDependentType { primary });
         }
@@ -1161,7 +1245,10 @@ impl<'db> TyChecker<'db> {
     }
 
     /// `with (N)` names an implementation when `N` is not an ordinary value.
-    fn named_choice(&mut self, value: ExprId) -> Option<Result<KnownChoice<'db>, &'static str>> {
+    fn named_choice(
+        &mut self,
+        value: ExprId,
+    ) -> Option<Result<KnownChoice<'db>, Option<&'static str>>> {
         let Partial::Present(Expr::Path(Partial::Present(path))) = value.data(self.db, self.body())
         else {
             return None;
@@ -1172,63 +1259,106 @@ impl<'db> TyChecker<'db> {
         let implementation = match resolve_impl_name(self.db, *path, self.env.scope()) {
             ImplNameRes::Found(implementation) => implementation,
             ImplNameRes::NotVisible => {
-                return Some(Err(
+                return Some(Err(Some(
                     "this implementation name is not visible here; an implementation name is private to its module unless declared `pub impl`",
-                ));
+                )));
             }
-            ImplNameRes::Ambiguous => return Some(Err("the implementation name is ambiguous")),
+            ImplNameRes::Ambiguous => {
+                return Some(Err(Some("the implementation name is ambiguous")));
+            }
             ImplNameRes::NotFound => return None,
         };
         // A bare name that is both a value and a named implementation is an
         // error that asks which one is meant; a value alone is a value.
-        if path.as_ident(self.db).is_some() {
+        if path.parent(self.db).is_none()
+            && let Some(ident) = path.ident(self.db).to_opt()
+        {
             let minter = LoweringContext::new();
             if !matches!(
                 resolve_ident_expr(
                     self.db,
                     &self.env,
-                    *path,
+                    crate::hir_def::PathId::from_ident(self.db, ident),
                     value.span(self.body()).into(),
                     &minter
                 ),
                 ResolvedPathInBody::NewBinding(_)
             ) {
-                return Some(Err(
+                return Some(Err(Some(
                     "this name is both a value and a named implementation; write `{ name }` for the value, or rename one of them",
-                ));
+                )));
             }
         }
-        let implementation = &implementation;
-        let Some(candidate) = lower_impl_trait(self.db, *implementation) else {
-            return Some(Err("the named implementation declaration is invalid"));
-        };
-        if !candidate.params(self.db).is_empty() {
-            return Some(Err(
-                "a generic named implementation cannot be opened by name",
-            ));
+        if self.refuse_written_const_args(WrittenNode::Expr(value)) {
+            return Some(Err(None));
         }
-        // Its conditions are proved where it is declared, not under the
-        // frames of the opening: a condition that only
-        // a named implementation answers is refused until sub-choices carry
-        // the opening's answer into the implementation.
+        let (goal, normalized_args) = match instantiate_named_impl_header(
+            self.db,
+            implementation,
+            path.generic_args(self.db),
+            self.env.scope(),
+            self.env.assumptions(),
+            |arg| {
+                let resolved = self.resolved_ty(arg);
+                if self.refuse_choice_dependent_ty(arg, resolved, value.span(self.body()).into()) {
+                    return None;
+                }
+                for slot in type_slot_reads(self.db, resolved) {
+                    if !self.env.const_reaches.contains(&slot) {
+                        self.env.const_reaches.push(slot);
+                    }
+                }
+                Some(resolved)
+            },
+        ) {
+            Ok(instantiated) => instantiated,
+            Err(err) => return Some(Err(err)),
+        };
+        for &arg in goal.args(self.db) {
+            if self.refuse_choice_dependent_ty(arg, arg, value.span(self.body()).into()) {
+                return Some(Err(None));
+            }
+            for slot in type_slot_reads(self.db, arg) {
+                if !self.env.const_reaches.contains(&slot) {
+                    self.env.const_reaches.push(slot);
+                }
+            }
+        }
+        let frame = self.env.choice_frames.current();
+        let frame_cx = self.env.frame_proof_context(frame);
+        let decl_cx = TraitSolveCx::new(self.db, implementation.scope())
+            .with_assumptions(frame_cx.assumptions());
+        let mut undecided = Vec::new();
         let mut active = rustc_hash::FxHashSet::default();
-        let bounds = self
+        let bounds = self.env.impl_bound_choices(
+            frame,
+            implementation,
+            &normalized_args,
+            0,
+            Some(&mut undecided),
+            &mut active,
+        );
+        let Ok(known) = KnownChoice::prove(self.db, frame_cx, implementation, goal)
+            .or_else(|_| KnownChoice::prove(self.db, decl_cx, implementation, goal))
+        else {
+            return Some(Err(Some(
+                "the named implementation's conditions do not hold where it is opened",
+            )));
+        };
+        if let Some(refusal) = self
             .env
-            .impl_bound_choices(None, *implementation, &[], 0, None, &mut active);
-        Some(
-            KnownChoice::prove(
-                self.db,
-                TraitSolveCx::new(self.db, implementation.scope()),
-                *implementation,
-                // The slot it answers; its associated types are its own
-                // (compared with the ordinary ones where it is declared).
-                slot_goal(self.db, candidate.trait_inst(self.db)),
-            )
-            .map(|known| known.with_bounds(self.db, bounds))
-            .map_err(|_| {
-                "the named implementation's conditions do not hold where it is declared; a condition only a named implementation answers is not supported yet"
-            }),
-        )
+            .reads_opened_condition(frame, undecided, Some(goal))
+        {
+            return Some(Err(Some(match refusal {
+                ChoiceRefusal::OpenedCondition => {
+                    "the named implementation's conditions read a slot opened here through an implementation with a condition on it; conditional implementations under `with` are not supported yet"
+                }
+                _ => {
+                    "the named implementation's conditions have a proof that cannot be followed to one implementation while a slot is opened here; this is not supported yet"
+                }
+            })));
+        }
+        Some(Ok(known.with_bounds(self.db, bounds)))
     }
 
     /// Open an unkeyed `with` binding that names an implementation. `None`
@@ -1241,17 +1371,15 @@ impl<'db> TyChecker<'db> {
     ) -> Option<bool> {
         let named = self.named_choice(value)?;
         let opened = match named {
-            Ok(choice) => {
-                self.add_premise_if_needed(choice.goal());
-                self.push_choice(header, value, choice.goal(), Choice::Known(choice))
-            }
-            Err(reason) => {
+            Ok(choice) => self.push_choice(header, value, choice.goal(), Choice::Known(choice)),
+            Err(Some(reason)) => {
                 self.push_diag(BodyDiag::ObligationOpening {
                     primary: value.span(self.body()).into(),
                     reason,
                 });
                 false
             }
+            Err(None) => false,
         };
         self.env
             .type_expr(value, ExprProp::new(TyId::unit(self.db), false));
@@ -1293,10 +1421,7 @@ impl<'db> TyChecker<'db> {
             return Some(false);
         };
         let opened = match self.denote_evidence(value, prop) {
-            Ok(choice) => {
-                self.add_premise_if_needed(goal);
-                self.push_choice(header, value, goal, choice)
-            }
+            Ok(choice) => self.push_choice(header, value, goal, choice),
             Err(error) => {
                 self.report_source_error(value.span(self.body()).into(), error);
                 false
@@ -1306,26 +1431,6 @@ impl<'db> TyChecker<'db> {
         Some(opened)
     }
 
-    /// The opened goal is a premise of the block when ordinary selection
-    /// cannot prove it: a generic goal, or one with only named implementations.
-    /// The evidence or the named implementation is its proof.
-    fn add_premise_if_needed(&mut self, goal: TraitInstId<'db>) {
-        let generic = goal.args(self.db).iter().any(|ty| ty.has_param(self.db));
-        if generic
-            || !matches!(
-                resolve_trait_impl_instance(
-                    self.db,
-                    self.env.proof_context(),
-                    goal,
-                    crate::analysis::ty::trait_choice::OrdinarySelection::decides_nothing(),
-                ),
-                Selection::Unique(_)
-            )
-        {
-            self.env.add_opened_premise(goal);
-        }
-    }
-
     fn push_choice(
         &mut self,
         header: Option<FrameId>,
@@ -1333,11 +1438,10 @@ impl<'db> TyChecker<'db> {
         goal: TraitInstId<'db>,
         choice: Choice<'db>,
     ) -> bool {
-        let slot = self.env.normalized_slot(goal);
-        if self.env.choice_frames.push(header, slot, choice).is_err() {
+        if let Err(reason) = self.env.install_frame_choice(header, goal, choice, false) {
             self.push_diag(BodyDiag::ObligationOpening {
                 primary: value.span(self.body()).into(),
-                reason: "one `with` header gives the same trait slot twice",
+                reason,
             });
             return false;
         }
@@ -1524,26 +1628,24 @@ impl<'db> TyChecker<'db> {
         );
         // Delivered here: the closed evidence arguments' values, then the
         // recorder's decisions.
-        callable.set_delivered(Vec::new());
-        let (decided, refusals) = self
+        callable.set_delivered(
+            values
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, value)| match value.value(self.db) {
+                    SemConstValue::Evidence { choice, .. } => {
+                        Some((Delivery::Param(idx as u16), Choice::Known(*choice)))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        );
+        let (callable, refusals) = self
             .env
             .decided_call(self.env.use_frames[call], callable, true);
-        if !refusals.is_empty() || matches!(decided.choice(), Some(Choice::Slot(_))) {
+        if !refusals.is_empty() || callable.has_open_choice(self.db) {
             return Err(unknown);
         }
-        callable = decided;
-        let mut delivered = values
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, value)| match value.value(self.db) {
-                SemConstValue::Evidence { choice, .. } => {
-                    Some((Delivery::Param(idx as u16), Choice::Known(*choice)))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        delivered.extend(callable.delivered().iter().copied());
-        callable.set_delivered(delivered);
         let (scope, assumptions) = (self.env.scope(), self.env.assumptions());
         let Some((body, _)) = callable.called_body(self.db, scope, assumptions) else {
             return Err(unknown);
@@ -1556,7 +1658,7 @@ impl<'db> TyChecker<'db> {
             body,
         )
         .iter()
-        .any(|(_, choice)| matches!(choice, Choice::Slot(_)))
+        .any(|(_, choice)| choice.has_slot(self.db))
         {
             return Err(unknown);
         }
@@ -1574,11 +1676,10 @@ impl<'db> TyChecker<'db> {
         let ty = self.resolved_ty(prop.ty);
         if evidence_goal(self.db, self.env.scope(), ty).is_some() {
             return match self.denote_evidence(expr, &prop)? {
-                Choice::Known(choice) => Ok(SemConstId::new(
-                    self.db,
-                    SemConstValue::Evidence { ty, choice },
-                )),
-                Choice::Slot(_) => Err(SourceError::Unsupported(
+                Choice::Known(choice) if !Choice::Known(choice).has_slot(self.db) => Ok(
+                    SemConstId::new(self.db, SemConstValue::Evidence { ty, choice }),
+                ),
+                Choice::Known(_) | Choice::Slot(_) => Err(SourceError::Unsupported(
                     "an evidence factory given evidence not known here is not supported",
                 )),
             };
@@ -1602,25 +1703,23 @@ impl<'db> TyChecker<'db> {
                     Some(cref @ ConstRef::Const(_)) => cref,
                     // A trait constant is read through its decisions here,
                     // as anywhere; one that waits for a choice is not closed.
-                    Some(ConstRef::TraitConst { use_: assoc, .. }) => {
+                    Some(cref @ ConstRef::TraitConst { .. }) => {
                         let frame = self.env.use_frames[expr];
-                        let Ok(decided) =
-                            self.env
-                                .trait_const_decisions(frame, assoc, &mut Vec::new())
+                        let Ok(decided) = self.env.decided_const_ref(frame, cref, &mut Vec::new())
                         else {
                             return Err(SourceError::Unsupported(
                                 "a factory argument that reads a choice not known here is not supported",
                             ));
                         };
-                        if const_use_reads(self.db, ConstRef::trait_const(decided))
+                        if const_use_reads(self.db, decided)
                             .iter()
-                            .any(|(_, choice)| matches!(choice, Some(Choice::Slot(_))))
+                            .any(|(_, choice)| choice.is_some_and(|c| c.has_slot(self.db)))
                         {
                             return Err(SourceError::Unsupported(
                                 "a factory argument that reads a choice not known here is not supported",
                             ));
                         }
-                        ConstRef::trait_const(decided)
+                        decided
                     }
                     _ => {
                         return Err(SourceError::Unsupported(
@@ -1671,36 +1770,13 @@ impl<'db> TyChecker<'db> {
     /// is pending evidence or the use is refused, never read as the ordinary
     /// implementation.
     pub(super) fn pattern_constant(&self, cref: ConstRef<'db>) -> Option<ConstRef<'db>> {
-        let frame = self.env.choice_frames.current();
-        let (decided, own, delivered) = match cref {
-            ConstRef::TraitConst { use_, .. } => {
-                let decided = self
-                    .env
-                    .trait_const_decisions(frame, use_, &mut Vec::new())
-                    .ok()?;
-                (
-                    ConstRef::trait_const(decided),
-                    decided.choice(),
-                    decided.delivered(),
-                )
-            }
-            ConstRef::InherentConst(use_) => {
-                let decided = self
-                    .env
-                    .inherent_const_decisions(frame, use_, &mut Vec::new())
-                    .ok()?;
-                (ConstRef::InherentConst(decided), None, decided.delivered())
-            }
-            ConstRef::Const(_) => return Some(cref),
-        };
+        let decided = self
+            .env
+            .decided_const_ref(self.env.choice_frames.current(), cref, &mut Vec::new())
+            .ok()?;
         // Pending evidence, or a slot a written constant reads unsupplied
         // under the frames around it (`seed_written_frames`): not known here.
-        let unknown = |choice: Choice<'db>| {
-            choice.evidence_param().is_some() || choice == Choice::Slot(SlotRef::Unsupplied)
-        };
-        let pending = own.is_some_and(unknown)
-            || delivered.is_some_and(|list| list.items(self.db).iter().any(|(_, c)| unknown(*c)));
-        (!pending).then_some(decided)
+        (!decided.has_pending_slot(self.db)).then_some(decided)
     }
 
     /// Whether `expr` is built from literals and const items only, so the base
@@ -1735,7 +1811,7 @@ impl<'db> TyChecker<'db> {
             });
             self.env.set_binding_choice(pat, Err(SourceError::Reported));
             return;
-        }
+        };
         if evidence_goal(self.db, self.env.scope(), ty).is_none() {
             return;
         }
@@ -1886,33 +1962,62 @@ impl<'db> TyChecker<'db> {
                 {
                     Some(choice) if self.choice_answers(choice, goal) => Ok(choice),
                     Some(_) => Err("the opened implementation does not prove the requested goal"),
-                    None if slot.args(self.db).iter().any(|ty| ty.has_param(self.db)) => {
-                        Err("a generic goal can be proved only under a `with` that opens it")
-                    }
                     // Proved through a condition on an opened slot, or by a
                     // proof that cannot be followed: refused as the call form
                     // of the same goal is.
-                    None => match self.env.reads_opened_condition(
-                        self.env.choice_frames.current(),
-                        [goal],
-                        None,
-                    ) {
-                        Some(refusal) => {
-                            self.push_diag(BodyDiag::ObligationOpening {
-                                primary: expr.span(self.body()).into(),
-                                reason: match refusal {
-                                    ChoiceRefusal::OpenedCondition => {
-                                        "the goal is proved through an implementation with a condition on a slot opened here; conditional implementations under `with` are not supported yet"
-                                    }
-                                    _ => {
-                                        "the goal's proof cannot be followed to one implementation while a slot is opened here, so it is not known to avoid that slot; this is not supported yet"
-                                    }
-                                },
-                            });
-                            return false;
+                    None => {
+                        let frame = self.env.choice_frames.current();
+                        let mut undecided = Vec::new();
+                        let mut active = rustc_hash::FxHashSet::default();
+                        let choice = match self.env.ordinary_choice(
+                            frame,
+                            goal,
+                            0,
+                            Some(&mut undecided),
+                            &mut active,
+                        ) {
+                            Some(Choice::Known(known)) => KnownChoice::prove(
+                                self.db,
+                                self.env.frame_proof_context(frame),
+                                known.implementation(),
+                                goal,
+                            )
+                            .map(|proved| {
+                                Choice::Known(proved.with_bounds(self.db, known.bounds()))
+                            })
+                            .map_err(|_| {
+                                undecided.push(goal);
+                                "the requested trait goal was not proved"
+                            }),
+                            _ if slot.args(self.db).iter().any(|ty| ty.has_param(self.db)) => {
+                                undecided.push(goal);
+                                Err(
+                                    "a generic goal can be proved only under a `with` that opens it",
+                                )
+                            }
+                            _ => {
+                                undecided.push(goal);
+                                Err("the requested trait goal was not proved")
+                            }
+                        };
+                        match self.env.reads_opened_condition(frame, undecided, None) {
+                            Some(refusal) => {
+                                self.push_diag(BodyDiag::ObligationOpening {
+                                    primary: expr.span(self.body()).into(),
+                                    reason: match refusal {
+                                        ChoiceRefusal::OpenedCondition => {
+                                            "the goal is proved through an implementation with a condition on a slot opened here; conditional implementations under `with` are not supported yet"
+                                        }
+                                        _ => {
+                                            "the goal's proof cannot be followed to one implementation while a slot is opened here, so it is not known to avoid that slot; this is not supported yet"
+                                        }
+                                    },
+                                });
+                                return false;
+                            }
+                            None => choice,
                         }
-                        None => self.ordinary_choice(goal).map(Choice::Known),
-                    },
+                    }
                 }
             }
         };
@@ -1948,33 +2053,71 @@ impl<'db> TyChecker<'db> {
             }
         }
     }
+}
 
-    fn ordinary_choice(&self, goal: TraitInstId<'db>) -> Result<KnownChoice<'db>, &'static str> {
-        let cx = self.env.proof_context();
-        let Selection::Unique(resolved) = resolve_trait_impl_instance(
-            self.db,
-            cx,
-            goal,
-            crate::analysis::ty::trait_choice::OrdinarySelection::no_recorded_choice(),
-        ) else {
-            return Err("the requested trait goal was not proved");
-        };
-        let ImplementorOrigin::Hir(implementation) = resolved.selected().origin(self.db) else {
-            return Err("the requested trait goal has no authored implementation");
-        };
-        let mut active = rustc_hash::FxHashSet::default();
-        let bounds = self.env.impl_bound_choices(
-            None,
-            implementation,
-            resolved.impl_args(self.db),
-            0,
-            None,
-            &mut active,
-        );
-        KnownChoice::prove(self.db, cx, implementation, goal)
-            .map(|known| known.with_bounds(self.db, bounds))
-            .map_err(|_| "the implementation's conditions were not admitted")
+/// Lowers and completes the generic arguments written on a named
+/// implementation path `Name<...>`, then instantiates its trait goal header.
+pub(super) fn instantiate_named_impl_header<'db>(
+    db: &'db dyn HirAnalysisDb,
+    implementation: crate::hir_def::ImplTrait<'db>,
+    given_args: crate::hir_def::GenericArgListId<'db>,
+    scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    mut map_arg: impl FnMut(TyId<'db>) -> Option<TyId<'db>>,
+) -> Result<(TraitInstId<'db>, Vec<TyId<'db>>), Option<&'static str>> {
+    let Some(candidate) = lower_impl_trait(db, implementation) else {
+        return Err(Some("the named implementation declaration is invalid"));
+    };
+    let params = candidate.params(db);
+    if params.is_empty() && !given_args.is_empty(db) {
+        return Err(Some("this named implementation takes no generic arguments"));
     }
+    let minter = LoweringContext::new();
+    let lowered_args = crate::analysis::ty::ty_lower::lower_generic_arg_list(
+        db,
+        given_args,
+        scope,
+        assumptions,
+        &minter,
+    );
+    let param_set =
+        crate::analysis::ty::ty_lower::collect_generic_params(db, implementation.into());
+    let Ok(impl_args) = param_set.complete_args(
+        db,
+        &[],
+        &lowered_args,
+        crate::analysis::ty::generic_defaults::DefaultApplication::Evaluate(&minter),
+    ) else {
+        return Err(Some(
+            "the generic arguments do not match the named implementation's parameters",
+        ));
+    };
+    if impl_args.len() != params.len() {
+        return Err(Some(if given_args.is_empty(db) {
+            "a generic named implementation cannot be opened by name without generic arguments"
+        } else {
+            "the generic arguments do not match the named implementation's parameters"
+        }));
+    }
+    let mut normalized_args = Vec::with_capacity(impl_args.len());
+    for arg in impl_args {
+        normalized_args.push(map_arg(arg).ok_or(None)?);
+    }
+    let instantiated = crate::analysis::ty::binder::Binder::bind(
+        crate::hir_def::GenericParamOwner::ImplTrait(implementation),
+        slot_goal(db, candidate.trait_inst(db)),
+    )
+    .instantiate(db, &normalized_args);
+    let goal = slot_goal(
+        db,
+        crate::analysis::ty::trait_resolution::normalize_trait_inst_preserving_validity(
+            db,
+            instantiated,
+            scope,
+            assumptions,
+        ),
+    );
+    Ok((goal, normalized_args))
 }
 
 fn evidence_choice<'db>(
@@ -1983,7 +2126,14 @@ fn evidence_choice<'db>(
 ) -> Result<Choice<'db>, SourceError> {
     match value {
         Some(EvalOutcome::Ready(value)) => match value.value(db) {
-            SemConstValue::Evidence { choice, .. } => Ok(Choice::Known(*choice)),
+            SemConstValue::Evidence { choice, .. } => {
+                if Choice::Known(*choice).has_slot(db) {
+                    return Err(SourceError::Unsupported(
+                        "a compile-time call that reads a choice not known here is not supported",
+                    ));
+                }
+                Ok(Choice::Known(*choice))
+            }
             _ => Err(SourceError::Unsupported(
                 "the evidence source did not produce an evidence value",
             )),
@@ -2019,6 +2169,21 @@ impl<'db> TyCheckEnv<'db> {
             return None;
         }
         self.choice_frames.lookup(frame, self.normalized_slot(inst))
+    }
+
+    /// Whether a type's or constant's read of `slot` depends on a choice
+    /// `frame` opened: either `slot` itself is opened in `frame`, or its
+    /// proof in `frame` reads a condition on a slot `frame` opened.
+    pub(super) fn frame_reaches_slot(
+        &self,
+        frame: Option<FrameId>,
+        slot: TraitInstId<'db>,
+    ) -> bool {
+        self.frame_choice(frame, slot).is_some()
+            || matches!(
+                self.conditions_read_frame(frame, slot),
+                ProofReads::Condition
+            )
     }
 
     /// Whether `frame` opens a slot of `trait_`.
@@ -2085,14 +2250,7 @@ impl<'db> TyCheckEnv<'db> {
         if let super::BodyOwner::Func(func, _) = self.owner() {
             return own_slots(db, func);
         }
-        let mut own = Vec::new();
-        for bound in self.base_assumptions().list(db) {
-            let bound = slot_goal(db, *bound);
-            if bound.args(db).iter().any(|ty| ty.has_param(db)) && !own.contains(&bound) {
-                own.push(bound);
-            }
-        }
-        own
+        crate::analysis::ty::trait_choice::slots_of(db, self.base_assumptions())
     }
 
     /// `inst`'s slot as frames key it in this body (`SlotKey`).
@@ -2119,6 +2277,48 @@ impl<'db> TyCheckEnv<'db> {
         self.written_unknown = frames.unknown();
     }
 
+    /// The opened goal is a premise of the block when ordinary selection
+    /// cannot prove it: a generic goal, or one with only named implementations.
+    /// The evidence or the named implementation is its proof.
+    pub(super) fn add_premise_if_needed(&mut self, goal: TraitInstId<'db>) {
+        let db = self.db();
+        let generic = goal.args(db).iter().any(|ty| ty.has_param(db));
+        if generic
+            || !matches!(
+                resolve_trait_impl_instance(
+                    db,
+                    self.proof_context(),
+                    goal,
+                    crate::analysis::ty::trait_choice::OrdinarySelection::decides_nothing(),
+                ),
+                Selection::Unique(_)
+            )
+        {
+            self.add_opened_premise(goal);
+        }
+    }
+
+    /// Install a choice for `goal`'s normalized slot into `choice_frames` and
+    /// register `goal` as an opened premise when needed.
+    pub(super) fn install_frame_choice(
+        &mut self,
+        header: Option<FrameId>,
+        goal: TraitInstId<'db>,
+        choice: Choice<'db>,
+        seed: bool,
+    ) -> Result<(), &'static str> {
+        self.add_premise_if_needed(goal);
+        let slot = self.normalized_slot(goal);
+        if seed {
+            self.choice_frames.seed(slot, choice);
+            Ok(())
+        } else {
+            self.choice_frames
+                .push(header, slot, choice)
+                .map_err(|_| "one `with` header gives the same trait slot twice")
+        }
+    }
+
     /// A named implementation's own body sees itself for its own slot, for
     /// every use of that slot in the body, `Self` forms, receiver calls and
     /// concrete paths alike. A trait's default body run for it reads it
@@ -2129,10 +2329,20 @@ impl<'db> TyCheckEnv<'db> {
             return;
         };
         let goal = implementor.trait_inst(db);
-        let slot = self.normalized_slot(goal);
-        self.choice_frames.seed(
-            slot,
-            Choice::Known(KnownChoice::own(db, implementation, goal)),
+        let mut active = rustc_hash::FxHashSet::default();
+        let bounds = self.impl_bound_choices(
+            None,
+            implementation,
+            implementor.params(db),
+            0,
+            None,
+            &mut active,
+        );
+        let _ = self.install_frame_choice(
+            None,
+            goal,
+            Choice::Known(KnownChoice::own(db, implementation, goal).with_bounds(db, bounds)),
+            true,
         );
     }
 
@@ -2223,13 +2433,13 @@ impl<'db> TyCheckEnv<'db> {
         let db = self.db();
         let mut bounds = Vec::new();
         for (bound, at_use) in impl_declared_goals(db, implementation, impl_args) {
-            let choice = match undecided.as_deref_mut() {
-                Some(undecided) => self.decide(frame, at_use).or_else(|| {
-                    undecided.push(at_use);
-                    self.ordinary_choice(None, at_use, depth, None, active)
-                }),
-                None => self.ordinary_choice(None, at_use, depth, None, active),
-            };
+            let choice =
+                self.ordinary_choice(frame, at_use, depth, undecided.as_deref_mut(), active);
+            if choice.is_none()
+                && let Some(undecided) = undecided.as_deref_mut()
+            {
+                undecided.push(at_use);
+            }
             if let Some(choice) = choice {
                 let item = (Delivery::Bound(bound), choice);
                 if !bounds.contains(&item) {
@@ -2238,6 +2448,46 @@ impl<'db> TyCheckEnv<'db> {
             }
         }
         (!bounds.is_empty()).then(|| DeliveryList::new(db, bounds))
+    }
+
+    /// Decides a single declared bound (`bound`, instantiated at the use as
+    /// `at_use`) for a call or associated constant use.
+    fn decide_bound_at_use(
+        &self,
+        frame: Option<FrameId>,
+        bound: TraitInstId<'db>,
+        at_use: TraitInstId<'db>,
+        own_slot: Option<TraitInstId<'db>>,
+        own: Option<Choice<'db>>,
+        nominal: bool,
+        candidate: bool,
+        undecided: &mut Vec<TraitInstId<'db>>,
+    ) -> Option<Choice<'db>> {
+        if Some(at_use) == own_slot {
+            return own;
+        }
+        let db = self.db();
+        let choice = match own {
+            Some(Choice::Known(known)) if !nominal && !candidate => {
+                known.bound_choice_at_use(db, bound, at_use).or_else(|| {
+                    let mut active = rustc_hash::FxHashSet::default();
+                    self.ordinary_choice(frame, at_use, 0, Some(undecided), &mut active)
+                })
+            }
+            _ if candidate => self.decide(frame, at_use).or_else(|| {
+                undecided.push(at_use);
+                let mut active = rustc_hash::FxHashSet::default();
+                self.ordinary_choice(None, at_use, 0, None, &mut active)
+            }),
+            _ => {
+                let mut active = rustc_hash::FxHashSet::default();
+                self.ordinary_choice(frame, at_use, 0, Some(undecided), &mut active)
+            }
+        };
+        if choice.is_none() {
+            undecided.push(at_use);
+        }
+        choice
     }
 
     /// The decisions a direct call checked in `frame` records: its trait
@@ -2271,12 +2521,18 @@ impl<'db> TyCheckEnv<'db> {
             None => (func, callable.generic_args(), false),
         };
         let mut decided = Vec::new();
+        let mut undecided_bounds = Vec::new();
         for (bound, at_call) in declared_goals(db, body, body_args) {
-            let choice = if Some(at_call) == own_slot {
-                own
-            } else {
-                self.decide(frame, at_call)
-            };
+            let choice = self.decide_bound_at_use(
+                frame,
+                bound,
+                at_call,
+                own_slot,
+                own,
+                !by_name,
+                false,
+                &mut undecided_bounds,
+            );
             decided.push((bound, at_call, choice));
         }
         // A body chosen later is one of the trait's implementations of the
@@ -2310,22 +2566,13 @@ impl<'db> TyCheckEnv<'db> {
         // for it receives its implementation's bounds here.
         let undecided = undecided_own
             .into_iter()
-            .chain(
-                decided
-                    .iter()
-                    .filter(|(_, _, choice)| choice.is_none())
-                    .map(|(_, goal, _)| *goal),
-            )
+            .chain(undecided_bounds)
             .chain(undecided_candidates);
         if let Some(refusal) = self.reads_opened_condition(frame, undecided, own_slot) {
             return Err(refusal);
         }
         let mut delivered: Vec<(Delivery<'db>, Choice<'db>)> = Vec::new();
-        for (bound, at_call, choice) in decided {
-            let choice = choice.or_else(|| {
-                let mut active = rustc_hash::FxHashSet::default();
-                self.ordinary_choice(None, at_call, 0, None, &mut active)
-            });
+        for (bound, _at_call, choice) in decided {
             let Some(choice) = choice else {
                 continue;
             };
@@ -2438,6 +2685,9 @@ impl<'db> TyCheckEnv<'db> {
     /// runs in `frame`, whose opened goals are premises there as they were
     /// while the block was checked (`add_premise_if_needed`).
     fn walk_conditions(&self, frame: FrameId, goal: TraitInstId<'db>) -> ProofReads {
+        if self.frame_choice(Some(frame), goal).is_some() {
+            return ProofReads::Condition;
+        }
         let db = self.db();
         let mut premises = self.assumptions().list(db).to_vec();
         for opened in self.choice_frames.opened(Some(frame)) {
@@ -2496,7 +2746,7 @@ impl<'db> TyCheckEnv<'db> {
         if has_frames(frame)
             && call_slot_reads(db, &callable)
                 .into_iter()
-                .any(|slot| self.frame_choice(frame, slot).is_some())
+                .any(|slot| self.frame_reaches_slot(frame, slot))
         {
             refusals.push(ChoiceRefusal::DependentType);
         }
@@ -2515,7 +2765,33 @@ impl<'db> TyCheckEnv<'db> {
             delivered.extend(decided);
             callable.set_delivered(delivered);
         }
+        let solve_cx = self.proof_context();
+        callable.record_evidence(db, solve_cx);
+        callable.record_bound_evidence(db, solve_cx);
         (callable, refusals)
+    }
+
+    /// One constant reference's decisions and lowered evidence witnesses,
+    /// recorded where it is written (`frame`).
+    pub(super) fn decided_const_ref(
+        &self,
+        frame: Option<FrameId>,
+        cref: ConstRef<'db>,
+        reached: &mut Vec<TraitInstId<'db>>,
+    ) -> Result<ConstRef<'db>, ChoiceRefusal> {
+        let db = self.db();
+        let mut decided = match cref {
+            ConstRef::TraitConst { use_ } => self
+                .trait_const_decisions(frame, use_, reached)
+                .map(ConstRef::trait_const)?,
+            ConstRef::InherentConst(use_) => self
+                .inherent_const_decisions(frame, use_, reached)
+                .map(ConstRef::InherentConst)?,
+            ConstRef::Const(_) => return Ok(cref),
+        };
+        decided.record_evidence(db);
+        decided.record_bound_evidence(db);
+        Ok(decided)
     }
 
     /// Record each trait use's decision, each direct call's deliveries, and
@@ -2615,16 +2891,12 @@ impl<'db> TyCheckEnv<'db> {
             let mut captured = Vec::new();
             let mut undecided = Vec::new();
             for goal in self.call_uses(&callable) {
-                let choice = if Some(slot_goal(db, goal)) == own_slot {
-                    let mut active = rustc_hash::FxHashSet::default();
-                    self.ordinary_choice(frame, goal, 0, Some(&mut undecided), &mut active)
-                } else {
-                    self.decide(frame, goal).or_else(|| {
-                        undecided.push(goal);
-                        let mut active = rustc_hash::FxHashSet::default();
-                        self.ordinary_choice(None, goal, 0, None, &mut active)
-                    })
-                };
+                let mut active = rustc_hash::FxHashSet::default();
+                let choice =
+                    self.ordinary_choice(frame, goal, 0, Some(&mut undecided), &mut active);
+                if choice.is_none() {
+                    undecided.push(goal);
+                }
                 if let Some(choice) = choice {
                     choice.for_each_choice(db, &mut |item| {
                         if !item.is_ordinary() && !captured.contains(&item) {
@@ -2657,23 +2929,10 @@ impl<'db> TyCheckEnv<'db> {
         for expr in exprs {
             let frame = self.use_frames[expr];
             let mut reached = Vec::new();
-            let decided = match self.const_refs[expr] {
-                Some(ConstRef::TraitConst {
-                    use_,
-                    evidence,
-                    bound_evidence,
-                }) => self
-                    .trait_const_decisions(frame, use_, &mut reached)
-                    .map(|use_| ConstRef::TraitConst {
-                        use_,
-                        evidence,
-                        bound_evidence,
-                    }),
-                Some(ConstRef::InherentConst(use_)) => self
-                    .inherent_const_decisions(frame, use_, &mut reached)
-                    .map(ConstRef::InherentConst),
-                _ => continue,
+            let Some(cref) = self.const_refs[expr] else {
+                continue;
             };
+            let decided = self.decided_const_ref(frame, cref, &mut reached);
             for goal in reached {
                 if !self.const_reaches.contains(&goal) {
                     self.const_reaches.push(goal);
@@ -2681,7 +2940,13 @@ impl<'db> TyCheckEnv<'db> {
             }
             match decided {
                 Ok(decided) => self.const_refs[expr] = Some(decided),
-                Err(refusal) => self.choice_refusals.push((expr, refusal)),
+                Err(refusal) => {
+                    if let Some(cref) = &mut self.const_refs[expr] {
+                        cref.record_evidence(db);
+                        cref.record_bound_evidence(db);
+                    }
+                    self.choice_refusals.push((expr, refusal));
+                }
             }
         }
         // A `with` operand taken as an effect value because its type was not
@@ -2886,9 +3151,15 @@ impl<'db> TyCheckEnv<'db> {
         let use_ = use_.with_choice(own);
         let own_decision = own.map(|choice| (own_slot, choice));
         let items = match use_.body_that_runs(db) {
-            Some(runs) => {
-                self.body_decisions(frame, runs, own_decision, false, &mut undecided, reached)?
-            }
+            Some(runs) => self.body_decisions(
+                frame,
+                runs,
+                own_decision,
+                false,
+                false,
+                &mut undecided,
+                reached,
+            )?,
             // A body chosen later: the trait's default body declares the
             // slots a constant's declaration has (its `Self` and supertraits),
             // reached by name (`DeliveryList::to_body`), and each
@@ -2901,6 +3172,7 @@ impl<'db> TyCheckEnv<'db> {
                         default,
                         own_decision,
                         true,
+                        false,
                         &mut undecided,
                         reached,
                     )?,
@@ -2922,6 +3194,7 @@ impl<'db> TyCheckEnv<'db> {
                         candidate,
                         own_decision,
                         false,
+                        true,
                         &mut undecided,
                         reached,
                     )? {
@@ -2976,6 +3249,7 @@ impl<'db> TyCheckEnv<'db> {
             (body, ty, subst),
             None,
             false,
+            false,
             &mut undecided,
             reached,
         )?;
@@ -2991,6 +3265,7 @@ impl<'db> TyCheckEnv<'db> {
     /// or evidence choice (refused as a call into a function's is); one
     /// that passes the user's own bound on is added to `reached`, which the
     /// user owes its callers (`own_type_reads`).
+    #[allow(clippy::too_many_arguments)]
     fn body_decisions(
         &self,
         frame: Option<FrameId>,
@@ -3001,47 +3276,42 @@ impl<'db> TyCheckEnv<'db> {
         ),
         own: Option<(TraitInstId<'db>, Choice<'db>)>,
         nominal: bool,
+        candidate: bool,
         undecided: &mut Vec<TraitInstId<'db>>,
         reached: &mut Vec<TraitInstId<'db>>,
     ) -> Result<Vec<(Delivery<'db>, Choice<'db>)>, ChoiceRefusal> {
         let db = self.db();
         let mut items = Vec::new();
         for (bound, at_use) in const_declared_goals(db, body, &subst) {
-            let decided = match own {
-                Some((slot, choice)) if at_use == slot => Some(choice),
-                _ => self.decide(frame, at_use),
+            let Some(choice) = self.decide_bound_at_use(
+                frame,
+                bound,
+                at_use,
+                own.map(|(slot, _)| slot),
+                own.map(|(_, choice)| choice),
+                nominal,
+                candidate,
+                undecided,
+            ) else {
+                continue;
             };
-            let choice = match decided {
-                Some(choice) => {
-                    if const_type_reads(db, body, ty).contains(&bound) {
-                        let mut dependent = false;
-                        choice.for_each_choice(db, &mut |item| match item {
-                            Choice::Slot(SlotRef::Bound(goal)) => {
-                                if !reached.contains(&goal) {
-                                    reached.push(goal);
-                                }
-                            }
-                            // Refused where it is read (`written_frames`).
-                            Choice::Slot(SlotRef::Unsupplied) => {}
-                            Choice::Known(known) if known.is_ordinary() => {}
-                            _ => dependent = true,
-                        });
-                        if dependent {
-                            return Err(ChoiceRefusal::DependentType);
+            if const_type_reads(db, body, ty).contains(&bound) {
+                let mut dependent = false;
+                choice.for_each_choice(db, &mut |item| match item {
+                    Choice::Slot(SlotRef::Bound(goal)) => {
+                        if !reached.contains(&goal) {
+                            reached.push(goal);
                         }
                     }
-                    choice
+                    // Refused where it is read (`written_frames`).
+                    Choice::Slot(SlotRef::Unsupplied) => {}
+                    Choice::Known(known) if known.is_ordinary() => {}
+                    _ => dependent = true,
+                });
+                if dependent {
+                    return Err(ChoiceRefusal::DependentType);
                 }
-                None => {
-                    undecided.push(at_use);
-                    let mut active = rustc_hash::FxHashSet::default();
-                    let Some(choice) = self.ordinary_choice(None, at_use, 0, None, &mut active)
-                    else {
-                        continue;
-                    };
-                    choice
-                }
-            };
+            }
             let delivery = if nominal {
                 Delivery::Nominal(bound)
             } else {
@@ -3443,16 +3713,28 @@ impl<'db> Callable<'db> {
 }
 
 impl<'db> super::ConstRef<'db> {
+    /// Whether this constant reference's own choice or delivered bound choices
+    /// wait on an evidence parameter or an unsupplied frame slot.
+    pub(crate) fn has_pending_slot(self, db: &'db dyn HirAnalysisDb) -> bool {
+        let (own, delivered) = match self {
+            super::ConstRef::TraitConst { use_ } => (use_.choice(), use_.delivered()),
+            super::ConstRef::InherentConst(use_) => (None, use_.delivered()),
+            super::ConstRef::Const(_) => return false,
+        };
+        own.is_some_and(|choice| choice.has_pending_slot(db))
+            || delivered.is_some_and(|list| {
+                list.items(db)
+                    .iter()
+                    .any(|(_, choice)| choice.has_pending_slot(db))
+            })
+    }
+
     /// Proves, in the use's context, the bounds the constant's value body
     /// declares, instantiated for the use, as
     /// `declared_bound_evidence_with_deliveries` records them.
     pub(crate) fn record_bound_evidence(&mut self, db: &'db dyn HirAnalysisDb) {
         match self {
-            super::ConstRef::TraitConst {
-                use_,
-                bound_evidence,
-                ..
-            } => {
+            super::ConstRef::TraitConst { use_ } => {
                 let trait_ = use_.inst().def(db);
                 let (Some(body), Ok(subst)) = (
                     trait_
@@ -3493,7 +3775,6 @@ impl<'db> super::ConstRef<'db> {
                         &[],
                     ),
                 );
-                *bound_evidence = ev;
                 *use_ = use_.with_bound_evidence(ev);
             }
             super::ConstRef::InherentConst(use_) => {
