@@ -48,6 +48,7 @@ module.exports = grammar({
   ],
 
   conflicts: $ => [
+    [$._pattern_path, $.path],
     [$.where_clause, $._expression, $._condition_atom_no_let],
     [$.record_field, $.record_pattern_field],
     [$.where_clause, $._condition_atom_no_let],
