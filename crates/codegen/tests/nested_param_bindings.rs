@@ -83,7 +83,7 @@ fn generic_nested_controls_preserve_private_tails_and_resolve_uniform_offsets() 
             wasmtime::Val::I32(index as i32),
             wasmtime::Val::F32(3.0f32.to_bits()),
         ];
-        args.extend(values.iter().copied());
+        args.extend(values.iter().cloned());
         let mut actual = vec![wasmtime::Val::F32(0); initial.len()];
         transition.call(&mut store, &args, &mut actual).unwrap();
         let mut expected = initial;
@@ -266,7 +266,10 @@ fn typed_update_does_not_grant_access_to_private_nested_fields() {
         .unwrap()
         .root_mod(&db);
     let diagnostics = db.run_on_top_mod(top).format_diags(&db);
-    assert!(diagnostics.contains("private"), "{diagnostics}");
+    assert!(
+        diagnostics.contains("error[2-0003]") && diagnostics.contains("`head` is not visible"),
+        "{diagnostics}"
+    );
 }
 
 #[test]
