@@ -1,0 +1,47 @@
+use core::marker::Copy
+use std::webgpu::{StorageBuffer, GpuProgram, WebGpuBackend, ComputeSurface,
+    ComputeInvocation, Workgroup, FixedDispatch, FragmentSurface}
+
+struct Pair<T> { left: T, right: T }
+impl<T: Copy> Copy for Pair<T> {}
+struct Block<T> { first: Pair<T>, second: Pair<T> }
+impl<T: Copy> Copy for Block<T> {}
+struct Packet<T, U> { body: T, tail: U }
+impl<T: Copy, U: Copy> Copy for Packet<T, U> {}
+
+struct Projection { origin: Pair<Block<f32>>, span: f32, resolution: f32 }
+impl Copy for Projection {}
+struct Snapshot { projection: Projection, counts: Block<u32>, weights: Block<f32> }
+impl Copy for Snapshot {}
+type Extended = Packet<Snapshot, Block<f32>>
+type Anchor = Packet<Pair<Block<f32>>, Pair<u32>>
+
+fn copy<T, const N: usize>(from: StorageBuffer<T, N>, to: StorageBuffer<T, N>, index: u32) {
+    let value = from.load(index: index)
+    to.store(index: index, value: value)
+}
+
+actor RecursiveStorage uses (GpuProgram<WebGpuBackend>) {
+    plain: StorageBuffer<Snapshot, 2>,
+    plain_copy: StorageBuffer<Snapshot, 2>,
+    extended: StorageBuffer<Extended, 2>,
+    extended_copy: StorageBuffer<Extended, 2>,
+    anchor: StorageBuffer<Anchor, 2>,
+    anchor_copy: StorageBuffer<Anchor, 2>,
+
+    fn transfer(self, lane: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<2, 1, 1>, FixedDispatch<1, 1, 1>>)
+    {
+        copy(from: self.plain, to: self.plain_copy, index: lane.global.x)
+        copy(from: self.extended, to: self.extended_copy, index: lane.global.x)
+        copy(from: self.anchor, to: self.anchor_copy, index: lane.global.x)
+    }
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        // Read nested leaves as values as well as transporting whole records.
+        let sample = self.plain_copy.load(index: 0)
+        if sample.projection.origin.left.first.left == sample.projection.span {
+            1
+        } else { 0 }
+    }
+}

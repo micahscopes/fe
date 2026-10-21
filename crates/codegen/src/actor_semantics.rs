@@ -39,9 +39,10 @@ pub(crate) struct SemanticGpuResource<'db> {
     pub(crate) has_typed_policy: bool,
 }
 
-/// Semantic element discovery shared by resource consumers. This deliberately
-/// does not choose a physical layout or decide whether signed storage is legal
-/// in a browser interface.
+/// Semantic storage leaves shared by resource consumers. Records flatten in
+/// declaration-order DFS after generic field substitution. Their names are
+/// unambiguous dotted source paths; an existing flat record keeps its names.
+/// This does not decide whether signed storage is legal in a browser interface.
 pub(crate) enum SemanticResourceElement<'db> {
     Scalar(ResourceScalar),
     Record {
@@ -67,7 +68,11 @@ pub(crate) fn resource_scalar(
     }
 }
 
-pub(crate) enum ResourceElementError { NotRecord, EmptyOrInconsistent }
+pub(crate) enum ResourceElementError {
+    NotRecord,
+    EmptyOrInconsistent,
+    Field { path: String, reason: &'static str },
+}
 
 #[cfg(test)]
 mod resource_element_tests {
@@ -101,17 +106,106 @@ pub fn identity(value: SignedPair) -> SignedPair { value }
         assert!(matches!(resource_scalar(&db, fields[0].1), Some(ResourceScalar::I32)));
         assert!(matches!(resource_scalar(&db, fields[1].1), Some(ResourceScalar::F32)));
     }
+
+    #[test]
+    fn nested_generic_records_use_instantiated_paths_not_nominal_cycle_detection() {
+        let mut db = DriverDataBase::default();
+        let url = url::Url::parse("file:///nested_resource_element.fe").unwrap();
+        db.workspace().touch(
+            &mut db,
+            url.clone(),
+            Some(
+                r#"
+struct Link<T> { value: T, tag: u32 }
+struct Pair<T> { first: T, second: T }
+type Nested = Pair<Link<Link<f32>>>
+pub fn identity(value: Nested) -> Nested { value }
+"#
+                .to_owned(),
+            ),
+        );
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+        let function = top
+            .ingot(&db)
+            .all_funcs(&db)
+            .iter()
+            .copied()
+            .find(|f| {
+                f.name(&db)
+                    .to_opt()
+                    .is_some_and(|n| n.data(&db) == "identity")
+            })
+            .unwrap();
+        let Ok(SemanticResourceElement::Record { fields, .. }) =
+            semantic_resource_element(&db, function.return_ty(&db))
+        else {
+            panic!("nested generic aliases must have a finite leaf plan");
+        };
+        assert_eq!(
+            fields
+                .iter()
+                .map(|(name, _)| name.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "first.value.value",
+                "first.value.tag",
+                "first.tag",
+                "second.value.value",
+                "second.value.tag",
+                "second.tag"
+            ]
+        );
+        for (index, (_, ty)) in fields.into_iter().enumerate() {
+            if index % 3 == 0 {
+                assert!(matches!(
+                    resource_scalar(&db, ty),
+                    Some(ResourceScalar::F32)
+                ));
+            } else {
+                assert!(matches!(
+                    resource_scalar(&db, ty),
+                    Some(ResourceScalar::U32)
+                ));
+            }
+        }
+    }
 }
 
 pub(crate) fn semantic_resource_element<'db>(
     db: &'db dyn hir::analysis::HirAnalysisDb,
     ty: TyId<'db>,
 ) -> Result<SemanticResourceElement<'db>, ResourceElementError> {
-    use hir::analysis::ty::adt_def::AdtRef;
-    use hir::hir_def::FieldParent;
     let ty = ty.as_view(db).unwrap_or(ty);
     if let Some(scalar) = resource_scalar(db, ty) {
         return Ok(SemanticResourceElement::Scalar(scalar));
+    }
+    let (name, _) = resource_record_fields(db, ty)?;
+    let mut fields = Vec::new();
+    append_resource_record_leaves(
+        db,
+        ty,
+        &mut Vec::new(),
+        &mut std::collections::HashSet::new(),
+        &mut fields,
+    )?;
+    Ok(SemanticResourceElement::Record { name, fields })
+}
+
+fn resource_record_fields<'db>(
+    db: &'db dyn hir::analysis::HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Result<(Option<String>, Vec<(Option<String>, TyId<'db>)>), ResourceElementError> {
+    use hir::analysis::ty::adt_def::AdtRef;
+    use hir::hir_def::FieldParent;
+    // Resource handles are not ordinary value records, even when their opaque
+    // source representation happens to contain a u32 binding number.
+    if ty.as_view(db).is_some()
+        || nominal_attrs(db, ty).is_some_and(|attrs| attrs.gpu_resource(db).is_some())
+    {
+        return Err(ResourceElementError::NotRecord);
     }
     let Some(adt) = ty.adt_def(db) else {
         return Err(ResourceElementError::NotRecord);
@@ -124,12 +218,55 @@ pub(crate) fn semantic_resource_element<'db>(
     if declared.is_empty() || declared.len() != instantiated.len() {
         return Err(ResourceElementError::EmptyOrInconsistent);
     }
-    Ok(SemanticResourceElement::Record {
-        name: record.name(db).to_opt().map(|name| name.data(db).to_string()),
-        fields: declared.into_iter().zip(instantiated).map(|(field, ty)| {
-            (field.name(db).map(|name| name.data(db).to_string()), ty)
-        }).collect(),
-    })
+    Ok((
+        record
+            .name(db)
+            .to_opt()
+            .map(|name| name.data(db).to_string()),
+        declared
+            .into_iter()
+            .zip(instantiated)
+            .map(|(field, ty)| (field.name(db).map(|name| name.data(db).to_string()), ty))
+            .collect(),
+    ))
+}
+
+fn append_resource_record_leaves<'db>(
+    db: &'db dyn hir::analysis::HirAnalysisDb,
+    ty: TyId<'db>,
+    path: &mut Vec<String>,
+    active: &mut std::collections::HashSet<TyId<'db>>,
+    leaves: &mut Vec<(Option<String>, TyId<'db>)>,
+) -> Result<(), ResourceElementError> {
+    let invalid = |path: &[String], reason| ResourceElementError::Field {
+        path: path.join("."),
+        reason,
+    };
+    if ty.as_view(db).is_some() {
+        return Err(invalid(path, "borrowed storage fields are not POD values"));
+    }
+    if resource_scalar(db, ty).is_some() {
+        leaves.push((Some(path.join(".")), ty));
+        return Ok(());
+    }
+    if !active.insert(ty) {
+        return Err(invalid(
+            path,
+            "recursive storage records have no finite POD layout",
+        ));
+    }
+    let (_, fields) = resource_record_fields(db, ty).map_err(|error| invalid(path, match error {
+        ResourceElementError::EmptyOrInconsistent => "record has no fields or inconsistent semantic metadata",
+        _ => "expected a u32/i32/f32 scalar or a nested POD record; arrays, enums and resource handles are unsupported",
+    }))?;
+    for (name, field_ty) in fields {
+        let name = name.ok_or_else(|| invalid(path, "POD record fields must be named"))?;
+        path.push(name);
+        append_resource_record_leaves(db, field_ty, path, active, leaves)?;
+        path.pop();
+    }
+    active.remove(&ty);
+    Ok(())
 }
 
 /// Recover one GPU resource's semantic shape after aliases and views have been

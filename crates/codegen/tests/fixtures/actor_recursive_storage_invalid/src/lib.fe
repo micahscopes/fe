@@ -1,0 +1,7 @@
+use std::webgpu::{StorageBuffer, GpuProgram, WebGpuBackend, FragmentSurface}
+struct Payload<T> { value: T }
+struct Invalid { header: u32, payload: Payload<bool> }
+actor InvalidStorage uses (GpuProgram<WebGpuBackend>) {
+    samples: StorageBuffer<Invalid, 1>,
+    fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) { 0 }
+}

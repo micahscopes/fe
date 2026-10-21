@@ -5499,11 +5499,16 @@ where
                         .to_owned(),
                 ResourceElementError::EmptyOrInconsistent =>
                     "GPU storage POD records must contain one or more u32/i32/f32 fields".to_owned(),
+                ResourceElementError::Field { path, reason } =>
+                    format!("GPU storage POD field `{path}`: {reason}"),
             })
         })?;
         let element = match shape {
           SemanticResourceElement::Scalar(scalar) => GpuResourceElementType::Scalar(scalar_type(scalar)),
           SemanticResourceElement::Record { name, fields } => {
+            // The shared semantic plan supplies declaration-order DFS leaves.
+            // Keep the physical resource flat: load/store adapt those same
+            // leaves to/from the authored nested value at the storage boundary.
             let field_tys = fields
                 .iter()
                 .map(|(_, ty)| resource_scalar(self.db, *ty).map(scalar_type))

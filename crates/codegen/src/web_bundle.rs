@@ -1712,6 +1712,9 @@ fn resource_element(
         ResourceElementError::EmptyOrInconsistent => WebBundleError::EntryDerivation(format!(
             "resource `{path}` POD record has no fields or inconsistent semantic metadata"
         )),
+        ResourceElementError::Field { path: field, reason } => WebBundleError::EntryDerivation(format!(
+            "resource `{path}` POD field `{field}` must contain only `u32` or `f32` record leaves: {reason}"
+        )),
     })?;
     let declared = match shape {
         SemanticResourceElement::Scalar(ResourceScalar::U32) => return Ok(WebActorResourceElement::U32),
@@ -1725,8 +1728,8 @@ fn resource_element(
             Some(ResourceScalar::U32) => WebScalarKind::U32,
             Some(ResourceScalar::F32) => WebScalarKind::F32,
             _ => return Err(WebBundleError::EntryDerivation(format!(
-                "resource `{path}` POD field {} must be `u32` or `f32`; signed `i32` storage requires explicit carrier bitcasts",
-                index
+                "resource `{path}` POD field {} (`{}`) must be `u32` or `f32`; signed `i32` storage requires explicit carrier bitcasts",
+                index, name.as_deref().unwrap_or("<unnamed>")
             ))),
         };
         let name = name.ok_or_else(|| WebBundleError::EntryDerivation(format!(
