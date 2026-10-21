@@ -696,6 +696,8 @@ fn tree_sitter_agrees_on_basic_quotation_and_contextual_quote_names() {
         ),
         ("fn ordinary() { let quote = 41\n quote + 1 }", 0),
         ("fn ordinary() { quote(1, 2) }", 0),
+        ("fn ordinary() { let quote = 8\n quote / { 2 } }", 0),
+        ("fn ordinary() { quote(1) / { 2 } }", 0),
         ("fn ordinary() { quote\n { 1 } }", 0),
     ] {
         let (green, errors) = parse_source_file(source, RecoveryMode::NoRecover);
@@ -733,6 +735,9 @@ fn tree_sitter_agrees_on_composed_quotation_and_enum_reflection_examples() {
             "../test_files/quotation/field_type_queries_and_abi_derive_helpers_evaluate_in_provider.fe"
         ),
         "const fn make() { quote(other /* binder */) { impl ${record} { fn test(self) { ${body} } } } }",
+        "const fn make() { quote { fn f() -> Wrapper<$ {ty}> { make() } } }",
+        "const fn make() { quote { fn f() -> Wrapper<$/* comment */{ty}> { make() } } }",
+        "const fn make() { quote { fn f() -> Wrapper<$/* comment\n continued */{ty}> { make() } } }",
     ] {
         let (_, errors) = parse_source_file(source, RecoveryMode::NoRecover);
         assert!(errors.is_empty(), "{errors:?}\n{source}");

@@ -370,7 +370,14 @@ static bool skip_quote_trivia(TSLexer *lexer) {
   for (;;) {
     while (lexer->lookahead == ' ' || lexer->lookahead == '\t' || lexer->lookahead == '\r') advance(lexer);
     if (lexer->lookahead != '/') return lexer->lookahead != '\n';
-    advance_over_comment(lexer);
+    advance(lexer);
+    if (lexer->lookahead == '/') {
+      while (!lexer->eof(lexer) && lexer->lookahead != '\n') advance(lexer);
+      return false;
+    }
+    if (lexer->lookahead != '*') return false; // A division operator is not trivia.
+    advance(lexer);
+    if (!skip_block_comment(lexer)) return false;
   }
 }
 
@@ -538,7 +545,7 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
               continue;
             case '$': {
               advance(lexer);
-              if (lexer->lookahead != '{') goto not_generic;
+              if (!skip_quote_trivia(lexer) || lexer->lookahead != '{') goto not_generic;
               int splice_depth = 1;
               advance(lexer);
               while (splice_depth > 0 && !lexer->eof(lexer)) {
