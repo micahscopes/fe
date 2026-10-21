@@ -714,6 +714,13 @@ fn tree_sitter_agrees_on_basic_quotation_and_contextual_quote_names() {
         let mut count = 0;
         while let Some(node) = pending.pop() {
             count += usize::from(node.kind() == "quote_expression");
+            if node.kind() == "quote" {
+                assert_eq!(
+                    node.utf8_text(source.as_bytes()).unwrap(),
+                    "quote",
+                    "{source}"
+                );
+            }
             let mut cursor = node.walk();
             pending.extend(node.children(&mut cursor));
         }
