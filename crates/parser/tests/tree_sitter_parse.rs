@@ -662,6 +662,7 @@ fn tree_sitter_agrees_on_bounded_native_derive_surface() {
         include_str!("../../../ingots/core/src/derive.fe"),
         "impl Score for Pair with (Fields)\nimpl Score for Pair as Zero with (mod_::Provider)\n",
         "impl Score for Pair with (Provider<u256>)\n",
+        "pub impl Score for Pair as Chosen with (Provider)\n",
         "trait Constraint {}\ntrait Holder<T: Constraint> {}\n",
         "impl Score for Pair as Ordinary where true { fn score() -> usize { 7 } }\n",
     ] {
