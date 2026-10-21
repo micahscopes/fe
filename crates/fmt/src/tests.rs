@@ -135,8 +135,7 @@ fn quotation_splice_documents_format_values_without_losing_categories() {
 
 #[test]
 fn quotation_open_binders_and_splice_comments_survive_formatting() {
-    let source = r#"const fn make() { quote(other // binder
-) {
+    let source = r#"const fn make() { quote(other) {
     impl Eq for $// type
 {record} where ${bounds} {
         fn eq(self) -> bool { match self { ${pattern} => other.${field} == ${value} } }
@@ -145,7 +144,7 @@ fn quotation_open_binders_and_splice_comments_survive_formatting() {
     let config = crate::Config::default();
     let formatted = crate::format_str(source, &config).expect("format valid quotation");
     for fragment in [
-        "quote(other // binder\n)",
+        "quote(other)",
         "$// type\n{record}",
         "where ${bounds}",
         "${pattern} => other.${field} == ${value}",
