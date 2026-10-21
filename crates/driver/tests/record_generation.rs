@@ -1867,6 +1867,18 @@ const fn observe() -> u256 { <Box<u256> as Value>::value() }
         "{error}"
     );
 
+    let record_splice = source.replace("-> ${ty} { 7 }", "-> ${record} { 7 }");
+    let (db, file) = input(&record_splice);
+    let error = prepare_file(&db, file)
+        .err()
+        .expect("record splice must not lose concrete target arguments");
+    assert!(
+        error
+            .cause
+            .contains("record splices from instantiated generic records are not supported yet"),
+        "{error}"
+    );
+
     let scalar = source
         .replace(
             "let ty = field_type(field(record, 0))",
