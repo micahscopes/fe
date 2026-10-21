@@ -705,9 +705,11 @@ impl Param {
     }
 }
 
-/// Public scalar interpretation used by controls. Implementations preserve
-/// all data outside that scalar view. For projected aggregates, the Param's
-/// relative leaf metadata must denote this same f32 value in the uniform ABI.
+/// Public scalar edit interface used by controls. Implementations preserve
+/// unrelated logical state. Reapplying the current scalar value should retain
+/// hidden state; an actual edit may rebuild dependent representation, such as
+/// the precision coefficients of a coordinate. For projected aggregates, the
+/// Param's relative leaf metadata must denote this same f32 value in the uniform ABI.
 /// This interface grants no access to private representation fields.
 pub trait ParamValue {
     fn param_value(self) -> f32
