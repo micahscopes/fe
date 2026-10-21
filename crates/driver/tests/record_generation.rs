@@ -39,7 +39,7 @@ fn explicit_provider_is_evaluated_then_one_output_view_is_admitted() {
     let module = output.top_mod(output_file);
     let function = module
         .all_funcs(&output)
-        .into_iter()
+        .iter()
         .find(|f| {
             f.name(&output)
                 .to_opt()
@@ -448,7 +448,7 @@ struct Pair {
     assert!(output.run_on_top_mod(module).is_empty());
     let function = module
         .all_funcs(&output)
-        .into_iter()
+        .iter()
         .find(|f| {
             f.name(&output)
                 .to_opt()
