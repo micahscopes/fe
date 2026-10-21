@@ -702,3 +702,43 @@ pub struct Pair {
         quoted_attr_err.cause
     );
 }
+
+#[test]
+fn generation_provider_path_trivia_preserves_identity() {
+    for path in ["author :: make", "author:: make", "author ::make"] {
+        let source = SOURCE.replace("author::make", path);
+        let (db, file) = input(&source);
+        let output = prepare_file(&db, file).unwrap().unwrap();
+        let output_file = output
+            .workspace()
+            .get(&output, &file.url(&db).unwrap())
+            .unwrap();
+        let module = output.top_mod(output_file);
+        let function = module
+            .all_funcs(&output)
+            .iter()
+            .find(|function| {
+                function
+                    .name(&output)
+                    .to_opt()
+                    .is_some_and(|name| name.data(&output) == "generated_count")
+            })
+            .copied()
+            .unwrap();
+        let owner = BodyOwner::Func(function, None);
+        let result = eval_body_owner_const(
+            &output,
+            owner,
+            GenericSubst::for_body_owner(&output, owner, vec![]),
+        );
+        let EvalOutcome::Ready(value) = result else {
+            panic!("{path}: {result:?}")
+        };
+        assert!(
+            matches!(value.value(&output), SemConstValue::Scalar {
+            value: SemConstScalar::Int { value }, ..
+        } if value.to_string() == "42"),
+            "{path}"
+        );
+    }
+}
