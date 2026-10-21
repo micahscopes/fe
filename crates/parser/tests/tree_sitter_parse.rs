@@ -698,7 +698,7 @@ fn tree_sitter_agrees_on_basic_quotation_and_contextual_quote_names() {
         ("fn ordinary() { quote(1, 2) }", 0),
         ("fn ordinary() { let quote = 8\n quote / { 2 } }", 0),
         ("fn ordinary() { quote(1) / { 2 } }", 0),
-        ("fn ordinary() { quote\n { 1 } }", 0),
+        ("fn ordinary() { quote\n {} }", 0),
     ] {
         let (green, errors) = parse_source_file(source, RecoveryMode::NoRecover);
         assert!(errors.is_empty(), "{source}: {errors:?}");
@@ -752,5 +752,18 @@ fn tree_sitter_agrees_on_composed_quotation_and_enum_reflection_examples() {
         assert!(errors.is_empty(), "{errors:?}\n{source}");
         let errors = parse_errors(&mut parser, source);
         assert!(errors.is_empty(), "{errors:?}\n{source}");
+        let tree = parser.parse(source, None).unwrap();
+        let mut pending = vec![tree.root_node()];
+        while let Some(node) = pending.pop() {
+            if matches!(node.kind(), "quote" | "<") {
+                assert_eq!(
+                    node.utf8_text(source.as_bytes()).unwrap(),
+                    node.kind(),
+                    "{source}"
+                );
+            }
+            let mut cursor = node.walk();
+            pending.extend(node.children(&mut cursor));
+        }
     }
 }
