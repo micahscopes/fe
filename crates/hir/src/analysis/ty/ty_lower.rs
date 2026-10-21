@@ -2106,12 +2106,15 @@ pub(crate) fn is_unshadowed_core_constraint<'db>(
 ) -> bool {
     use crate::analysis::name_resolution::resolve_type_path_definition;
     let path = PathId::from_str(db, "Constraint");
-    let marker_path = super::corelib::lib_root_path(db, scope, "core")
+    let Some(core_scope) = super::corelib::library_root_scope(db, scope, "core") else {
+        return false;
+    };
+    let marker_path = PathId::from_ident(db, IdentId::make_ingot(db))
         .push_str(db, "obligations")
         .push_str(db, "Constraint");
     match (
         resolve_type_path_definition(db, path, scope),
-        resolve_type_path_definition(db, marker_path, scope),
+        resolve_type_path_definition(db, marker_path, core_scope),
     ) {
         (None, Some(NameResKind::Scope(_))) => true,
         (Some(NameResKind::Scope(found)), Some(NameResKind::Scope(marker))) => found == marker,
