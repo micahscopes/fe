@@ -48,16 +48,9 @@ fn generic_nested_controls_preserve_private_tails_and_resolve_uniform_offsets() 
     let initialize = instance
         .get_func(&mut store, "fe_surface_initialize_v1")
         .unwrap();
-    let replace = instance
-        .get_func(&mut store, "fe_surface_state_replace_v1")
-        .unwrap();
     let transition = instance
-        .get_func(&mut store, "fe_surface_transition_scheduled_v1")
+        .get_func(&mut store, "fe_surface_transition_v2")
         .unwrap();
-    let alloc = instance
-        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
-        .unwrap();
-    let memory = instance.get_memory(&mut store, "memory").unwrap();
     let initial = [
         1.0f32, 0.125, -0.0625, 0.03125, -1.0, 0.125, -0.0625, 0.03125, 2.0, 32.0, 11.0, 13.0,
         19.0, 23.0, 17.0,
@@ -75,23 +68,24 @@ fn generic_nested_controls_preserve_private_tails_and_resolve_uniform_offsets() 
     };
     assert_eq!(bits(&values), initial.map(f32::to_bits));
     for index in [0u32, 1, 2, 3, 4, 255] {
-        replace.call(&mut store, &values, &mut []).unwrap();
-        let ptr = alloc.call(&mut store, (52, 4)).unwrap();
-        let mut event = [0u8; 52];
-        event[32..36].copy_from_slice(&32.0f32.to_le_bytes());
-        event[36..40].copy_from_slice(&32.0f32.to_le_bytes());
-        event[40..44].copy_from_slice(&1u32.to_le_bytes());
-        event[44..48].copy_from_slice(&index.to_le_bytes());
-        event[48..52].copy_from_slice(&3.0f32.to_le_bytes());
-        memory.write(&mut store, ptr as usize, &event).unwrap();
+        let mut args = vec![
+            wasmtime::Val::F32(0),
+            wasmtime::Val::F32(0),
+            wasmtime::Val::F32(0),
+            wasmtime::Val::F32(0),
+            wasmtime::Val::F32(0),
+            wasmtime::Val::I32(0),
+            wasmtime::Val::I32(0),
+            wasmtime::Val::F32(0),
+            wasmtime::Val::F32(32.0f32.to_bits()),
+            wasmtime::Val::F32(32.0f32.to_bits()),
+            wasmtime::Val::I32(1),
+            wasmtime::Val::I32(index as i32),
+            wasmtime::Val::F32(3.0f32.to_bits()),
+        ];
+        args.extend(values.iter().copied());
         let mut actual = vec![wasmtime::Val::F32(0); initial.len()];
-        transition
-            .call(
-                &mut store,
-                &[wasmtime::Val::I32(ptr), wasmtime::Val::I32(1)],
-                &mut actual,
-            )
-            .unwrap();
+        transition.call(&mut store, &args, &mut actual).unwrap();
         let mut expected = initial;
         match index {
             1 => expected[8] = 3.0,
@@ -102,7 +96,7 @@ fn generic_nested_controls_preserve_private_tails_and_resolve_uniform_offsets() 
         assert_eq!(
             bits(&actual),
             expected.map(f32::to_bits),
-            "resident event {index}"
+            "typed event {index}"
         );
     }
     let surface = bundle.manifest.surface.as_ref().unwrap();
