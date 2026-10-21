@@ -5,6 +5,8 @@ trait GuardedUpdate {
     fn guarded(self, _ denominator: u32) -> bool
 }
 
+struct GuardedProvider {}
+
 impl Derive<GuardedUpdate> for GuardedProvider {
     const fn derive<T>(ev: own Evidence<GuardedUpdate<T>>) -> Evidence<GuardedUpdate<T>>
         uses (reflect: Reflect<T>, builder: mut ImplBuilder<GuardedUpdate<T>>)
