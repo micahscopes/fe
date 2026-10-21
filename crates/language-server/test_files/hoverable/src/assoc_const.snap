@@ -1,5 +1,6 @@
 ---
 source: crates/language-server/src/functionality/references.rs
+assertion_line: 415
 expression: snapshot
 input_file: test_files/hoverable/src/assoc_const.fe
 ---
@@ -44,6 +45,7 @@ note:
   │
 8 │   n == Counter::MAX
   │        ^^^^^^^^^^^^ ref: 8:16
+
 note: 
   ┌─ lib.fe:1:5
   │
@@ -799,4 +801,3 @@ note:
    │
 31 │     Color::Blue => false
    │     ^^^^^^^^^^^ ref: 31:11
-
