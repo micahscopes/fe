@@ -59,6 +59,35 @@ fn roundtrip_inputs() -> Vec<Vec<u8>> {
         .collect()
 }
 
+// Reflect the emitted shader, rather than inventing an optional trap binding.
+// This fixture has six resources and may have a trailing backend trap buffer.
+fn roundtrip_bindings(bundle: &WebBundle) -> Vec<u32> {
+    let shader = naga::front::wgsl::parse_str(&bundle.pass_wgsl[0].source).unwrap();
+    let mut bindings = shader
+        .global_variables
+        .iter()
+        .filter_map(|(_, global)| global.binding.as_ref())
+        .map(|binding| {
+            assert_eq!(binding.group, 0, "fixture uses only bind group zero");
+            binding.binding
+        })
+        .collect::<Vec<_>>();
+    bindings.sort_unstable();
+    assert!(
+        bindings == [0, 1, 2, 3, 4, 5] || bindings == [0, 1, 2, 3, 4, 5, 6],
+        "unexpected fixture binding contract: {bindings:?}"
+    );
+    bindings
+}
+
+fn roundtrip_buffer_sizes(bindings: &[u32]) -> Vec<u64> {
+    let sizes = [144, 144, 176, 176, 80, 80, 256];
+    bindings
+        .iter()
+        .map(|&binding| sizes[binding as usize])
+        .collect()
+}
+
 // Export precisely the native GPU fixture for a browser with a remote adapter.
 // Merely writing these files is not a GPU execution or a passing GPU gate.
 fn dump_fixture(label: &str, bundle: &WebBundle) {
@@ -75,20 +104,23 @@ fn dump_fixture(label: &str, bundle: &WebBundle) {
     for (index, pass) in bundle.pass_wgsl.iter().enumerate() {
         std::fs::write(directory.join(format!("pass-{index}.wgsl")), &pass.source).unwrap();
     }
+    let bindings = roundtrip_bindings(bundle);
+    let trap_binding = bindings.contains(&6).then_some(6u32);
     std::fs::write(
         directory.join("roundtrip.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
-            "schema": 1,
+            "schema": 2,
             "computePass": 0,
             "entryPoint": "main",
             "bindGroup": 0,
-            "bufferSizes": [144, 144, 176, 176, 80, 80, 256],
+            "bindings": bindings,
+            "bufferSizes": roundtrip_buffer_sizes(&bindings),
             "inputBindings": [0, 2, 4],
             "outputBindings": [1, 3, 5],
             "inputBytes": roundtrip_inputs(),
             "outputInitialByte": 205,
-            "trapBinding": 6,
-            "trapExpectedByte": 0,
+            "trapBinding": trap_binding,
+            "trapExpectedByte": trap_binding.map(|_| 0u8),
             "workgroups": [1, 1, 1]
         }))
         .unwrap(),
@@ -233,10 +265,11 @@ fn execute(bundle: &WebBundle) {
         compilation_options: Default::default(),
         cache: None,
     });
-    let sizes = [144u64, 144, 176, 176, 80, 80, 256];
+    let bound_slots = roundtrip_bindings(bundle);
+    let sizes = roundtrip_buffer_sizes(&bound_slots);
     let buffers = sizes
-        .into_iter()
-        .map(|size| {
+        .iter()
+        .map(|&size| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
                 size,
@@ -253,12 +286,16 @@ fn execute(bundle: &WebBundle) {
         queue.write_buffer(&buffers[pair * 2 + 1], 0, &vec![0xcd; bytes.len()]);
         expected.extend(bytes);
     }
-    expected.extend([0u8; 256]);
+    let mut output_slots = vec![1, 3, 5];
+    if bound_slots.contains(&6) {
+        expected.extend([0u8; 256]);
+        output_slots.push(6);
+    }
     let entries = buffers
         .iter()
-        .enumerate()
-        .map(|(binding, buffer)| wgpu::BindGroupEntry {
-            binding: binding as u32,
+        .zip(&bound_slots)
+        .map(|(buffer, &binding)| wgpu::BindGroupEntry {
+            binding,
             resource: buffer.as_entire_binding(),
         })
         .collect::<Vec<_>>();
@@ -281,7 +318,7 @@ fn execute(bundle: &WebBundle) {
         pass.dispatch_workgroups(1, 1, 1);
     }
     let mut offset = 0;
-    for index in [1, 3, 5, 6] {
+    for index in output_slots {
         encoder.copy_buffer_to_buffer(&buffers[index], 0, &readback, offset, sizes[index]);
         offset += sizes[index];
     }
@@ -301,6 +338,6 @@ fn execute(bundle: &WebBundle) {
     assert_eq!(
         &*slice.get_mapped_range(),
         &expected,
-        "all record leaves, second-element strides and zero trap words must roundtrip"
+        "all record leaves, second-element strides and any declared trap words must roundtrip"
     );
 }
