@@ -2079,3 +2079,157 @@ const fn verify_client3() -> bool {
     ));
 }
 
+#[test]
+fn client4_msg_generator_matches_compiler_msg_oracle_in_ctfe() {
+    let source = r#"use core::abi::{AbiSize, Decode, DynString, Encode}
+use core::derive::Derive
+use core::message::MsgVariant
+use core::meta::{Code, Item, Record, field, field_type}
+use std::abi::{Sol, sol}
+use std::derive::{
+    AbiDecodeDerive, AbiEncodeDerive, AbiSizeDerive, SolMsg, abi_struct, msg_struct,
+    msg_struct_expr, msg_struct_returning, msg_struct_with_selector, msg_variant_with_selector,
+}
+use std::evm::Address
+
+#[generate(abi_struct)]
+pub struct Packet {
+    pub a: u64,
+    pub b: bool,
+    pub c: Address,
+}
+
+msg OracleMsg {
+    #[selector = sol("noop()")]
+    noop,
+    #[selector = sol("ping(uint256)")]
+    ping { x: u256 },
+    #[selector = sol("echo(uint256)")]
+    Echo { val: u256 } -> u256,
+    #[selector = sol("transfer(address,uint256)")]
+    Transfer { to: Address, amount: u256 } -> bool,
+    #[selector = sol("inspect((uint64,bool,address),string)")]
+    Inspect { packet: Packet, note: DynString } -> (u256, bool),
+}
+
+pub struct noop {}
+impl AbiSize for noop with (AbiSizeDerive)
+impl Encode<Sol> for noop with (AbiEncodeDerive)
+impl Decode<Sol> for noop with (AbiDecodeDerive)
+impl MsgVariant<Sol> for noop with (SolMsg)
+
+#[generate(msg_struct)]
+pub struct ping {
+    pub x: u256,
+}
+
+pub const fn echo_msg(_ record: Record) -> Code<Item> {
+    let ret_ty = field_type(field(record, 0))
+    msg_struct_returning(record, quote { std::abi::sol("echo(uint256)") }, ret_ty)
+}
+
+#[generate(echo_msg)]
+pub struct Echo {
+    pub val: u256,
+}
+
+pub const fn transfer_msg(_ record: Record) -> Code<Item> {
+    msg_struct_expr(record, quote { std::abi::sol("transfer(address,uint256)") })
+}
+
+#[generate(transfer_msg)]
+pub struct Transfer {
+    pub to: Address,
+    pub amount: u256,
+}
+
+#[generate(abi_struct)]
+pub struct Inspect {
+    pub packet: Packet,
+    pub note: DynString,
+}
+
+impl MsgVariant<Sol> for Inspect {
+    const SELECTOR: u32 = sol("inspect((uint64,bool,address),string)")
+    type Return = (u256, bool)
+}
+
+pub const fn hex_msg(_ record: Record) -> Code<Item> {
+    msg_struct_with_selector(record, 0x12345678)
+}
+
+#[generate(hex_msg)]
+pub struct HexMsg {
+    pub a: u256,
+}
+
+pub struct ExplicitHexMsg {
+    pub a: u256,
+}
+struct ExplicitHexProvider {}
+impl Derive<MsgVariant<Sol>> for ExplicitHexProvider {
+    const fn derive(_ input: Record) -> Code<Item> {
+        msg_variant_with_selector(input, 0x87654321)
+    }
+}
+impl AbiSize for ExplicitHexMsg with (AbiSizeDerive)
+impl Encode<Sol> for ExplicitHexMsg with (AbiEncodeDerive)
+impl Decode<Sol> for ExplicitHexMsg with (AbiDecodeDerive)
+impl MsgVariant<Sol> for ExplicitHexMsg with (ExplicitHexProvider)
+
+const fn verify_client4() -> bool {
+    <noop as MsgVariant<Sol>>::SELECTOR == <OracleMsg::noop as MsgVariant<Sol>>::SELECTOR
+        && <noop as AbiSize>::HEAD_SIZE == <OracleMsg::noop as AbiSize>::HEAD_SIZE
+        && <noop as AbiSize>::IS_DYNAMIC == <OracleMsg::noop as AbiSize>::IS_DYNAMIC
+        && <ping as MsgVariant<Sol>>::SELECTOR == <OracleMsg::ping as MsgVariant<Sol>>::SELECTOR
+        && <ping as AbiSize>::HEAD_SIZE == <OracleMsg::ping as AbiSize>::HEAD_SIZE
+        && <ping as AbiSize>::IS_DYNAMIC == <OracleMsg::ping as AbiSize>::IS_DYNAMIC
+        && <Echo as MsgVariant<Sol>>::SELECTOR == <OracleMsg::Echo as MsgVariant<Sol>>::SELECTOR
+        && <Echo as AbiSize>::HEAD_SIZE == <OracleMsg::Echo as AbiSize>::HEAD_SIZE
+        && <Echo as AbiSize>::IS_DYNAMIC == <OracleMsg::Echo as AbiSize>::IS_DYNAMIC
+        && <Transfer as MsgVariant<Sol>>::SELECTOR == <OracleMsg::Transfer as MsgVariant<Sol>>::SELECTOR
+        && <Transfer as AbiSize>::HEAD_SIZE == <OracleMsg::Transfer as AbiSize>::HEAD_SIZE
+        && <Transfer as AbiSize>::IS_DYNAMIC == <OracleMsg::Transfer as AbiSize>::IS_DYNAMIC
+        && <Inspect as MsgVariant<Sol>>::SELECTOR == <OracleMsg::Inspect as MsgVariant<Sol>>::SELECTOR
+        && <Inspect as AbiSize>::HEAD_SIZE == <OracleMsg::Inspect as AbiSize>::HEAD_SIZE
+        && <Inspect as AbiSize>::IS_DYNAMIC == <OracleMsg::Inspect as AbiSize>::IS_DYNAMIC
+        && <HexMsg as MsgVariant<Sol>>::SELECTOR == 0x12345678
+        && <ExplicitHexMsg as MsgVariant<Sol>>::SELECTOR == 0x87654321
+}
+"#;
+    let (db, file) = input(source);
+    let output = prepare_file(&db, file).unwrap().unwrap();
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    let module = output.top_mod(output_file);
+    let diags = output.run_on_top_mod(module);
+    assert!(diags.is_empty(), "{}", diags.format_diags(&output));
+    let function = module
+        .all_funcs(&output)
+        .into_iter()
+        .find(|f| {
+            f.name(&output)
+                .to_opt()
+                .is_some_and(|name| name.data(&output) == "verify_client4")
+        })
+        .unwrap();
+    let owner = BodyOwner::Func(*function, None);
+    let result = eval_body_owner_const(
+        &output,
+        owner,
+        GenericSubst::for_body_owner(&output, owner, vec![]),
+    );
+    let EvalOutcome::Ready(value) = result else {
+        panic!("{result:?}")
+    };
+    assert!(matches!(
+        value.value(&output),
+        SemConstValue::Scalar {
+            value: SemConstScalar::Bool(true),
+            ..
+        }
+    ));
+}
+

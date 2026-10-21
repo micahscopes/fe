@@ -2,8 +2,10 @@ use core::AsBytes
 use core::abi::{AbiDecoder, AbiFrame, AbiSize, AbiSpan, ByteInput, Decode, Encode}
 use core::derive::Derive
 use core::error::ErrorVariant
+use core::message::MsgVariant
 use core::meta::{
-    Code, Expr, Field, FieldQuery, Item, Record, Where, empty, field, field_count, field_type,
+    Code, Expr, Field, FieldQuery, FieldType, Item, Record, Where, empty, field, field_count,
+    field_type,
 }
 use ingot::abi::{Sol, SolCompat}
 use ingot::evm::{Event, Indexed, Log, TopicValue}
@@ -759,3 +761,127 @@ impl Derive<Event> for EventDerive {
 
 /// Alias for `EventDerive`.
 pub type SolEvent = EventDerive
+
+// -----------------------------------------------------------------------------
+// Client 4: Fe Message Variant Generator (`impl core::message::MsgVariant<Sol> for T`)
+// -----------------------------------------------------------------------------
+
+/// Generates `impl core::message::MsgVariant<std::abi::Sol> for ${record}` with unit return `()`
+/// and `SELECTOR` computed from `${record}`'s name and field `SolCompat::SOL_TYPE`s.
+pub const fn msg_variant(_ record: Record) -> Code<Item> {
+    let tuple_ty = sol_tuple_type(record)
+    quote {
+        impl core::message::MsgVariant<ingot::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ingot::abi::sol((${record}, ${tuple_ty}))
+            type Return = ()
+        }
+    }
+}
+
+/// Generates `impl core::message::MsgVariant<std::abi::Sol> for ${record}` with unit return `()`
+/// and an explicit `u32` selector.
+pub const fn msg_variant_with_selector(_ record: Record, _ selector: u32) -> Code<Item> {
+    quote {
+        impl core::message::MsgVariant<ingot::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ${selector}
+            type Return = ()
+        }
+    }
+}
+
+/// Generates `impl core::message::MsgVariant<std::abi::Sol> for ${record}` with unit return `()`
+/// and a spliced `Code<Expr>` selector (e.g. `quote { std::abi::sol("ping(uint256)") }`).
+pub const fn msg_variant_expr(_ record: Record, _ selector: Code<Expr>) -> Code<Item> {
+    quote {
+        impl core::message::MsgVariant<ingot::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ${selector}
+            type Return = ()
+        }
+    }
+}
+
+/// Generates `impl core::message::MsgVariant<std::abi::Sol> for ${record}` with a spliced
+/// `Code<Expr>` selector and reflected `FieldType` return type `${ret_ty}`.
+pub const fn msg_variant_returning(
+    _ record: Record,
+    _ selector: Code<Expr>,
+    _ ret_ty: FieldType,
+) -> Code<Item> {
+    quote {
+        impl core::message::MsgVariant<ingot::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ${selector}
+            type Return = ${ret_ty}
+        }
+    }
+}
+
+/// Client 4 all-in-one Fe Message Variant struct generator:
+/// generates `AbiSize`, `AbiSpan<Sol>`, `Encode<Sol>`, `Decode<Sol>`, `SolCompat`,
+/// and `MsgVariant<Sol>` (with `type Return = ()` and canonical selector).
+pub const fn msg_struct(_ record: Record) -> Code<Item> {
+    let abi_impls = abi_struct(record)
+    let msg_impl = msg_variant(record)
+    quote {
+        ${abi_impls}
+        ${msg_impl}
+    }
+}
+
+/// Alias for `msg_struct`.
+pub const fn msg(_ record: Record) -> Code<Item> {
+    msg_struct(record)
+}
+
+/// Client 4 all-in-one Fe Message Variant struct generator with an explicit `u32` selector.
+pub const fn msg_struct_with_selector(_ record: Record, _ selector: u32) -> Code<Item> {
+    let abi_impls = abi_struct(record)
+    let msg_impl = msg_variant_with_selector(record, selector)
+    quote {
+        ${abi_impls}
+        ${msg_impl}
+    }
+}
+
+/// Client 4 all-in-one Fe Message Variant struct generator with a `Code<Expr>` selector.
+pub const fn msg_struct_expr(_ record: Record, _ selector: Code<Expr>) -> Code<Item> {
+    let abi_impls = abi_struct(record)
+    let msg_impl = msg_variant_expr(record, selector)
+    quote {
+        ${abi_impls}
+        ${msg_impl}
+    }
+}
+
+/// Client 4 all-in-one Fe Message Variant struct generator with a `Code<Expr>` selector
+/// and reflected `FieldType` return type `${ret_ty}`.
+pub const fn msg_struct_returning(
+    _ record: Record,
+    _ selector: Code<Expr>,
+    _ ret_ty: FieldType,
+) -> Code<Item> {
+    let abi_impls = abi_struct(record)
+    let msg_impl = msg_variant_returning(record, selector, ret_ty)
+    quote {
+        ${abi_impls}
+        ${msg_impl}
+    }
+}
+
+/// Explicit `Derive<MsgVariant<Sol>>` provider with unit return `()` and canonical selector.
+pub struct SolMsg {}
+impl Derive<MsgVariant<Sol>> for SolMsg {
+    const fn derive(_ input: Record) -> Code<Item> {
+        msg_variant(input)
+    }
+}
+
+/// Alias for `SolMsg`.
+pub type MsgVariantDerive = SolMsg
+
+/// Explicit `Derive<MsgVariant<Sol>>` provider with unit return `()` and an explicit `SELECTOR`.
+pub struct SolMsgSelector<const SELECTOR: u32> {}
+impl<const SELECTOR: u32> Derive<MsgVariant<Sol>> for SolMsgSelector<SELECTOR> {
+    const fn derive(_ input: Record) -> Code<Item> {
+        msg_variant_with_selector(input, SELECTOR)
+    }
+}

@@ -225,14 +225,25 @@ fn recv_arm_to_abi_entry(
         )));
     }
     let abi_info = arm_view.abi_info(db, sol_ty);
-    let Some(selector_signature) = abi_info.selector_signature.as_deref() else {
+    let input_descs = struct_ty_to_abi_param_descs(db, variant_struct, variant_ty, |_| None)?;
+    let synthesized_signature = if abi_info.selector_signature.is_none()
+        && struct_has_generated_items(db, variant_struct)
+    {
+        let canonical = canonical_function_signature(&variant_name, &input_descs);
+        (abi_info.selector_value == Some(selector_for_signature(&canonical))).then_some(canonical)
+    } else {
+        None
+    };
+    let Some(selector_signature) = abi_info
+        .selector_signature
+        .as_deref()
+        .or(synthesized_signature.as_deref())
+    else {
         return Ok(RecvArmAbiEmission::Skip(format!(
             "skipping recv arm `{variant_name}`: selector signature is unknown; \
              use `#[selector = sol(\"name(types)\")]` to include it in the ABI"
         )));
     };
-
-    let input_descs = struct_ty_to_abi_param_descs(db, variant_struct, variant_ty, |_| None)?;
     // A tuple return is a parameter list (Solidity multi-value `returns`), so
     // each element becomes its own output, matching its runtime encoding.
     let output_tys = match abi_info.ret_ty {
@@ -735,11 +746,42 @@ fn is_event_struct(db: &DriverDataBase, struct_: Struct<'_>) -> bool {
     hir::analysis::ty::evidence::prove(db, solve_cx, inst).is_some()
 }
 
+fn struct_has_generated_items(db: &DriverDataBase, struct_: Struct<'_>) -> bool {
+    let top_mod = struct_.top_mod(db);
+    let scope_graph = top_mod.scope_graph(db);
+    let struct_ty = TyId::new(db, TyData::TyBase(TyBase::Adt(struct_.as_adt(db))));
+    top_mod.all_impl_traits(db).iter().any(|impl_trait| {
+        if impl_trait.ty(db) != struct_ty {
+            return false;
+        }
+        if scope_graph
+            .scopes
+            .get(&impl_trait.scope())
+            .is_some_and(|node| node.publication_parent.is_some())
+        {
+            return true;
+        }
+        impl_trait.methods(db).any(|func| {
+            scope_graph
+                .scopes
+                .get(&func.scope())
+                .is_some_and(|node| node.publication_parent.is_some())
+        }) || impl_trait.hir_consts(db).iter().any(|c| {
+            c.value.to_opt().is_some_and(|body| {
+                scope_graph
+                    .scopes
+                    .get(&body.scope())
+                    .is_some_and(|node| node.publication_parent.is_some())
+            })
+        })
+    })
+}
+
 fn variant_has_canonical_json_abi_shape(db: &DriverDataBase, struct_: Struct<'_>) -> bool {
     matches!(
         hir::span::struct_ast(db, struct_),
         hir::span::HirOrigin::Desugared(hir::span::DesugaredOrigin::Msg(_))
-    )
+    ) || struct_has_generated_items(db, struct_)
 }
 
 fn resolve_lib_trait_path<'db>(
@@ -2907,5 +2949,227 @@ pub contract EventContract uses (log: mut Log) {
             Token::String("event payload".to_string()),
         ]);
         assert_eq!(complex_log.data.data.as_ref(), &expected_complex_data[..]);
+    }
+
+    #[test]
+    fn client4_msg_generator_runtime_evm_and_json_abi_parity() {
+        use contract_harness::{ExecutionOptions, FeContractHarness, U256};
+        use ethers_core::abi::{Token, encode};
+        use ethers_core::types::{Address as EthAddress, U256 as EthU256};
+
+        let code = r#"
+use core::abi::{AbiSize, ByteInput, Decode, DynString, Encode}
+use core::message::MsgVariant
+use core::meta::{Code, Item, Record, field, field_type}
+use std::abi::{Sol, sol}
+use std::derive::{
+    AbiDecodeDerive, AbiEncodeDerive, AbiSizeDerive, SolMsg, abi_struct, msg_struct,
+    msg_struct_returning,
+}
+use std::evm::{Address, CallData, encode_msg_calldata}
+
+#[generate(abi_struct)]
+pub struct Packet {
+    pub a: u64,
+    pub b: bool,
+    pub c: Address,
+}
+
+#[generate(msg_struct)]
+pub struct ping {
+    pub x: u256,
+}
+
+pub struct noop {}
+impl AbiSize for noop with (AbiSizeDerive)
+impl Encode<Sol> for noop with (AbiEncodeDerive)
+impl Decode<Sol> for noop with (AbiDecodeDerive)
+impl MsgVariant<Sol> for noop with (SolMsg)
+
+pub const fn echo_msg(_ record: Record) -> Code<Item> {
+    let ret_ty = field_type(field(record, 0))
+    msg_struct_returning(record, quote { std::abi::sol("echo(uint256)") }, ret_ty)
+}
+
+#[generate(echo_msg)]
+pub struct Echo {
+    pub val: u256,
+}
+
+#[generate(abi_struct)]
+pub struct Transfer {
+    pub to: Address,
+    pub amount: u256,
+}
+
+impl MsgVariant<Sol> for Transfer {
+    const SELECTOR: u32 = sol("transfer(address,uint256)")
+    type Return = bool
+}
+
+#[generate(abi_struct)]
+pub struct Inspect {
+    pub packet: Packet,
+    pub note: DynString,
+}
+
+impl MsgVariant<Sol> for Inspect {
+    const SELECTOR: u32 = sol("inspect((uint64,bool,address),string)")
+    type Return = (u256, bool)
+}
+
+pub contract MsgContract {
+    recv {
+        noop {} uses () {}
+
+        ping { x } uses () {
+            let _ = x
+        }
+
+        Echo { val } -> u256 uses () {
+            val + 1
+        }
+
+        Transfer { to, amount } -> bool uses () {
+            let buf = encode_msg_calldata(Transfer { to, amount })
+            let cd = CallData::new()
+            if (buf.len() as u256) != cd.len() || buf.len() != 68 {
+                return false
+            }
+            var i: usize = 0
+            while i < buf.len() {
+                if buf.span().byte_at(i) != cd.byte_at(i as u256) {
+                    return false
+                }
+                i += 1
+            }
+            to == Address::new(0x22) && amount == 500
+        }
+
+        Inspect { packet, note } -> (u256, bool) uses () {
+            let decoded_self = CallData::with_base(4).decode<Inspect>()
+            let ok = packet.a == 42
+                && packet.b
+                && packet.c == Address::new(0x44)
+                && decoded_self.packet.a == 42
+                && decoded_self.note == note
+            (packet.a as u256 + ( Packet::HEAD_SIZE + Inspect::HEAD_SIZE ), ok)
+        }
+    }
+}
+"#;
+
+        let entries = abi_entries(code, "MsgContract");
+        let find_fn = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry["type"] == "function" && entry["name"] == name)
+                .unwrap_or_else(|| panic!("missing function `{name}` in ABI: {entries:?}"))
+        };
+
+        let noop_fn = find_fn("noop");
+        assert_eq!(noop_fn["inputs"], serde_json::json!([]));
+        assert_eq!(noop_fn["outputs"], serde_json::json!([]));
+
+        let ping_fn = find_fn("ping");
+        assert_eq!(
+            ping_fn["inputs"],
+            serde_json::json!([{ "name": "x", "type": "uint256" }])
+        );
+        assert_eq!(ping_fn["outputs"], serde_json::json!([]));
+
+        let echo_fn = find_fn("echo");
+        assert_eq!(
+            echo_fn["inputs"],
+            serde_json::json!([{ "name": "val", "type": "uint256" }])
+        );
+        assert_eq!(
+            echo_fn["outputs"],
+            serde_json::json!([{ "name": "", "type": "uint256" }])
+        );
+
+        let transfer_fn = find_fn("transfer");
+        assert_eq!(
+            transfer_fn["inputs"],
+            serde_json::json!([
+                { "name": "to", "type": "address" },
+                { "name": "amount", "type": "uint256" },
+            ])
+        );
+        assert_eq!(
+            transfer_fn["outputs"],
+            serde_json::json!([{ "name": "", "type": "bool" }])
+        );
+
+        let inspect_fn = find_fn("inspect");
+        assert_eq!(inspect_fn["inputs"][0]["type"], "tuple");
+        assert_eq!(inspect_fn["inputs"][0]["components"][0]["type"], "uint64");
+        assert_eq!(inspect_fn["inputs"][1]["type"], "string");
+        assert_eq!(
+            inspect_fn["outputs"],
+            serde_json::json!([
+                { "name": "", "type": "uint256" },
+                { "name": "", "type": "bool" },
+            ])
+        );
+
+        let harness = FeContractHarness::compile("MsgContract", code).expect("compile contract");
+        let mut instance = harness.deploy_instance().expect("deploy instance");
+        let opts = ExecutionOptions::default();
+
+        let noop_res = instance.call_function("noop()", &[], opts).expect("noop");
+        assert!(noop_res.return_data.is_empty());
+
+        let ping_res = instance
+            .call_function("ping(uint256)", &[Token::Uint(EthU256::from(123u64))], opts)
+            .expect("ping");
+        assert!(ping_res.return_data.is_empty());
+
+        let echo_res = instance
+            .call_function("echo(uint256)", &[Token::Uint(EthU256::from(99u64))], opts)
+            .expect("echo");
+        assert_eq!(
+            U256::from_be_slice(&echo_res.return_data),
+            U256::from(100u64)
+        );
+
+        let transfer_res = instance
+            .call_function(
+                "transfer(address,uint256)",
+                &[
+                    Token::Address(EthAddress::from_low_u64_be(0x22)),
+                    Token::Uint(EthU256::from(500u64)),
+                ],
+                opts,
+            )
+            .expect("transfer");
+        assert_eq!(
+            U256::from_be_slice(&transfer_res.return_data),
+            U256::from(1u64)
+        );
+
+        let mut inspect_calldata =
+            ethers_core::utils::keccak256(b"inspect((uint64,bool,address),string)")[..4].to_vec();
+        inspect_calldata.extend_from_slice(&encode(&[
+            Token::Tuple(vec![
+                Token::Uint(EthU256::from(42u64)),
+                Token::Bool(true),
+                Token::Address(EthAddress::from_low_u64_be(0x44)),
+            ]),
+            Token::String("msg payload".to_string()),
+        ]));
+        let inspect_res = instance
+            .call_raw(&inspect_calldata, opts)
+            .expect("inspect");
+        // Packet::HEAD_SIZE = 96, Inspect::HEAD_SIZE = 128, 42 + 96 + 128 = 266
+        assert_eq!(inspect_res.return_data.len(), 64);
+        assert_eq!(
+            U256::from_be_slice(&inspect_res.return_data[..32]),
+            U256::from(266u64)
+        );
+        assert_eq!(
+            U256::from_be_slice(&inspect_res.return_data[32..64]),
+            U256::from(1u64)
+        );
     }
 }

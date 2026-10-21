@@ -365,9 +365,9 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
         // structure as a normal type. Const expressions inside types are validated via
         // const-ty lowering/evaluation, and walking their HIR representation as a type
         // produces spurious "expected type" diagnostics for paths like `SALT`.
-        let trait_def = match ty.data(self.db) {
+        let trait_def = match ty.base_ty(self.db).data(self.db) {
             TyData::ConstraintTerm(goal) => Some(goal.def(self.db)),
-            TyData::TyBase( super::ty_def::TyBase::TraitCtor(def)) => Some(*def),
+            TyData::TyBase(super::ty_def::TyBase::TraitCtor(def)) => Some(*def),
             _ => None,
         };
         if let Some(trait_def) = trait_def {
