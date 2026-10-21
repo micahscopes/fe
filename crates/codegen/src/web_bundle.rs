@@ -3671,7 +3671,8 @@ fn nominal_resident_lane_contract(
         }
         if resource_field_indices.contains(&(index as u32)) {
             actor_param_is_resource.push(true);
-            params.push(WebControlWasmType::I32);
+            // Match the inert GPU handle ABI used by the primary surface lane.
+            params.push(WebControlWasmType::I64);
             continue;
         }
         let canonical = canonical_type_from_semantic(db, declared, lane_label)
@@ -11174,19 +11175,19 @@ actor CoexistenceActor uses (
             .get_typed_func::<f32, ()>(&mut store, TYPED_SURFACE_STATE_REPLACE_EXPORT)
             .unwrap();
         let location = instance
-            .get_typed_func::<(i32, i32, i32, i32, i32, i32, i32), f32>(
+            .get_typed_func::<(i32, i32, i32, i32, i32, i32, i64), f32>(
                 &mut store,
                 SURFACE_LOCATION_EXPORT,
             )
             .unwrap();
         let notify = instance
-            .get_typed_func::<(i32, i32, i32, i32, i32, i32, i32), f32>(
+            .get_typed_func::<(i32, i32, i32, i32, i32, i32, i64), f32>(
                 &mut store,
                 ACTOR_NOTIFICATION_EXPORT,
             )
             .unwrap();
         let contact = instance
-            .get_typed_func::<(i32, i32, i32, f32, f32, i32, i32, f32, f32, f32, f32, f32, f32, i32), f32>(
+            .get_typed_func::<(i32, i32, i32, f32, f32, i32, i32, f32, f32, f32, f32, f32, f32, i64), f32>(
                 &mut store,
                 SURFACE_CONTACT_EXPORT,
             )
