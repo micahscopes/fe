@@ -2259,7 +2259,7 @@ export class FeSurfaceElement extends HTMLElement {
   _applyStatePolicy() {
     const policy = this.getAttribute("state") || "auto";
     if (policy === "live") {
-      this._goLive();
+      this._goLive().catch(error => this._fail(error));
       return;
     }
     if (policy === "frozen") {

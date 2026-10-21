@@ -843,6 +843,18 @@ test("declared live surfaces skip disposable poster work while gallery modes ret
   }
 });
 
+test("declared live startup reports acquisition failures through the surface", async () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  const original = new Error("GPU unavailable");
+  surface.getAttribute = () => "live";
+  surface._goLive = async () => { throw original; };
+  let reported;
+  surface._fail = error => { reported = error; };
+  surface._applyStatePolicy();
+  await Promise.resolve();
+  assert.equal(reported, original);
+});
+
 test("direct live rendering establishes WebGPU mode without a poster for owned and adopted canvases", async () => {
   const previousUsage = globalThis.GPUTextureUsage;
   globalThis.GPUTextureUsage = { RENDER_ATTACHMENT: 16, COPY_SRC: 1 };
