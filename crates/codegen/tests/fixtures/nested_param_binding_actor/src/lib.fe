@@ -12,7 +12,8 @@ impl<T: Copy> Copy for Pair<T> {}
 struct Camera { center: Pair<Expansion<4>>, zoom: f32, resolution: f32 }
 impl Copy for Camera {}
 struct State { camera: Camera, hidden: f32, clock: f32, phase: f32, weight: f32, ticks: f32 }
-impl Copy for State {}
+// Deliberately no Copy impl on the root: the borrowed derive reconstructs
+// it once from its Copy fields, preserving the legacy flat-state contract.
 struct Envelope { state: State }
 
 // Declaration order intentionally differs from the uniform's leaf order.
