@@ -1117,3 +1117,46 @@ const fn observe() -> u256 {
         );
     }
 }
+
+#[test]
+fn scoped_derive_refuses_generic_provider_aliases_before_materialization() {
+    let source = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+trait Value { const fn value() -> u256 }
+struct Pair {}
+struct Provider<T> {}
+impl Derive<Value> for Provider<u8> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { const fn value() -> u256 { 1 } }
+    }
+}
+impl Derive<Value> for Provider<u256> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { const fn value() -> u256 { 2 } }
+    }
+}
+type P8 = Provider<u8>
+type P256 = Provider<u256>
+const fn observe() -> u256 {
+    with (P8) { Pair::value() } + with (P256) { Pair::value() }
+}
+"#;
+    let error = prepare_err(source);
+    assert!(
+        error.contains(
+            "scoped on-demand derive for generic provider applications is not supported yet"
+        ),
+        "{error}"
+    );
+    // A nongeneric alias still denotes a valid ordinary provider.
+    let positive = source
+        .replace("struct Provider<T> {}", "struct Provider {}")
+        .replace("Provider<u8>", "Provider");
+    let positive = positive[..positive
+        .find("impl Derive<Value> for Provider<u256>")
+        .unwrap()]
+        .to_string()
+        + "type P = Provider\nconst fn observe() -> u256 { with (P) { Pair::value() } }\n";
+    let output = prepare(&positive).unwrap();
+    assert_eq!(eval_const_fn_u256(&output, "observe"), "1");
+}

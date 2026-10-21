@@ -1571,6 +1571,9 @@ pub fn validate_scoped_derive_opening<'db>(
     if provider_ty.has_param(db) || provider_ty.has_invalid(db) || !provider_ty.is_star_kind(db) {
         return Err("native derive requires a concrete provider type".into());
     }
+    if !provider_ty.generic_args(db).is_empty() {
+        return Err("scoped on-demand derive for generic provider applications is not supported yet; the generated choice would lose its actual arguments".into());
+    }
     crate::analysis::ty::ty_check::admit_ground_type_application(
         db,
         provider_ty,
