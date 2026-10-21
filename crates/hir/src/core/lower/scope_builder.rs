@@ -312,25 +312,28 @@ impl<'db> ScopeGraphBuilder<'db> {
     }
 
     pub(super) fn find_item_by_range(&self, range: parser::TextRange) -> Option<ItemKind<'db>> {
-        let root = super::top_mod_ast(self.db, self.top_mod);
-        use parser::ast::prelude::*;
         self.graph
             .nodes
             .values()
-            .find_map(|(scope, _)| match *scope {
-                ScopeId::Item(item @ ItemKind::Struct(s)) => {
-                    let crate::span::HirOrigin::Raw(ptr) = s.origin(self.db) else {
-                        return None;
-                    };
-                    (ptr.to_node(root.syntax()).syntax().text_range() == range).then_some(item)
+            .find_map(|(scope, node)| {
+                if node.publication_parent.is_some() {
+                    return None;
                 }
-                ScopeId::Item(item @ ItemKind::Enum(e)) => {
-                    let crate::span::HirOrigin::Raw(ptr) = e.origin(self.db) else {
-                        return None;
-                    };
-                    (ptr.to_node(root.syntax()).syntax().text_range() == range).then_some(item)
+                match *scope {
+                    ScopeId::Item(item @ ItemKind::Struct(s)) => {
+                        let crate::span::HirOrigin::Raw(ptr) = s.origin(self.db) else {
+                            return None;
+                        };
+                        (ptr.syntax_node_ptr().text_range() == range).then_some(item)
+                    }
+                    ScopeId::Item(item @ ItemKind::Enum(e)) => {
+                        let crate::span::HirOrigin::Raw(ptr) = e.origin(self.db) else {
+                            return None;
+                        };
+                        (ptr.syntax_node_ptr().text_range() == range).then_some(item)
+                    }
+                    _ => None,
                 }
-                _ => None,
             })
     }
 
@@ -342,14 +345,19 @@ impl<'db> ScopeGraphBuilder<'db> {
     ) -> ScopeId<'db> {
         use parser::ast::prelude::*;
         let root = super::top_mod_ast(self.db, quote_top_mod);
+        let root_range = root.syntax().text_range();
         let scopes: Vec<ScopeId<'db>> = if quote_top_mod == self.top_mod {
-            self.graph.nodes.values().map(|(scope, _)| *scope).collect()
+            self.graph
+                .nodes
+                .values()
+                .filter_map(|(scope, node)| node.publication_parent.is_none().then_some(*scope))
+                .collect()
         } else {
             quote_top_mod
                 .scope_graph(self.db)
                 .scopes
-                .keys()
-                .copied()
+                .iter()
+                .filter_map(|(scope, node)| node.publication_parent.is_none().then_some(*scope))
                 .collect()
         };
         if let Some(range) = producer_block
@@ -362,11 +370,17 @@ impl<'db> ScopeGraphBuilder<'db> {
                 else {
                     return None;
                 };
+                let ptr_range = ptr.syntax_node_ptr().text_range();
+                if ptr_range == range {
+                    return Some(scope);
+                }
+                if !root_range.contains_range(ptr_range) || !ptr_range.contains_range(range) {
+                    return None;
+                }
                 let expr_node = ptr.to_node(root.syntax());
-                let matches_range = expr_node.syntax().text_range() == range
-                    || parser::ast::UnsafeExpr::cast(expr_node.syntax().clone())
-                        .and_then(|u| u.block())
-                        .is_some_and(|b| b.syntax().text_range() == range);
+                let matches_range = parser::ast::UnsafeExpr::cast(expr_node.syntax().clone())
+                    .and_then(|u| u.block())
+                    .is_some_and(|b| b.syntax().text_range() == range);
                 matches_range.then_some(scope)
             })
         {
@@ -380,7 +394,7 @@ impl<'db> ScopeGraphBuilder<'db> {
                 let crate::span::HirOrigin::Raw(ptr) = mod_.origin(self.db) else {
                     return None;
                 };
-                (ptr.to_node(root.syntax()).syntax().text_range() == range).then_some(scope)
+                (ptr.syntax_node_ptr().text_range() == range).then_some(scope)
             })
         {
             return scope;

@@ -2,8 +2,11 @@ use core::AsBytes
 use core::abi::{AbiDecoder, AbiFrame, AbiSize, AbiSpan, ByteInput, Decode, Encode}
 use core::derive::Derive
 use core::error::ErrorVariant
-use core::meta::{Code, Expr, Field, Item, Record, Where, empty, field, field_count, field_type}
+use core::meta::{
+    Code, Expr, Field, FieldQuery, Item, Record, Where, empty, field, field_count, field_type,
+}
 use ingot::abi::{Sol, SolCompat}
+use ingot::evm::{Event, Indexed, Log, TopicValue}
 
 /// One step of a fold over the fields of a record, written as code.
 ///
@@ -542,3 +545,217 @@ impl<const SELECTOR: u32> Derive<ErrorVariant<Sol>> for SolErrorSelector<SELECTO
         error_variant_with_selector(input, SELECTOR)
     }
 }
+
+// -----------------------------------------------------------------------------
+// Client 3: Fe Event Generator (`impl std::evm::Event for T`)
+// -----------------------------------------------------------------------------
+
+/// Query family classifying whether a reflected event field type is `Indexed<T>`
+/// (`true`, emitted as an EVM log topic) or an unindexed ABI field (`false`,
+/// encoded into the event's ABI data payload).
+pub struct IsIndexedFieldQuery<T> {}
+
+impl<T> FieldQuery<bool> for IsIndexedFieldQuery<Indexed<T>> {
+    const fn evaluate() -> bool {
+        true
+    }
+}
+
+impl<T: core::abi::AbiSize> FieldQuery<bool> for IsIndexedFieldQuery<T> {
+    const fn evaluate() -> bool {
+        false
+    }
+}
+
+/// Per-field dispatch for generated `std::evm::Event` implementations:
+/// `Indexed<T>` fields contribute an EVM log topic, while non-indexed ABI
+/// fields contribute to the ABI-encoded event data payload.
+pub trait EventField {
+    const IS_INDEXED: bool
+    const DATA_HEAD_SIZE: u256
+
+    fn data_dynamic_size(self) -> u256
+    fn emit_field(
+        own self,
+        _ out: AbiFrame,
+        head_pos: u256,
+        tails: own AbiFrame,
+    ) -> (AbiFrame, u256)
+}
+
+impl<T: TopicValue + Copy> EventField for Indexed<T> {
+    const IS_INDEXED: bool = true
+    const DATA_HEAD_SIZE: u256 = 0
+
+    #[inline(always)]
+    fn data_dynamic_size(self) -> u256 {
+        0
+    }
+
+    #[inline(always)]
+    fn emit_field(
+        own self,
+        _ out: AbiFrame,
+        head_pos: u256,
+        tails: own AbiFrame,
+    ) -> (AbiFrame, u256) {
+        let _ = out
+        let _ = head_pos
+        (tails, self.as_topic())
+    }
+}
+
+impl<T: AbiSize + Encode<Sol>> EventField for T {
+    const IS_INDEXED: bool = false
+    const DATA_HEAD_SIZE: u256 = core::abi::abi_field_head_size<T>()
+
+    #[inline(always)]
+    fn data_dynamic_size(self) -> u256 {
+        core::abi::dynamic_payload_size<T>(self)
+    }
+
+    #[inline(always)]
+    fn emit_field(
+        own self,
+        _ out: AbiFrame,
+        head_pos: u256,
+        tails: own AbiFrame,
+    ) -> (AbiFrame, u256) {
+        let next_tails = SolField<T>::encode(self, out, head_pos: head_pos, tails: tails)
+        (next_tails, 0)
+    }
+}
+
+/// Sum of the unindexed event fields' head sizes.
+pub struct EventHeadSize {}
+impl FieldStep for EventHeadSize {
+    const fn unit() -> Code<Expr> {
+        quote { 0 }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote { ${acc} + <${ty} as ingot::derive::EventField>::DATA_HEAD_SIZE }
+    }
+}
+
+/// Sum of the unindexed event fields' dynamic tail payload sizes on `self`.
+pub struct EventDynamicSize {}
+impl FieldStep for EventDynamicSize {
+    const fn unit() -> Code<Expr> {
+        quote { 0 }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote { ${acc} + <${ty} as ingot::derive::EventField>::data_dynamic_size(self.${field}) }
+    }
+}
+
+/// Emits each field into either the event's ABI data frame or the log topic slots.
+pub struct EventEmitStep {}
+impl FieldStep for EventEmitStep {
+    const fn unit() -> Code<Expr> {
+        quote { () }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote(out, head_pos, tails, indexed_count, topic1, topic2, topic3) {
+            {
+                ${acc}
+                let (next_tails, field_topic) = <${ty} as ingot::derive::EventField>::emit_field(
+                    self.${field},
+                    out,
+                    head_pos: head_pos,
+                    tails: tails,
+                )
+                tails = next_tails
+                head_pos += <${ty} as ingot::derive::EventField>::DATA_HEAD_SIZE
+                if <${ty} as ingot::derive::EventField>::IS_INDEXED {
+                    if indexed_count == 0 {
+                        topic1 = field_topic
+                    } else if indexed_count == 1 {
+                        topic2 = field_topic
+                    } else if indexed_count == 2 {
+                        topic3 = field_topic
+                    }
+                    indexed_count += 1
+                }
+            }
+        }
+    }
+}
+
+/// Client 3 Fe Event struct generator (`#[event]` equivalent):
+/// generates `impl std::evm::Event for ${record}` with `TOPIC0` and `emit`.
+pub const fn event_struct(_ record: Record) -> Code<Item> {
+    let tuple_ty = sol_tuple_type(record)
+    let data_head = fold_fields<EventHeadSize>(record)
+    let data_dyn = fold_fields<EventDynamicSize>(record)
+    let emit_steps = fold_fields<EventEmitStep>(record)
+
+    quote(log, out, head_pos, tails, indexed_count, topic1, topic2, topic3) {
+        impl ingot::evm::Event for ${record} {
+            const TOPIC0: u256 = core::keccak((${record}, ${tuple_ty}))
+
+            fn emit<L: ingot::evm::Log>(own self, _ log: mut L) {
+                let head_size: u256 = ${data_head}
+                let total: u256 = head_size + ${data_dyn}
+                let data_buf = if total == 0 {
+                    core::ptr::MemBuffer::empty()
+                } else {
+                    core::ptr::MemBuffer::alloc(total as usize)
+                }
+                let out = unsafe { core::abi::AbiFrame::from_raw_parts(ptr: data_buf.ptr(), len: total) }
+                var tails = out.tail(head_size)
+                var head_pos: u256 = 0
+                var indexed_count: usize = 0
+                var topic1: u256 = 0
+                var topic2: u256 = 0
+                var topic3: u256 = 0
+                let _ = out
+                let _ = tails
+                let _ = head_pos
+                ${emit_steps}
+                if indexed_count == 0 {
+                    log.log1(data: data_buf.span(), topic0: Self::TOPIC0)
+                } else if indexed_count == 1 {
+                    log.log2(
+                        data: data_buf.span(),
+                        topic0: Self::TOPIC0,
+                        topic1: topic1,
+                    )
+                } else if indexed_count == 2 {
+                    log.log3(
+                        data: data_buf.span(),
+                        topic0: Self::TOPIC0,
+                        topic1: topic1,
+                        topic2: topic2,
+                    )
+                } else {
+                    log.log4(
+                        data: data_buf.span(),
+                        topic0: Self::TOPIC0,
+                        topic1: topic1,
+                        topic2: topic2,
+                        topic3: topic3,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// Alias for `event_struct`.
+pub const fn event(_ record: Record) -> Code<Item> {
+    event_struct(record)
+}
+
+/// Explicit `Derive<Event>` provider for `impl Event for T with (EventDerive)`.
+pub struct EventDerive {}
+impl Derive<Event> for EventDerive {
+    const fn derive(_ input: Record) -> Code<Item> {
+        event_struct(input)
+    }
+}
+
+/// Alias for `EventDerive`.
+pub type SolEvent = EventDerive

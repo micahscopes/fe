@@ -24,3 +24,36 @@ pub trait Event {
 pub trait TopicValue {
     fn as_topic(self) -> u256
 }
+
+/// Wrapper marking an event struct field as an indexed EVM log topic (`topic1`..`topic3`).
+pub struct Indexed<T> {
+    pub value: T,
+}
+
+impl<T> Indexed<T> {
+    #[inline(always)]
+    pub const fn new(_ value: T) -> Self {
+        Indexed { value }
+    }
+}
+
+impl<T: core::Copy> core::Copy for Indexed<T> {}
+
+impl<T: TopicValue> Indexed<T> {
+    #[inline(always)]
+    pub fn as_topic(self) -> u256 {
+        self.value.as_topic()
+    }
+}
+
+impl<T: TopicValue> TopicValue for Indexed<T> {
+    #[inline(always)]
+    fn as_topic(self) -> u256 {
+        self.value.as_topic()
+    }
+}
+
+impl<T: ingot::abi::SolCompat> ingot::abi::SolCompat for Indexed<T> {
+    type S = T::S
+    const SOL_TYPE: Self::S = T::SOL_TYPE
+}

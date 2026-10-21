@@ -280,6 +280,24 @@ fn recv_arm_to_abi_entry(
     }))
 }
 
+fn unwrap_std_indexed_event_ty<'db>(db: &'db DriverDataBase, ty: TyId<'db>) -> Option<TyId<'db>> {
+    let (base, args) = ty.decompose_ty_app(db);
+    let TyData::TyBase(TyBase::Adt(adt)) = base.data(db) else {
+        return None;
+    };
+    let adt_ref = adt.adt_ref(db);
+    if adt_ref.name(db)?.data(db) != "Indexed" {
+        return None;
+    }
+    if !base
+        .ingot(db)
+        .is_some_and(|ingot| ingot.kind(db) == IngotKind::Std)
+    {
+        return None;
+    }
+    args.first().copied()
+}
+
 fn event_struct_to_abi_entry(db: &DriverDataBase, struct_: Struct<'_>) -> Result<AbiEntry, String> {
     let event_name = struct_
         .name(db)
@@ -291,12 +309,37 @@ fn event_struct_to_abi_entry(db: &DriverDataBase, struct_: Struct<'_>) -> Result
         .into_iter()
         .map(|ty| ty.instantiate_identity())
         .collect();
-    let inputs = named_field_param_descs(db, struct_.hir_fields(db), &field_tys, |field| {
-        Some(field.is_event_indexed)
-    })?
-    .into_iter()
-    .map(NamedAbiParamDesc::into_param)
-    .collect();
+    let hir_fields = struct_.hir_fields(db).data(db);
+    if hir_fields.len() != field_tys.len() {
+        return Err(format!(
+            "field count mismatch: {} HIR fields vs {} semantic fields",
+            hir_fields.len(),
+            field_tys.len()
+        ));
+    }
+    let inputs = hir_fields
+        .iter()
+        .zip(field_tys)
+        .map(|(field, ty)| {
+            let name = field
+                .name
+                .to_opt()
+                .map(|ident| ident.data(db).to_string())
+                .unwrap_or_default();
+            let (indexed, effective_ty) = if let Some(inner_ty) = unwrap_std_indexed_event_ty(db, ty)
+            {
+                (Some(true), inner_ty)
+            } else {
+                (Some(field.is_event_indexed), ty)
+            };
+            Ok(NamedAbiParamDesc {
+                name,
+                indexed,
+                desc: semantic_ty_to_abi_desc(db, effective_ty)?,
+            }
+            .into_param())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
     Ok(AbiEntry {
         entry_type: "event".to_string(),
@@ -676,10 +719,20 @@ fn push_event_struct<'db>(
 }
 
 fn is_event_struct(db: &DriverDataBase, struct_: Struct<'_>) -> bool {
-    matches!(
+    if matches!(
         hir::span::struct_ast(db, struct_),
         hir::span::HirOrigin::Desugared(hir::span::DesugaredOrigin::Event(_))
-    )
+    ) {
+        return true;
+    }
+    let scope = struct_.scope();
+    let Some(event_trait) = resolve_lib_trait_path(db, scope, "std::evm::event::Event") else {
+        return false;
+    };
+    let struct_ty = TyId::new(db, TyData::TyBase(TyBase::Adt(struct_.as_adt(db))));
+    let inst = TraitInstId::new_simple(db, event_trait, vec![struct_ty]);
+    let solve_cx = hir::analysis::ty::trait_resolution::TraitSolveCx::new(db, scope);
+    hir::analysis::ty::evidence::prove(db, solve_cx, inst).is_some()
 }
 
 fn variant_has_canonical_json_abi_shape(db: &DriverDataBase, struct_: Struct<'_>) -> bool {
@@ -2603,5 +2656,256 @@ pub contract Client1And2Contract {
             &custom_revert.0[4..],
             &encode(&[Token::Uint(EthU256::from(0x77u64))])[..]
         );
+    }
+
+    #[test]
+    fn client3_event_generator_runtime_evm_logs_and_json_abi_parity() {
+        use contract_harness::{ExecutionOptions, FeContractHarness, U256};
+        use ethers_core::{
+            abi::{Token, encode},
+            types::{Address as EthAddress, U256 as EthU256},
+        };
+
+        let code = r#"
+use std::abi::{DynString, sol}
+use std::derive::{EventDerive, abi_struct, event_struct}
+use std::evm::{Address, Event, Indexed, Log}
+
+mod oracle {
+    use std::abi::DynString
+    use std::evm::Address
+
+    #[abi]
+    pub struct Packet {
+        pub a: u64,
+        pub b: bool,
+        pub c: Address,
+    }
+
+    #[event]
+    pub struct EmptyEvent {}
+
+    #[event]
+    pub struct SingleIndexed {
+        #[indexed]
+        pub id: u256,
+    }
+
+    #[event]
+    pub struct Transfer {
+        #[indexed]
+        pub from: Address,
+        #[indexed]
+        pub to: Address,
+        pub value: u256,
+    }
+
+    #[event]
+    pub struct ComplexLog {
+        #[indexed]
+        pub id: u256,
+        #[indexed]
+        pub sender: Address,
+        #[indexed]
+        pub ok: bool,
+        pub packet: Packet,
+        pub note: DynString,
+    }
+
+    #[event]
+    pub struct ExtremelyLongCustomEventNameExceedingThirtyTwoBytesInSoliditySignature {
+        #[indexed]
+        pub tag: u256,
+        pub amount: u256,
+    }
+}
+
+#[generate(abi_struct)]
+pub struct Packet {
+    pub a: u64,
+    pub b: bool,
+    pub c: Address,
+}
+
+#[generate(event_struct)]
+pub struct EmptyEvent {}
+
+pub struct SingleIndexed {
+    pub id: Indexed<u256>,
+}
+
+impl Event for SingleIndexed with (EventDerive)
+
+#[generate(event_struct)]
+pub struct Transfer {
+    pub from: Indexed<Address>,
+    pub to: Indexed<Address>,
+    pub value: u256,
+}
+
+#[generate(event_struct)]
+pub struct ComplexLog {
+    pub id: Indexed<u256>,
+    pub sender: Indexed<Address>,
+    pub ok: Indexed<bool>,
+    pub packet: Packet,
+    pub note: DynString,
+}
+
+#[generate(event_struct)]
+pub struct ExtremelyLongCustomEventNameExceedingThirtyTwoBytesInSoliditySignature {
+    pub tag: Indexed<u256>,
+    pub amount: u256,
+}
+
+msg EventMsg {
+    #[selector = sol("checkTopics()")]
+    CheckTopics -> bool,
+    #[selector = sol("emitAll(string)")]
+    EmitAll { note: DynString },
+}
+
+pub contract EventContract uses (log: mut Log) {
+    recv EventMsg {
+        CheckTopics -> bool {
+            <EmptyEvent as Event>::TOPIC0 == <oracle::EmptyEvent as Event>::TOPIC0
+                && <SingleIndexed as Event>::TOPIC0 == <oracle::SingleIndexed as Event>::TOPIC0
+                && <Transfer as Event>::TOPIC0 == <oracle::Transfer as Event>::TOPIC0
+                && <ComplexLog as Event>::TOPIC0 == <oracle::ComplexLog as Event>::TOPIC0
+                && <ExtremelyLongCustomEventNameExceedingThirtyTwoBytesInSoliditySignature as Event>::TOPIC0
+                    == <oracle::ExtremelyLongCustomEventNameExceedingThirtyTwoBytesInSoliditySignature as Event>::TOPIC0
+        }
+
+        EmitAll { note } uses (mut log) {
+            log.emit(EmptyEvent {})
+            log.emit(SingleIndexed { id: Indexed::new(7) })
+            log.emit(Transfer {
+                from: Indexed::new(Address::new(0x11)),
+                to: Indexed::new(Address::new(0x22)),
+                value: 300,
+            })
+            log.emit(ComplexLog {
+                id: Indexed::new(99),
+                sender: Indexed::new(Address::new(0x33)),
+                ok: Indexed::new(true),
+                packet: Packet { a: 42, b: true, c: Address::new(0x44) },
+                note,
+            })
+            log.emit(ExtremelyLongCustomEventNameExceedingThirtyTwoBytesInSoliditySignature {
+                tag: Indexed::new(55),
+                amount: 66,
+            })
+        }
+    }
+}
+"#;
+
+        let entries = abi_entries(code, "EventContract");
+        let find_event = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry["type"] == "event" && entry["name"] == name)
+                .unwrap_or_else(|| panic!("missing event `{name}` in ABI: {entries:?}"))
+        };
+
+        let transfer = find_event("Transfer");
+        assert_eq!(transfer["anonymous"], false);
+        assert_eq!(
+            transfer["inputs"],
+            serde_json::json!([
+                { "name": "from", "type": "address", "indexed": true },
+                { "name": "to", "type": "address", "indexed": true },
+                { "name": "value", "type": "uint256", "indexed": false },
+            ])
+        );
+
+        let complex = find_event("ComplexLog");
+        assert_eq!(complex["inputs"][0]["indexed"], true);
+        assert_eq!(complex["inputs"][0]["type"], "uint256");
+        assert_eq!(complex["inputs"][1]["indexed"], true);
+        assert_eq!(complex["inputs"][1]["type"], "address");
+        assert_eq!(complex["inputs"][2]["indexed"], true);
+        assert_eq!(complex["inputs"][2]["type"], "bool");
+        assert_eq!(complex["inputs"][3]["indexed"], false);
+        assert_eq!(complex["inputs"][3]["type"], "tuple");
+        assert_eq!(complex["inputs"][3]["components"][0]["type"], "uint64");
+        assert_eq!(complex["inputs"][4]["indexed"], false);
+        assert_eq!(complex["inputs"][4]["type"], "string");
+
+        let harness = FeContractHarness::compile("EventContract", code).expect("compile contract");
+        let mut instance = harness.deploy_instance().expect("deploy instance");
+        let opts = ExecutionOptions::default();
+
+        let topics_ok = instance
+            .call_function("checkTopics()", &[], opts)
+            .expect("checkTopics");
+        assert_eq!(
+            U256::from_be_slice(&topics_ok.return_data),
+            U256::from(1u64)
+        );
+
+        let mut emit_calldata = ethers_core::utils::keccak256(b"emitAll(string)")[..4].to_vec();
+        emit_calldata.extend_from_slice(&encode(&[Token::String("event payload".to_string())]));
+        let outcome = instance
+            .call_raw_with_logs(&emit_calldata, opts)
+            .expect("emitAll");
+        assert_eq!(outcome.raw_logs.len(), 5);
+
+        let empty_log = &outcome.raw_logs[0];
+        assert_eq!(empty_log.data.topics().len(), 1);
+        assert_eq!(
+            empty_log.data.topics()[0].as_slice(),
+            &ethers_core::utils::keccak256(b"EmptyEvent()")[..]
+        );
+        assert!(empty_log.data.data.is_empty());
+
+        let transfer_log = &outcome.raw_logs[2];
+        assert_eq!(transfer_log.data.topics().len(), 3);
+        assert_eq!(
+            transfer_log.data.topics()[0].as_slice(),
+            &ethers_core::utils::keccak256(b"Transfer(address,address,uint256)")[..]
+        );
+        assert_eq!(
+            U256::from_be_slice(transfer_log.data.topics()[1].as_slice()),
+            U256::from(0x11u64)
+        );
+        assert_eq!(
+            U256::from_be_slice(transfer_log.data.topics()[2].as_slice()),
+            U256::from(0x22u64)
+        );
+        assert_eq!(
+            transfer_log.data.data.as_ref(),
+            &encode(&[Token::Uint(EthU256::from(300u64))])[..]
+        );
+
+        let complex_log = &outcome.raw_logs[3];
+        assert_eq!(complex_log.data.topics().len(), 4);
+        assert_eq!(
+            complex_log.data.topics()[0].as_slice(),
+            &ethers_core::utils::keccak256(
+                b"ComplexLog(uint256,address,bool,(uint64,bool,address),string)"
+            )[..]
+        );
+        assert_eq!(
+            U256::from_be_slice(complex_log.data.topics()[1].as_slice()),
+            U256::from(99u64)
+        );
+        assert_eq!(
+            U256::from_be_slice(complex_log.data.topics()[2].as_slice()),
+            U256::from(0x33u64)
+        );
+        assert_eq!(
+            U256::from_be_slice(complex_log.data.topics()[3].as_slice()),
+            U256::from(1u64)
+        );
+        let expected_complex_data = encode(&[
+            Token::Tuple(vec![
+                Token::Uint(EthU256::from(42u64)),
+                Token::Bool(true),
+                Token::Address(EthAddress::from_low_u64_be(0x44)),
+            ]),
+            Token::String("event payload".to_string()),
+        ]);
+        assert_eq!(complex_log.data.data.as_ref(), &expected_complex_data[..]);
     }
 }

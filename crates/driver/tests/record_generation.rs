@@ -1930,3 +1930,152 @@ const fn verify_client1_and_client2() -> bool {
     ));
 }
 
+#[test]
+fn client3_event_generator_topic0_and_indexed_field_query_in_ctfe() {
+    let source = r#"use core::abi::DynString
+use core::meta::{Code, Item, Record, field, field_count, field_type, query_field}
+use std::derive::{EventDerive, IsIndexedFieldQuery, abi_struct, event_struct}
+use std::evm::{Address, Event, Indexed}
+
+mod oracle {
+    use core::abi::DynString
+    use std::evm::Address
+
+    #[abi]
+    pub struct Packet {
+        pub a: u64,
+        pub b: bool,
+        pub c: Address,
+    }
+
+    #[event]
+    pub struct EmptyEvent {}
+
+    #[event]
+    pub struct SingleIndexed {
+        #[indexed]
+        pub id: u256,
+    }
+
+    #[event]
+    pub struct Transfer {
+        #[indexed]
+        pub from: Address,
+        #[indexed]
+        pub to: Address,
+        pub value: u256,
+    }
+
+    #[event]
+    pub struct ComplexLog {
+        #[indexed]
+        pub id: u256,
+        #[indexed]
+        pub sender: Address,
+        #[indexed]
+        pub ok: bool,
+        pub packet: Packet,
+        pub note: DynString,
+    }
+}
+
+#[generate(abi_struct)]
+pub struct Packet {
+    pub a: u64,
+    pub b: bool,
+    pub c: Address,
+}
+
+#[generate(event_struct)]
+pub struct EmptyEvent {}
+
+pub struct SingleIndexed {
+    pub id: Indexed<u256>,
+}
+
+impl Event for SingleIndexed with (EventDerive)
+
+pub const fn count_indexed_fields(_ record: Record) -> Code<Item> {
+    let n = field_count(record)
+    var indexed: usize = 0
+    var unindexed: usize = 0
+    var i: usize = 0
+    while i < n {
+        let ty = field_type(field(record, i))
+        if query_field<IsIndexedFieldQuery, bool>(ty) {
+            indexed += 1
+        } else {
+            unindexed += 1
+        }
+        i += 1
+    }
+    quote {
+        const fn transfer_indexed_counts() -> (usize, usize) {
+            (${indexed}, ${unindexed})
+        }
+    }
+}
+
+#[generate(event_struct)]
+#[generate(count_indexed_fields)]
+pub struct Transfer {
+    pub from: Indexed<Address>,
+    pub to: Indexed<Address>,
+    pub value: u256,
+}
+
+#[generate(event_struct)]
+pub struct ComplexLog {
+    pub id: Indexed<u256>,
+    pub sender: Indexed<Address>,
+    pub ok: Indexed<bool>,
+    pub packet: Packet,
+    pub note: DynString,
+}
+
+const fn verify_client3() -> bool {
+    let (indexed, unindexed) = transfer_indexed_counts()
+    indexed == 2
+        && unindexed == 1
+        && <EmptyEvent as Event>::TOPIC0 == <oracle::EmptyEvent as Event>::TOPIC0
+        && <SingleIndexed as Event>::TOPIC0 == <oracle::SingleIndexed as Event>::TOPIC0
+        && <Transfer as Event>::TOPIC0 == <oracle::Transfer as Event>::TOPIC0
+        && <ComplexLog as Event>::TOPIC0 == <oracle::ComplexLog as Event>::TOPIC0
+}
+"#;
+    let (db, file) = input(source);
+    let output = prepare_file(&db, file).unwrap().unwrap();
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    let module = output.top_mod(output_file);
+    let diags = output.run_on_top_mod(module);
+    assert!(diags.is_empty(), "{}", diags.format_diags(&output));
+    let function = module
+        .all_funcs(&output)
+        .into_iter()
+        .find(|f| {
+            f.name(&output)
+                .to_opt()
+                .is_some_and(|name| name.data(&output) == "verify_client3")
+        })
+        .unwrap();
+    let owner = BodyOwner::Func(*function, None);
+    let result = eval_body_owner_const(
+        &output,
+        owner,
+        GenericSubst::for_body_owner(&output, owner, vec![]),
+    );
+    let EvalOutcome::Ready(value) = result else {
+        panic!("{result:?}")
+    };
+    assert!(matches!(
+        value.value(&output),
+        SemConstValue::Scalar {
+            value: SemConstScalar::Bool(true),
+            ..
+        }
+    ));
+}
+
