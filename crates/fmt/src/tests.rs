@@ -135,16 +135,18 @@ fn quotation_splice_documents_format_values_without_losing_categories() {
 
 #[test]
 fn quotation_open_binders_and_splice_comments_survive_formatting() {
-    let source = r#"const fn make() { quote(other /* binder */) {
-    impl Eq for $/* type */{record} where ${bounds} {
+    let source = r#"const fn make() { quote(other // binder
+) {
+    impl Eq for $// type
+{record} where ${bounds} {
         fn eq(self) -> bool { match self { ${pattern} => other.${field} == ${value} } }
     }
 } }"#;
     let config = crate::Config::default();
     let formatted = crate::format_str(source, &config).expect("format valid quotation");
     for fragment in [
-        "quote(other /* binder */)",
-        "$/* type */{record}",
+        "quote(other // binder\n)",
+        "$// type\n{record}",
         "where ${bounds}",
         "${pattern} => other.${field} == ${value}",
     ] {
