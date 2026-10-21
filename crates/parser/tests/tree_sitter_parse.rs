@@ -760,3 +760,12 @@ fn tree_sitter_agrees_on_composed_quotation_and_enum_reflection_examples() {
         }
     }
 }
+
+#[test]
+fn tree_sitter_highlight_query_accepts_pattern_paths() {
+    tree_sitter::Query::new(
+        &tree_sitter_fe::LANGUAGE.into(),
+        include_str!("../../tree-sitter-fe/queries/highlights.scm"),
+    )
+    .expect("highlight query must match the generated editor node structure");
+}
