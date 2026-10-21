@@ -34,7 +34,7 @@ pub(super) fn append_functions<'db>(ctxt: &mut FileLowerCtxt<'db>) {
         .generation_inputs()
         .functions(db)
         .iter()
-        .filter(|plan| plan.target_file == url && plan.request_impl.is_none())
+        .filter(|plan| plan.target_file == url)
         .cloned()
         .collect::<Vec<_>>();
     let root = super::top_mod_ast(db, top_mod);
