@@ -1758,3 +1758,84 @@ fn generation_provider_path_trivia_preserves_identity() {
         );
     }
 }
+
+#[test]
+fn quoted_impl_same_name_generic_bounds_are_preserved() {
+    let source = r#"use core::meta::{Code, Item, Record}
+trait Extra { const fn value() -> u256 }
+trait Mark { const fn mark() -> u256 }
+struct HasExtra {}
+struct NoExtra {}
+impl Extra for HasExtra { const fn value() -> u256 { 7 } }
+pub const fn make(_ record: Record) -> Code<Item> {
+    quote {
+        impl<T: Extra> Mark for ${record} {
+            const fn mark() -> u256 { <T as Extra>::value() }
+        }
+    }
+}
+#[generate(make)]
+struct Box<T> { value: T }
+const fn observe() -> u256 { <Box<HasExtra> as Mark>::mark() }
+"#;
+    let (db, file) = input(source);
+    let output = prepare_file(&db, file).unwrap().unwrap();
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    let module = output.top_mod(output_file);
+    let function = module
+        .all_funcs(&output)
+        .iter()
+        .find(|function| {
+            function
+                .name(&output)
+                .to_opt()
+                .is_some_and(|name| name.data(&output) == "observe")
+        })
+        .copied()
+        .unwrap();
+    let owner = BodyOwner::Func(function, None);
+    let result = eval_body_owner_const(
+        &output,
+        owner,
+        GenericSubst::for_body_owner(&output, owner, vec![]),
+    );
+    let EvalOutcome::Ready(value) = result else {
+        panic!("{result:?}")
+    };
+    assert!(matches!(value.value(&output), SemConstValue::Scalar {
+        value: SemConstScalar::Int { value }, ..
+    } if value.to_string() == "7"));
+    let invalid = source.replace("Box<HasExtra>", "Box<NoExtra>");
+    let (db, file) = input(&invalid);
+    let error = prepare_file(&db, file)
+        .err()
+        .expect("missing Extra must prevent Mark application");
+    assert!(
+        error.cause.contains("Extra") || error.cause.contains("Mark"),
+        "{error}"
+    );
+}
+
+#[test]
+fn quoted_impl_incompatible_same_name_generic_kind_is_refused() {
+    let source = r#"use core::meta::{Code, Item, Record}
+pub const fn make(_ record: Record) -> Code<Item> {
+    quote { impl<const T: usize> ${record} {} }
+}
+#[generate(make)]
+struct Box<T> { value: T }
+"#;
+    let (db, file) = input(source);
+    let error = prepare_file(&db, file)
+        .err()
+        .expect("type/const binder conflict must refuse");
+    assert!(
+        error
+            .cause
+            .contains("incompatible type or const declaration"),
+        "{error}"
+    );
+}
