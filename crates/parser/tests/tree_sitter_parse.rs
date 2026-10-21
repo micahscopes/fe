@@ -698,3 +698,12 @@ fn tree_sitter_agrees_on_basic_quotation_and_contextual_quote_names() {
         assert_eq!(count, expected_quotes, "{source}");
     }
 }
+
+#[test]
+fn tree_sitter_highlight_query_accepts_pattern_paths() {
+    tree_sitter::Query::new(
+        &tree_sitter_fe::LANGUAGE.into(),
+        include_str!("../../tree-sitter-fe/queries/highlights.scm"),
+    )
+    .expect("highlight query must match the generated editor node structure");
+}
