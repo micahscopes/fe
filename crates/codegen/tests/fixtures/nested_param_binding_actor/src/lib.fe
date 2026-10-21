@@ -9,14 +9,15 @@ use ingot::scalar::{Expansion, expansion, valid_tail}
 
 pub struct Pair<T> { pub re: T, pub im: T }
 impl<T: Copy> Copy for Pair<T> {}
-struct Camera { center: Pair<Expansion<4>>, zoom: f32 }
+struct Camera { center: Pair<Expansion<4>>, zoom: f32, resolution: f32 }
 impl Copy for Camera {}
-struct State { camera: Camera, hidden: f32, ticks: f32 }
+struct State { camera: Camera, hidden: f32, clock: f32, phase: f32, weight: f32, ticks: f32 }
 impl Copy for State {}
 struct Envelope { state: State }
 
 // Declaration order intentionally differs from the uniform's leaf order.
-struct CameraParams { zoom: Param, center: Pair<Param> }
+type CoordinateControls<T> = Pair<T>
+struct CameraParams { zoom: Param, center: CoordinateControls<Param> }
 struct Params { ticks: Param, camera: CameraParams }
 impl SurfaceState for State { type Params = Params }
 derive ApplyParamBindings for State using ParamBindingsProvider<Params>
@@ -39,8 +40,12 @@ fn initial_state() -> State {
         camera: Camera {
             center: Pair { re: expansion(1.0), im: expansion(-1.0) },
             zoom: 2.0,
+            resolution: 32.0,
         },
         hidden: 11.0,
+        clock: 13.0,
+        phase: 19.0,
+        weight: 23.0,
         ticks: 17.0,
     }
 }
@@ -57,7 +62,9 @@ pub fn edit(index: u32) -> bool {
         && after.camera.center.re.param_value() == (if index == 2 { 3.0 } else { 1.0 })
         && after.camera.center.im.param_value() == (if index == 3 { 3.0 } else { -1.0 })
         && valid_tail(after.camera.center.re) && valid_tail(after.camera.center.im)
-        && after.hidden == 11.0 && after.ticks == 17.0
+        && after.camera.resolution == 32.0
+        && after.hidden == 11.0 && after.clock == 13.0
+        && after.phase == 19.0 && after.weight == 23.0 && after.ticks == 17.0
 }
 
 actor NestedSurface uses (GpuProgram<WebGpuBackend>) {

@@ -4786,7 +4786,7 @@ mod freeze_guard {
              subtract/multiply/negate/share construction add five audited operations, 39 → 44; \
              configured provider-type reflection adds one, 44 → 45; domain-neutral float \
              literal construction adds one, 45 → 46; explicit immutable and mutable borrow \
-             construction add two, 46 → 48.)"
+             construction add two, 46 → 48; bounded record updates add one, 48 → 49.)"
         );
     }
 
@@ -4856,8 +4856,8 @@ mod freeze_guard {
 
     #[test]
     fn total_recognized_method_surface_is_pinned() {
-        // The full named method surface the freeze pins: 48 builder ops + 0
-        // reflection reads = 48 distinct literals. TD5c first moved the three
+        // The full named method surface the freeze pins: 49 builder ops + 0
+        // reflection reads = 49 distinct literals. TD5c first moved the three
         // `reflect.*` scalar reads onto `ReflectHandle` (54 → 51), then moved
         // the `field.*`/`variant.*` reads onto `FieldHandle`/`VariantHandle`
         // (RECOGNIZED_REFLECT_OPS → 0) and `same_ty`/`same_field` onto

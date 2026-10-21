@@ -12,9 +12,9 @@
 //! behavior and walks the record.
 //!
 //! `Param` also owns fluent input bindings. A params record and its ordinary
-//! scalar state record are joined by `SurfaceState`; the
-//! `ParamBindingsProvider` reflects the state fields once, projects the same
-//! names from the params record, and emits a straight-line Fe transition. No
+//! state record are joined by `SurfaceState`; the
+//! `ParamBindingsProvider` walks nested declaration paths and emits a typed
+//! whole-value transition preserving undeclared state. No
 //! binding table is projected to JSON and the browser does not interpret these
 //! values: the generated Wasm calls `Param::drive` below.
 
@@ -429,6 +429,8 @@ pub struct Param {
     wheel_out_factor: f32,
 }
 
+impl Copy for Param {}
+
 impl Param {
     const fn control(
         _ kind: ParamKind,
@@ -736,8 +738,10 @@ pub trait ApplyParamBindings: SurfaceState {
 }
 
 /// Generic derive provider for `ApplyParamBindings`. Configure it with the
-/// state's associated Params record. Reflection matches field labels to that
-/// record's declaration ordinals; `Param::drive` owns application semantics.
+/// state's associated Params record. Recursive declaration paths determine
+/// event ordinals; `Param::drive` and `ParamValue` own value semantics.
+/// Nested state fields are ordinary Copy values; private representations are
+/// updated only through their public ParamValue implementation.
 pub struct ParamBindingsProvider<Params> {}
 
 impl<Params> Derive<ApplyParamBindings> for ParamBindingsProvider<Params> {
@@ -750,7 +754,14 @@ impl<Params> Derive<ApplyParamBindings> for ParamBindingsProvider<Params> {
         let state = builder.self_ref()
         let params = builder.arg_ref("params")
         let event = builder.arg_ref("event")
-        let mut next = builder.record_update(state)
+        // Preserve the existing borrowed-self API, including flat states
+        // that do not declare Copy: construct one owned result from fields.
+        // Nested fields are copied as whole values, never flattened here.
+        let mut owned = builder.struct_init()
+        for field in reflect.fields() {
+            owned = builder.with_field(owned, field, builder.field_get(state, field))
+        }
+        let mut next = builder.record_update(owned)
         // The recursive declaration order is also the browser event order.
         // State may contain hidden fields: the owned update preserves them.
         let mut index: u32 = 0

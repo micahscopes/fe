@@ -486,6 +486,11 @@ fn walk_param_record<'db>(
         ));
     }
     for (name, field) in struct_named_fields(db, value, "the params record")? {
+        if out.len() >= 256 {
+            return Err(ViewProjectionError::Shape(
+                "parameter record exceeds the finite path budget".into(),
+            ));
+        }
         let mut path = prefix.to_vec();
         path.push(name);
         let fields = struct_named_fields(
