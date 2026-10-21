@@ -9,7 +9,7 @@ impl Derive<GuardedUpdate> for GuardedProvider {
     const fn derive<T>(ev: own Evidence<GuardedUpdate<T>>) -> Evidence<GuardedUpdate<T>>
         uses (reflect: Reflect<T>, builder: mut ImplBuilder<GuardedUpdate<T>>)
     {
-        let mut result = quote { true }
+        let mut result = builder.bool(true)
         for field in reflect.fields() {
             let update = builder.record_update(builder.self_ref())
             let quotient = builder.call(builder.self_ref(), "quotient", builder.arg_ref("denominator"))
@@ -17,9 +17,9 @@ impl Derive<GuardedUpdate> for GuardedProvider {
             let value = builder.field_get(update, field)
             // Reuse the same handle twice. Both evaluations belong to this
             // short-circuit operand, including their temporary bindings.
-            result = quote(denominator) {
-                denominator == 0 || (${value} == ${quotient} && ${value} == ${quotient})
-            }
+            let zero = builder.eq(builder.arg_ref("denominator"), builder.int(0))
+            let equal = builder.eq(value, quotient)
+            result = builder.or(zero, builder.and(equal, equal))
         }
         builder.emit_method("guarded", result)
         builder.finish()
