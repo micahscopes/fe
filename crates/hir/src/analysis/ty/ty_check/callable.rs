@@ -218,7 +218,7 @@ pub(super) fn unify_explicit_call_generic_args<'db>(
                 )
                 .map_err(CallGenericArgUnifyError::InvalidArgument)?
         }
-        CallableDef::VariantCtor(_) => given_args
+        CallableDef::VariantCtor(_) | CallableDef::StructCtor(_) => given_args
             .clone()
             .unwrap_or_else(|| callable.generic_args[offset..].to_vec()),
     };
@@ -446,7 +446,9 @@ impl<'db> Callable<'db> {
         let Some(inst) = self.trait_inst else {
             return Some((func, self.generic_args.clone()));
         };
-        if inst.args(db).iter().any(|ty| ty.has_var(db)) {
+        if inst.args(db).iter().any(|ty| ty.has_var(db))
+            || matches!(self.choice, Some(Choice::Slot(_)))
+        {
             return None;
         }
         if self.evidence.is_some() {
@@ -490,6 +492,11 @@ impl<'db> Callable<'db> {
     /// The checker's decision for this call's trait slot, if not ordinary.
     pub fn choice(&self) -> Option<Choice<'db>> {
         self.choice
+    }
+
+    /// Whether this call's trait decision reaches an unresolved [`SlotRef`].
+    pub(crate) fn has_open_choice(&self, db: &'db dyn HirAnalysisDb) -> bool {
+        self.choice.is_some_and(|choice| choice.has_slot(db))
     }
 
     pub(crate) fn set_choice(&mut self, choice: Option<Choice<'db>>) {
@@ -539,13 +546,10 @@ impl<'db> Callable<'db> {
         db: &'db dyn HirAnalysisDb,
         solve_cx: TraitSolveCx<'db>,
     ) {
-        if let Some(choice) = self.choice
-            && let Some(ev) = choice.to_evidence(db, solve_cx, self.trait_inst)
-        {
-            self.evidence = Some(ev);
-            return;
-        }
-        self.evidence = self.trait_inst.and_then(|inst| prove(db, solve_cx, inst));
+        self.evidence = match self.choice {
+            Some(choice) => choice.to_evidence(db, solve_cx, self.trait_inst),
+            None => self.trait_inst.and_then(|inst| prove(db, solve_cx, inst)),
+        };
     }
 
     /// The checker's proof of the call's trait goal.
@@ -731,17 +735,20 @@ impl<'db> Callable<'db> {
 
         for (i, hir_arg) in call_args.iter().enumerate() {
             let arg_idx = if has_receiver { i + 1 } else { i };
-            // A variant constructor's arguments see the variant's field types,
-            // like a struct literal's fields. Keep this contextual typing
+            // A variant or tuple struct constructor's arguments see its field
+            // types, like a struct literal's fields. Keep this contextual typing
             // selective: applying it to every call argument changes ordinary
             // inference and compile-time evaluation.
             let expected_hint = self
                 .compile_time_string_literal_arg_expected(tc, hir_arg.expr, arg_idx)
                 .or_else(|| {
-                    matches!(self.callable_def, CallableDef::VariantCtor(_))
-                        .then(|| self.arg_ty(db, arg_idx))
-                        .flatten()
-                        .map(|ty| tc.normalize_ty(ty))
+                    matches!(
+                        self.callable_def,
+                        CallableDef::VariantCtor(_) | CallableDef::StructCtor(_)
+                    )
+                    .then(|| self.arg_ty(db, arg_idx))
+                    .flatten()
+                    .map(|ty| tc.normalize_ty(ty))
                 });
             if !already_typed
                 && matches!(
@@ -1216,7 +1223,7 @@ impl<'db> Callable<'db> {
         let instantiated = constraints.instantiate(db, &self.generic_args);
         let definition_assumptions = match self.callable_def {
             CallableDef::Func(func) => param_env(db, func.into()),
-            CallableDef::VariantCtor(_) => declared,
+            CallableDef::VariantCtor(_) | CallableDef::StructCtor(_) => declared,
         };
         let definition_solve_cx = TraitSolveCx::new(db, self.callable_def.scope())
             .with_assumptions(definition_assumptions);

@@ -224,20 +224,21 @@ fn run(_ o: Once<Item>) -> usize {
 }
 
 #[test]
-fn for_loop_protocol_calls_refuse_opened_condition_under_with() {
-    // R9C-1a (OpenedCondition refusal on `for x in o` inside `with`):
-    // `Once::start` relies on conditional `impl<T: Price> Bonus for T` under `with (Wholesale)`.
-    let opened_condition_loop = r#"
+fn for_loop_protocol_calls_transport_subchoices_and_refuse_unfollowed_proofs_under_with() {
+    // 1. `Once::start` relies on conditional `impl<T: Price> Bonus for T` via `call_bonus<T>()`.
+    // Under `with (Wholesale)`, the sub-choice `T: Price -> Wholesale` is transported into
+    // `Once::start` -> `call_bonus<Item>()` without refusal.
+    let transported_loop = r#"
 use core::iter::Collection
 
-trait Price { fn amount() -> usize }
-trait Bonus { fn bonus() -> usize }
+trait Price { const fn amount() -> usize }
+trait Bonus { const fn bonus() -> usize }
 struct Item {}
-impl Price for Item { fn amount() -> usize { 100 } }
-impl Price for Item as Wholesale { fn amount() -> usize { 70 } }
-impl<T: Price> Bonus for T { fn bonus() -> usize { T::amount() } }
+impl Price for Item { const fn amount() -> usize { 100 } }
+impl Price for Item as Wholesale { const fn amount() -> usize { 70 } }
+impl<T: Price> Bonus for T { const fn bonus() -> usize { T::amount() } }
 
-fn call_bonus<T: Bonus>() -> usize { T::bonus() }
+const fn call_bonus<T: Bonus>() -> usize { T::bonus() }
 
 struct Once<T> {
     vals: [usize; 1],
@@ -247,13 +248,13 @@ impl<T: Price> Collection for Once<T> {
     type Item = usize
     type Cursor = usize
 
-    fn start(self) -> usize {
+    const fn start(self) -> usize {
         let _ = call_bonus<T>()
         0
     }
-    fn has(self, _ c: usize) -> bool { c < 1 }
-    fn next(self, _ c: usize) -> usize { c + 1 }
-    fn at(mut? self, _ c: usize) -> mut? usize { mut? self.vals[0] }
+    const fn has(self, _ c: usize) -> bool { c < 1 }
+    const fn next(self, _ c: usize) -> usize { c + 1 }
+    const fn at(mut? self, _ c: usize) -> mut? usize { mut? self.vals[0] }
 }
 
 fn run(_ o: Once<Item>) -> usize {
@@ -267,9 +268,9 @@ fn run(_ o: Once<Item>) -> usize {
 }
 "#;
     assert!(
-        diag_codes(opened_condition_loop).contains(&"8-0098".to_string()),
-        "expected 8-0098 for `for` loop protocol call with opened condition under `with`, got {:?}",
-        diag_codes(opened_condition_loop)
+        diag_codes(transported_loop).is_empty(),
+        "expected no diagnostics for `for` loop protocol call transporting conditional sub-choice under `with`, got {:?}",
+        diag_codes(transported_loop)
     );
 }
 
@@ -577,5 +578,260 @@ pub fn nested_const_in_with() {
         codes.iter().filter(|c| *c == "8-0098").count(),
         3,
         "expected 3 `8-0098` refusals for nested items inside `with` referencing choice-dependent `Holder<Item>`, got {codes:?}"
+    );
+}
+
+#[test]
+fn generic_named_impl_opens_with_explicit_type_args_and_transports_subchoices() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generic_named_impl_positive.fe".into(),
+        r#"
+use core::obligations::{Evidence, prove}
+
+trait Inner {
+    const C: usize
+    const fn val() -> usize
+}
+
+impl Inner for u256 {
+    const C: usize = 3
+    const fn val() -> usize { 30 }
+}
+
+impl Inner for u256 as AltInner {
+    const C: usize = 7
+    const fn val() -> usize { 70 }
+}
+
+trait OnlyInner {
+    const fn only_val() -> usize
+}
+
+impl OnlyInner for u256 as NamedOnlyInner {
+    const fn only_val() -> usize { 90 }
+}
+
+trait Outer {
+    const OC: usize
+    const fn out() -> usize
+}
+
+impl Outer for u256 {
+    const OC: usize = 1
+    const fn out() -> usize { 10 }
+}
+
+impl<T: Inner> Outer for T as NamedOuter {
+    const OC: usize = T::C + 100
+    const fn out() -> usize { T::val() + 100 }
+}
+
+impl<T: OnlyInner> Outer for T as NamedNeedsOnly {
+    const OC: usize = 200
+    const fn out() -> usize { T::only_val() + 200 }
+}
+
+const fn ask_outer<T: Outer>() -> usize {
+    T::OC + T::out()
+}
+
+const fn use_outer_ev(_ ev: Evidence<Outer<u256>>) -> usize {
+    with (ev) {
+        ask_outer<u256>()
+    }
+}
+
+const ORDINARY: usize = ask_outer<u256>()
+
+const NAMED_DEFAULT_INNER: usize = with (NamedOuter<u256>) {
+    <u256 as Outer>::OC + <u256 as Outer>::out() + ask_outer<u256>()
+}
+
+const NAMED_ALT_INNER_SAME_HEADER: usize = with (AltInner, NamedOuter<u256>) {
+    <u256 as Outer>::OC + <u256 as Outer>::out() + ask_outer<u256>()
+}
+
+const NAMED_ALT_INNER_NESTED: usize = with (AltInner) {
+    with (NamedOuter<u256>) {
+        ask_outer<u256>()
+    }
+}
+
+const NAMED_ONLY_PREREQ: usize = with (NamedOnlyInner, NamedNeedsOnly<u256>) {
+    ask_outer<u256>()
+}
+
+const NAMED_PROVED_EV: usize = {
+    let ev: Evidence<Outer<u256>> = with (AltInner, NamedOuter<u256>) {
+        prove<Outer<u256>>()
+    }
+    use_outer_ev(ev)
+}
+
+pub fn check() -> [u8; ORDINARY] {
+    let _a: [u8; NAMED_DEFAULT_INNER] = [0; 466]
+    let _b: [u8; NAMED_ALT_INNER_SAME_HEADER] = [0; 554]
+    let _c: [u8; NAMED_ALT_INNER_NESTED] = [0; 277]
+    let _d: [u8; NAMED_ONLY_PREREQ] = [0; 490]
+    let _e: [u8; NAMED_PROVED_EV] = [0; 277]
+    [0; 11]
+}
+"#,
+    );
+    let (module, _) = db.top_mod(file);
+    db.assert_no_diags(module);
+}
+
+#[test]
+fn generic_named_impl_refuses_bad_arguments_unsatisfied_prereqs_and_choice_dependent_types() {
+    let missing_args = r#"
+trait Outer { fn out() -> u256 }
+impl<T> Outer for T as NamedOuter { fn out() -> u256 { 1 } }
+pub fn bad() -> u256 {
+    with (NamedOuter) {
+        <u256 as Outer>::out()
+    }
+}
+"#;
+    assert!(
+        diag_codes(missing_args).contains(&"8-0098".to_string()),
+        "expected 8-0098 when opening generic named impl without generic arguments"
+    );
+
+    let extra_args_on_non_generic = r#"
+trait Outer { fn out() -> u256 }
+impl Outer for u256 as NonGeneric { fn out() -> u256 { 1 } }
+pub fn bad() -> u256 {
+    with (NonGeneric<u256>) {
+        <u256 as Outer>::out()
+    }
+}
+"#;
+    assert!(
+        diag_codes(extra_args_on_non_generic).contains(&"8-0098".to_string()),
+        "expected 8-0098 when passing generic arguments to a non-generic named impl"
+    );
+
+    let unsatisfied_prereq = r#"
+trait OnlyInner { fn val() -> u256 }
+impl OnlyInner for u256 as NamedOnly { fn val() -> u256 { 1 } }
+trait Outer { fn out() -> u256 }
+impl<T: OnlyInner> Outer for T as NamedNeedsOnly { fn out() -> u256 { T::val() } }
+pub fn bad() -> u256 {
+    with (NamedNeedsOnly<u256>) {
+        <u256 as Outer>::out()
+    }
+}
+"#;
+    assert!(
+        diag_codes(unsatisfied_prereq).contains(&"8-0098".to_string()),
+        "expected 8-0098 when opening generic named impl whose prerequisite is not satisfied"
+    );
+
+    let choice_dependent_type_under_generic_named = r#"
+trait Outer { const N: usize }
+impl Outer for u256 { const N: usize = 2 }
+impl<T> Outer for T as NamedOuter { const N: usize = 4 }
+pub fn bad() {
+    with (NamedOuter<u256>) {
+        let _buf: [u8; <u256 as Outer>::N] = [0; 2]
+    }
+}
+"#;
+    assert!(
+        diag_codes(choice_dependent_type_under_generic_named).contains(&"8-0122".to_string()),
+        "expected 8-0122 when type inside `with (NamedOuter<u256>)` reads `<u256 as Outer>::N`"
+    );
+
+    let defaulted_const_param_written_frames = r#"
+trait Cap { const C: usize }
+struct Arr<const N: usize> {}
+impl<const N: usize> Cap for Arr<N> { const C: usize = N }
+impl<const N: usize = { 2 + 2 }> Cap for Arr<N> as NamedArr { const C: usize = 99 }
+
+pub fn bad_defaulted() {
+    with (NamedArr) {
+        let _xs: [u8; <Arr<4> as Cap>::C] = [0; 4]
+    }
+}
+"#;
+    assert!(
+        diag_codes(defaulted_const_param_written_frames).contains(&"8-0122".to_string()),
+        "expected 8-0122 when type inside `with (NamedArr)` with defaulted const param reads `<Arr<4> as Cap>::C`"
+    );
+
+    let anon_const_arg_on_named_impl = r#"
+struct Positive<const N: usize> where { N > 0 } {}
+trait Cap { fn get(self) -> usize }
+struct Arr<const N: usize> {}
+impl<const N: usize> Cap for Arr<N> as NamedArr {
+    fn get(self) -> usize { N }
+}
+pub fn bad_anon_const() -> usize {
+    with (NamedArr<{ let _p: Positive<0> = Positive {}; 4 }>) {
+        let a: Arr<4> = Arr {}
+        a.get()
+    }
+}
+"#;
+    assert!(
+        !diag_codes(anon_const_arg_on_named_impl).is_empty(),
+        "expected diagnostic when anonymous const argument on `with (NamedArr<{{ ... }}>)` violates inner `where` requirement"
+    );
+}
+
+#[test]
+fn generic_named_impl_own_body_sees_self_slot_for_blanket_and_named_only_traits() {
+    let src = r#"
+trait Inner {
+    const fn inner(self) -> u256
+}
+impl Inner for u256 {
+    const fn inner(self) -> u256 { self + 5 }
+}
+
+trait Outer {
+    const OC: u256 = 10
+    const fn get(self) -> u256
+    const fn helper(self) -> u256 {
+        Self::OC
+    }
+}
+
+impl<T: Inner> Outer for T as BlanketOuter {
+    const OC: u256 = 20
+    const fn get(self) -> u256 {
+        self.inner() + self.helper() + Self::OC + T::OC
+    }
+}
+
+struct Boxed<T> { pub x: T }
+impl<T: Inner> Outer for Boxed<T> as NamedBoxedOuter {
+    const OC: u256 = 30
+    const fn get(self) -> u256 {
+        self.x.inner() + self.helper() + Self::OC + <Boxed<T> as Outer>::OC
+    }
+}
+
+const FROM_BLANKET: u256 = with (BlanketOuter<u256>) {
+    (1 as u256).get()
+}
+
+const FROM_BOXED: u256 = with (NamedBoxedOuter<u256>) {
+    (Boxed { x: 1 as u256 }).get()
+}
+
+struct Verify66<const N: u256> where { N == 66 } {}
+struct Verify96<const N: u256> where { N == 96 } {}
+fn verify_own_body(
+    _ a: Verify66<FROM_BLANKET>,
+    _ b: Verify96<FROM_BOXED>,
+) {}
+"#;
+    let codes = diag_codes(src);
+    assert!(
+        codes.is_empty(),
+        "expected no diagnostics for generic named impl bodies referencing their own slot via `self.helper()`, `Self::OC`, `T::OC`, and `<Boxed<T> as Outer>::OC`, got {codes:?}"
     );
 }
