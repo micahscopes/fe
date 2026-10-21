@@ -1388,17 +1388,26 @@ module.exports = grammar({
       ')',
     ),
 
-    path_pattern: $ => prec(1, $.path),
+    // Pattern constructors may qualify a variant through instantiated types.
+    _pattern_path: $ => prec.right(seq(
+      $.path_segment,
+      optional($.generic_arg_list),
+      repeat(prec.right(PREC.PATH + 1, seq(
+        '::', $.path_segment, optional($.generic_arg_list),
+      ))),
+    )),
+
+    path_pattern: $ => prec(1, $._pattern_path),
 
     path_tuple_pattern: $ => prec(2, seq(
-      $.path,
+      $._pattern_path,
       '(',
       sepTrailing($._pattern, ','),
       ')',
     )),
 
     record_pattern: $ => prec(3, seq(
-      $.path,
+      $._pattern_path,
       '{',
       sepTrailing($.record_pattern_field, ','),
       '}',
