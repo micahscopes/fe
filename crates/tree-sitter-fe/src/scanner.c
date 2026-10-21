@@ -545,7 +545,7 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
               continue;
             case '$': {
               advance(lexer);
-              if (lexer->lookahead != '{') goto not_generic;
+              if (!skip_quote_trivia(lexer) || lexer->lookahead != '{') goto not_generic;
               int splice_depth = 1;
               advance(lexer);
               while (splice_depth > 0 && !lexer->eof(lexer)) {
