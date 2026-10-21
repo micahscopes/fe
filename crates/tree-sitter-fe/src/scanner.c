@@ -363,6 +363,24 @@ static bool scan_word(TSLexer *lexer, const char *word) {
   return !is_ident_char(lexer->lookahead);
 }
 
+// Lookahead after mark_end must never skip: skipping would move the start of
+// the already marked quote/generic token. The opening /* is consumed here.
+static bool advance_quote_block_comment(TSLexer *lexer) {
+  int depth = 1;
+  while (depth > 0 && !lexer->eof(lexer)) {
+    if (lexer->lookahead == '*') {
+      advance(lexer);
+      if (lexer->lookahead == '/') { advance(lexer); depth--; }
+    } else if (lexer->lookahead == '/') {
+      advance(lexer);
+      if (lexer->lookahead == '*') { advance(lexer); depth++; }
+    } else {
+      advance(lexer);
+    }
+  }
+  return depth == 0;
+}
+
 // Ignore trivia tokens, but not a standalone newline, just like the Rust
 // parser's current_kind_same_line. A newline inside a block comment remains
 // part of that single comment token.
@@ -378,7 +396,7 @@ static bool skip_quote_trivia(TSLexer *lexer, bool allow_newlines) {
     }
     if (lexer->lookahead != '*') return false; // A division operator is not trivia.
     advance(lexer);
-    if (!skip_block_comment(lexer)) return false;
+    if (!advance_quote_block_comment(lexer)) return false;
   }
 }
 
