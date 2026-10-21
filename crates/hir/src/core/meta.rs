@@ -845,8 +845,6 @@ impl<'db> ItemCode<'db> {
                 .url(db)
                 .ok_or("generation target has no source URL")?,
             quote_range: quote.syntax().text_range(),
-            request_impl: None,
-            scoped_impl: None,
             producer_module,
             producer_block,
             holes,
