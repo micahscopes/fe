@@ -1,6 +1,8 @@
 pub use abi::{self, *}
+pub use derive
 pub use evm
 pub use prelude
 pub use io
 pub use native
 pub use core::text
+pub use sp1

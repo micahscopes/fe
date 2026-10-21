@@ -277,8 +277,22 @@ pub enum SyntaxKind {
     ClosureExpr,
     /// Authored checked item template.
     QuoteExpr,
+    /// `(other, ..)` open binder list on `quote`.
+    QuoteOpenList,
     /// A provider expression embedded in a template.
     QuoteHoleExpr,
+    /// `${ty}` splice in type position.
+    QuoteHoleType,
+    /// `${arms}` splice in match-arm position.
+    QuoteHoleArm,
+    /// `${pat}` splice in pattern position.
+    QuoteHolePat,
+    /// `${...}` splice for a member, declared name, item, or where predicate.
+    QuoteHole,
+    /// `{ item1\n item2\n .. }` inside a quote.
+    QuoteItemList,
+    /// `{ where T: Trait, .. }` inside a quote.
+    QuoteWhere,
     /// `x + 1`
     BinExpr,
     /// `!x`
@@ -505,6 +519,10 @@ pub enum SyntaxKind {
     RecordFieldDef,
     /// `{x: i32, y: u32}`
     RecordFieldDefList,
+    /// `pub u8` in `struct Month(pub u8)`
+    TupleFieldDef,
+    /// `(pub u8, u16)` in `struct Pair(pub u8, u16)`
+    TupleFieldDefList,
 
     VariantDef,
     VariantDefList,
@@ -630,7 +648,14 @@ impl SyntaxKind {
             SyntaxKind::RParen => "`)`",
             SyntaxKind::Dollar => "`$`",
             SyntaxKind::QuoteExpr => "quotation",
+            SyntaxKind::QuoteOpenList => "`quote` open name list",
             SyntaxKind::QuoteHoleExpr => "quotation hole",
+            SyntaxKind::QuoteHoleType => "`${...}` type splice",
+            SyntaxKind::QuoteHoleArm => "`${...}` match-arm splice",
+            SyntaxKind::QuoteHolePat => "`${...}` pattern splice",
+            SyntaxKind::QuoteHole => "`${...}` splice",
+            SyntaxKind::QuoteItemList => "quoted items",
+            SyntaxKind::QuoteWhere => "quoted where predicates",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
             SyntaxKind::LBracket => "`[`",
@@ -717,6 +742,7 @@ impl SyntaxKind {
 
             SyntaxKind::ArrayExpr => "array definition",
             SyntaxKind::RecordFieldDef => "field",
+            SyntaxKind::TupleFieldDef => "tuple field",
             SyntaxKind::IndexExpr => "index expression",
             SyntaxKind::BlockExpr => "block",
             SyntaxKind::ClosureExpr => "closure expression",
@@ -828,6 +854,7 @@ impl SyntaxKind {
             SyntaxKind::AttrList => "attribute list",
             SyntaxKind::Visibility => "visibility modifier",
             SyntaxKind::RecordFieldDefList => "record field list",
+            SyntaxKind::TupleFieldDefList => "tuple field list",
             SyntaxKind::VariantDef => "`enum` variant definition",
             SyntaxKind::VariantDefList => "`enum` variant list",
             SyntaxKind::TypeGenericParam => "generic type parameter",
@@ -885,6 +912,7 @@ impl SyntaxKind {
                 | SyntaxKind::Percent
                 | SyntaxKind::Tilde
                 | SyntaxKind::Not
+                | SyntaxKind::Dollar
                 | SyntaxKind::Hat
                 | SyntaxKind::Amp
                 | SyntaxKind::Amp2

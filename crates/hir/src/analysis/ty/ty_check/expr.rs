@@ -1,4 +1,3 @@
-use crate::hir_def::ModeMarker;
 use either::Either;
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive;
@@ -69,6 +68,7 @@ use crate::analysis::ty::{
         stored_value_contains_implicit_layout_params, stored_value_contains_out_of_scope_params,
     },
     fold::{TyFoldable as _, TyFolder},
+    instantiate_trait_self,
     normalize::normalize_with_trait_evidence,
     provider::{ProviderTransport, provider_semantics_for_specialized_call},
     shape::{Shape, SumKind, sum_kind},
@@ -107,7 +107,7 @@ use crate::analysis::{
     },
 };
 use crate::core::semantic::storage_slot_span;
-use crate::hir_def::{BlockKind, ItemKind, scope_graph::ScopeId};
+use crate::hir_def::{BlockKind, FieldParent, ItemKind, scope_graph::ScopeId};
 use crate::semantic::{ProviderBinding, ProviderSource};
 use common::indexmap::IndexMap;
 
@@ -370,21 +370,79 @@ impl<'db> TyChecker<'db> {
         self.refuse_written_const_args(super::choice::WrittenNode::Expr(expr));
         let mut actual = match expr_data {
             Expr::ItemQuote(holes) => {
-                for &hole in holes {
-                    self.check_expr_unknown(hole);
-                }
+                let hole_tys = holes
+                    .iter()
+                    .map(|&hole| self.check_expr_unknown(hole).ty)
+                    .collect::<Vec<_>>();
+                let expected_resolved = expected.fold_with(self.db, &mut self.table);
+                let kind = crate::core::meta::code_kind_from_ty(self.db, expected_resolved)
+                    .unwrap_or_else(|| {
+                        use common::generation::FrozenCodeKind;
+                        use parser::ast::{self, prelude::*};
+                        let body = self.env.body();
+                        if let crate::span::HirOrigin::Raw(ptr) =
+                            body.source_map(self.db).expr_map.node_to_source(expr)
+                        {
+                            let root = crate::lower::top_mod_ast(self.db, body.top_mod(self.db));
+                            if let ast::ExprKind::Quote(quote) = ptr.to_node(root.syntax()).kind() {
+                                if quote.item_list().is_some() {
+                                    return FrozenCodeKind::Item;
+                                }
+                                if quote.where_clause().is_some() {
+                                    return FrozenCodeKind::Where;
+                                }
+                                if quote.arm_list().is_some() {
+                                    return FrozenCodeKind::Arm;
+                                }
+                                if let Some(block) = quote.body() {
+                                    let stmts = block.stmts().collect::<Vec<_>>();
+                                    if stmts.is_empty() && block.items().next().is_some() {
+                                        return FrozenCodeKind::Item;
+                                    }
+                                    if !stmts.is_empty()
+                                        && block.items().next().is_none()
+                                        && stmts.iter().all(|stmt| {
+                                            matches!(
+                                                stmt.kind(),
+                                                ast::StmtKind::Expr(inner)
+                                                    if inner.expr().is_some_and(|e| matches!(e.kind(), ast::ExprKind::QuoteHole(_)))
+                                            )
+                                        })
+                                        && !hole_tys.is_empty()
+                                        && let Some(hole_kind) =
+                                            crate::core::meta::code_kind_from_ty(
+                                                self.db,
+                                                hole_tys[0].fold_with(self.db, &mut self.table),
+                                            )
+                                    {
+                                        return hole_kind;
+                                    }
+                                }
+                            }
+                        }
+                        FrozenCodeKind::Expr
+                    });
+                let marker_path = match kind {
+                    common::generation::FrozenCodeKind::Item => "core::meta::Item",
+                    common::generation::FrozenCodeKind::Expr => "core::meta::Expr",
+                    common::generation::FrozenCodeKind::Pat => "core::meta::Pat",
+                    common::generation::FrozenCodeKind::Arm => "core::meta::Arm",
+                    common::generation::FrozenCodeKind::Where => "core::meta::Where",
+                };
                 let code = crate::analysis::ty::corelib::resolve_lib_type_path(
                     self.db,
                     self.env.scope(),
                     "core::meta::Code",
                 );
-                let item = crate::analysis::ty::corelib::resolve_lib_type_path(
+                let marker = crate::analysis::ty::corelib::resolve_lib_type_path(
                     self.db,
                     self.env.scope(),
-                    "core::meta::Item",
+                    marker_path,
                 );
-                match (code, item) {
-                    (Some(code), Some(item)) => ExprProp::new(TyId::app(self.db, code, item), true),
+                match (code, marker) {
+                    (Some(code), Some(marker)) => {
+                        ExprProp::new(TyId::app(self.db, code, marker), true)
+                    }
                     _ => ExprProp::invalid(self.db),
                 }
             }
@@ -1272,6 +1330,31 @@ impl<'db> TyChecker<'db> {
             ty.base_ty(self.db).data(self.db),
             TyData::TyBase(TyBase::Prim(PrimTy::U256))
         )
+    }
+
+    /// Constructing or destructuring a tuple struct requires all of its fields
+    /// to be visible. Reports the first invisible field at `span` and returns
+    /// `false` if one exists.
+    pub(super) fn check_tuple_struct_fields_visible(
+        &mut self,
+        ty: TyId<'db>,
+        span: DynLazySpan<'db>,
+    ) -> bool {
+        let Some(struct_) = ty.as_tuple_struct(self.db) else {
+            return true;
+        };
+        let parent = FieldParent::Struct(struct_);
+        for (idx, field) in parent.fields(self.db).enumerate() {
+            let scope = ScopeId::Field(parent, idx as u16);
+            if !is_scope_visible_from(self.db, scope, self.env.scope()) {
+                let Some(name) = field.name(self.db) else {
+                    continue;
+                };
+                self.push_diag(PathResDiag::Invisible(span, name, scope.name_span(self.db)));
+                return false;
+            }
+        }
+        true
     }
 
     fn peel_transparent_newtypes(&self, mut ty: TyId<'db>) -> TyId<'db> {
@@ -2751,7 +2834,8 @@ impl<'db> TyChecker<'db> {
     ) -> Option<MatchedKeyedEntry<'db>> {
         match entry {
             FamilyKeyedEntry::Witness(witness) => {
-                let key_commit = query_matches_witness(self, query, &witness.key)?;
+                let key_commit =
+                    query_matches_witness(self, query, &witness.key, witness.provider.ty)?;
                 Some(MatchedKeyedEntry::Witness(MatchedWitness {
                     witness,
                     key_commit,
@@ -2903,16 +2987,7 @@ impl<'db> TyChecker<'db> {
             return None;
         }
         let instantiated = instantiate_trait_pattern_in(self.db, &mut self.table, query);
-        let args = std::iter::once(provider_ty)
-            .chain(instantiated.args(self.db).iter().skip(1).copied())
-            .collect::<Vec<_>>();
-        let trait_goal = TraitInstId::new(
-            self.db,
-            instantiated.def(self.db),
-            args,
-            instantiated.assoc_type_bindings(self.db).clone(),
-            ModeMarker::None,
-        );
+        let trait_goal = instantiate_trait_self(self.db, instantiated, provider_ty);
         let GoalSatisfiability::Satisfied(solution) =
             self.trait_effect_goal_satisfiability(trait_goal)
         else {
@@ -3353,18 +3428,15 @@ impl<'db> TyChecker<'db> {
                 self.push_diag(BodyDiag::WithEffectTraitUnsatisfied {
                     primary: span.clone(),
                     key: key_path,
-                    trait_req: TraitInstId::new(
+                    trait_req: instantiate_trait_self(
                         self.db,
-                        pattern.def,
-                        std::iter::once(provider.ty)
-                            .chain(pattern.args_no_self.iter().copied())
-                            .collect::<Vec<_>>(),
-                        pattern
-                            .assoc_bindings
-                            .iter()
-                            .copied()
-                            .collect::<IndexMap<_, _>>(),
-                        ModeMarker::None,
+                        TraitKeySchema {
+                            def: pattern.def,
+                            args_no_self: pattern.args_no_self.clone(),
+                            assoc_bindings: pattern.assoc_bindings.clone(),
+                        }
+                        .into_trait_inst(self.db),
+                        provider.ty,
                     ),
                     given: provider.ty,
                 });
@@ -3534,18 +3606,15 @@ impl<'db> TyChecker<'db> {
                         .iter()
                         .any(|slot| slot.kind == PatternSlotKind::OmittedExplicitArg)
                 {
-                    let trait_req = TraitInstId::new(
+                    let trait_req = instantiate_trait_self(
                         self.db,
-                        pattern.def,
-                        std::iter::once(provider.ty)
-                            .chain(pattern.args_no_self.iter().copied())
-                            .collect::<Vec<_>>(),
-                        pattern
-                            .assoc_bindings
-                            .iter()
-                            .copied()
-                            .collect::<IndexMap<_, _>>(),
-                        ModeMarker::None,
+                        TraitKeySchema {
+                            def: pattern.def,
+                            args_no_self: pattern.args_no_self.clone(),
+                            assoc_bindings: pattern.assoc_bindings.clone(),
+                        }
+                        .into_trait_inst(self.db),
+                        provider.ty,
                     );
                     if emit_diag {
                         self.push_diag(BodyDiag::WithEffectTraitUnsatisfied {
@@ -3584,16 +3653,7 @@ impl<'db> TyChecker<'db> {
                     &mut table,
                     pattern.clone(),
                 );
-                let args = std::iter::once(provider.ty)
-                    .chain(instantiated.args(self.db).iter().skip(1).copied())
-                    .collect::<Vec<_>>();
-                let trait_goal = TraitInstId::new(
-                    self.db,
-                    instantiated.def(self.db),
-                    args,
-                    instantiated.assoc_type_bindings(self.db).clone(),
-                    ModeMarker::None,
-                );
+                let trait_goal = instantiate_trait_self(self.db, instantiated, provider.ty);
                 let GoalSatisfiability::Satisfied(solution) =
                     self.trait_effect_goal_satisfiability_in_scope(scope, assumptions, trait_goal)
                 else {
@@ -4098,6 +4158,17 @@ impl<'db> TyChecker<'db> {
                         self.env
                             .register_value_path_ref(expr, ValuePathRef::TypeConst(ty));
                         ExprProp::new(self.table.instantiate_to_term(const_ty_ty), true)
+                    } else if matches!(reso, PathRes::Ty(_))
+                        && let Some(ctor_ty) = ty.tuple_struct_ctor_ty(self.db)
+                    {
+                        if !self
+                            .check_tuple_struct_fields_visible(ty, path_expr_span.clone().into())
+                        {
+                            return ExprProp::invalid(self.db);
+                        }
+                        self.env
+                            .register_value_path_ref(expr, ValuePathRef::FunctionItem);
+                        ExprProp::new(self.instantiate_to_term(ctor_ty), true)
                     } else {
                         let diag = if ty.is_struct(self.db) {
                             let record_like = RecordLike::from_ty(ty);
@@ -4364,16 +4435,12 @@ impl<'db> TyChecker<'db> {
 
                     self.env.register_const_ref(
                         expr,
-                        ConstRef::TraitConst {
-                            use_: AssocConstUse::new(
-                                self.env.scope(),
-                                self.env.assumptions(),
-                                inst,
-                                name,
-                            ),
-                            evidence: None,
-                            bound_evidence: None,
-                        },
+                        ConstRef::trait_const(AssocConstUse::new(
+                            self.env.scope(),
+                            self.env.assumptions(),
+                            inst,
+                            name,
+                        )),
                     );
                     // Look up the associated const's declared type in the trait and
                     // instantiate it with the trait instance's args (including Self).
@@ -4657,17 +4724,27 @@ impl<'db> TyChecker<'db> {
             let (ty_base, ty_args) = resolved_field.base_ty.decompose_ty_app(self.db);
             let is_mut = typed_lhs.is_mut || resolved_field.implicit_deref_ty.is_some();
 
-            match field {
-                FieldIndex::Ident(label) => {
+            // Tuple struct fields are named by their position.
+            let label = match field {
+                FieldIndex::Ident(label) => Some(*label),
+                FieldIndex::Index(index)
+                    if resolved_field.base_ty.as_tuple_struct(self.db).is_some() =>
+                {
+                    Some(IdentId::new(self.db, index.data(self.db).to_string()))
+                }
+                FieldIndex::Index(_) => None,
+            };
+            match label {
+                Some(label) => {
                     let record_like = RecordLike::from_ty(resolved_field.base_ty);
-                    if let Some(field_ty) = record_like.record_field_ty(self.db, *label) {
-                        if let Some(scope) = record_like.record_field_scope(self.db, *label)
+                    if let Some(field_ty) = record_like.record_field_ty(self.db, label) {
+                        if let Some(scope) = record_like.record_field_scope(self.db, label)
                             && !is_scope_visible_from(self.db, scope, self.env.scope())
                         {
                             // Check the visibility of the field.
                             let diag = PathResDiag::Invisible(
                                 expr.span(self.body()).into_field_expr().accessor().into(),
-                                *label,
+                                label,
                                 scope.name_span(self.db),
                             );
 
@@ -4680,7 +4757,7 @@ impl<'db> TyChecker<'db> {
                     }
                 }
 
-                FieldIndex::Index(_) => {
+                None => {
                     if ty_base.is_tuple(self.db) {
                         self.env
                             .register_resolved_field_index(expr, resolved_field.index);
@@ -4870,9 +4947,17 @@ impl<'db> TyChecker<'db> {
             let else_prop = self.check_expr_in_new_scope(*else_, expected, result_discarded);
             let borrow_provider =
                 merged_borrow_provider(then_prop.borrow_provider, else_prop.borrow_provider);
+            // The conditional only diverges if both branches do.
+            let else_ty = else_prop.ty.fold_with(self.db, &mut self.table);
+            let then_ty = then_prop.ty.fold_with(self.db, &mut self.table);
+            let ty = if else_ty.is_never(self.db) && !then_ty.is_never(self.db) {
+                then_prop.ty
+            } else {
+                else_prop.ty
+            };
             ExprProp {
                 borrow_provider,
-                ..ExprProp::new(else_prop.ty, true)
+                ..ExprProp::new(ty, true)
             }
         } else {
             let if_ty = self.fresh_ty();
@@ -4910,6 +4995,7 @@ impl<'db> TyChecker<'db> {
         let scrutinee_prop = self.open_matched_place(*scrutinee, scrutinee_prop, arm_pats);
 
         let mut match_ty = expected;
+        let mut diverging_arms = 0;
         let mut first_provider: Option<AddressSpace> = None;
         let mut provider_unknown = false;
         let mut provider_conflict = false;
@@ -4927,7 +5013,17 @@ impl<'db> TyChecker<'db> {
             } else {
                 self.check_expr(arm.body, match_ty)
             };
-            match_ty = arm_prop.ty;
+            // A diverging arm doesn't determine the type of the match, which
+            // only diverges if every arm does.
+            if arm_prop
+                .ty
+                .fold_with(self.db, &mut self.table)
+                .is_never(self.db)
+            {
+                diverging_arms += 1;
+            } else {
+                match_ty = arm_prop.ty;
+            }
             self.env.leave_scope();
 
             if arm_prop.shape.is_some() {
@@ -4994,6 +5090,10 @@ impl<'db> TyChecker<'db> {
                     self.push_diag(diag);
                 }
             }
+        }
+
+        if !arms.is_empty() && diverging_arms == arms.len() {
+            match_ty = TyId::never(self.db);
         }
 
         ExprProp {
@@ -5676,6 +5776,16 @@ pub(super) fn resolve_ident_expr<'db>(
         let Ok(res) = bucket.pick_any(&[NameDomain::VALUE, NameDomain::TYPE]) else {
             return ResolvedPathInBody::Invalid;
         };
+        if path.hygiene_scope(db).is_some()
+            && matches!(
+                res.kind,
+                crate::analysis::name_resolution::NameResKind::Scope(
+                    ScopeId::FuncParam(..) | ScopeId::GenericParam(ItemKind::Func(_), _)
+                )
+            )
+        {
+            return ResolvedPathInBody::Invalid;
+        }
         let Ok(reso) = resolve_name_res_with_minter(
             db,
             res,
@@ -5690,7 +5800,7 @@ pub(super) fn resolve_ident_expr<'db>(
         ResolvedPathInBody::Reso(reso)
     };
 
-    match env.resolve_ident_in_blocks(ident, |bucket, scope| match resolve_bucket(bucket, scope) {
+    match env.resolve_ident_in_blocks(path, |bucket, scope| match resolve_bucket(bucket, scope) {
         ResolvedPathInBody::Invalid => None,
         resolved => Some(resolved),
     }) {

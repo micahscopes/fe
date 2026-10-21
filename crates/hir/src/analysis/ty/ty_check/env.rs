@@ -1,8 +1,8 @@
 use crate::{
     analysis::place::{Place, is_grant_place_expr, is_pointer_place_expr},
     hir_def::{
-        BinOp, Body, ClosureDef, Contract, Expr, ExprId, Func, IdentId, Partial, Pat, PatId, Stmt,
-        StmtId, TypeId as HirTypeId, UnOp, scope_graph::ScopeId,
+        BinOp, Body, ClosureDef, Contract, Expr, ExprId, Func, IdentId, Partial, Pat, PatId,
+        PathId, Stmt, StmtId, TypeId as HirTypeId, UnOp, scope_graph::ScopeId,
     },
     span::DynLazySpan,
 };
@@ -11,6 +11,7 @@ use crate::hir_def::params::FuncParamMode;
 use crate::hir_def::{CallableDef, ItemKind};
 use common::indexmap::IndexMap;
 use cranelift_entity::{PrimaryMap, SecondaryMap};
+use num_bigint::BigInt;
 use rustc_hash::{FxHashMap, FxHashSet};
 use salsa::Update;
 use thin_vec::ThinVec;
@@ -27,9 +28,12 @@ use crate::analysis::ty::pattern_ir::{
 };
 use crate::analysis::{
     HirAnalysisDb,
+    semantic::consts::int_const,
     ty::{
         closure::closure_effect_requirements,
-        const_ty::{CallableInputOrigin, const_body_assumptions},
+        const_ty::{
+            CallableInputOrigin, ConstTyData, const_body_assumptions, const_ty_from_sem_const,
+        },
         corelib::resolve_lib_type_path,
         effects::{
             EffectKeyKind,
@@ -1239,10 +1243,15 @@ impl<'db> TyCheckEnv<'db> {
             requirement,
         };
         let provider_ty = info.provider.provider_ty;
+        // The body assumes its provider meets the key. The key keeps the
+        // trait's own `Self` for its provider, for the row's to fill.
+        let bound = info
+            .requirement
+            .key
+            .key_trait()
+            .map(|key| super::super::instantiate_trait_self(db, key, provider_ty));
         if let EffectRequirementKey::Trait(inst) = info.requirement.key {
-            info.requirement.key = EffectRequirementKey::Trait(
-                super::super::instantiate_trait_self(db, inst, provider_ty),
-            );
+            info.requirement.key = EffectRequirementKey::Trait(inst.with_self_ty(db, provider_ty));
         }
         let binding = LocalBinding::effect_param(&info);
         // A row is forwarded whole, never provided.
@@ -1260,7 +1269,6 @@ impl<'db> TyCheckEnv<'db> {
             is_mut: true,
             binding: Some(binding),
         });
-        let bound = info.requirement.key.key_trait();
         active.effects.push(info);
         if let Some(bound) = bound {
             let mut preds = self.assumptions.list(db).to_vec();
@@ -1594,28 +1602,19 @@ impl<'db> TyCheckEnv<'db> {
             .values_mut()
             .flatten()
             .for_each(|premises| *premises = premises.fold_with(self.db, &mut prober));
+        self.assumptions = self.assumptions.fold_with(self.db, &mut prober);
+        let assumptions = self.assumptions;
         self.record_choice_decisions();
-        let assumptions = self.assumptions.fold_with(self.db, &mut prober);
         let signature = self.signature.fold_with(self.db, &mut prober);
         let pattern_store = self.pattern_store.fold_with(self.db, &mut prober);
 
-        // Each trait goal a call or constant uses is now final: prove it once,
-        // here, for every later stage.
         let solve_cx = TraitSolveCx::new(self.db, prober.scope).with_assumptions(assumptions);
         for lowering in self.semantic_expr_lowering.values_mut().flatten() {
-            let callable = lowering.callable_mut();
-            callable.record_evidence(self.db, solve_cx);
-            callable.record_bound_evidence(self.db, solve_cx);
-        }
-        for plan in self.for_loop_plans.values_mut().flatten() {
-            for call in &mut plan.calls {
-                call.callable.record_evidence(self.db, solve_cx);
-                call.callable.record_bound_evidence(self.db, solve_cx);
+            if !matches!(lowering, SemanticExprLowering::Call { .. }) {
+                let callable = lowering.callable_mut();
+                callable.record_evidence(self.db, solve_cx);
+                callable.record_bound_evidence(self.db, solve_cx);
             }
-        }
-        for const_ref in self.const_refs.values_mut().flatten() {
-            const_ref.record_evidence(self.db);
-            const_ref.record_bound_evidence(self.db);
         }
 
         self.record_init_lowering
@@ -2373,6 +2372,13 @@ impl<'db, 'a> Prober<'db, 'a> {
 impl<'db> TyFolder<'db> for Prober<'db, '_> {
     fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
         let ty = self.table.fold_ty(db, ty);
+        if let TyData::ConstTy(const_ty) = ty.data(db)
+            && let ConstTyData::TyVar(var, len_ty) = const_ty.data(db)
+            && let Some(TyVarSort::StringLen { min_len }) = self.table.unbound_sort(var.key)
+        {
+            let len = const_ty_from_sem_const(db, int_const(db, *len_ty, BigInt::from(min_len)));
+            return TyId::const_ty(db, len);
+        }
         let TyData::TyVar(var) = ty.data(db) else {
             return ty.super_fold_with(db, self);
         };
@@ -2492,28 +2498,34 @@ pub(super) fn resolve_ident_in_blocks<'db, B: Copy, R>(
     blocks: &[BlockEnv<'db, B>],
     body_scope: ScopeId<'db>,
     current_scope: ScopeId<'db>,
-    ident: IdentId<'db>,
+    path: PathId<'db>,
     mut resolve_bucket: impl FnMut(
         &'db crate::analysis::name_resolution::NameResBucket<'db>,
         ScopeId<'db>,
     ) -> Option<R>,
 ) -> IdentInBlocks<B, R> {
     use crate::analysis::name_resolution::{EarlyNameQueryId, QueryDirective, resolve_query};
+    let ident = path.ident(db).unwrap();
+    let local_ident = path.local_ident(db).unwrap_or(ident);
+    let hygiene_scope = path.hygiene_scope(db);
     for block in blocks.iter().rev() {
-        if let Some(binding) = block.lookup_var(ident) {
+        if let Some(binding) = block.lookup_var(local_ident) {
             return IdentInBlocks::Binding(binding);
         }
-        let directive = QueryDirective::for_scope(db, block.scope).disallow_lex();
-        let query = EarlyNameQueryId::new(db, ident, block.scope, directive);
-        let bucket = resolve_query(db, query);
-        if let Some(resolved) = resolve_bucket(bucket, block.scope) {
-            return IdentInBlocks::Scope(resolved);
+        if hygiene_scope.is_none() {
+            let directive = QueryDirective::for_scope(db, block.scope).disallow_lex();
+            let query = EarlyNameQueryId::new(db, ident, block.scope, directive);
+            let bucket = resolve_query(db, query);
+            if let Some(resolved) = resolve_bucket(bucket, block.scope) {
+                return IdentInBlocks::Scope(resolved);
+            }
         }
     }
-    let directive = QueryDirective::for_scope(db, body_scope);
-    let query = EarlyNameQueryId::new(db, ident, body_scope, directive);
+    let fallback_scope = hygiene_scope.unwrap_or(body_scope);
+    let directive = QueryDirective::for_scope(db, fallback_scope);
+    let query = EarlyNameQueryId::new(db, ident, fallback_scope, directive);
     let bucket = resolve_query(db, query);
-    match resolve_bucket(bucket, current_scope) {
+    match resolve_bucket(bucket, hygiene_scope.unwrap_or(current_scope)) {
         Some(resolved) => IdentInBlocks::Scope(resolved),
         None => IdentInBlocks::Unresolved,
     }
@@ -2573,14 +2585,46 @@ pub(super) fn is_pat_local_binding<'db>(
     }
 }
 
+pub(super) fn is_pat_local_binding_path<'db>(
+    db: &'db dyn HirAnalysisDb,
+    current_scope: ScopeId<'db>,
+    path: PathId<'db>,
+) -> bool {
+    let Some(name) = path.as_ident(db) else {
+        return false;
+    };
+    if let Some(h_scope) = path.hygiene_scope(db) {
+        use crate::analysis::name_resolution::{
+            EarlyNameQueryId, NameDomain, NameResKind, QueryDirective, resolve_query,
+        };
+        let directive = QueryDirective::for_scope(db, h_scope);
+        let query = EarlyNameQueryId::new(db, name, h_scope, directive);
+        let bucket = resolve_query(db, query);
+        if let Ok(res) = bucket
+            .pick(NameDomain::VALUE)
+            .as_ref()
+            .or_else(|_| bucket.pick(NameDomain::TYPE).as_ref())
+            && matches!(
+                res.kind,
+                NameResKind::Scope(ScopeId::GenericParam(ItemKind::Func(_), _))
+            )
+        {
+            return true;
+        }
+        is_pat_local_binding(db, h_scope, name)
+    } else {
+        is_pat_local_binding(db, current_scope, name)
+    }
+}
+
 impl<'db> TyCheckEnv<'db> {
-    pub(super) fn is_pat_local_binding(&self, name: IdentId<'db>) -> bool {
-        is_pat_local_binding(self.db, self.scope(), name)
+    pub(super) fn is_pat_local_binding(&self, path: PathId<'db>) -> bool {
+        is_pat_local_binding_path(self.db, self.scope(), path)
     }
 
     pub(super) fn resolve_ident_in_blocks<R>(
         &self,
-        ident: IdentId<'db>,
+        path: PathId<'db>,
         resolve_bucket: impl FnMut(
             &'db crate::analysis::name_resolution::NameResBucket<'db>,
             ScopeId<'db>,
@@ -2591,7 +2635,7 @@ impl<'db> TyCheckEnv<'db> {
             &self.var_env,
             self.body.scope(),
             self.scope(),
-            ident,
+            path,
             resolve_bucket,
         )
     }
@@ -2753,14 +2797,14 @@ pub(crate) fn body_lexical_env<'db>(
                     self.in_or_pat = prev;
                 }
                 Pat::Path(Partial::Present(path), _) => {
-                    if let Some(name) = path.as_ident(self.db)
-                        && is_pat_local_binding(self.db, self.current_scope(), name)
+                    if let Some(bind_name) = path.local_ident(self.db)
+                        && is_pat_local_binding_path(self.db, self.current_scope(), *path)
                     {
                         let binding = LexicalBinding::Local { pat };
                         if !self.in_or_pat {
                             self.out.pat_bindings.push((pat, binding));
                         }
-                        self.register_pending(name, binding);
+                        self.register_pending(bind_name, binding);
                     }
                 }
                 Pat::Path(Partial::Absent, _) => {}
@@ -2848,21 +2892,27 @@ pub(crate) fn body_lexical_env<'db>(
             match expr_data {
                 Expr::Lit(_) | Expr::UnsupportedMacroCall | Expr::Path(Partial::Absent) => {}
                 Expr::Path(Partial::Present(path)) => {
-                    if path.is_bare_ident(self.db)
-                        && let Some(ident) = path.ident(self.db).to_opt()
-                    {
+                    if path.is_bare_ident(self.db) && path.ident(self.db).is_present() {
                         let resolved = match resolve_ident_in_blocks(
                             self.db,
                             &self.blocks,
                             self.func_body.scope(),
                             self.current_scope(),
-                            ident,
+                            *path,
                             |bucket, _| {
                                 bucket
                                     .pick_any(&[NameDomain::VALUE, NameDomain::TYPE])
                                     .as_ref()
                                     .ok()
                                     .and_then(|res| res.scope())
+                                    .filter(|scope| {
+                                        !(path.hygiene_scope(self.db).is_some()
+                                            && matches!(
+                                                scope,
+                                                ScopeId::FuncParam(..)
+                                                    | ScopeId::GenericParam(ItemKind::Func(_), _)
+                                            ))
+                                    })
                             },
                         ) {
                             IdentInBlocks::Binding(binding) => Some(binding),

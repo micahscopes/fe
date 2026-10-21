@@ -550,10 +550,25 @@ fn opened_by<'db>(
     use crate::analysis::name_resolution::path_resolver::{ImplNameRes, resolve_impl_name};
     match resolve_impl_name(db, *path, expr_scope) {
         ImplNameRes::Found(implementation) => {
-            if path.is_bare_ident(db) && lex.expr_binding(value).is_some() {
+            if path.parent(db).is_none() && lex.expr_binding(value).is_some() {
                 return Some(Vec::new());
             }
-            return Some(implementation.trait_inst(db).into_iter().collect());
+            let mut bodies = Vec::new();
+            path_bodies(db, *path, &mut bodies);
+            if !bodies.is_empty() {
+                return None;
+            }
+            return Some(
+                super::choice::instantiate_named_impl_header(
+                    db,
+                    implementation,
+                    path.generic_args(db),
+                    expr_scope,
+                    assumptions,
+                    Some,
+                )
+                .map_or_else(|_| Vec::new(), |(goal, _)| vec![goal]),
+            );
         }
         ImplNameRes::NotVisible | ImplNameRes::Ambiguous => return Some(Vec::new()),
         ImplNameRes::NotFound => {}
@@ -710,7 +725,10 @@ fn path_bodies<'db>(db: &'db dyn HirAnalysisDb, path: PathId<'db>, out: &mut Vec
     let mut segment = Some(path);
     while let Some(path) = segment {
         match path.kind(db) {
-            PathKind::Ident { .. } => {}
+            PathKind::Ident { .. }
+            | PathKind::BoundIngot { .. }
+            | PathKind::BoundItem { .. }
+            | PathKind::InScope { .. } => {}
             PathKind::QualifiedType { type_, trait_ } => {
                 ty_bodies(db, Partial::Present(type_), out);
                 if let Partial::Present(trait_path) = trait_.path(db) {
