@@ -50,7 +50,7 @@ test("continuous controls preserve authored values without an invented step latt
   }
 });
 
-const { GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
+const { SurfaceContactPhase, wireSurfaceContactTransport, GpuDeviceEventKind, GpuDeviceLossReason, PassPreparationMode, SurfaceEventKind, SurfaceQueueAction, SurfaceRecoveryAction, bindingShaderVisibility, coordinateSurfaceRecovery, createGpuDeviceLifecycleChannel, createGpuQueueIdleChannel, fetchVerifiedResourceArtifact, fitBackingExtent, installGeneratedWebGpuOperations, passShaderVisibility, rasterDrawShape, readGpuBufferSnapshot, realizePassPipeline, requiresGpuPassGraph, resourceBufferUsage, selectActivePassRecords, selectPreparedPassRecords, surfaceParamPlan, unpackCanvasReadback, wgslPayloadSummary, writeSurfaceEventBatch } =
   await import("./fe-render-runtime.js");
 
 test("actor readouts render, refresh, and reject both direct and scripted edits", () => {
@@ -2691,4 +2691,118 @@ test("pointer lifecycle identity crosses the fixed host boundary untouched", () 
     [320, 180],
     [320, 180],
   ]);
+});
+
+
+test("contact transport retains identities and raw bounds, and closes every capture", () => {
+  const listeners = new Map();
+  const captures = [];
+  const canvas = {
+    style: { touchAction: "pan-y" },
+    addEventListener(name, callback) { listeners.set(name, callback); },
+    removeEventListener(name) { listeners.delete(name); },
+    getBoundingClientRect() { return { left: 10.5, top: 20.25, width: 390, height: 844 }; },
+    setPointerCapture(id) { captures.push(["set", id]); },
+    releasePointerCapture(id) { captures.push(["release", id]); },
+  };
+  const raw = [];
+  const dispose = wireSurfaceContactTransport(canvas, value => raw.push(value));
+  const pointer = (id, x, y, primary = false) => ({
+    pointerId: id, clientX: x, clientY: y, pointerType: "touch", button: 0,
+    buttons: 1, isPrimary: primary, pressure: 0.375, timeStamp: 123.5,
+    preventDefault() {},
+  });
+  listeners.get("pointerdown")(pointer(7, 12.5, 24.75, true));
+  listeners.get("pointerdown")(pointer(900, 100.25, 80.5));
+  listeners.get("pointerdown")(pointer(42, 200, 120));
+  listeners.get("pointermove")(pointer(900, 170.125, 90.25));
+  assert.deepEqual(raw[3], {
+    phase: SurfaceContactPhase.Move, device: 2, pointerId: 900,
+    clientX: 170.125, clientY: 90.25, buttons: 1, primary: false,
+    pressure: 0.375, timestamp: 123.5,
+    bounds: { left: 10.5, top: 20.25, width: 390, height: 844 },
+  });
+  listeners.get("pointercancel")(pointer(900, 999, 999));
+  listeners.get("lostpointercapture")(pointer(42, 999, 999));
+  const before = raw.length;
+  listeners.get("pointerup")(pointer(900, 999, 999));
+  assert.equal(raw.length, before, "duplicate termination never manufactures another observation");
+  let cancellations;
+  dispose(values => { cancellations = values; });
+  assert.equal(cancellations.length, 1);
+  assert.equal(cancellations[0].pointerId, 7);
+  assert.equal(cancellations[0].phase, SurfaceContactPhase.Cancel);
+  assert.equal(cancellations[0].clientX, 12.5, "scope cancellation has no invented terminal motion");
+  assert.deepEqual(captures, [["set", 7], ["set", 900], ["set", 42], ["release", 900], ["release", 7]]);
+  assert.equal(listeners.size, 0);
+  assert.equal(canvas.style.touchAction, "pan-y");
+  dispose(() => { throw new Error("closing twice must be inert"); });
+});
+
+test("contact input preserves heterogeneous wheel, edit and motion order", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  const calls = [];
+  surface._runSurfaceEventBatch = events => { calls.push(events.map(e => e.name)); return [calls.length]; };
+  surface._runSurfaceContact = contact => { calls.push([contact.name]); return [calls.length]; };
+  const events = [
+    { name: "wheel" }, { lane: "contact", contact: { name: "first down" } },
+    { lane: "contact", contact: { name: "second down" } },
+    { name: "parameter edit" }, { name: "wheel two" },
+    { lane: "contact", contact: { name: "pinch motion" } }, { name: "animation frame" },
+  ];
+  assert.deepEqual(surface._runSurfaceFrame(events), [6]);
+  assert.deepEqual(calls, [["wheel"], ["first down"], ["second down"], ["parameter edit", "wheel two"], ["pinch motion"], ["animation frame"]]);
+});
+
+test("contact scope cancellation consumes only retained input and never renders", () => {
+  const surface = Object.create(FeSurfaceElement.prototype);
+  surface._surfaceContactKernel = () => {};
+  surface._pendingSurfaceEvents = [{ name: "retained motion" }];
+  const calls = [];
+  surface._runSurfaceFrame = events => { calls.push(events.map(e => e.name)); return [1]; };
+  surface._runSurfaceContact = event => { calls.push([event.phase, event.pointerId]); return [2]; };
+  surface._refreshControlValues = () => {};
+  surface._render = () => { throw new Error("scope cancellation must not render"); };
+  surface._finishSurfaceContactScope([{ phase: SurfaceContactPhase.Cancel, pointerId: 7 }]);
+  assert.deepEqual(calls, [["retained motion"], [SurfaceContactPhase.Cancel, 7]]);
+  assert.deepEqual(surface._pendingSurfaceEvents, []);
+  assert.deepEqual(surface._uniforms, [2]);
+  surface._pendingSurfaceEvents = [{ name: "dropped motion" }];
+  surface._applySurfaceQueueAction({ queueAction: SurfaceQueueAction.Drop });
+  surface._finishSurfaceContactScope([{ phase: SurfaceContactPhase.Cancel, pointerId: 900 }]);
+  assert.deepEqual(calls.at(-1), [SurfaceContactPhase.Cancel, 900]);
+  assert.equal(calls.length, 3, "Hidden policy's dropped input is never resurrected");
+});
+
+test("opted-in contacts replace legacy pointer delivery and keep wheel transport", () => {
+  const listeners = new Map();
+  const surface = Object.create(FeSurfaceElement.prototype);
+  const canvas = {
+    style: { touchAction: "" },
+    addEventListener(name, callback) { listeners.set(name, callback); },
+    removeEventListener(name) { listeners.delete(name); },
+    getBoundingClientRect() { return { left: 10, top: 20, width: 100, height: 50 }; },
+    setPointerCapture() {}, releasePointerCapture() {},
+  };
+  surface._surfaceTransitionKernel = () => {};
+  surface._surfaceContactKernel = () => {};
+  surface._mode = "webgpu";
+  surface._liveCanvas = canvas;
+  surface._backingWidth = 1000;
+  surface._backingHeight = 1000;
+  const contacts = [], legacy = [];
+  surface._applyContact = value => contacts.push(value);
+  surface._applyGesture = value => legacy.push(value);
+  surface._finishSurfaceContactScope = () => {};
+  surface._wireGestures();
+  listeners.get("pointerdown")({ pointerId: 2, button: 0, buttons: 1, isPrimary: false,
+    pointerType: "touch", pressure: 0.5, clientX: 20, clientY: 30, timeStamp: 1, preventDefault() {} });
+  assert.equal(contacts.length, 1);
+  assert.equal(legacy.length, 0);
+  listeners.get("wheel")({ clientX: 35, clientY: 30, deltaY: -0.125, deltaMode: 0,
+    buttons: 0, timeStamp: 2, preventDefault() {} });
+  assert.deepEqual(legacy[0], { dx: 0, dy: 0, wheelDelta: -0.125, wheelMode: 0,
+    mx: 250, my: 200, buttons: 0, timestamp: 2 });
+  surface._unwireGestures();
+  assert.equal(listeners.size, 0);
 });

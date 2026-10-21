@@ -1,0 +1,33 @@
+//! Raw Pointer Events for an explicitly opted-in render surface.
+//!
+//! The browser supplies identities, capture lifecycle and DOMRect facts.
+//! Contact membership, gesture geometry and camera policy belong to Fe.
+
+use super::component_events::PointerSample
+
+/// Raw CSS-pixel bounds measured for the canvas when the event occurred.
+#[derive(Default)]
+pub struct SurfaceContactBounds {
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Copy for SurfaceContactBounds {}
+
+/// A distinct nominal lane even though its scalar width happens to equal
+/// SurfaceEvent's. No arity, shape or application function-name inference.
+#[derive(Default)]
+pub struct SurfaceContactEvent {
+    pub sample: PointerSample,
+    pub bounds: SurfaceContactBounds,
+}
+
+impl Copy for SurfaceContactEvent {}
+
+/// Opt in to all captured pointer identities on the surface's canvas.
+/// One behavior takes SurfaceContactEvent and returns complete non-resource
+/// actor state, sharing resident ownership with the other typed actor lanes.
+/// The compiler exports this behavior as `fe_surface_contact_v1`.
+pub struct SurfaceContactTransition {}
