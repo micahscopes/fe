@@ -603,7 +603,7 @@ const fn check_within() -> bool {
     assert!(diags.is_empty(), "{}", diags.format_diags(&output));
     let function = module
         .all_funcs(&output)
-        .into_iter()
+        .iter()
         .find(|f| {
             f.name(&output)
                 .to_opt()
@@ -790,7 +790,7 @@ const fn check_enums() -> bool {
     assert!(diags.is_empty(), "{}", diags.format_diags(&output));
     let function = module
         .all_funcs(&output)
-        .into_iter()
+        .iter()
         .find(|f| {
             f.name(&output)
                 .to_opt()
@@ -878,7 +878,7 @@ const fn check_summary() -> u256 {
     assert!(output.run_on_top_mod(module).is_empty());
     let function = module
         .all_funcs(&output)
-        .into_iter()
+        .iter()
         .find(|f| {
             f.name(&output)
                 .to_opt()
@@ -1119,7 +1119,7 @@ const fn verify_hygiene() -> u256 {
     assert!(diags.is_empty(), "{}", diags.format_diags(&output));
     let function = module
         .all_funcs(&output)
-        .into_iter()
+        .iter()
         .find(|f| {
             f.name(&output)
                 .to_opt()
