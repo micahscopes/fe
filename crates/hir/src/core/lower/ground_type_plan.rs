@@ -62,6 +62,7 @@ pub(super) struct GroundTypeNode<'db> {
 pub(super) struct GroundTypePlan<'db> {
     pub nodes: Vec<GroundTypeNode<'db>>,
     pub root: usize,
+    occurrences: Vec<EvalEnv<'db>>,
 }
 
 pub(super) fn base_ground_type_plan<'db>(
@@ -74,8 +75,55 @@ pub(super) fn base_ground_type_plan<'db>(
         root_top_mod: scope.top_mod(db),
         nodes: Vec::new(),
         unfolds: 0,
+        occurrences: Vec::new(),
     }
     .finish(root)
+}
+
+/// Finite declaration-order paths to occurrences of one resolved nominal leaf.
+/// Generic arguments are substituted in their occurrence environment; aliases
+/// and recursive type functions use the same evaluator as ground reflection.
+/// This exposes paths, not access privileges: generated accesses are checked
+/// by ordinary semantic analysis at their destination.
+pub(super) fn base_record_leaf_paths<'db>(
+    db: &'db dyn HirDb,
+    root: TypeId<'db>,
+    scope: ScopeId<'db>,
+    leaf: ItemKind<'db>,
+) -> Result<Vec<Vec<IdentId<'db>>>, GroundTypePlanError> {
+    let mut evaluator = Evaluator {
+        db,
+        root_top_mod: scope.top_mod(db),
+        nodes: Vec::new(),
+        unfolds: 0,
+        occurrences: Vec::new(),
+    };
+    let root = evaluator.eval_ty(root, scope.top_mod(db), None)?;
+    let mut paths = Vec::new();
+    evaluator.collect_leaf_paths(root, leaf, &mut Vec::new(), &mut paths, 0)?;
+    Ok(paths)
+}
+
+pub(super) fn normalized_record_leaf_paths<'db>(
+    db: &'db dyn HirDb,
+    plan: &GroundTypePlan<'db>,
+    root: usize,
+    leaf: ItemKind<'db>,
+) -> Result<Vec<Vec<IdentId<'db>>>, GroundTypePlanError> {
+    let root_top_mod = match plan.nodes[root].constructor {
+        ItemKind::Struct(item) => item.top_mod(db),
+        _ => return Err(GroundTypePlanError::Unsupported),
+    };
+    let mut evaluator = Evaluator {
+        db,
+        root_top_mod,
+        nodes: plan.nodes.clone(),
+        unfolds: 0,
+        occurrences: plan.occurrences.clone(),
+    };
+    let mut paths = Vec::new();
+    evaluator.collect_leaf_paths(root, leaf, &mut Vec::new(), &mut paths, 0)?;
+    Ok(paths)
 }
 
 pub(super) fn base_ground_constructor<'db>(
@@ -94,15 +142,17 @@ struct Evaluator<'db> {
     root_top_mod: TopLevelMod<'db>,
     nodes: Vec<GroundTypeNode<'db>>,
     unfolds: usize,
+    // Substitution environments of nominal occurrences, indexed like nodes.
+    occurrences: Vec<EvalEnv<'db>>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct EvalEnv<'db> {
     type_args: Vec<(IdentId<'db>, TypeBinding<'db>)>,
     const_args: Vec<(IdentId<'db>, BaseConstValue<'db>)>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TypeBinding<'db> {
     ty: TypeId<'db>,
     top_mod: TopLevelMod<'db>,
@@ -126,11 +176,49 @@ impl<'db> EvalEnv<'db> {
 }
 
 impl<'db> Evaluator<'db> {
+    fn collect_leaf_paths(
+        &mut self,
+        node: usize,
+        leaf: ItemKind<'db>,
+        prefix: &mut Vec<IdentId<'db>>,
+        paths: &mut Vec<Vec<IdentId<'db>>>,
+        depth: usize,
+    ) -> Result<(), GroundTypePlanError> {
+        if depth >= PLAN_NODE_LIMIT || paths.len() >= PLAN_NODE_LIMIT {
+            return Err(GroundTypePlanError::NodeLimit);
+        }
+        let constructor = self.nodes[node].constructor;
+        if constructor == leaf {
+            paths.push(prefix.clone());
+            return Ok(());
+        }
+        let ItemKind::Struct(struct_) = constructor else {
+            return Err(GroundTypePlanError::Unsupported);
+        };
+        let env = self.occurrences[node].clone();
+        for field in struct_.fields(self.db).data(self.db) {
+            let name = field
+                .name
+                .to_opt()
+                .ok_or(GroundTypePlanError::Unsupported)?;
+            let ty = field
+                .type_ref()
+                .to_opt()
+                .ok_or(GroundTypePlanError::Unsupported)?;
+            let child = self.eval_ty(ty, struct_.top_mod(self.db), Some(&env))?;
+            prefix.push(name);
+            self.collect_leaf_paths(child, leaf, prefix, paths, depth + 1)?;
+            prefix.pop();
+        }
+        Ok(())
+    }
+
     fn finish(mut self, root: TypeId<'db>) -> Result<GroundTypePlan<'db>, GroundTypePlanError> {
         let root = self.eval_ty(root, self.root_top_mod, None)?;
         Ok(GroundTypePlan {
             nodes: self.nodes,
             root,
+            occurrences: self.occurrences,
         })
     }
 
@@ -138,12 +226,14 @@ impl<'db> Evaluator<'db> {
         &mut self,
         constructor: ItemKind<'db>,
         args: Vec<GroundArg<'db>>,
+        env: EvalEnv<'db>,
     ) -> Result<usize, GroundTypePlanError> {
         if self.nodes.len() == PLAN_NODE_LIMIT {
             return Err(GroundTypePlanError::NodeLimit);
         }
         let id = self.nodes.len();
         self.nodes.push(GroundTypeNode { constructor, args });
+        self.occurrences.push(env);
         Ok(id)
     }
 
@@ -226,12 +316,28 @@ impl<'db> Evaluator<'db> {
                     return Err(GroundTypePlanError::Unsupported);
                 }
                 let mut args = Vec::new();
+                let mut occurrence = EvalEnv {
+                    type_args: Vec::new(),
+                    const_args: Vec::new(),
+                };
                 for (param, arg) in params.iter().zip(generic_args) {
+                    let name = param
+                        .name()
+                        .to_opt()
+                        .ok_or(GroundTypePlanError::Unsupported)?;
                     args.push(match arg {
                         GenericArg::Type(arg) => {
                             if !matches!(param, GenericParam::Type(_)) {
                                 return Err(GroundTypePlanError::Unsupported);
                             }
+                            occurrence.type_args.push((
+                                name,
+                                TypeBinding {
+                                    ty: arg.ty.to_opt().ok_or(GroundTypePlanError::Unsupported)?,
+                                    top_mod,
+                                    env: env.cloned().map(Box::new),
+                                },
+                            ));
                             GroundArg::Type(self.eval_ty(
                                 arg.ty.to_opt().ok_or(GroundTypePlanError::Unsupported)?,
                                 top_mod,
@@ -250,12 +356,19 @@ impl<'db> Evaluator<'db> {
                             else {
                                 return Err(GroundTypePlanError::Unsupported);
                             };
+                            occurrence.const_args.push((
+                                name,
+                                BaseConstValue::UInt {
+                                    value,
+                                    kind: expected,
+                                },
+                            ));
                             GroundArg::Const(value)
                         }
                         GenericArg::AssocType(_) => return Err(GroundTypePlanError::Unsupported),
                     });
                 }
-                self.push(item, args)
+                self.push(item, args, occurrence)
             }
             _ => Err(GroundTypePlanError::Unsupported),
         }

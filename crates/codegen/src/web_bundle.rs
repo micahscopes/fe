@@ -5795,20 +5795,44 @@ fn project_surface(
         return Err(mismatch());
     }
 
-    // Emit params in member (arg_index) order so `surface.params[i]` aligns with
-    // `members[i]`, matching each member name to exactly one `view()` param.
-    let mut params = Vec::with_capacity(members.len());
+    // Browser event ordinals follow declaration DFS, not uniform offsets.
+    // Paths can omit an actor's outer state envelope only when the suffix
+    // resolves uniquely. This preserves legacy flat declarations while
+    // disambiguating nested records with repeated terminal field names.
+    let mut params = Vec::with_capacity(view.params.len());
+    let mut bound_leaves = std::collections::HashSet::new();
     for view_param in &view.params {
-        if !field_names.contains(&view_param.name.as_str()) {
-            return Err(mismatch());
+        let candidates = state_leaves
+            .iter()
+            .filter(|leaf| leaf.path.ends_with(&view_param.target_path))
+            .collect::<Vec<_>>();
+        let [leaf] = candidates.as_slice() else {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "param `{}` target `{}` must resolve to exactly one actor scalar leaf (found {})",
+                view_param.name,
+                view_param.target_path.join("."),
+                candidates.len()
+            )));
+        };
+        if !bound_leaves.insert(leaf.path.clone()) {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "param `{}` duplicates actor scalar target `{}`",
+                view_param.name,
+                leaf.path.join(".")
+            )));
         }
-        let Some(member) = members
+        let member = members
             .iter()
             .copied()
-            .find(|member| member.name == view_param.name)
-        else {
-            return Err(mismatch());
-        };
+            .find(|member| member.name == leaf.name)
+            .ok_or_else(mismatch)?;
+        if view_param.projected && member.scalar != WebScalarKind::F32 {
+            return Err(WebBundleError::SurfaceProjection(format!(
+                "param `{}` target `{}` must be an f32 scalar leaf",
+                view_param.name,
+                leaf.path.join(".")
+            )));
+        }
         params.push(web_surface_param(view_param, member)?);
     }
 

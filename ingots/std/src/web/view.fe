@@ -420,6 +420,8 @@ pub struct Param {
     initialized: bool,
     source: ParamValueSource,
     presentation: ParamPresentation,
+    // Relative uniform leaf for a public scalar projection, empty for f32.
+    projection: ChoiceLabel,
     drag_x_per_px: f32,
     drag_y_per_px: f32,
     wheel_per_notch: f32,
@@ -439,6 +441,7 @@ impl Param {
     ) -> Param {
         Param {
             kind: kind, min: min, max: max, init: init,
+            projection: ChoiceLabel::empty(),
             bounded: true, initialized: true,
             source: ParamValueSource::Initial,
             presentation: ParamPresentation {
@@ -458,6 +461,7 @@ impl Param {
     ) -> Param {
         Param {
             kind: kind, min: value, max: value, init: value,
+            projection: ChoiceLabel::empty(),
             bounded: false, initialized: initialized, source: source,
             presentation: ParamPresentation {
                 widget: ParamWidget::Hidden,
@@ -522,6 +526,7 @@ impl Param {
             ParamWidget::Select, ParamScale::Linear, ParamReadout::Integer,
         )
         Param {
+            projection: result.projection,
             kind: result.kind, min: result.min, max: result.max, init: result.init,
             bounded: result.bounded, initialized: result.initialized,
             source: result.source,
@@ -584,6 +589,7 @@ impl Param {
     /// Add `delta_x * per_px` to this value for each captured drag event.
     pub const fn drag_x(self, per_px: f32) -> Param {
         Param {
+            projection: self.projection,
             kind: self.kind, min: self.min, max: self.max, init: self.init,
             bounded: self.bounded, initialized: self.initialized,
             source: self.source, presentation: self.presentation,
@@ -597,6 +603,7 @@ impl Param {
     /// Add `delta_y * per_px` to this value for each captured drag event.
     pub const fn drag_y(self, per_px: f32) -> Param {
         Param {
+            projection: self.projection,
             kind: self.kind, min: self.min, max: self.max, init: self.init,
             bounded: self.bounded, initialized: self.initialized,
             source: self.source, presentation: self.presentation,
@@ -613,6 +620,7 @@ impl Param {
     /// transition instead of changing the host transport.
     pub const fn wheel(self, per_notch: f32) -> Param {
         Param {
+            projection: self.projection,
             kind: self.kind, min: self.min, max: self.max, init: self.init,
             bounded: self.bounded, initialized: self.initialized,
             source: self.source, presentation: self.presentation,
@@ -628,6 +636,7 @@ impl Param {
     /// reusable form of the gallery's former handwritten `wheel_zoom` helper.
     pub const fn wheel_scale(self, in_factor: f32, out_factor: f32) -> Param {
         Param {
+            projection: self.projection,
             kind: self.kind, min: self.min, max: self.max, init: self.init,
             bounded: self.bounded, initialized: self.initialized,
             source: self.source, presentation: self.presentation,
@@ -636,6 +645,23 @@ impl Param {
             wheel_per_notch: self.wheel_per_notch,
             wheel_in_factor: in_factor, wheel_out_factor: out_factor,
         }
+    }
+
+    /// Bind the scalar view of a structured value to its relative uniform
+    /// leaf. The public ParamValue implementation owns reading/replacement;
+    /// the compiler validates this path against the actual scalar layout.
+    /// The path is relative to this declaration's corresponding state value.
+    pub const fn projected(self, _ leaf: String<31>) -> Param {
+        let mut result = self
+        result.projection = ChoiceLabel::from_string(leaf)
+        result
+    }
+
+    /// Apply a control through the value owner's public scalar projection.
+    pub fn drive_value<T: Copy + ParamValue>(
+        self, _ current: T, _ event: SurfaceEvent, _ index: u32,
+    ) -> T {
+        current.with_param_value(self.drive(current.param_value(), event, index))
     }
 
     /// Apply this declaration to one current scalar and one untouched browser
@@ -677,6 +703,20 @@ impl Param {
     }
 }
 
+/// Public scalar interpretation used by controls. Implementations preserve
+/// all data outside that scalar view. For projected aggregates, the Param's
+/// relative leaf metadata must denote this same f32 value in the uniform ABI.
+/// This interface grants no access to private representation fields.
+pub trait ParamValue {
+    fn param_value(self) -> f32
+    fn with_param_value(self, _ value: f32) -> Self
+}
+
+impl ParamValue for f32 {
+    fn param_value(self) -> f32 { self }
+    fn with_param_value(self, _ value: f32) -> f32 { value }
+}
+
 /// Associates an ordinary scalar state record with the params record whose
 /// fields have the same labels. The relation is authored in Fe, not inferred
 /// from a manifest.
@@ -710,27 +750,29 @@ impl<Params> Derive<ApplyParamBindings> for ParamBindingsProvider<Params> {
         let state = builder.self_ref()
         let params = builder.arg_ref("params")
         let event = builder.arg_ref("event")
-        let mut next = builder.struct_init()
-        // Parameter ordinals belong to the declaration record, not the state
-        // record: readouts may be interleaved and inputs may be reordered.
-        let declarations = 0..0
+        let mut next = builder.record_update(state)
+        // The recursive declaration order is also the browser event order.
+        // State may contain hidden fields: the owned update preserves them.
+        let mut index: u32 = 0
         for configured in builder.provider_ty().normalized_preorder_types() {
             if builder.same_ty(configured.constructor(), builder.ty<ParamBindingsProvider>()) {
                 for arg in configured.generic_args() {
-                    if arg.is_type() { declarations = arg.ty().fields() }
+                    if arg.is_type() {
+                        for field in arg.ty().leaf_fields(builder.ty<Param>()) {
+                            // A declaration may be a readout owned outside
+                            // this transition's state (legacy flat behavior).
+                            for root in reflect.fields() {
+                                if root.name() == field.root_name() {
+                                    let current = builder.field_get(state, field)
+                                    let param = builder.field_get(params, field)
+                                    let driven = builder.call(param, "drive_value", current, event, builder.int(index))
+                                    next = builder.with_field(next, field, driven)
+                                }
+                            }
+                            index = index + 1
+                        }
+                    }
                 }
-            }
-        }
-        for field in reflect.fields() {
-            let current = builder.field_get(state, field)
-            let param = builder.field_get(params, field)
-            let mut index: u32 = 0
-            for declaration in declarations {
-                if declaration.name() == field.name() {
-                    let driven = builder.call(param, "drive", current, event, builder.int(index))
-                    next = builder.with_field(next, field, driven)
-                }
-                index = index + 1
             }
         }
         builder.emit_method("apply_param_bindings", next)

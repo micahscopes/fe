@@ -577,6 +577,33 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
                 let arg = self.replay_expr(body, *arg);
                 body.core_keccak_call(arg)
             }
+            GenExpr::RecordUpdate { base, fields } => {
+                // One hygienic mutable value, with ordinary typed assignments.
+                // No private-field reconstruction or per-leaf record copies.
+                let name = IdentId::new(db, format!("$fco_record_update_{}", expr.0));
+                let init = self.replay_expr(body, *base);
+                let pat = body.push_pat(crate::hir_def::Pat::Path(
+                    Partial::Present(PathId::from_ident(db, name)),
+                    true,
+                ));
+                body.emit_stmt(crate::hir_def::Stmt::Let(pat, None, Some(init)));
+                for update in fields {
+                    let value = self.replay_expr(body, update.value);
+                    let mut place = body.ident_expr(name);
+                    for field in &update.path {
+                        let index = match field {
+                            FieldName::Named(name) => FieldIndex::Ident(*name),
+                            FieldName::Positional(index) => {
+                                FieldIndex::Index(IntegerId::new(db, BigUint::from(*index)))
+                            }
+                        };
+                        place = body.push_expr(Expr::Field(place, Partial::Present(index)));
+                    }
+                    let assign = body.push_expr(Expr::Assign(place, value));
+                    body.emit_stmt(crate::hir_def::Stmt::Expr(assign));
+                }
+                body.ident_expr(name)
+            }
             GenExpr::StructInit { fields } => {
                 let field_inits = fields
                     .iter()

@@ -25,7 +25,7 @@ use super::{
     base_scope_graph_impl,
     ground_type_plan::{
         GroundArg as NormalizedGroundArg, GroundTypePlan, base_ground_constructor,
-        base_ground_type_plan,
+        base_ground_type_plan, base_record_leaf_paths, normalized_record_leaf_paths,
     },
     provider::{
         FieldName, TargetReflection, ValidatedProvider, canonical_trait_path, resolve_base_item,
@@ -121,6 +121,7 @@ const RECOGNIZED_BUILDER_OPS: &[&str] = &[
     "static_call",
     "keccak",
     "struct_init",
+    "record_update",
     "variant_init",
     "with_field",
     "match_expr",
@@ -196,7 +197,8 @@ const _: () = {
     // extend the audited codegen subset (39 → 45). A domain-neutral float
     // literal builder extends that same generated-expression subset (45 → 46).
     // Explicit immutable and mutable borrow builders bring the surface to 48.
-    assert!(RECOGNIZED_BUILDER_OPS.len() == 48);
+    // Bounded owned record updates add one generated-HIR operation (49).
+    assert!(RECOGNIZED_BUILDER_OPS.len() == 49);
     // TD5c: was 7, then 4, now 0; ALL reflection reads — non-iterating (onto the
     // typed read-only handles `ReflectHandle`/`FieldHandle`/`VariantHandle`) AND
     // the `fields`/`variants` iterables (now ordinary method calls returning a
@@ -272,6 +274,12 @@ impl ProviderFailureKind {
 pub(super) struct ExecError {
     pub(super) kind: ProviderFailureKind,
     pub(super) range: TextRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+pub(super) struct GenFieldUpdate<'db> {
+    pub path: Vec<FieldName<'db>>,
+    pub value: GenExprId,
 }
 
 /// A generated expression node, built by builder expression commands and
@@ -364,6 +372,13 @@ pub(super) enum GenExpr<'db> {
     /// `Self { field: value, .. }`
     StructInit {
         fields: Vec<(FieldKey, GenExprId)>,
+    },
+    /// One owned record value with typed path assignments. Ordinary HIR
+    /// checking validates field access, privacy, ownership and replacement
+    /// types; untouched fields are preserved without enumerating them.
+    RecordUpdate {
+        base: GenExprId,
+        fields: Vec<GenFieldUpdate<'db>>,
     },
     /// `Enum::Variant` / `Enum::Variant(..)` / `Enum::Variant { .. }`
     VariantInit {
@@ -659,6 +674,7 @@ enum Value<'db> {
     /// Target fields retain `FieldKey` provenance for initialization/binders;
     /// nested fields retain resolved owner identity and hygienic access shape.
     Field(FieldHandle<'db>),
+    FieldPath(Vec<FieldName<'db>>),
     /// A reflected variant handle, as a typed read-only handle (TD5c). The
     /// scalar read `is_default` and the binary read `precedes` resolve against
     /// the handle's own vocabulary; its declaration-order index identity is
@@ -2786,7 +2802,34 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 Err(self.unsupported_expr(expr))
             }
             // FREEZE (TD5.0): end typed reflect/field/variant dispatch.
+            Value::FieldPath(path) if method_name.as_str() == "root_name" && args.is_empty() => {
+                let Some(FieldName::Named(name)) = path.first() else {
+                    return Err(self.unsupported_expr(expr));
+                };
+                Ok(Value::Str(StringId::new(
+                    self.db,
+                    name.data(self.db).clone(),
+                )))
+            }
             Value::Ty(ty) => {
+                if method_name.as_str() == "leaf_fields" && args.len() == 1 {
+                    let Value::Ty(leaf) = self.eval_expr(args[0].expr)? else {
+                        return Err(self.unsupported_expr(expr));
+                    };
+                    let leaf = base_ground_constructor(self.db, leaf.ty, leaf.top_mod.scope())
+                        .map_err(|_| self.unsupported_expr(expr))?;
+                    let paths = base_record_leaf_paths(self.db, ty.ty, ty.top_mod.scope(), leaf)
+                        .map_err(|_| self.invalid_method(expr,
+                            "leaf_fields requires a finite record shape with the requested nominal leaves"))?;
+                    return Ok(Value::Seq(
+                        paths
+                            .into_iter()
+                            .map(|path| {
+                                Value::FieldPath(path.into_iter().map(FieldName::Named).collect())
+                            })
+                            .collect(),
+                    ));
+                }
                 if !args.is_empty() {
                     return Err(self.unsupported_expr(expr));
                 }
@@ -2847,6 +2890,24 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 }
             }
             Value::NormalizedTy { plan, node } => {
+                if method_name.as_str() == "leaf_fields" && args.len() == 1 {
+                    let Value::Ty(leaf) = self.eval_expr(args[0].expr)? else {
+                        return Err(self.unsupported_expr(expr));
+                    };
+                    let leaf = base_ground_constructor(self.db, leaf.ty, leaf.top_mod.scope())
+                        .map_err(|_| self.unsupported_expr(expr))?;
+                    let paths = normalized_record_leaf_paths(self.db, &self.normalized_plans[plan], node, leaf)
+                        .map_err(|_| self.invalid_method(expr,
+                            "leaf_fields requires a finite record shape with the requested nominal leaves"))?;
+                    return Ok(Value::Seq(
+                        paths
+                            .into_iter()
+                            .map(|path| {
+                                Value::FieldPath(path.into_iter().map(FieldName::Named).collect())
+                            })
+                            .collect(),
+                    ));
+                }
                 if !args.is_empty() {
                     return Err(self.unsupported_expr(expr));
                 }
@@ -3527,10 +3588,16 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             }
             ("field_get", [base, field]) => {
                 let base = self.gen_expr_arg(base.expr)?;
-                let Value::Field(field) = self.eval_expr(field.expr)? else {
-                    return Err(self.unsupported_expr(expr));
+                let path = match self.eval_expr(field.expr)? {
+                    Value::Field(field) => vec![field.access()],
+                    Value::FieldPath(path) => path,
+                    _ => return Err(self.unsupported_expr(expr)),
                 };
-                Ok(self.push_expr(GenExpr::FieldGet(base, field.access())))
+                let mut value = base;
+                for field in path {
+                    value = self.push_gen(GenExpr::FieldGet(value, field));
+                }
+                Ok(Value::Expr(value))
             }
             ("eq", [lhs, rhs]) => {
                 let lhs = self.gen_expr_arg(lhs.expr)?;
@@ -3659,6 +3726,13 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             // read-only identity comparisons mis-shelved by spelling; their
             // vocabulary now lives on the typed read-only [`ReflectionCompare`]
             // table, consulted in the catch-all below.
+            ("record_update", [base]) => {
+                let base = self.gen_expr_arg(base.expr)?;
+                Ok(self.push_expr(GenExpr::RecordUpdate {
+                    base,
+                    fields: Vec::new(),
+                }))
+            }
             ("struct_init", []) => {
                 if !self.reflection.is_struct() {
                     return Err(self.invalid_method(expr, "`struct_init` on a non-struct target"));
@@ -3676,7 +3750,30 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             }
             ("with_field", [init_arg, field_arg, value_arg]) => {
                 let init = self.gen_expr_arg(init_arg.expr)?;
-                let Value::Field(field) = self.eval_expr(field_arg.expr)? else {
+                let field_value = self.eval_expr(field_arg.expr)?;
+                if let GenExpr::RecordUpdate { base, fields } = &self.exprs[init.0] {
+                    let base = *base;
+                    let mut fields = fields.clone();
+                    let path = match field_value {
+                        Value::Field(field) => vec![field.access()],
+                        Value::FieldPath(path) => path,
+                        _ => return Err(self.unsupported_expr(field_arg.expr)),
+                    };
+                    if path.is_empty()
+                        || fields.iter().any(|existing| {
+                            existing.path.starts_with(&path) || path.starts_with(&existing.path)
+                        })
+                    {
+                        return Err(self.invalid_method(
+                            field_arg.expr,
+                            "record_update paths must be nonempty and disjoint",
+                        ));
+                    }
+                    let value = self.gen_expr_arg(value_arg.expr)?;
+                    fields.push(GenFieldUpdate { path, value });
+                    return Ok(self.push_expr(GenExpr::RecordUpdate { base, fields }));
+                }
+                let Value::Field(field) = field_value else {
                     return Err(self.unsupported_expr(field_arg.expr));
                 };
                 let Some(field) = field.target_key() else {
@@ -3984,6 +4081,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 | GenExpr::Tuple(_)
                 | GenExpr::Keccak(_)
                 | GenExpr::StructInit { .. }
+                | GenExpr::RecordUpdate { .. }
                 | GenExpr::VariantInit { .. }
                 | GenExpr::Match { .. }
                 | GenExpr::Block { .. }
@@ -4573,6 +4671,7 @@ fn value_kind_name(value: &Value) -> &'static str {
         Value::Int(_) => "compile-time integer",
         Value::Float(_) => "compile-time float literal",
         Value::Field(_) => "`Field` handle",
+        Value::FieldPath(_) => "reflected record path",
         Value::Variant(_) => "`Variant` handle",
         Value::GroundArg(_) | Value::NormalizedArg { .. } => "ground generic argument",
         Value::Ty(_) | Value::NormalizedTy { .. } | Value::NormalizedCtor(_) | Value::GenTy(_) => {
@@ -4676,7 +4775,7 @@ mod freeze_guard {
         // Pin the count too, so a same-size swap is still flagged for review.
         assert_eq!(
             RECOGNIZED_BUILDER_OPS.len(),
-            48,
+            49,
             "FREEZE (TD5.0): the builder command surface changed size; update the count \
              and docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md as part of a TD5 rung. \
              (TD5c moved `same_ty`/`same_field` — mis-shelved `builder.*`-spelled identity \
@@ -4771,7 +4870,7 @@ mod freeze_guard {
         // `builder.*` is the executor's only named surface.
         let total = RECOGNIZED_BUILDER_OPS.len() + RECOGNIZED_REFLECT_OPS.len();
         assert_eq!(
-            total, 48,
+            total, 49,
             "FREEZE (TD5.0): the recognized command surface changed size. A new op requires \
              a TD5 category decision — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
         );

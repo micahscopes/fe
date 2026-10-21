@@ -44,6 +44,10 @@ pub struct ViewSurface {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewParam {
     pub name: String,
+    /// Declaration path followed by an explicit relative scalar projection.
+    /// Actor reconciliation resolves this path, never a display-name guess.
+    pub target_path: Vec<String>,
+    pub projected: bool,
     /// Opaque snake-case spelling of the Fe enum variant. The compiler does
     /// not own or exhaustively mirror the parameter vocabulary.
     pub kind: String,
@@ -466,17 +470,50 @@ fn walk_params<'db>(
     value: SemConstId<'db>,
 ) -> Result<Vec<ViewParam>, ViewProjectionError> {
     let mut out = Vec::new();
-    for (name, field) in struct_named_fields(db, value, "the params record")? {
-        out.push(walk_param(db, name, field)?);
-    }
+    walk_param_record(db, value, &[], &mut out)?;
     Ok(out)
+}
+
+fn walk_param_record<'db>(
+    db: &'db dyn HirAnalysisDb,
+    value: SemConstId<'db>,
+    prefix: &[String],
+    out: &mut Vec<ViewParam>,
+) -> Result<(), ViewProjectionError> {
+    if prefix.len() >= 256 || out.len() >= 256 {
+        return Err(ViewProjectionError::Shape(
+            "parameter record exceeds the finite path budget".into(),
+        ));
+    }
+    for (name, field) in struct_named_fields(db, value, "the params record")? {
+        let mut path = prefix.to_vec();
+        path.push(name);
+        let fields = struct_named_fields(
+            db,
+            field,
+            &format!("parameter declaration `{}`", path.join(".")),
+        )?;
+        // The vocabulary remains Fe-owned: recognize its scalar declaration
+        // shape, then let walk_param validate every required field.
+        if fields.iter().any(|(name, value)| {
+            name == "kind" && matches!(value.value(db), SemConstValue::Enum { .. })
+        }) {
+            out.push(walk_param(db, path, field)?);
+        } else {
+            walk_param_record(db, field, &path, out)?;
+        }
+    }
+    Ok(())
 }
 
 fn walk_param<'db>(
     db: &'db dyn HirAnalysisDb,
-    name: String,
+    path: Vec<String>,
     value: SemConstId<'db>,
 ) -> Result<ViewParam, ViewProjectionError> {
+    let name = path.join(".");
+    let mut target_path = path;
+    let mut projected = false;
     let mut kind = None;
     let mut min = None;
     let mut max = None;
@@ -487,6 +524,26 @@ fn walk_param<'db>(
     let mut presentation = None;
     for (field_name, field) in struct_named_fields(db, value, &format!("param `{name}`"))? {
         match field_name.as_str() {
+            "projection" => {
+                let projection =
+                    read_choice_label(db, field, &format!("param `{name}` projection"))?;
+                if !projection.is_empty() {
+                    projected = true;
+                    for segment in projection.split('.') {
+                        let mut chars = segment.chars();
+                        if !chars
+                            .next()
+                            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                            || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        {
+                            return Err(ViewProjectionError::Shape(format!(
+                                "param `{name}` has invalid relative projection `{projection}`"
+                            )));
+                        }
+                        target_path.push(segment.to_owned());
+                    }
+                }
+            }
             "kind" => kind = Some(read_enum_case(db, field, &format!("param `{name}` kind"))?),
             "min" => min = Some(read_f32(db, field, &format!("param `{name}` min"))?),
             "max" => max = Some(read_f32(db, field, &format!("param `{name}` max"))?),
@@ -530,6 +587,8 @@ fn walk_param<'db>(
     })?;
     Ok(ViewParam {
         name,
+        target_path,
+        projected,
         kind,
         min,
         max,

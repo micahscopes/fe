@@ -49,7 +49,7 @@ Generated expressions:
   `borrow_mut`
 - calls and constants: `call`, `trait_call`, `trait_const`, `static_call`
 - aggregates: `tuple_expr`, `with_elem`, `struct_init`, `variant_init`,
-  `with_field`
+  `with_field`, `record_update`
 - matching: `match_expr`, `with_arm`, `variant_binder`
 - strings: `str`, `concat`, `keccak`
 
@@ -200,3 +200,33 @@ opaque generated-expression handle with method signatures for this inventory.
 Introducing that honest typed façade requires migrating the complete surface,
 not selectively declaring new arithmetic operations, and remains explicit
 architectural debt outside this bounded TD5 slice.
+
+## Bounded nested record paths (MB2 parameter binding)
+
+Category decision: `record_update(base)` is **generated IR construction**.
+It adds one builder name (48 -> 49), and `with_field` additionally accepts
+nonempty disjoint reflected paths for that update. Replay evaluates the base
+once into a hygienic owned mutable local, assigns the selected paths, and
+returns it. Ordinary field, ownership and privacy checks still apply. This is
+not private reconstruction, runtime reflection, or a serialization policy.
+
+`Type.leaf_fields(LeafType)` and a returned path's `root_name()` are read-only
+base-graph reflection. The leaf is a resolved nominal constructor. Traversal
+substitutes generic occurrences and normalizes aliases/type functions using
+the existing bounded ground evaluator; non-record/non-leaf shapes fail closed.
+Paths are in declaration DFS order. `field_get` consumes these paths, preserving
+ordinary typed HIR checking. The first slice deliberately supports records,
+not arrays, arbitrary type projections, or generated nominal definitions.
+
+The web provider uses these domain-neutral operations to update only declared
+controls, preserving hidden state. Scalar projection policy remains ordinary
+Fe (`ParamValue`); the manifest validates its explicit relative leaf against
+the actual canonical actor layout. No web type is privileged by the builder.
+
+Projection law: `param_value(v)` is the f32 represented at the declared
+relative ABI leaf, and `with_param_value(v, x)` replaces that value while
+preserving the rest. Like an authored codec implementation, this law is a
+library obligation. Path/shape/type checking rejects nonexistent, ambiguous,
+non-scalar and wrong-scalar targets; it does not prove an arbitrary method
+body implements the declared interpretation. Tests must establish that law
+for each projection adapter, including unchanged private tails.
