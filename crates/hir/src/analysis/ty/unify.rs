@@ -172,7 +172,7 @@ where
                     || !params1
                         .iter()
                         .zip(params2)
-                        .all(|(param1, param2)| param1.same_modes(param2))
+                        .all(|(param1, param2)| param1.same_modes(db, param2))
                     || lhs.len() != rhs.len()
                 {
                     return Err(UnificationError::TypeMismatch);
