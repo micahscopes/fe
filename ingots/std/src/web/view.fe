@@ -767,3 +767,22 @@ pub struct Surface<V> {
     pub extent: Extent,
     pub params: V,
 }
+
+/// Explicit nominal role for a surface actor's Location synchronization
+/// transition. A behavior using `SurfaceLocationTransition` must take one
+/// nominal `SurfaceLocationEvent` record and return the actor's non-resource
+/// state record, lowering to the dedicated `fe_surface_location_v1` export.
+pub struct SurfaceLocationTransition {}
+
+/// Fixed browser-to-Fe location synchronization record for
+/// `SurfaceLocationTransition` (`fe_surface_location_v1`).
+pub struct SurfaceLocationEvent {
+    pub apply_input: bool,
+    pub input_ptr: u32,
+    pub input_len: u32,
+    pub out_ptr: u32,
+    pub out_cap: u32,
+    pub out_len_ptr: u32,
+}
+
+impl Copy for SurfaceLocationEvent {}
