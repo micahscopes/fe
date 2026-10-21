@@ -36,6 +36,75 @@
 // precompiler to `<fe-surface manifest=...>`, crates/html-precompile) all
 // import this SAME module and drive the SAME element. One mount path.
 
+// Fixed scalar vocabularies shared with std::web::component_events. These
+// describe browser facts, not gesture membership or camera behavior.
+export const SurfaceContactPhase = Object.freeze({ Down: 0, Move: 1, Up: 2, Cancel: 3, LostCapture: 4 });
+
+export function wireSurfaceContactTransport(canvas, deliver) {
+  const captured = new Map();
+  const touchAction = canvas.style.touchAction;
+  canvas.style.touchAction = "none";
+  const device = type => ({ mouse: 0, pen: 1, touch: 2 })[type] ?? 3;
+  const snapshot = (event, phase) => {
+    const { left, top, width, height } = canvas.getBoundingClientRect();
+    return {
+      phase, device: device(event.pointerType), pointerId: event.pointerId >>> 0,
+      clientX: event.clientX, clientY: event.clientY, buttons: event.buttons,
+      primary: event.isPrimary, pressure: event.pressure, timestamp: event.timeStamp,
+      bounds: { left, top, width, height },
+    };
+  };
+  const release = id => {
+    try { canvas.releasePointerCapture(id); } catch { /* Already released. */ }
+  };
+  const down = event => {
+    const raw = snapshot(event, SurfaceContactPhase.Down);
+    canvas.setPointerCapture(event.pointerId);
+    captured.set(raw.pointerId, raw);
+    deliver(raw);
+    if (event.button === 0) event.preventDefault();
+  };
+  const move = event => {
+    const id = event.pointerId >>> 0;
+    if (!captured.has(id)) return;
+    const raw = snapshot(event, SurfaceContactPhase.Move);
+    captured.set(id, raw);
+    deliver(raw);
+    event.preventDefault();
+  };
+  const finish = (event, phase) => {
+    const id = event.pointerId >>> 0;
+    if (!captured.has(id)) return;
+    const raw = snapshot(event, phase);
+    captured.delete(id);
+    deliver(raw);
+    if (phase !== SurfaceContactPhase.LostCapture) release(event.pointerId);
+  };
+  const handlers = {
+    pointerdown: down, pointermove: move,
+    pointerup: event => finish(event, SurfaceContactPhase.Up),
+    pointercancel: event => finish(event, SurfaceContactPhase.Cancel),
+    lostpointercapture: event => finish(event, SurfaceContactPhase.LostCapture),
+  };
+  for (const [name, handler] of Object.entries(handlers)) canvas.addEventListener(name, handler);
+  let closed = false;
+  return closeScope => {
+    if (closed) return;
+    closed = true;
+    // Scope cancellation is a typed lifecycle fact. Retained raw observations
+    // are delivered before these cancellations; no terminal motion is invented.
+    const timestamp = globalThis.performance?.now?.() ?? 0;
+    const cancelled = [...captured.values()].map(raw => ({ ...raw, phase: SurfaceContactPhase.Cancel, timestamp }));
+    try { closeScope(cancelled); } finally {
+      for (const [name, handler] of Object.entries(handlers)) canvas.removeEventListener(name, handler);
+      const ids = [...captured.keys()];
+      captured.clear();
+      for (const id of ids) release(id);
+      canvas.style.touchAction = touchAction;
+    }
+  };
+}
+
 const DEFAULT_SIZE = 256; // dispatch/canvas size for a v4 manifest with no declared `surface.extent`.
 const SURFACE_EVENT_STRIDE = 52;
 const MAX_SURFACE_EVENT_BATCH = Math.floor(0x7fffffff / SURFACE_EVENT_STRIDE);
@@ -1643,6 +1712,7 @@ export class FeSurfaceElement extends HTMLElement {
     this._scopedTaskLifetime = null;
     this._bufferPublications = null;
     this._actorNotificationKernel = null;
+    this._surfaceContactKernel = null;
     this._scopedTasksNeedReboot = false;
     this._surface = null;
     this._control = null; // R3 param gestures: the projected `control` manifest section.
@@ -2017,6 +2087,13 @@ export class FeSurfaceElement extends HTMLElement {
       }
       this._surfaceTransitionStateResident =
         typeof residentScheduled === "function" || this._gpuReadbackKernel !== null;
+      this._surfaceContactKernel = instance?.exports.fe_surface_contact_v1 ?? null;
+      if (this._surfaceContactKernel !== null) {
+        if (typeof this._surfaceContactKernel !== "function") {
+          throw new Error("fe render runtime: contact export is not callable");
+        }
+        this._surfaceTransitionStateResident = true;
+      }
       this._actorNotificationKernel = instance?.exports.fe_surface_actor_message_v1 ?? null;
       if (this._actorNotificationKernel !== null) {
         if (typeof this._actorNotificationKernel !== "function") {
@@ -3613,9 +3690,11 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   _teardown() {
+    this._unwireGestures();
     this._stopScopedTasks();
     this._bufferPublications = null;
     this._actorNotificationKernel = null;
+    this._surfaceContactKernel = null;
     this._scopedTaskBroker = null;
     this._scopedTaskMachines = null;
     this._scopedTasksNeedReboot = false;
@@ -3964,10 +4043,14 @@ export class FeSurfaceElement extends HTMLElement {
    * Captured drag is the compatibility default. A compiler-projected Fe actor
    * capability may additionally request raw uncaptured primary hover motion. */
   _wireGestures() {
-    if (!this._surfaceTransitionKernel && (!this._control || !this._controlKernel)) return;
+    if (!this._surfaceContactKernel && !this._surfaceTransitionKernel && (!this._control || !this._controlKernel)) return;
     const canvas = this._adoptedCanvas || (this._mode === "webgpu" ? this._liveCanvas : this._posterCanvas);
     if (!canvas || this._gestureListeners?.canvas === canvas) return;
     this._unwireGestures();
+    if (this._surfaceContactKernel) {
+      this._wireContactGestures(canvas);
+      return;
+    }
     const touchAction = canvas.style.touchAction;
     canvas.style.touchAction = "none";
 
@@ -4087,9 +4170,70 @@ export class FeSurfaceElement extends HTMLElement {
     };
   }
 
+  _wireContactGestures(canvas) {
+    const disposeContacts = wireSurfaceContactTransport(canvas, raw => this._applyContact(raw));
+    const onWheel = event => {
+      event.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      this._applyGesture({
+        dx: 0, dy: 0, wheelDelta: event.deltaY, wheelMode: event.deltaMode,
+        mx: (event.clientX - rect.left) * this._backingWidth / (rect.width || 1),
+        my: (event.clientY - rect.top) * this._backingHeight / (rect.height || 1),
+        buttons: event.buttons, timestamp: event.timeStamp,
+      });
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    this._gestureListeners = { canvas, disposeContacts, onWheel };
+  }
+
+  _applyContact(raw) {
+    if (this._fsm !== "live" || !this._surfaceContactKernel) return;
+    const eventKind = raw.phase === SurfaceContactPhase.Down ? SurfaceEventKind.PointerDown
+      : raw.phase === SurfaceContactPhase.Move ? SurfaceEventKind.PointerMove : SurfaceEventKind.PointerUp;
+    const event = { lane: "contact", contact: raw, eventKind, timestamp: raw.timestamp };
+    if (this._surfaceTransitionSchedule === "resident") {
+      this._pendingSurfaceEvents.push(event);
+      this._notifyScheduledInput(eventKind, raw.timestamp);
+    } else {
+      this._queueGestureRender(this._runSurfaceContact(raw));
+    }
+  }
+
+  _runSurfaceContact(raw) {
+    const { left, top, width, height } = raw.bounds;
+    return this._runWasmArenaEpoch(() => this._surfaceReplyValues(
+      this._surfaceContactKernel(
+        raw.phase, raw.device, raw.pointerId, raw.clientX, raw.clientY,
+        raw.buttons, raw.primary ? 1 : 0, raw.pressure, raw.timestamp,
+        left, top, width, height, ...this._surfaceResourceArgs(),
+      ), "typed surface contact",
+    ));
+  }
+
+  _finishSurfaceContactScope(cancelled) {
+    if (!this._surfaceContactKernel) return;
+    // The queue contains only input retained by the Fe policy. Closing this
+    // input scope consumes that retained prefix before cancelling its captures;
+    // it never restores dropped events or requests presentation.
+    if (this._pendingSurfaceEvents.length) {
+      this._uniforms = this._runSurfaceFrame(this._pendingSurfaceEvents.splice(0));
+    }
+    for (const raw of cancelled) this._uniforms = this._runSurfaceContact(raw);
+    this._refreshControlValues();
+  }
+
   _unwireGestures() {
     const listeners = this._gestureListeners;
     if (!listeners) return;
+    if (listeners.disposeContacts) {
+      try {
+        listeners.disposeContacts(cancelled => this._finishSurfaceContactScope(cancelled));
+      } finally {
+        listeners.canvas.removeEventListener("wheel", listeners.onWheel);
+        this._gestureListeners = null;
+      }
+      return;
+    }
     const { canvas, onPointerDown, onPointerMove, onPointerUp, onWheel, touchAction } = listeners;
     canvas.removeEventListener("pointerdown", onPointerDown);
     canvas.removeEventListener("pointermove", onPointerMove);
@@ -4364,6 +4508,28 @@ export class FeSurfaceElement extends HTMLElement {
   }
 
   _runSurfaceFrame(events) {
+    if (!events.some(event => event.lane === "contact")) return this._runSurfaceEventBatch(events);
+    let pending = [];
+    let next = null;
+    const flush = () => {
+      if (pending.length) {
+        next = this._runSurfaceEventBatch(pending);
+        pending = [];
+        return next !== null;
+      }
+      return true;
+    };
+    for (const event of events) {
+      if (event.lane === "contact") {
+        if (!flush()) return null;
+        next = this._runSurfaceContact(event.contact);
+      } else pending.push(event);
+    }
+    if (!flush()) return null;
+    return next;
+  }
+
+  _runSurfaceEventBatch(events) {
     if (events.length === 0 || events.length > MAX_SURFACE_EVENT_BATCH) {
       throw new Error(`fe render runtime: invalid surface event batch length ${events.length}`);
     }
