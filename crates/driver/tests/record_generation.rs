@@ -1894,3 +1894,22 @@ const fn observe() -> u256 { <Box<u256> as Value>::value() }
         assert!(prepare_file(&db, file).unwrap().is_some());
     }
 }
+
+#[test]
+fn reflected_field_query_family_rejects_named_implementations() {
+    let (db, file) = input(
+        r#"
+use core::meta::FieldQuery
+struct Query<T> {}
+impl<T> FieldQuery<u256> for Query<T> as Alternate {
+    const fn evaluate() -> u256 { 7 }
+}
+"#,
+    );
+    let diagnostics = db.run_on_top_mod(db.top_mod(file)).format_diags(&db);
+    assert!(
+        diagnostics.contains("this trait cannot have a named implementation"),
+        "{diagnostics}"
+    );
+    assert!(diagnostics.contains("FieldQuery"), "{diagnostics}");
+}
