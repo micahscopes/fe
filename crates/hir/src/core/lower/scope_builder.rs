@@ -363,11 +363,10 @@ impl<'db> ScopeGraphBuilder<'db> {
                     return false;
                 };
                 let expr_node = ptr.to_node(root.syntax());
-                let matches_range = expr_node.syntax().text_range() == range
+                expr_node.syntax().text_range() == range
                     || parser::ast::UnsafeExpr::cast(expr_node.syntax().clone())
                         .and_then(|u| u.block())
-                        .is_some_and(|b| b.syntax().text_range() == range);
-                matches_range
+                        .is_some_and(|b| b.syntax().text_range() == range)
             })
         {
             return scope;
