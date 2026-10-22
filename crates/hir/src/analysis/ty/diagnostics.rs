@@ -506,6 +506,10 @@ pub enum MarkerPosition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, SalsaValue)]
 pub enum BodyDiag<'db> {
+    PermitConstruction {
+        primary: DynLazySpan<'db>,
+        reason: &'static str,
+    },
     CompileTimePhase {
         primary: DynLazySpan<'db>,
         message: String,
@@ -1398,6 +1402,7 @@ impl<'db> BodyDiag<'db> {
     pub(crate) fn local_code(&self) -> u16 {
         match self {
             Self::CompileTimePhase { .. } => 137,
+            Self::PermitConstruction { .. } => 139,
             Self::TypeMismatch { .. } => 0,
             Self::InfiniteOccurrence(..) => 1,
             Self::DuplicatedRestPat(..) => 2,
