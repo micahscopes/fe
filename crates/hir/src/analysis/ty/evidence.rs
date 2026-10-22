@@ -58,6 +58,7 @@ impl<'db> BoundSchemaId<'db> {
         (index < self.slots(db).list(db).len()).then_some(BoundSlotRef {
             schema: self,
             index: u32::try_from(index).ok()?,
+            applied: self.slots(db),
         })
     }
 
@@ -73,6 +74,9 @@ impl<'db> BoundSchemaId<'db> {
 pub struct BoundSlotRef<'db> {
     pub schema: BoundSchemaId<'db>,
     pub index: u32,
+    /// Applied goals in declaration order, including equal entries. Extending
+    /// a substituted list deduplicates it and cannot be used as a slot address.
+    pub applied: PredicateListId<'db>,
 }
 
 /// Supplies for a particular namespace. Index equality alone never authorizes
@@ -186,10 +190,13 @@ impl<'db> EvidenceId<'db> {
     /// dictionary arriving from another checked body.
     pub(crate) fn qualify(self, db: &'db dyn HirAnalysisDb, owner: BodyOwner<'db>) -> Self {
         match self.data(db) {
-            Evidence::Assumption(slot) if slot.schema.owner(db).is_none() => {
-                BoundSchemaId::new(db, Some(owner), slot.schema.slots(db))
-                    .assumption(db, slot.index as usize)
-            }
+            Evidence::Assumption(slot) if slot.schema.owner(db).is_none() => EvidenceId::new(
+                db,
+                Evidence::Assumption(BoundSlotRef {
+                    schema: BoundSchemaId::new(db, Some(owner), slot.schema.slots(db)),
+                    ..*slot
+                }),
+            ),
             Evidence::Impl {
                 selected,
                 instantiated,
@@ -459,8 +466,13 @@ impl<'db> TyFoldable<'db> for EvidenceId<'db> {
                     scope: *scope,
                 },
             ),
-            // A bound slot is a declaration address, not an applied goal.
-            Evidence::Assumption(_) => self,
+            Evidence::Assumption(slot) => EvidenceId::new(
+                db,
+                Evidence::Assumption(BoundSlotRef {
+                    applied: slot.applied.fold_with(db, folder),
+                    ..*slot
+                }),
+            ),
         }
     }
 }
@@ -482,7 +494,7 @@ impl<'db> TyVisitable<'db> for EvidenceId<'db> {
                 }
             }
             Evidence::DeferredSolCodec { goal, .. } => goal.visit_with(visitor),
-            Evidence::Assumption(_) => {}
+            Evidence::Assumption(slot) => slot.applied.visit_with(visitor),
         }
     }
 }
@@ -655,16 +667,19 @@ fn implied_bound_evidence<'db>(
     assumptions: PredicateListId<'db>,
 ) -> Option<EvidenceId<'db>> {
     if let Evidence::Assumption(slot) = proof.data(db) {
-        // `assumptions` is the applied goal view; the slot keeps its original
-        // declaration namespace through substitution.
-        let index = assumptions
-            .extend_all_bounds(db)
+        // Use the producer's positional view, not a newly deduplicated list.
+        // Substitution can make two different declaration slots equal.
+        let index = slot
+            .applied
             .list(db)
             .iter()
             .position(|&bound| bound == goal)?;
         return Some(EvidenceId::new(
             db,
-            Evidence::Assumption(slot.schema.slot(db, index)?),
+            Evidence::Assumption(BoundSlotRef {
+                index: u32::try_from(index).ok()?,
+                ..*slot
+            }),
         ));
     }
     let Evidence::Impl {
