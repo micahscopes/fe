@@ -1415,6 +1415,7 @@ impl<'db> TyChecker<'db> {
                     super::PlaceEntryCalls {
                         locate: callable,
                         codec,
+                        codec_choice_failed: false,
                     },
                 );
                 return ExprProp::new(output_ty, lhs.is_mut);
