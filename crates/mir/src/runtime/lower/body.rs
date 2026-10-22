@@ -7,8 +7,7 @@ use hir::analysis::{
         EvalOutcome, FieldIndex, RuntimeSizeError, SConst, SLocalId, SStmtId, SemConstId,
         SemConstScalar, SemConstValue, SemOrigin, SemanticCalleeRef, SemanticCodeRegionRef,
         SemanticCodeRegionTarget, SemanticConstRef, SemanticInstance, SemanticInstanceKey,
-        SemanticLocalRole, VariantIndex, core_method_callee_key, eval_const_ref,
-        generated_callee_key,
+        SemanticLocalRole, VariantIndex, eval_const_ref, generated_callee_key,
         normalized::{
             NBlockId, NDataPath, NDataProjection, NEffectArg, NEffectArgValue, NExpr, NIndex,
             NOperand, NPlace, NPlaceBase, NRootKind, NStatement, NStatementId, NStatementKind,
@@ -492,7 +491,7 @@ struct Lane<'db> {
     slot: RLocalId,
     offset: RLocalId,
     space: AddressSpace,
-    codec: TyId<'db>,
+    codec: [hir::analysis::semantic::SemanticInstanceKey<'db>; 2],
     ty: TyId<'db>,
 }
 
@@ -2490,7 +2489,7 @@ impl<'db> RmirEmitter<'db> {
                         )));
                         current = project_index_class(self.db, current);
                     }
-                    NDataProjection::Entry(_) => {
+                    NDataProjection::Entry(..) => {
                         unreachable!("an entry is a place step, never a value projection")
                     }
                 }
@@ -2546,7 +2545,7 @@ impl<'db> RmirEmitter<'db> {
                     }
                 }
                 NDataProjection::Index(NIndex::Value(_)) => return false,
-                NDataProjection::Entry(_) => {
+                NDataProjection::Entry(..) => {
                     unreachable!("an entry is a place step, never a value projection")
                 }
             };
@@ -5074,7 +5073,7 @@ impl<'db> RmirEmitter<'db> {
                     projected.push(PlaceElem::Index(IndexSource::Constant(*index)));
                     current = project_index_class(self.db, current);
                 }
-                NDataProjection::Entry(key) => {
+                NDataProjection::Entry(key, entry) => {
                     runtime_place.path = std::mem::take(&mut projected).into_boxed_slice();
                     let normalized = &self.semantic_body.normalized;
                     let collection_ty = normalized.place_prefix_ty(self.db, place, idx)?;
@@ -5085,6 +5084,7 @@ impl<'db> RmirEmitter<'db> {
                         collection_ty,
                         element_ty,
                         *key,
+                        *entry,
                     ) {
                         EntryPlace::Place(place) => place,
                         EntryPlace::Lane(lane) => RuntimePlace {
@@ -5170,6 +5170,7 @@ impl<'db> RmirEmitter<'db> {
         collection_ty: TyId<'db>,
         element_ty: TyId<'db>,
         key: NValueId,
+        entry: hir::hir_def::ExprId,
     ) -> EntryPlace<'db> {
         let owner = self.semantic_body.owner();
         let space = owner
@@ -5191,12 +5192,11 @@ impl<'db> RmirEmitter<'db> {
             self.lower_place_addr_of_for_class(collection_ty, bb, collection, receiver_class);
         let base = self.coerce_value(bb, receiver, &word);
         let key = self.read_normalized_value(bb, key);
-        let locate = self.resolve_core_method(
-            &["ops", "StateIndex"],
-            "locate",
-            vec![collection_ty],
-            collection_ty,
-        );
+        let locate = owner.call_sites(self.db)[entry.index()]
+            .as_ref()
+            .and_then(|site| site.callee)
+            .expect("an admitted entry has its checked locate callee");
+        let locate = SemanticInstance::new(self.db, locate.key);
         let location = self.call_generated(bb, locate, &[receiver, base, key]);
         let mut coordinate = |index| {
             let value = self.alloc_runtime_temp(word_ty, RuntimeCarrier::Value(word.clone()));
@@ -5213,12 +5213,14 @@ impl<'db> RmirEmitter<'db> {
             value
         };
         let slot = coordinate(0);
-        if let Some(lanes) = lanes {
+        if lanes.is_some() {
             return EntryPlace::Lane(Lane {
                 slot,
                 offset: coordinate(1),
                 space,
-                codec: lanes.codec,
+                codec: owner
+                    .entry_codec_callees(self.db, entry)
+                    .expect("an admitted packed entry has its checked codecs"),
                 ty: element_ty,
             });
         }
@@ -5234,7 +5236,8 @@ impl<'db> RmirEmitter<'db> {
     /// The lane `place` names when it ends at an element its collection
     /// packs into a lane.
     fn entry_lane(&mut self, bb: RBlockId, place: &NPlace<'db>) -> Option<Lane<'db>> {
-        let (NDataProjection::Entry(key), prefix) = place.path.as_slice().split_last()? else {
+        let (NDataProjection::Entry(key, entry), prefix) = place.path.as_slice().split_last()?
+        else {
             return None;
         };
         let collection_ty =
@@ -5252,7 +5255,7 @@ impl<'db> RmirEmitter<'db> {
                 ..place.clone()
             },
         )?;
-        match self.lower_entry(bb, collection, collection_ty, place.ty, *key) {
+        match self.lower_entry(bb, collection, collection_ty, place.ty, *key, *entry) {
             EntryPlace::Lane(lane) => Some(lane),
             EntryPlace::Place(_) => unreachable!("the collection packs its elements"),
         }
@@ -5305,12 +5308,7 @@ impl<'db> RmirEmitter<'db> {
             LaneSite::Entry(lane) => {
                 let place = self.lane_word(bb, lane);
                 let word = self.load_runtime_place_value(bb, place, TyId::u256(self.db));
-                let get = self.resolve_core_method(
-                    &["ops", "LaneCodec"],
-                    "get",
-                    vec![lane.codec, lane.ty],
-                    lane.codec,
-                );
+                let get = SemanticInstance::new(self.db, lane.codec[0]);
                 self.call_generated(bb, get, &[word, lane.offset])
             }
             LaneSite::Field { place, ty } => self.load_runtime_place_value(bb, place.clone(), *ty),
@@ -5323,12 +5321,7 @@ impl<'db> RmirEmitter<'db> {
             LaneSite::Entry(lane) => {
                 let place = self.lane_word(bb, lane);
                 let word = self.load_runtime_place_value(bb, place.clone(), TyId::u256(self.db));
-                let set = self.resolve_core_method(
-                    &["ops", "LaneCodec"],
-                    "set",
-                    vec![lane.codec, lane.ty],
-                    lane.codec,
-                );
+                let set = SemanticInstance::new(self.db, lane.codec[1]);
                 let word = self.call_generated(bb, set, &[word, lane.offset, value]);
                 self.write_value_to_place(bb, place, word, &word_class());
             }
@@ -5638,29 +5631,6 @@ impl<'db> RmirEmitter<'db> {
             },
         );
         result
-    }
-
-    /// The instance of core trait `trait_path`'s method `name` for the
-    /// trait arguments `args`, resolved in the scope of `scope_ty` when the
-    /// body has none.
-    fn resolve_core_method(
-        &self,
-        trait_path: &[&str],
-        name: &str,
-        args: Vec<TyId<'db>>,
-        scope_ty: TyId<'db>,
-    ) -> SemanticInstance<'db> {
-        let scope = self
-            .env
-            .scope
-            .or_else(|| scope_ty.as_scope(self.db))
-            .expect("core trait resolution requires a scope");
-        let key =
-            core_method_callee_key(self.db, scope, self.env.assumptions, trait_path, name, args)
-                .unwrap_or_else(|error| {
-                    panic!("failed to finalize generated call to `{name}`: {error:?}")
-                });
-        SemanticInstance::new(self.db, key)
     }
 
     fn read_semantic_value(&mut self, bb: RBlockId, local: SLocalId) -> RLocalId {
