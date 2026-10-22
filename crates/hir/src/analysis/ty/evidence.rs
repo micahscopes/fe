@@ -1191,11 +1191,10 @@ pub(crate) fn impl_method_evidence<'db>(
 #[salsa::tracked(return_ref)]
 pub(crate) fn impl_const_evidence<'db>(
     db: &'db dyn HirAnalysisDb,
-    owner: BodyOwner<'db>,
+    body: Body<'db>,
+    expected: super::ty_def::TyId<'db>,
 ) -> Option<BoundAdaptation<'db>> {
-    let BodyOwner::AnonConstBody { body, .. } = owner else {
-        return None;
-    };
+    let owner = BodyOwner::AnonConstBody { body, expected };
     let Some(ItemKind::ImplTrait(impl_trait)) = body.scope().parent_item(db) else {
         return None;
     };
@@ -1357,8 +1356,13 @@ pub(crate) fn impl_const_bound_evidence<'db>(
     subst: GenericSubst<'db>,
     assumptions: PredicateListId<'db>,
 ) -> Option<BoundEvidence<'db>> {
-    let (Some(proofs), Some(subst)) = (impl_const_evidence(db, owner), subst.mapping(db).as_ref())
-    else {
+    let BodyOwner::AnonConstBody { body, expected } = owner else {
+        return None;
+    };
+    let (Some(proofs), Some(subst)) = (
+        impl_const_evidence(db, body, expected),
+        subst.mapping(db).as_ref(),
+    ) else {
         return None;
     };
     let supplied = expanded_condition_evidence(db, selection, assumptions);
