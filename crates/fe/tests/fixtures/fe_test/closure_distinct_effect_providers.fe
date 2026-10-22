@@ -1,0 +1,46 @@
+trait Log {
+    fn n(self) -> u256
+}
+struct A { n: u256 }
+struct B { n: u256 }
+impl Log for A {
+    fn n(self) -> u256 {
+        self.n
+    }
+}
+impl Log for B {
+    fn n(self) -> u256 {
+        self.n
+    }
+}
+fn note() -> u256 uses (log: Log) {
+    log.n()
+}
+fn apply<F: Fn() -> u256>(_ f: F) -> u256 uses F::E {
+    f()
+}
+#[test]
+fn same_closure_uses_each_call_provider() {
+    let g = || note()
+    assert!(with (Log = A { n: 70 }) { g() } == 70)
+    assert!(with (Log = B { n: 100 }) { g() } == 100)
+    assert!(with (Log = A { n: 7 }) { apply(g) } == 7)
+}
+#[test]
+fn closure_escapes_defining_block_and_keeps_its_row() {
+    let g = with (Log = A { n: 7 }) {
+        || note()
+    }
+    assert!(with (Log = A { n: 70 }) { g() } == 70)
+    assert!(with (Log = B { n: 100 }) { apply(g) } == 100)
+}
+#[test]
+fn nested_closure_keeps_capture_and_call_provider() {
+    let offset: u256 = 3
+    let outer = || {
+        let inner = || note() + offset
+        apply(inner)
+    }
+    assert!(with (Log = A { n: 70 }) { outer() } == 73)
+    assert!(with (Log = B { n: 100 }) { outer() } == 103)
+}
