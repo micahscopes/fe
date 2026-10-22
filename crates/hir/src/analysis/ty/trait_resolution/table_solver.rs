@@ -557,6 +557,21 @@ impl<'db> ResolutionContext for TraitResolutionContext<'db> {
             }
             None => {}
         }
+        // A retained exact dictionary is authoritative at recursive goals too,
+        // including closed handle capabilities. Lexical choices above may
+        // replace it; ordinary candidate enumeration must not discard it just
+        // because substitution made the head concrete. This does not guess
+        // inference arguments or relax the explicit require-implementation mode.
+        if !prepared.query.require_impl
+            && let Some(index) = prepared
+                .query
+                .assumptions
+                .list(self.db)
+                .iter()
+                .position(|&assumption| assumption == prepared.normalized_goal)
+        {
+            return Ok(CallbackOutcome::Continue(vec![Clause::Assumption(index)]));
+        }
         // An impl lives in its normalized self type's ingot or its trait's
         // (`trait_impl_admissibility`): `<Identity as Driver<[P; 2]>>::Item:
         // Copy` is `P: Copy`, whose impl is in `P`'s ingot, not `Identity`'s.
