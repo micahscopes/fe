@@ -24,7 +24,7 @@ use crate::analysis::{
         diagnostics::{BodyDiag, FuncBodyDiag},
         evidence::{
             BoundEvidence, BoundOwner, BoundSchemaId, EvidenceId, EvidenceList, ProofOutcome,
-            UseEvidence, declared_bound_evidence_with_pending, instantiated_selection,
+            RowEvidence, UseEvidence, declared_bound_evidence_with_pending, instantiated_selection,
             prove_outcome,
         },
         fold::{TyFoldable, TyFolder},
@@ -443,13 +443,48 @@ impl<'db> Callable<'db> {
         let Ok(subst) = CompleteSubst::for_owner(db, func.into(), self.generic_args.clone()) else {
             return false;
         };
-        let (evidence, pending) = declared_bound_evidence_with_pending(
+        let (evidence, mut pending) = declared_bound_evidence_with_pending(
             db,
             func_declared_bounds(db, func, mode),
             func_signature(db, func, mode),
             &subst,
             solve_cx,
         );
+        let requirements = func
+            .effect_requirements(db)
+            .iter()
+            .map(|requirement| crate::core::semantic::EffectRequirement {
+                key: super::super::binder::Binder::bind(func.into(), requirement.key.clone())
+                    .instantiate(db, &self.generic_args),
+                ..requirement.clone()
+            })
+            .collect::<Vec<_>>();
+        let expansion = super::super::effects::rows::expand_rows(
+            db,
+            &requirements,
+            func.scope(),
+            solve_cx.assumptions(),
+        );
+        let rows = expansion
+            .components
+            .iter()
+            .filter_map(|component| {
+                let goal = component.requirement.key.key_trait()?;
+                let provider = self.effect_providers.iter().find(|provider| {
+                    provider.provider.provider_idx == component.requirement.binding_idx
+                })?;
+                let goal =
+                    super::super::instantiate_trait_self(db, goal, provider.provider.provider_ty);
+                let outcome = prove_outcome(db, solve_cx, goal);
+                pending |= matches!(outcome, ProofOutcome::NeedsGeneration);
+                Some(RowEvidence {
+                    path: component.path.clone(),
+                    goal,
+                    proof: outcome.evidence(),
+                })
+            })
+            .collect();
+        let evidence = evidence.with_rows(db, rows);
         self.use_evidence.bounds = Some(BoundEvidence {
             schema: BoundSchemaId::new(
                 db,
@@ -498,6 +533,24 @@ impl<'db> Callable<'db> {
 
     pub fn use_evidence(&self) -> UseEvidence<'db> {
         self.use_evidence
+    }
+
+    /// Transport an already-selected row component through the existing row
+    /// argument mapping. This does not prove or select the component again.
+    pub(crate) fn supply_row_evidence(
+        &mut self,
+        db: &'db dyn HirAnalysisDb,
+        row: RowEvidence<'db>,
+    ) {
+        if let Some(bounds) = &mut self.use_evidence.bounds {
+            let mut rows = bounds.entries.rows(db).clone();
+            if let Some(existing) = rows.iter_mut().find(|existing| existing.path == row.path) {
+                *existing = row;
+            } else {
+                rows.push(row);
+            }
+            bounds.entries = bounds.entries.with_rows(db, rows);
+        }
     }
 
     pub(crate) fn has_deferred_evidence(&self, db: &'db dyn HirAnalysisDb) -> bool {

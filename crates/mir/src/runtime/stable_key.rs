@@ -366,14 +366,6 @@ fn impl_env_identity<'db>(
         ingot_identity_for_top_mod(db, scope.top_mod(db)),
         module_path_components_for_scope(db, scope).join("$")
     );
-    if !evidence
-        .entries(db)
-        .iter()
-        .flatten()
-        .any(|ev| ev.has_named_impl(db))
-    {
-        return identity;
-    }
     // Instances that differ only in non-ordinary evidence or evidence parameters
     // run different code.
     let mut parts = Vec::new();
@@ -384,7 +376,22 @@ fn impl_env_identity<'db>(
             parts.push(format!("bound{idx}={}", evidence_id_identity(db, *ev)));
         }
     }
-    format!("{identity}$evidence${}", parts.join("$"))
+    for row in evidence.rows(db) {
+        if let Some(proof) = row.proof.filter(|proof| proof.has_named_impl(db)) {
+            parts.push(format!(
+                "row{}{:?}={}:{}",
+                row.path.entry,
+                row.path.steps,
+                trait_identity(db, row.goal),
+                evidence_id_identity(db, proof)
+            ));
+        }
+    }
+    if parts.is_empty() {
+        identity
+    } else {
+        format!("{identity}$evidence${}", parts.join("$"))
+    }
 }
 
 fn evidence_id_identity<'db>(db: &'db dyn HirAnalysisDb, ev: EvidenceId<'db>) -> String {

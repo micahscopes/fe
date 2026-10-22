@@ -113,6 +113,7 @@ impl<'db> SemanticInstanceKey<'db> {
                     .map(|entry| entry.filter(|proof| proof.has_named_impl(db)))
                     .collect(),
             )
+            .with_rows(db, supplied.rows(db).clone())
         } else {
             supplied
         };
@@ -297,10 +298,98 @@ pub fn instantiated_typed_body<'db>(
 ) -> TypedBody<'db> {
     let mut body =
         instantiate_typed_body(db, typed_body_template(db, key.owner(db)), key.subst(db));
+    let raw_goals = if matches!(key.owner(db), BodyOwner::Closure { .. }) {
+        body.assumptions()
+    } else {
+        body.signature()
+    };
+    let row_owner = match key.owner(db) {
+        BodyOwner::Closure { def, .. } => Some((def.body.scope(), Some(def.expr))),
+        BodyOwner::Func(func, _) => func.body(db).map(|body| (body.scope(), None)),
+        _ => None,
+    };
+    // This declaration-side expansion cannot call key.typed_body(): that would
+    // make dictionary transport depend on the result it is constructing.
+    let row_paths = if let Some(site) = effect_param_site(key.owner(db)) {
+        let requirements = EffectEnvView::new(site)
+            .requirements(db)
+            .into_iter()
+            .map(|requirement| {
+                let key_ty = key
+                    .subst(db)
+                    .mapping(db)
+                    .as_ref()
+                    .and_then(|subst| substitute_complete(db, requirement.key.clone(), subst).ok())
+                    .unwrap_or_else(|| requirement.key.clone());
+                EffectRequirement {
+                    key: key_ty,
+                    ..requirement
+                }
+            })
+            .collect::<Vec<_>>();
+        expand_rows(db, &requirements, key.owner(db).scope(), body.assumptions())
+    } else {
+        RowExpansion::default()
+    };
+    if let Some(owner) = row_owner {
+        body = body.fold_with(
+            db,
+            &mut RowProviderSubst {
+                owner,
+                providers: key.effect_providers(db).providers(db),
+            },
+        );
+    }
+    let goals = if matches!(key.owner(db), BodyOwner::Closure { .. }) {
+        body.assumptions()
+    } else {
+        body.signature()
+    };
+    let mut entries = key.evidence(db).entries(db).clone();
+    entries.resize(goals.list(db).len(), None);
+    for (index, &raw_goal) in raw_goals.list(db).iter().enumerate() {
+        let TyData::TyParam(param) = raw_goal.self_ty(db).data(db) else {
+            continue;
+        };
+        if param.row_effect_provider_of() != row_owner || row_owner.is_none() {
+            continue;
+        }
+        let path = row_paths
+            .components
+            .iter()
+            .find(|component| component.requirement.binding_idx as usize == param.idx)
+            .map(|component| component.path.clone())
+            .or_else(|| {
+                matches!(key.owner(db), BodyOwner::Closure { .. })
+                    .then(|| crate::analysis::ty::effects::rows::RowPath::entry(param.idx as u32))
+            });
+        let Some(row) = path.and_then(|path| {
+            key.evidence(db)
+                .rows(db)
+                .iter()
+                .find(|row| row.path == path)
+        }) else {
+            continue;
+        };
+        let goal = goals.list(db)[index];
+        entries[index] = row.proof.and_then(|proof| {
+            if row.goal == goal {
+                Some(proof)
+            } else {
+                crate::analysis::ty::evidence::implied_bound_evidence(
+                    db,
+                    proof,
+                    goal,
+                    body.assumptions(),
+                )
+            }
+        });
+    }
+    let supplied = EvidenceList::of(db, entries).with_rows(db, key.evidence(db).rows(db).clone());
     let evidence = instance_evidence(
         db,
-        body.signature(),
-        key.evidence(db),
+        goals,
+        supplied,
         TraitSolveCx::new(db, key.impl_env(db).normalization_scope(db)),
     );
     let bound = crate::analysis::ty::evidence::BoundEvidence {
@@ -308,8 +397,6 @@ pub fn instantiated_typed_body<'db>(
         entries: evidence,
     };
     body.bind_evidence(db, bound);
-    // A closure value carries its defining body's dictionaries through generic
-    // calls and returns. Creating a closure instance does not re-select them.
     if let Some(defining_body) = body.body() {
         body = body.fold_with(
             db,
@@ -319,27 +406,7 @@ pub fn instantiated_typed_body<'db>(
             },
         );
     }
-    // A body's row provider parameters are the providers its call binds.
-    let owner = match key.owner(db) {
-        BodyOwner::Closure { def, .. } => (def.body.scope(), Some(def.expr)),
-        BodyOwner::Func(func, _)
-            if let Some(func_body) = func.body(db)
-                && func
-                    .effect_requirements(db)
-                    .iter()
-                    .any(|requirement| requirement.key.key_row().is_some()) =>
-        {
-            (func_body.scope(), None)
-        }
-        _ => return body,
-    };
-    body.fold_with(
-        db,
-        &mut RowProviderSubst {
-            owner,
-            providers: key.effect_providers(db).providers(db),
-        },
-    )
+    body
 }
 
 struct CaptureClosureEvidence<'db> {
@@ -558,6 +625,20 @@ fn expand_row_args<'db>(
             else {
                 continue;
             };
+            if let Some(row) = key
+                .evidence(db)
+                .rows(db)
+                .iter()
+                .find(|row| row.path == caller.path)
+            {
+                callable.supply_row_evidence(
+                    db,
+                    crate::analysis::ty::evidence::RowEvidence {
+                        path: callee.path.clone(),
+                        ..row.clone()
+                    },
+                );
+            }
             let slot = caller.requirement.binding_idx;
             let binding = LocalBinding::EffectParam {
                 site: caller.requirement.binding_site,

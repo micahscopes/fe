@@ -15,6 +15,7 @@ use salsa::Update;
 
 use super::{
     const_ty::const_body_assumptions,
+    effects::rows::RowPath,
     fold::{TyFoldable, TyFolder},
     method_cmp::trait_to_impl_param_subst,
     normalize::normalize_ty,
@@ -169,14 +170,9 @@ impl<'db> UseEvidence<'db> {
     pub fn has_deferred(self, db: &'db dyn HirAnalysisDb) -> bool {
         self.dispatch
             .is_some_and(|dispatch| dispatch.proof.has_deferred(db))
-            || self.bounds.is_some_and(|bounds| {
-                bounds
-                    .entries
-                    .entries(db)
-                    .iter()
-                    .flatten()
-                    .any(|proof| proof.has_deferred(db))
-            })
+            || self
+                .bounds
+                .is_some_and(|bounds| bounds.entries.has_deferred(db))
     }
 
     /// Explicit instance-boundary completion. A present but uncompletable
@@ -186,18 +182,7 @@ impl<'db> UseEvidence<'db> {
             dispatch.proof = complete_deferred_evidence(db, dispatch.proof)?;
         }
         if let Some(bounds) = &mut self.bounds {
-            bounds.entries = EvidenceList::of(
-                db,
-                bounds
-                    .entries
-                    .entries(db)
-                    .iter()
-                    .map(|proof| match proof {
-                        Some(proof) => complete_deferred_evidence(db, *proof).map(Some),
-                        None => Some(None),
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-            );
+            bounds.entries = bounds.entries.complete_deferred(db)?;
         }
         Some(())
     }
@@ -464,48 +449,126 @@ fn evidence_is_closed<'db>(db: &'db dyn HirAnalysisDb, evidence: EvidenceId<'db>
     }
 }
 
-/// Proofs of the assumptions a body is checked under, one per entry of its
-/// signature (`TypedBody::signature`), each absent where the body proves
-/// that assumption itself.
+/// An effect row's dictionary is addressed by its structural path, not the
+/// transient component index produced by one expansion of an abstract row.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
+pub struct RowEvidence<'db> {
+    pub path: RowPath,
+    pub goal: TraitInstId<'db>,
+    pub proof: Option<EvidenceId<'db>>,
+}
+
+impl<'db> TyFoldable<'db> for RowEvidence<'db> {
+    fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
+        Self {
+            path: self.path,
+            goal: self.goal.fold_with(db, folder),
+            proof: self.proof.map(|proof| proof.fold_with(db, folder)),
+        }
+    }
+}
+impl<'db> TyVisitable<'db> for RowEvidence<'db> {
+    fn visit_with<V: TyVisitor<'db> + ?Sized>(&self, visitor: &mut V) {
+        self.goal.visit_with(visitor);
+        if let Some(proof) = self.proof {
+            proof.visit_with(visitor);
+        }
+    }
+}
+
+/// Supplies for declaration slots and for components of open effect rows.
+/// Row paths stay stable when substitution expands an earlier abstract row.
 #[salsa::interned]
 #[derive(Debug)]
 pub struct EvidenceList<'db> {
     #[return_ref]
     pub entries: Vec<Option<EvidenceId<'db>>>,
+    #[return_ref]
+    pub rows: Vec<RowEvidence<'db>>,
 }
 
 impl<'db> EvidenceList<'db> {
-    /// A list that supplies no proofs.
     pub fn none(db: &'db dyn HirAnalysisDb) -> Self {
-        Self::new(db, Vec::new())
+        Self::new(db, Vec::new(), Vec::new())
     }
 
-    /// The list of `entries`, without the absent proofs that end it, so
-    /// lists that supply the same proofs are equal.
     pub fn of(db: &'db dyn HirAnalysisDb, mut entries: Vec<Option<EvidenceId<'db>>>) -> Self {
         while entries.last().is_some_and(Option::is_none) {
             entries.pop();
         }
-        Self::new(db, entries)
+        Self::new(db, entries, Vec::new())
     }
 
-    /// The proof of the assumption at `index`, if the list supplies one.
+    pub fn with_rows(self, db: &'db dyn HirAnalysisDb, mut rows: Vec<RowEvidence<'db>>) -> Self {
+        rows.sort_by(|a, b| (a.path.entry, &a.path.steps).cmp(&(b.path.entry, &b.path.steps)));
+        debug_assert!(rows.windows(2).all(|pair| pair[0].path != pair[1].path));
+        Self::new(db, self.entries(db).clone(), rows)
+    }
+
     pub fn get(self, db: &'db dyn HirAnalysisDb, index: usize) -> Option<EvidenceId<'db>> {
         self.entries(db).get(index).copied().flatten()
     }
 
     pub(crate) fn qualify(self, db: &'db dyn HirAnalysisDb, owner: BodyOwner<'db>) -> Self {
+        self.map_proofs(db, |proof| proof.qualify(db, owner))
+    }
+
+    fn map_proofs(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        mut map: impl FnMut(EvidenceId<'db>) -> EvidenceId<'db>,
+    ) -> Self {
         Self::of(
             db,
             self.entries(db)
                 .iter()
-                .map(|entry| entry.map(|proof| proof.qualify(db, owner)))
+                .map(|entry| entry.map(&mut map))
+                .collect(),
+        )
+        .with_rows(
+            db,
+            self.rows(db)
+                .iter()
+                .map(|row| RowEvidence {
+                    proof: row.proof.map(&mut map),
+                    ..row.clone()
+                })
                 .collect(),
         )
     }
 
-    /// Missing dictionaries in a settled signature. Still-schematic effect
-    /// providers and unresolved goals belong to their existing checker paths.
+    pub fn has_deferred(self, db: &'db dyn HirAnalysisDb) -> bool {
+        self.entries(db)
+            .iter()
+            .flatten()
+            .copied()
+            .chain(self.rows(db).iter().filter_map(|row| row.proof))
+            .any(|proof| proof.has_deferred(db))
+    }
+
+    pub fn complete_deferred(self, db: &'db dyn HirAnalysisDb) -> Option<Self> {
+        let complete = |proof| match proof {
+            Some(proof) => complete_deferred_evidence(db, proof).map(Some),
+            None => Some(None),
+        };
+        let entries = self
+            .entries(db)
+            .iter()
+            .map(|proof| complete(*proof))
+            .collect::<Option<Vec<_>>>()?;
+        let rows = self
+            .rows(db)
+            .iter()
+            .map(|row| {
+                Some(RowEvidence {
+                    proof: complete(row.proof)?,
+                    ..row.clone()
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self::of(db, entries).with_rows(db, rows))
+    }
+
     pub(crate) fn missing_bound_goals(
         self,
         db: &'db dyn HirAnalysisDb,
@@ -527,47 +590,37 @@ impl<'db> EvidenceList<'db> {
                 (!collect_flags(db, goal).intersects(TyFlags::HAS_VAR | TyFlags::HAS_INVALID))
                     .then_some(goal)
             })
+            .chain(self.rows(db).iter().filter_map(|row| {
+                (row.proof.is_none()
+                    && !collect_flags(db, row.goal)
+                        .intersects(TyFlags::HAS_VAR | TyFlags::HAS_INVALID)
+                    && !mentions_effect_provider(db, row.goal))
+                .then_some(row.goal)
+            }))
             .collect()
     }
 
-    /// Each proof with the assumptions it names replaced by `bound`'s proofs.
     pub fn bind(self, db: &'db dyn HirAnalysisDb, bound: BoundEvidence<'db>) -> Self {
-        if bound.entries.entries(db).is_empty() {
-            return self;
-        }
-        Self::new(
-            db,
-            self.entries(db)
-                .iter()
-                .map(|entry| entry.map(|evidence| evidence.bind(db, bound)))
-                .collect::<Vec<_>>(),
-        )
+        self.map_proofs(db, |proof| proof.bind(db, bound))
     }
 }
 
 impl<'db> TyFoldable<'db> for EvidenceList<'db> {
-    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
-    where
-        F: TyFolder<'db>,
-    {
-        Self::new(
-            db,
-            self.entries(db)
-                .iter()
-                .map(|entry| entry.map(|evidence| evidence.fold_with(db, folder)))
-                .collect::<Vec<_>>(),
-        )
+    fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
+        let entries = self
+            .entries(db)
+            .iter()
+            .map(|entry| entry.map(|proof| proof.fold_with(db, folder)))
+            .collect();
+        Self::of(db, entries).with_rows(db, self.rows(db).clone().fold_with(db, folder))
     }
 }
-
 impl<'db> TyVisitable<'db> for EvidenceList<'db> {
-    fn visit_with<V>(&self, visitor: &mut V)
-    where
-        V: TyVisitor<'db> + ?Sized,
-    {
-        for evidence in self.entries(visitor.db()).iter().flatten() {
-            evidence.visit_with(visitor);
+    fn visit_with<V: TyVisitor<'db> + ?Sized>(&self, visitor: &mut V) {
+        for proof in self.entries(visitor.db()).iter().flatten() {
+            proof.visit_with(visitor);
         }
+        self.rows(visitor.db()).visit_with(visitor);
     }
 }
 
@@ -793,7 +846,7 @@ pub(crate) fn declared_bound_evidence_with_pending<'db>(
 /// then supplied with the actual proofs of that implementation's conditions.
 /// This is projection from a dictionary, not fresh caller-side selection.
 #[salsa::tracked]
-fn implied_bound_evidence<'db>(
+pub(crate) fn implied_bound_evidence<'db>(
     db: &'db dyn HirAnalysisDb,
     proof: EvidenceId<'db>,
     goal: TraitInstId<'db>,
@@ -1310,6 +1363,7 @@ pub(crate) fn instance_evidence<'db>(
             })
             .collect(),
     )
+    .with_rows(db, supplied.rows(db).clone())
 }
 
 fn prove_cycle_initial<'db>(

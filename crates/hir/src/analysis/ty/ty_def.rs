@@ -1245,6 +1245,7 @@ pub struct ClosureDef<'db> {
 /// (see `ty::closure`).
 #[salsa::interned]
 #[derive(Debug)]
+#[allow(clippy::too_many_arguments)]
 pub struct ClosureTy<'db> {
     pub def: ClosureDef<'db>,
     /// Generic arguments of the item whose body defines the closure. The
