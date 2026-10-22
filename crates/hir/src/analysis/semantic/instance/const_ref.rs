@@ -1202,18 +1202,16 @@ fn semantic_const_key_for_const<'db>(
     const_: Const<'db>,
 ) -> Option<SemanticInstanceKey<'db>> {
     let owner = BodyOwner::Const(const_);
-    Some(
-        SemanticInstanceKey::of(
-            db,
-            owner,
-            GenericSubst::none(db),
-            EffectProviderSubst::empty(db),
-            ImplEnv::empty(db, owner.scope()),
-            EvidenceList::none(db),
-        )
-        .finalize_evidence(db, crate::analysis::ty::evidence::UseEvidence::default())
-        .ok()?,
+    SemanticInstanceKey::of(
+        db,
+        owner,
+        GenericSubst::none(db),
+        EffectProviderSubst::empty(db),
+        ImplEnv::empty(db, owner.scope()),
+        EvidenceList::none(db),
     )
+    .finalize_evidence(db, crate::analysis::ty::evidence::UseEvidence::default())
+    .ok()
 }
 
 fn semantic_const_key_for_inherent_const<'db>(
@@ -1223,18 +1221,16 @@ fn semantic_const_key_for_inherent_const<'db>(
     let (body, impl_args) =
         inherent_const_body_and_impl_args(db, use_.impl_(), use_.receiver_ty(), use_.name())?;
     let ty = inherent_const_decl_ty(db, use_.impl_(), use_.name())?;
-    Some(
-        SemanticInstanceKey::of(
-            db,
-            BodyOwner::AnonConstBody { body, expected: ty },
-            GenericSubst::for_owner(db, use_.impl_().into(), impl_args),
-            EffectProviderSubst::empty(db),
-            ImplEnv::new(db, use_.origin_scope(), use_.assumptions(), vec![]),
-            EvidenceList::none(db),
-        )
-        .finalize_evidence(db, crate::analysis::ty::evidence::UseEvidence::default())
-        .ok()?,
+    SemanticInstanceKey::of(
+        db,
+        BodyOwner::AnonConstBody { body, expected: ty },
+        GenericSubst::for_owner(db, use_.impl_().into(), impl_args),
+        EffectProviderSubst::empty(db),
+        ImplEnv::new(db, use_.origin_scope(), use_.assumptions(), vec![]),
+        EvidenceList::none(db),
     )
+    .finalize_evidence(db, crate::analysis::ty::evidence::UseEvidence::default())
+    .ok()
 }
 
 #[cfg(test)]

@@ -378,6 +378,20 @@ mod tests {
                 ),
                 Err(ResidualEvidence::DestinationSchema)
             );
+            assert_eq!(
+                key.finalize_evidence(
+                    &db,
+                    crate::analysis::ty::evidence::UseEvidence {
+                        dispatch: None,
+                        bounds: Some(BoundEvidence {
+                            schema: foreign_schema,
+                            entries: closed.proofs(&db)
+                        }),
+                    }
+                ),
+                Err(ResidualEvidence::DestinationSchema),
+                "invalid supplies must not produce an executable residual key",
+            );
             named_count += usize::from(
                 closed
                     .proofs(&db)
@@ -439,6 +453,19 @@ mod tests {
                         }
                     ),
                     Err(ResidualEvidence::UnboundSuppliedProof)
+                );
+                assert_eq!(
+                    key.finalize_evidence(
+                        &db,
+                        crate::analysis::ty::evidence::UseEvidence {
+                            dispatch: None,
+                            bounds: Some(BoundEvidence {
+                                schema: closed.schema(&db),
+                                entries: supplied
+                            }),
+                        }
+                    ),
+                    Err(ResidualEvidence::UnboundSuppliedProof),
                 );
                 rejected_unbound = true;
             }
@@ -561,5 +588,67 @@ fn root() -> u256 { with (Chosen) { Item::make() } }
             ),
             Err(ResidualEvidence::ProofGoalMismatch)
         );
+    }
+    #[test]
+    fn closed_facts_shadow_constructor_const_ctfe_and_recursive_keys() {
+        use super::super::semantic::InstanceEvidence;
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "closed_constructors.fe".into(),
+            r#"
+struct Item {}
+trait Marker {}
+impl Marker for Item {}
+trait Width { const N: usize }
+impl Width for Item { const N: usize = 2 }
+const fn extent() -> usize { 2 }
+fn width<const N: usize>(_ value: [u8; N]) -> usize { N }
+fn from_bound<T: Marker>() -> usize { width([0; extent()]) }
+fn recur(_ n: u256) -> u256 { if n == 0 { 0 } else { recur(n - 1) } }
+fn root() -> usize { width([0; Item::N]) + from_bound<Item>() }
+fn recursive_root() -> u256 { recur(2) }
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        let mut work = ["root", "recursive_root"]
+            .into_iter()
+            .map(|name| {
+                let func = crate::test_db::find_func(&db, module, name);
+                root_semantic_instance_key(&db, BodyOwner::func(&db, func)).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let width = crate::test_db::find_func(&db, module, "width");
+        let recur = crate::test_db::find_func(&db, module, "recur");
+        let mut seen = FxHashSet::default();
+        let mut widths = FxHashSet::default();
+        let mut recurs = FxHashSet::default();
+        while let Some(key) = work.pop() {
+            if !seen.insert(key) {
+                continue;
+            }
+            assert!(
+                seen.len() < 100,
+                "recursive constructor keys must stabilize"
+            );
+            if key.owner(&db) == BodyOwner::func(&db, width) {
+                assert!(
+                    matches!(key.evidence_state(&db), InstanceEvidence::Closed(_)),
+                    "ground const arguments close at the actual producer"
+                );
+                widths.insert(key);
+            }
+            if key.owner(&db) == BodyOwner::func(&db, recur) {
+                recurs.insert(key);
+            }
+            let instance = get_or_build_semantic_instance(&db, key);
+            work.extend(instance.callees(&db).iter().map(|callee| callee.key));
+        }
+        assert_eq!(
+            widths.len(),
+            1,
+            "equal CTFE and associated-constant arguments share a key across different caller bounds"
+        );
+        assert_eq!(recurs.len(), 1, "recursive edges reuse one ground instance");
     }
 }
