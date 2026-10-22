@@ -237,6 +237,7 @@ fn validate_closed_proof<'db>(
     scope: ScopeId<'db>,
 ) -> Result<(), ResidualEvidence> {
     let Evidence::Impl {
+        selected,
         instantiated,
         conds,
         ..
@@ -245,7 +246,10 @@ fn validate_closed_proof<'db>(
         return Err(ResidualEvidence::UnboundSuppliedProof);
     };
     let head = instantiated.trait_inst(db);
-    if head.def(db) != goal.def(db) || head.args(db) != goal.args(db) {
+    if head.def(db) != goal.def(db)
+        || head.args(db) != goal.args(db)
+        || goal.is_mut(db) && !selected.gives_mut(db)
+    {
         return Err(ResidualEvidence::ProofGoalMismatch);
     }
     let resolved = proof
@@ -722,6 +726,45 @@ fn root() -> u256 { with (Chosen) { Item::make() } }
             Err(ResidualEvidence::ProofGoalMismatch)
         );
     }
+    #[test]
+    fn closed_facts_shadow_mut_mode_requires_the_selected_impl_capability() {
+        use crate::analysis::ty::ty_def::BorrowKind;
+        use crate::test_db::find_func;
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "closed_modes.fe".into(),
+            r#"
+struct ReadOnly {}
+struct Both {}
+trait Access { fn value(mut? self) -> u256 }
+impl Access for ReadOnly { fn value(self) -> u256 { 1 } }
+impl Access for Both { fn value(mut? self) -> u256 { 2 } }
+fn read_only() where ReadOnly: Access {}
+fn both() where Both: Access {}
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        for (name, mutable) in [("read_only", false), ("both", true)] {
+            let func = find_func(&db, module, name);
+            let goal = func_signature(&db, func, None).list(&db)[0];
+            let proof = prove(&db, TraitSolveCx::new(&db, func.scope()), goal).unwrap();
+            assert_eq!(
+                validate_closed_proof(&db, proof, goal, func.scope()),
+                Ok(())
+            );
+            let mut_goal = goal.at_mode(&db, Some(BorrowKind::Mut));
+            assert_eq!(
+                validate_closed_proof(&db, proof, mut_goal, func.scope()),
+                if mutable {
+                    Ok(())
+                } else {
+                    Err(ResidualEvidence::ProofGoalMismatch)
+                }
+            );
+        }
+    }
+
     #[test]
     fn closed_facts_shadow_constructor_const_ctfe_and_recursive_keys() {
         use super::super::semantic::InstanceEvidence;
