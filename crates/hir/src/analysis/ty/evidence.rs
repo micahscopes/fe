@@ -260,6 +260,10 @@ pub enum Evidence<'db> {
     /// The assumption at this position in the extended assumption list of
     /// the body the goal was proved in.
     Assumption(BoundSlotRef<'db>),
+    /// A checked type-key effect binding supplies a handle to its target.
+    /// This is local capability evidence, not a global implementation for the
+    /// enclosing provider type. It has no method or associated-output choice.
+    EffectBinding(EffectBindingEvidence<'db>),
     /// The compiler's provisional ordinary Solidity codec obligation. Its
     /// element is still generic, so the whole-slot fallback is not a selection.
     /// Substitution closes this leaf without replacing any selected parent.
@@ -267,6 +271,36 @@ pub enum Evidence<'db> {
         goal: TraitInstId<'db>,
         scope: ScopeId<'db>,
     },
+}
+
+/// The finite certificate retained after effect resolution. Runtime place
+/// projections remain call operands; the dictionary records the handle's
+/// checked declaration, target, mutability and provider representation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
+pub struct EffectBindingEvidence<'db> {
+    pub(crate) owner: BodyOwner<'db>,
+    pub(crate) requirement: u32,
+    pub(crate) goal: TraitInstId<'db>,
+    pub(crate) provider: crate::semantic::ProviderBinding<'db>,
+}
+
+impl<'db> EffectBindingEvidence<'db> {
+    pub(crate) fn answers(&self, db: &'db dyn HirAnalysisDb, goal: TraitInstId<'db>) -> bool {
+        let scope = self.owner.scope();
+        let is_ref =
+            super::corelib::resolve_core_trait(db, scope, &["EffectRef"]) == Some(goal.def(db));
+        let is_mut =
+            super::corelib::resolve_core_trait(db, scope, &["EffectRefMut"]) == Some(goal.def(db));
+        goal == self.goal
+            && (is_ref || is_mut && self.provider.is_mut)
+            && goal.args(db).as_slice()
+                == [
+                    self.provider.provider_ty,
+                    self.provider.effective_target_ty(),
+                ]
+            && goal.assoc_type_bindings(db).is_empty()
+            && !goal.is_mut(db)
+    }
 }
 
 impl<'db> EvidenceId<'db> {
@@ -283,7 +317,9 @@ impl<'db> EvidenceId<'db> {
                 instantiated,
                 ..
             } => Some(ResolvedImplInstance::new(*selected, *instantiated, goal)),
-            Evidence::Assumption(_) | Evidence::DeferredSolCodec { .. } => None,
+            Evidence::Assumption(_)
+            | Evidence::EffectBinding(_)
+            | Evidence::DeferredSolCodec { .. } => None,
         }
     }
 
@@ -292,7 +328,7 @@ impl<'db> EvidenceId<'db> {
     fn rebase(self, db: &'db dyn HirAnalysisDb, bound: BoundEvidence<'db>) -> Option<Self> {
         Some(match self.data(db) {
             Evidence::Assumption(index) => bound.get(db, *index)?,
-            Evidence::DeferredSolCodec { .. } => self,
+            Evidence::DeferredSolCodec { .. } | Evidence::EffectBinding(_) => self,
             Evidence::Impl {
                 selected,
                 instantiated,
@@ -341,7 +377,9 @@ impl<'db> EvidenceId<'db> {
                     conds: conds.iter().map(|proof| proof.qualify(db, owner)).collect(),
                 },
             ),
-            Evidence::Assumption(_) | Evidence::DeferredSolCodec { .. } => self,
+            Evidence::Assumption(_)
+            | Evidence::EffectBinding(_)
+            | Evidence::DeferredSolCodec { .. } => self,
         }
     }
 
@@ -363,7 +401,9 @@ impl<'db> EvidenceId<'db> {
     pub fn conds(self, db: &'db dyn HirAnalysisDb) -> &'db [EvidenceId<'db>] {
         match self.data(db) {
             Evidence::Impl { conds, .. } => conds,
-            Evidence::Assumption(_) | Evidence::DeferredSolCodec { .. } => &[],
+            Evidence::Assumption(_)
+            | Evidence::EffectBinding(_)
+            | Evidence::DeferredSolCodec { .. } => &[],
         }
     }
 
@@ -372,7 +412,7 @@ impl<'db> EvidenceId<'db> {
     pub fn bind(self, db: &'db dyn HirAnalysisDb, bound: BoundEvidence<'db>) -> Self {
         match self.data(db) {
             Evidence::Assumption(index) => bound.get(db, *index).unwrap_or(self),
-            Evidence::DeferredSolCodec { .. } => self,
+            Evidence::DeferredSolCodec { .. } | Evidence::EffectBinding(_) => self,
             Evidence::Impl {
                 selected,
                 instantiated,
@@ -394,7 +434,7 @@ fn evidence_has_deferred<'db>(db: &'db dyn HirAnalysisDb, proof: EvidenceId<'db>
     match proof.data(db) {
         Evidence::DeferredSolCodec { .. } => true,
         Evidence::Impl { conds, .. } => conds.iter().any(|proof| proof.has_deferred(db)),
-        Evidence::Assumption(_) => false,
+        Evidence::Assumption(_) | Evidence::EffectBinding(_) => false,
     }
 }
 
@@ -409,7 +449,7 @@ pub(crate) fn complete_deferred_evidence<'db>(
         return Some(proof);
     }
     match proof.data(db) {
-        Evidence::Assumption(_) => Some(proof),
+        Evidence::Assumption(_) | Evidence::EffectBinding(_) => Some(proof),
         Evidence::DeferredSolCodec { goal, scope } => {
             if collect_flags(db, *goal).intersects(
                 TyFlags::HAS_PARAM
@@ -451,7 +491,9 @@ fn evidence_has_named_impl<'db>(db: &'db dyn HirAnalysisDb, evidence: EvidenceId
             matches!(selected.origin(db), ImplementorOrigin::Hir(implementation) if implementation.selection_name(db).is_some())
                 || conds.iter().any(|cond| cond.has_named_impl(db))
         }
-        Evidence::Assumption(_) | Evidence::DeferredSolCodec { .. } => false,
+        Evidence::Assumption(_)
+        | Evidence::EffectBinding(_)
+        | Evidence::DeferredSolCodec { .. } => false,
     }
 }
 
@@ -459,6 +501,7 @@ fn evidence_has_named_impl<'db>(db: &'db dyn HirAnalysisDb, evidence: EvidenceId
 fn evidence_is_closed<'db>(db: &'db dyn HirAnalysisDb, evidence: EvidenceId<'db>) -> bool {
     match evidence.data(db) {
         Evidence::Assumption(_) | Evidence::DeferredSolCodec { .. } => false,
+        Evidence::EffectBinding(_) => true,
         Evidence::Impl { conds, .. } => conds.iter().all(|cond| cond.is_closed(db)),
     }
 }
@@ -659,6 +702,14 @@ impl<'db> TyFoldable<'db> for EvidenceId<'db> {
                         .collect(),
                 },
             ),
+            Evidence::EffectBinding(binding) => EvidenceId::new(
+                db,
+                Evidence::EffectBinding(EffectBindingEvidence {
+                    goal: binding.goal.fold_with(db, folder),
+                    provider: binding.provider.clone().fold_with(db, folder),
+                    ..binding.clone()
+                }),
+            ),
             Evidence::DeferredSolCodec { goal, scope } => EvidenceId::new(
                 db,
                 Evidence::DeferredSolCodec {
@@ -692,6 +743,10 @@ impl<'db> TyVisitable<'db> for EvidenceId<'db> {
                 for cond in conds {
                     cond.visit_with(visitor);
                 }
+            }
+            Evidence::EffectBinding(binding) => {
+                binding.goal.visit_with(visitor);
+                binding.provider.visit_with(visitor);
             }
             Evidence::DeferredSolCodec { goal, .. } => goal.visit_with(visitor),
             Evidence::Assumption(slot) => slot.applied.visit_with(visitor),
@@ -1112,7 +1167,7 @@ pub(crate) fn instantiated_selection<'db>(
         }
         Some(Evidence::DeferredSolCodec { .. }) => None,
         // As selection answers a goal by an assumption.
-        Some(Evidence::Assumption(_)) => {
+        Some(Evidence::Assumption(_)) | Some(Evidence::EffectBinding(_)) => {
             let goal = goal();
             let assumption = ImplementorId::assumption(db, goal);
             Some(ResolvedImplInstance::new(assumption, assumption, goal))

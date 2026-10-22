@@ -77,18 +77,15 @@ impl<'db> ConstInvocation<'db> {
     /// paths a runtime body can need. Evaluating the term selects impls from
     /// the ingots of the types involved, not the caller's, so the term
     /// normalizes at its callee's own ingot root and calls written in
-    /// different ingots share one term.
+    /// different ingots share one term. Empty contexts in distinct lexical
+    /// bodies follow the same rule, including symbolic calls such as size_of<T>.
     pub(crate) fn new(
         db: &'db dyn HirAnalysisDb,
         key: SemanticInstanceKey<'db>,
         args: Vec<TyId<'db>>,
     ) -> Self {
         let env = key.impl_env(db);
-        let scope = env.normalization_scope(db);
-        let key = if env.assumptions(db).is_empty(db)
-            && env.witnesses(db).is_empty()
-            && scope == scope.ingot(db).root_mod(db).scope()
-        {
+        let key = if env.assumptions(db).is_empty(db) && env.witnesses(db).is_empty() {
             let owner = key.owner(db);
             key.rebase_const_context(
                 db,

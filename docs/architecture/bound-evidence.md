@@ -83,6 +83,20 @@ admission still checks the underlying obligations. No new consumer should
 construct an independent normalization or selection context to bypass the
 shared finalizer.
 
+Type-key effects also supply a checked handle capability. A projected field can
+have target `StorageMap<K, V>` while its provider representation is the enclosing
+`Store`; this does not establish a global implementation of
+`Store: EffectRef<StorageMap<K, V>>`. Shared provider adaptation retains a finite
+`EffectBinding` certificate for an absent induced slot, after checking the
+resolved binding, target and required mutability. Runtime place projections
+remain call operands. Existing supplied implementation trees are preserved.
+
+Constant terms with empty fact contexts canonicalize their origin to the
+callee's ingot, including symbolic calls written in different anonymous bodies.
+Runtime origins retain their existing behavior. Closed proof validation compares
+constant arguments using the compiler's existing constant identity rules rather
+than requiring identical intermediate representations.
+
 ## Verification
 
 Final exact-source receipts will be added after the complete gates. Preserve

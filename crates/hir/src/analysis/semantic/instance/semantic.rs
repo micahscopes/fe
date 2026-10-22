@@ -640,6 +640,71 @@ impl<'db> ProviderEvidenceAdaptation<'db> {
                     .ok_or(ResidualEvidence::ProofGoalMismatch)?
             });
         }
+        // A type-key effect is a checked handle capability. Its hidden
+        // provider may be an enclosing storage object rather than the target
+        // field's type, so a global EffectRef implementation is not its proof.
+        // Only complete an absent induced slot; never replace a supplied tree.
+        if let Some(site) = effect_param_site(self.owner) {
+            let view = EffectEnvView::new(site);
+            let resolutions = view.resolutions(db);
+            for requirement in view.requirements(db) {
+                let Some(target) = requirement.key.key_ty() else {
+                    continue;
+                };
+                let target = match self.subst.mapping(db) {
+                    Some(subst) => substitute_complete(db, target, subst)
+                        .map_err(|_| ResidualEvidence::GenericOrProjectedInput)?,
+                    None => target,
+                };
+                let target = normalize_ty(db, target, self.owner.scope(), assumptions);
+                let Some(resolution) = resolutions
+                    .iter()
+                    .find(|r| r.requirement_idx == requirement.binding_idx)
+                else {
+                    continue;
+                };
+                let Some(provider) = self
+                    .providers
+                    .providers(db)
+                    .iter()
+                    .find(|p| p.provider_idx == resolution.provider_idx)
+                else {
+                    continue;
+                };
+                if normalize_ty(
+                    db,
+                    provider.effective_target_ty(),
+                    self.owner.scope(),
+                    assumptions,
+                ) != target
+                    || requirement.is_mut && !provider.is_mut
+                {
+                    continue;
+                }
+                for (index, &goal) in goals.list(db).iter().enumerate() {
+                    if entries[index].is_some() {
+                        continue;
+                    }
+                    let binding = crate::analysis::ty::evidence::EffectBindingEvidence {
+                        owner: self.owner,
+                        requirement: requirement.binding_idx,
+                        goal,
+                        provider: provider.clone(),
+                    };
+                    let requests_mut = crate::analysis::ty::corelib::resolve_core_trait(
+                        db,
+                        self.owner.scope(),
+                        &["EffectRefMut"],
+                    ) == Some(goal.def(db));
+                    if binding.answers(db, goal) && (!requests_mut || requirement.is_mut) {
+                        entries[index] = Some(crate::analysis::ty::evidence::EvidenceId::new(
+                            db,
+                            crate::analysis::ty::evidence::Evidence::EffectBinding(binding),
+                        ));
+                    }
+                }
+            }
+        }
         Ok((
             goals,
             EvidenceList::of(db, entries).with_rows(db, supplied.rows(db).clone()),

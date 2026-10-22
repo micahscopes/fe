@@ -9,16 +9,17 @@ use super::{EffectProviderSubst, GenericSubst, ImplEnv};
 use crate::analysis::{
     HirAnalysisDb,
     ty::{
-        const_ty::const_body_assumptions,
+        const_ty::{const_body_assumptions, normalize_const_tys_for_comparison},
         evidence::{
             BoundEvidence, BoundOwner, BoundSchemaId, Evidence, EvidenceId, EvidenceList,
             ProvedGoal, prove,
         },
+        fold::{TyFoldable, TyFolder},
         normalize::normalize_ty,
         subst::substitute_complete,
         trait_resolution::{PredicateListId, TraitSolveCx},
         ty_check::{BodyOwner, func_signature},
-        ty_def::TyFlags,
+        ty_def::{TyFlags, TyId},
         visitor::collect_flags,
     },
 };
@@ -226,6 +227,24 @@ fn close_request<'db>(
     ))
 }
 
+/// Ground type comparison uses the same constant identity normalization as
+/// unification. Literal and retained computation representations may differ.
+fn same_ground_type<'db>(
+    db: &'db dyn HirAnalysisDb,
+    actual: TyId<'db>,
+    expected: TyId<'db>,
+) -> bool {
+    struct Constants;
+    impl<'db> TyFolder<'db> for Constants {
+        fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+            let ty = ty.super_fold_with(db, self);
+            normalize_const_tys_for_comparison(db, ty)
+        }
+    }
+    actual == expected
+        || actual.fold_with(db, &mut Constants) == expected.fold_with(db, &mut Constants)
+}
+
 /// Validate a retained proof against the asserted use, without invoking impl
 /// selection. The constructor cannot turn an unrelated closed tree into a fact.
 fn validate_closed_proof<'db>(
@@ -234,6 +253,12 @@ fn validate_closed_proof<'db>(
     goal: crate::analysis::ty::trait_def::TraitInstId<'db>,
     scope: ScopeId<'db>,
 ) -> Result<(), ResidualEvidence> {
+    if let Evidence::EffectBinding(binding) = proof.data(db) {
+        return binding
+            .answers(db, goal)
+            .then_some(())
+            .ok_or(ResidualEvidence::ProofGoalMismatch);
+    }
     let Evidence::Impl {
         selected,
         instantiated,
@@ -245,7 +270,12 @@ fn validate_closed_proof<'db>(
     };
     let head = instantiated.trait_inst(db);
     if head.def(db) != goal.def(db)
-        || head.args(db) != goal.args(db)
+        || head.args(db).len() != goal.args(db).len()
+        || head
+            .args(db)
+            .iter()
+            .zip(goal.args(db))
+            .any(|(&actual, &expected)| !same_ground_type(db, actual, expected))
         || goal.is_mut(db) && !selected.gives_mut(db)
     {
         return Err(ResidualEvidence::ProofGoalMismatch);
@@ -257,7 +287,11 @@ fn validate_closed_proof<'db>(
         let actual = resolved
             .instantiated_assoc_ty(db, name)
             .ok_or(ResidualEvidence::ProofGoalMismatch)?;
-        if normalize_ty(db, actual, scope, instantiated.constraints(db)) != expected {
+        if !same_ground_type(
+            db,
+            normalize_ty(db, actual, scope, instantiated.constraints(db)),
+            expected,
+        ) {
             return Err(ResidualEvidence::ProofGoalMismatch);
         }
     }
@@ -350,7 +384,7 @@ mod tests {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
             "symbolic_identity.fe".into(),
-            "const fn size<T>() -> usize { core::size_of<T>() }",
+            "const fn size<T>() -> usize { core::size_of<T>() }\nfn left() {}\nfn right() {}\n",
         );
         let (module, _) = db.top_mod(file);
         db.assert_no_diags(module);
@@ -367,6 +401,15 @@ mod tests {
         assert_eq!(
             attempted, structural,
             "a completion attempt adds no semantic input"
+        );
+        let terms = ["left", "right"].map(|name| {
+            let scope = find_func(&db, module, name).body(&db).unwrap().scope();
+            let key = structural.rebase_const_context(&db, ImplEnv::empty(&db, scope));
+            ConstInvocation::new(&db, key, Vec::new())
+        });
+        assert_eq!(
+            terms[0], terms[1],
+            "empty lexical contexts do not distinguish symbolic constant calls"
         );
         assert_eq!(
             ConstInvocation::new(&db, attempted, Vec::new()),
@@ -445,6 +488,62 @@ mod tests {
             "the same constant call has one cross-ingot identity"
         );
         assert_eq!(terms[0].key.evidence(&db), keys[0].evidence(&db));
+    }
+
+    #[test]
+    fn closed_effect_binding_certificates_preserve_target_and_mutability() {
+        use crate::analysis::ty::{corelib::resolve_core_trait, trait_def::TraitInstId};
+        use crate::test_db::find_func;
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "effect_binding.fe".into(),
+            r#"
+fn read() -> u256 uses (value: u256) { value }
+fn write() uses (mut value: u256) { value = 9 }
+fn root() -> u256 {
+    var value: u256 = 7
+    with (value) { write(); read() }
+}
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        let root = find_func(&db, module, "root");
+        let key = root_semantic_instance_key(&db, BodyOwner::func(&db, root)).unwrap();
+        let instance = get_or_build_semantic_instance(&db, key);
+        let mut checked = 0;
+        for callee in instance.callees(&db) {
+            for proof in callee.key.evidence(&db).entries(&db).iter().flatten() {
+                let Evidence::EffectBinding(binding) = proof.data(&db) else {
+                    continue;
+                };
+                assert!(proof.is_closed(&db));
+                assert!(validate_closed_proof(&db, *proof, binding.goal, root.scope()).is_ok());
+                let other = TraitInstId::new_simple(
+                    &db,
+                    binding.goal.def(&db),
+                    vec![binding.provider.provider_ty, TyId::bool(&db)],
+                );
+                assert_eq!(
+                    validate_closed_proof(&db, *proof, other, root.scope()),
+                    Err(ResidualEvidence::ProofGoalMismatch)
+                );
+                let mut readonly = binding.clone();
+                readonly.provider.is_mut = false;
+                readonly.goal = TraitInstId::new_simple(
+                    &db,
+                    resolve_core_trait(&db, root.scope(), &["EffectRefMut"]).unwrap(),
+                    binding.goal.args(&db).clone(),
+                );
+                let invalid = EvidenceId::new(&db, Evidence::EffectBinding(readonly.clone()));
+                assert_eq!(
+                    validate_closed_proof(&db, invalid, readonly.goal, root.scope()),
+                    Err(ResidualEvidence::ProofGoalMismatch)
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 2, "read and write retain checked capabilities");
     }
 
     #[test]
