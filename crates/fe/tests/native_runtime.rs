@@ -1855,3 +1855,33 @@ fn scoped_generated_trait_methods_execute_on_both_backends() {
         }
     }
 }
+
+#[test]
+fn native_named_closures_transport_captured_and_row_evidence() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fe_test/named_closure_evidence.fe");
+    for level in ["0", "1"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_fe"))
+            .args([
+                "test",
+                "--backend",
+                "native",
+                "--jobs",
+                "1",
+                "--color",
+                "never",
+                "-O",
+                level,
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(result.status.success(), "O{level}:\n{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("5 passed; 0 failed"),
+            "O{level}:\n{stdout}\n{stderr}"
+        );
+    }
+}
