@@ -1290,7 +1290,7 @@ impl<'db> ItemCode<'db> {
                 let valid_pat_block = quote.body().is_some_and(|block| {
                     block.items().next().is_none() && block.stmts().count() == 1
                 });
-                if !valid_pat_block {
+                if quote.pattern().is_none() && !valid_pat_block {
                     return Err("pattern quotation requires a pattern");
                 }
             }
