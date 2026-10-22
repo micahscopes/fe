@@ -1412,7 +1412,7 @@ impl<'db> BodyDiag<'db> {
             Self::ConstFnEffectfulCall { .. } => 63,
             Self::UnsafeDerefRequiresUnsafe { .. } => 96,
             Self::UnsafeCallRequiresUnsafe { .. } => 97,
-            Self::ChosenTypeRead { .. } => 130,
+            Self::ChosenTypeRead { .. } => 138,
         }
     }
 }
