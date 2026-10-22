@@ -10,7 +10,10 @@ use crate::analysis::{
     HirAnalysisDb,
     ty::{
         const_ty::const_body_assumptions,
-        evidence::{BoundOwner, BoundSchemaId, EvidenceList, ProvedGoal, prove},
+        evidence::{
+            BoundEvidence, BoundOwner, BoundSchemaId, Evidence, EvidenceId, EvidenceList,
+            ProvedGoal, prove,
+        },
         normalize::normalize_ty,
         subst::substitute_complete,
         trait_resolution::{PredicateListId, TraitSolveCx},
@@ -25,6 +28,8 @@ use crate::hir_def::{HirIngot, scope_graph::ScopeId};
 pub enum ResidualEvidence {
     /// Closure and contract checkers still own their non-function bound layouts.
     BodySchema,
+    DestinationSchema,
+    ProofGoalMismatch,
     GenericOrProjectedInput,
     GenericOrProjectedGoal,
     MissingOrdinaryProof,
@@ -91,7 +96,7 @@ pub(crate) struct EvidenceCompletion<'db> {
     pub owner: BodyOwner<'db>,
     pub subst: GenericSubst<'db>,
     pub providers: EffectProviderSubst<'db>,
-    pub supplied: EvidenceList<'db>,
+    pub supplied: BoundEvidence<'db>,
     pub dispatch: Option<ProvedGoal<'db>>,
     /// Producer context for normalization of the use's already-selected input.
     pub context: ImplEnv<'db>,
@@ -116,6 +121,16 @@ fn close_request<'db>(
 ) -> Result<ClosedBodyEvidence<'db>, ResidualEvidence> {
     let input = request.data(db);
     let schema = declaration_bound_schema(db, input.owner).ok_or(ResidualEvidence::BodySchema)?;
+    if input.supplied.schema.owner(db) != schema.owner(db)
+        || !input
+            .supplied
+            .schema
+            .slots(db)
+            .list(db)
+            .starts_with(schema.slots(db).list(db))
+    {
+        return Err(ResidualEvidence::DestinationSchema);
+    }
     if !ground(
         collect_flags(db, input.subst.generic_args(db))
             | collect_flags(db, input.providers.providers(db).as_slice()),
@@ -138,6 +153,7 @@ fn close_request<'db>(
     }
     let supplied = input
         .supplied
+        .entries
         .complete_deferred(db)
         .ok_or(ResidualEvidence::DeferredCompletion)?;
     let supplied = normalize_ty(db, supplied, scope, context_facts);
@@ -154,6 +170,7 @@ fn close_request<'db>(
             if !proof.is_closed(db) || !ground(collect_flags(db, proof)) {
                 return Err(ResidualEvidence::UnboundSuppliedProof);
             }
+            validate_closed_proof(db, proof, goal, scope)?;
             Ok(Some(proof))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -165,6 +182,14 @@ fn close_request<'db>(
     }) {
         return Err(ResidualEvidence::UnboundSuppliedProof);
     }
+    for row in supplied.rows(db) {
+        validate_closed_proof(
+            db,
+            row.proof.ok_or(ResidualEvidence::UnboundSuppliedProof)?,
+            row.goal,
+            scope,
+        )?;
+    }
     let dispatch = input
         .dispatch
         .map(|dispatch| {
@@ -173,6 +198,7 @@ fn close_request<'db>(
             if !ground(collect_flags(db, goal) | collect_flags(db, proof)) || !proof.is_closed(db) {
                 return Err(ResidualEvidence::UnboundSuppliedProof);
             }
+            validate_closed_proof(db, proof, goal, scope)?;
             Ok(ProvedGoal { goal, proof })
         })
         .transpose()?;
@@ -185,6 +211,58 @@ fn close_request<'db>(
         dispatch,
         scope.ingot(db).root_mod(db).scope(),
     ))
+}
+
+/// Validate a retained proof against the asserted use, without invoking impl
+/// selection. The constructor cannot turn an unrelated closed tree into a fact.
+fn validate_closed_proof<'db>(
+    db: &'db dyn HirAnalysisDb,
+    proof: EvidenceId<'db>,
+    goal: crate::analysis::ty::trait_def::TraitInstId<'db>,
+    scope: ScopeId<'db>,
+) -> Result<(), ResidualEvidence> {
+    let Evidence::Impl {
+        instantiated,
+        conds,
+        ..
+    } = proof.data(db)
+    else {
+        return Err(ResidualEvidence::UnboundSuppliedProof);
+    };
+    let head = instantiated.trait_inst(db);
+    if head.def(db) != goal.def(db) || head.args(db) != goal.args(db) {
+        return Err(ResidualEvidence::ProofGoalMismatch);
+    }
+    let resolved = proof
+        .answering(db, goal)
+        .ok_or(ResidualEvidence::ProofGoalMismatch)?;
+    for (&name, &expected) in goal.assoc_type_bindings(db) {
+        let actual = resolved
+            .instantiated_assoc_ty(db, name)
+            .ok_or(ResidualEvidence::ProofGoalMismatch)?;
+        if normalize_ty(db, actual, scope, instantiated.constraints(db)) != expected {
+            return Err(ResidualEvidence::ProofGoalMismatch);
+        }
+    }
+    let conditions = instantiated.constraints(db);
+    if matches!(
+        instantiated.origin(db),
+        crate::analysis::ty::trait_def::ImplementorOrigin::Hir(_)
+    ) {
+        if conditions.list(db).len() != conds.len() {
+            return Err(ResidualEvidence::ProofGoalMismatch);
+        }
+        for (&condition, &proof) in conditions.list(db).iter().zip(conds) {
+            let mode = Some(if goal.is_mut(db) {
+                crate::analysis::ty::ty_def::BorrowKind::Mut
+            } else {
+                crate::analysis::ty::ty_def::BorrowKind::Ref
+            });
+            let condition = normalize_ty(db, condition.at_mode(db, mode), scope, conditions);
+            validate_closed_proof(db, proof, condition, scope)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -213,7 +291,10 @@ mod tests {
             owner: key.owner(db),
             subst: key.subst(db),
             providers: key.effect_providers(db),
-            supplied: key.evidence(db),
+            supplied: BoundEvidence {
+                schema: key.typed_body(db).bound_schema(),
+                entries: key.evidence(db),
+            },
             dispatch: None,
             context: key.impl_env(db),
         }
@@ -280,6 +361,21 @@ mod tests {
                 continue;
             };
             closed_count += 1;
+            let foreign_schema =
+                BoundSchemaId::new(&db, BoundOwner::Context, closed.schema(&db).slots(&db));
+            assert_eq!(
+                close_instance_evidence(
+                    &db,
+                    EvidenceCompletion {
+                        supplied: BoundEvidence {
+                            schema: foreign_schema,
+                            entries: closed.proofs(&db)
+                        },
+                        ..input(&db, key)
+                    }
+                ),
+                Err(ResidualEvidence::DestinationSchema)
+            );
             named_count += usize::from(
                 closed
                     .proofs(&db)
@@ -342,6 +438,44 @@ mod tests {
                 rejected_unbound = true;
             }
         }
+        let ready = seen
+            .iter()
+            .filter_map(|&key| {
+                close_instance_evidence(&db, input(&db, key))
+                    .ok()
+                    .map(|closed| (key, closed))
+            })
+            .collect::<Vec<_>>();
+        let mut rejected_wrong_goal = false;
+        for &(key, closed) in &ready {
+            let Some(&goal) = closed.goals(&db).list(&db).first() else {
+                continue;
+            };
+            let foreign = ready.iter().flat_map(|(_, other)| other.proofs(&db).entries(&db)).flatten().copied().find(|proof| matches!(proof.data(&db), Evidence::Impl { instantiated, .. } if instantiated.trait_inst(&db).def(&db) != goal.def(&db)));
+            if let Some(proof) = foreign {
+                let mut entries = closed.proofs(&db).entries(&db).clone();
+                entries[0] = Some(proof);
+                assert_eq!(
+                    close_instance_evidence(
+                        &db,
+                        EvidenceCompletion {
+                            supplied: BoundEvidence {
+                                schema: closed.schema(&db),
+                                entries: EvidenceList::of(&db, entries)
+                            },
+                            ..input(&db, key)
+                        }
+                    ),
+                    Err(ResidualEvidence::ProofGoalMismatch)
+                );
+                rejected_wrong_goal = true;
+                break;
+            }
+        }
+        assert!(
+            rejected_wrong_goal,
+            "an unrelated closed proof cannot mint a goal fact"
+        );
         assert!(closed_count > 10, "exercise real ground instances");
         assert!(named_count >= 2, "exercise different selected dictionaries");
         assert!(
