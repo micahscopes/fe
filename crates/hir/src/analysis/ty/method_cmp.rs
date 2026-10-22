@@ -1480,6 +1480,61 @@ impl Contract for Item { fn run() uses (extra: Cap) {} }
     }
 
     #[test]
+    fn declaration_correspondence_checks_shared_body_effects_at_each_mode() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "method_correspondence_raised_effect.fe".into(),
+            r#"
+struct Store { value: u256 }
+struct Item { value: u256 }
+trait Slot { fn slot(mut? self) -> mut? u256 uses (store: mut? Store) }
+impl Slot for Item {
+    fn slot(mut? self) -> mut? u256 uses (store: mut Store) { mut? self.value }
+}
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        let body = module.all_impl_traits(&db)[0].methods(&db).next().unwrap();
+        let read = method_correspondence(&db, body, Some(BorrowKind::Ref)).unwrap();
+        let write = method_correspondence(&db, body, Some(BorrowKind::Mut)).unwrap();
+        assert!(
+            !read.effects_complete,
+            "mutable effect cannot serve the read-only trait contract"
+        );
+        assert!(write.effects_complete);
+        assert_eq!(read.body_mode, Some(BorrowKind::Ref));
+        assert_eq!(write.body_mode, Some(BorrowKind::Mut));
+    }
+
+    #[test]
+    fn declaration_correspondence_normalizes_const_keys_in_either_query_order() {
+        for diagnostics_first in [false, true] {
+            let mut db = HirAnalysisTestDb::default();
+            let file = db.new_stand_alone(
+                "method_correspondence_const_key.fe".into(),
+                r#"
+const fn plus1(_ x: usize) -> usize { x + 1 }
+trait Cap<T> {}
+struct Slot<const N: usize, const M: usize = plus1(N)> {}
+struct Item {}
+trait Run { fn run(self) uses (cap: Cap<Slot<4>>) }
+impl Run for Item { fn run(self) uses (cap: Cap<Slot<4, 5>>) {} }
+"#,
+            );
+            let (module, _) = db.top_mod(file);
+            if diagnostics_first {
+                db.assert_no_diags(module);
+            }
+            let body = module.all_impl_traits(&db)[0].methods(&db).next().unwrap();
+            let descriptor = method_correspondence(&db, body, None).unwrap();
+            assert!(descriptor.effects_complete);
+            assert_eq!(descriptor.trait_effect_to_body, Some(vec![(0, 0)]));
+            db.assert_no_diags(module);
+            assert_eq!(descriptor, method_correspondence(&db, body, None).unwrap());
+        }
+    }
+
+    #[test]
     fn declaration_correspondence_reports_malformed_generic_arity() {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
