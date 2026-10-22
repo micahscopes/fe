@@ -5,21 +5,20 @@ use driver::DriverDataBase;
 use hir::{
     analysis::{
         name_resolution::{PathRes, resolve_path},
+        semantic::{
+            SemanticInstanceKey, get_or_build_semantic_instance, root_semantic_instance_key,
+        },
         ty::{
             abi_ty::{self, AbiComponent, AbiTypeDesc, ParsedFunctionSignature},
             adt_def::AdtRef,
-            binder::Binder,
             corelib::{RuntimeBuiltinFuncKind, runtime_builtin_func_kind},
-            normalize::normalize_from_assumptions,
-            trait_def::TraitInstId,
-            trait_resolution::{PredicateListId, TraitSolveCx},
-            ty_check::{BodyOwner, check_body},
-            ty_def::{BorrowKind, TyBase, TyData, TyId},
+            trait_resolution::PredicateListId,
+            ty_check::BodyOwner,
+            ty_def::{TyBase, TyData, TyId},
         },
     },
     hir_def::{
-        FieldDefListId, Func, GenericParamOwner, IdentId, PathId, Struct, TopLevelMod, Trait,
-        scope_graph::ScopeId,
+        FieldDefListId, Func, IdentId, PathId, Struct, TopLevelMod, Trait, scope_graph::ScopeId,
     },
 };
 use serde::Serialize;
@@ -151,11 +150,11 @@ pub fn generate_contract_abi(
         }
     }
 
-    for struct_ in collect_contract_event_structs(db, contract, false) {
+    for struct_ in collect_contract_event_structs(db, contract, false)? {
         entries.push(event_struct_to_abi_entry(db, struct_)?);
     }
 
-    for struct_ in collect_contract_event_structs(db, contract, true) {
+    for struct_ in collect_contract_event_structs(db, contract, true)? {
         let mut entry = event_struct_to_abi_entry(db, struct_)?;
         entry.entry_type = "error".to_string();
         entry.anonymous = None;
@@ -312,72 +311,73 @@ fn collect_contract_event_structs<'db>(
     db: &'db DriverDataBase,
     contract: hir::hir_def::Contract<'db>,
     errors: bool,
-) -> Vec<Struct<'db>> {
+) -> Result<Vec<Struct<'db>>, String> {
     let mut events = Vec::new();
     let mut seen = HashSet::new();
-    let mut visited_funcs = HashSet::new();
+    let mut visited = HashSet::new();
     let emit_traits = resolve_event_emit_traits(db, contract.scope());
     let error_func = hir::analysis::ty::corelib::resolve_lib_func_path(
         db,
         contract.scope(),
         "std::evm::effects::revert_error",
     );
-
+    let mut roots = Vec::new();
     if contract.init(db).is_some() {
-        let (_, typed_body) = hir::analysis::ty::ty_check::check_contract_init_body(db, contract);
-        collect_typed_body_event_structs(
+        roots.push(BodyOwner::ContractInit { contract });
+    }
+    for recv in contract.recv_views(db) {
+        for arm in recv.arms(db) {
+            roots.push(BodyOwner::ContractRecvArm {
+                contract,
+                recv_idx: recv.index(db),
+                arm_idx: arm.index(db),
+            });
+        }
+    }
+    for owner in roots {
+        let key = root_semantic_instance_key(db, owner)
+            .map_err(|error| format!("cannot collect ABI metadata for {owner:?}: {error:?}"))?;
+        collect_instance_event_structs(
             db,
-            typed_body,
+            key,
             &emit_traits,
             errors,
             error_func,
             &mut events,
             &mut seen,
-            &mut visited_funcs,
-        );
+            &mut visited,
+        )?;
     }
-
-    for recv in contract.recv_views(db) {
-        for arm in recv.arms(db) {
-            let (_, typed_body) = hir::analysis::ty::ty_check::check_contract_recv_arm_body(
-                db,
-                contract,
-                recv.index(db),
-                arm.index(db),
-            );
-            collect_typed_body_event_structs(
-                db,
-                typed_body,
-                &emit_traits,
-                errors,
-                error_func,
-                &mut events,
-                &mut seen,
-                &mut visited_funcs,
-            );
-        }
-    }
-
-    events
+    Ok(events)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn collect_typed_body_event_structs<'db>(
+fn collect_instance_event_structs<'db>(
     db: &'db DriverDataBase,
-    typed_body: &hir::analysis::ty::ty_check::TypedBody<'db>,
+    key: SemanticInstanceKey<'db>,
     emit_traits: &EventEmitTraits<'db>,
     errors: bool,
     error_func: Option<Func<'db>>,
     out: &mut Vec<Struct<'db>>,
     seen: &mut HashSet<Struct<'db>>,
-    visited_funcs: &mut HashSet<VisitedFuncBody<'db>>,
-) {
+    visited: &mut HashSet<SemanticInstanceKey<'db>>,
+) -> Result<(), String> {
+    if !visited.insert(key) {
+        return Ok(());
+    }
+    let typed_body = key.typed_body(db);
     let Some(body) = typed_body.body() else {
-        return;
+        return Ok(());
     };
-
-    for (expr_id, partial_expr) in body.exprs(db).iter() {
-        let hir::hir_def::Partial::Present(_) = partial_expr else {
+    let instance = get_or_build_semantic_instance(db, key);
+    let callees = instance.admitted_callees(db).map_err(|error| {
+        format!(
+            "cannot collect ABI metadata for {:?}: {error:?}",
+            key.owner(db)
+        )
+    })?;
+    for expr_id in instance.owned_exprs(db) {
+        let hir::hir_def::Partial::Present(_) = expr_id.data(db, body) else {
             continue;
         };
         if errors {
@@ -391,83 +391,22 @@ fn collect_typed_body_event_structs<'db>(
         {
             push_event_struct(db, out, seen, struct_);
         }
-
-        // Operators also have semantic callees, even without call syntax.
-        if let Some(callable) = typed_body.callable_expr(expr_id)
-            && let hir::hir_def::CallableDef::Func(func) = callable.callable_def
-        {
-            let mut target = VisitedFuncBody::from_callable(func, callable);
-            if let Some(method) = callable.selected_method(
-                db,
-                TraitSolveCx::new(db, body.scope()).with_assumptions(typed_body.assumptions()),
-            ) && let Some(impl_func) = method.body()
-                && let Ok(body_args) = method.complete_body_args(db, callable.generic_args())
-            {
-                target.func = impl_func;
-                target.generic_args = body_args.into_values();
-            }
-            // The body the call runs: a `mut?` function's at the call's mode.
-            let owner = BodyOwner::func_at(db, target.func, callable.mode());
-            target.mode = owner.mode();
-            if target.func.body(db).is_none() || !visited_funcs.insert(target.clone()) {
-                continue;
-            }
-            let (_, func_typed_body) = check_body(db, owner);
-            let func_typed_body =
-                instantiate_callable_typed_body(db, func_typed_body.clone(), &target);
-            collect_typed_body_event_structs(
-                db,
-                &func_typed_body,
-                emit_traits,
-                errors,
-                error_func,
-                out,
-                seen,
-                visited_funcs,
-            );
-        }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct VisitedFuncBody<'db> {
-    func: Func<'db>,
-    /// The mode of the body of `func`, a `mut?` function, the call runs.
-    mode: Option<BorrowKind>,
-    generic_args: Vec<TyId<'db>>,
-    trait_inst: Option<TraitInstId<'db>>,
-}
-
-impl<'db> VisitedFuncBody<'db> {
-    fn from_callable(
-        func: Func<'db>,
-        callable: &hir::analysis::ty::ty_check::Callable<'db>,
-    ) -> Self {
-        Self {
-            func,
-            mode: callable.mode(),
-            generic_args: callable.generic_args().to_vec(),
-            trait_inst: callable.trait_inst(),
-        }
-    }
-}
-
-fn instantiate_callable_typed_body<'db>(
-    db: &'db DriverDataBase,
-    typed_body: hir::analysis::ty::ty_check::TypedBody<'db>,
-    target: &VisitedFuncBody<'db>,
-) -> hir::analysis::ty::ty_check::TypedBody<'db> {
-    let mut typed_body = Binder::bind(GenericParamOwner::Func(target.func), typed_body)
-        .instantiate(db, &target.generic_args);
-    if let Some(trait_inst) = target.trait_inst {
-        typed_body = normalize_from_assumptions(
+    // Follow the same finalized dictionaries, modes and provider bindings as
+    // execution. ABI discovery must not reconstruct an implementation choice.
+    for callee in callees {
+        collect_instance_event_structs(
             db,
-            typed_body,
-            target.func.scope(),
-            PredicateListId::new(db, vec![trait_inst]),
-        );
+            callee.key,
+            emit_traits,
+            errors,
+            error_func,
+            out,
+            seen,
+            visited,
+        )?;
     }
-    typed_body
+    Ok(())
 }
 
 struct EventEmitTraits<'db> {
@@ -2019,6 +1958,58 @@ pub contract C {
             errors[0]["inputs"],
             serde_json::json!([{"name":"code","type":"uint256"}])
         );
+    }
+
+    #[test]
+    fn custom_errors_follow_named_dictionaries_and_called_closure_regions() {
+        let entries = abi_entries(
+            r#"
+use core::ops::Add
+use std::abi::sol
+use std::evm::revert_error
+#[error]
+struct OrdinaryFailure { code: u256 }
+#[error]
+struct SelectedFailure { code: u256 }
+#[error]
+struct UnusedFailure { code: u256 }
+struct Number { value: u256 }
+impl Add for Number {
+    fn add(own self, _ other: own Number) -> Number {
+        revert_error(OrdinaryFailure { code: self.value })
+    }
+}
+impl Add for Number as Selected {
+    fn add(own self, _ other: own Number) -> Number {
+        revert_error(SelectedFailure { code: self.value })
+    }
+}
+fn add<T: Add>(_ lhs: own T, _ rhs: own T) -> T::Output { lhs + rhs }
+fn unused() -> u256 { revert_error(UnusedFailure { code: 3 }) }
+msg M {
+    #[selector = sol("fail()")]
+    Fail {} -> u256
+}
+pub contract C {
+    recv M {
+        Fail {} -> u256 {
+            let _unused = || unused()
+            with (Selected) {
+                let invoke = || add(Number { value: 1 }, Number { value: 2 }).value
+                invoke()
+            }
+        }
+    }
+}
+"#,
+            "C",
+        );
+        let errors: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry["type"] == "error")
+            .collect();
+        assert_eq!(errors.len(), 1, "{entries:?}");
+        assert_eq!(errors[0]["name"], "SelectedFailure");
     }
 
     #[test]

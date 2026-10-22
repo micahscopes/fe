@@ -384,7 +384,7 @@ mod tests {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
             "symbolic_identity.fe".into(),
-            "const fn size<T>() -> usize { core::size_of<T>() }\nfn left() {}\nfn right() {}\n",
+            "const fn size<T>() -> usize { core::size_of<T>() as usize }\nfn left() {}\nfn right() {}\n",
         );
         let (module, _) = db.top_mod(file);
         db.assert_no_diags(module);
@@ -499,10 +499,13 @@ mod tests {
             "effect_binding.fe".into(),
             r#"
 fn read() -> u256 uses (value: u256) { value }
-fn write() uses (mut value: u256) { value = 9 }
+fn write() uses (value: mut u256) { value = 9 }
 fn root() -> u256 {
     var value: u256 = 7
-    with (value) { write(); read() }
+    with (value) {
+        write()
+        read()
+    }
 }
 "#,
         );

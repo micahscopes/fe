@@ -334,7 +334,7 @@ pub enum SemanticEffectEnvInstantiationError<'db> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SemanticBodyAdmissionError<'db> {
+pub enum SemanticBodyAdmissionError<'db> {
     BlockedByUpstreamDiagnostics(Box<[crate::analysis::ty::ty_check::SmirLoweringIssue]>),
     IncompleteLoweringPlan(Box<[crate::analysis::ty::ty_check::SmirLoweringIssue]>),
     CallSiteFinalization(crate::analysis::semantic::SemanticDiagnosticId<'db>),
@@ -2008,6 +2008,33 @@ impl<'db> SemanticInstance<'db> {
     #[salsa::tracked(return_ref)]
     pub fn callees(self, db: &'db dyn HirAnalysisDb) -> Vec<SemanticCalleeRef<'db>> {
         collect_semantic_callees(db, self)
+    }
+
+    /// Expressions owned by this instance, excluding nested closure bodies.
+    /// Metadata consumers share the checker's region partition.
+    pub fn owned_exprs(self, db: &'db dyn HirAnalysisDb) -> Vec<ExprId> {
+        let Some(body) = self.key(db).typed_body(db).body() else {
+            return Vec::new();
+        };
+        let regions = closure_regions(db, body);
+        let region = self.key(db).owner(db).closure_region();
+        body.exprs(db)
+            .keys()
+            .filter(|&expr| regions.expr(expr) == region)
+            .collect()
+    }
+
+    /// The executable call graph after shared body and call-site admission.
+    /// Consumers must propagate failure instead of reporting partial metadata.
+    pub fn admitted_callees(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Result<&'db Vec<SemanticCalleeRef<'db>>, SemanticBodyAdmissionError<'db>> {
+        self.ensure_body_admitted(db)?;
+        if let Some(error) = self.call_site_finalization_diagnostic(db) {
+            return Err(SemanticBodyAdmissionError::CallSiteFinalization(error));
+        }
+        Ok(self.callees(db))
     }
 
     /// Borrow checking and runtime lowering consume concrete layouts, so a
