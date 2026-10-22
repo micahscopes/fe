@@ -1425,16 +1425,16 @@ mod schema_tests {
         let file = db.new_stand_alone(
             "closed_assumption.fe".into(),
             r#"
-struct Item {}
 trait Pick { fn value() -> u256 }
-impl Pick for Item { fn value() -> u256 { 100 } }
-fn context() where Item: Pick {}
+impl Pick for bool { fn value() -> u256 { 100 } }
+fn context<T: Pick>() {}
 "#,
         );
         let (module, _) = db.top_mod(file);
         db.assert_no_diags(module);
         let func = find_func(&db, module, "context");
-        let goals = func_signature(&db, func, None);
+        let subst = CompleteSubst::for_owner(&db, func.into(), vec![TyId::bool(&db)]).unwrap();
+        let goals = substitute_complete(&db, func_signature(&db, func, None), &subst).unwrap();
         let goal = goals.list(&db)[0];
         assert!(is_closed_goal(&db, goal));
         let solve = TraitSolveCx::new(&db, func.scope()).with_assumptions(goals);
@@ -1463,7 +1463,7 @@ fn context() where Item: Pick {}
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
             "failed_owned_completion.fe".into(),
-            "trait Missing {} fn context<T: Missing>() {}",
+            "trait Missing {}\nfn context<T: Missing>() {}",
         );
         let (module, _) = db.top_mod(file);
         db.assert_no_diags(module);

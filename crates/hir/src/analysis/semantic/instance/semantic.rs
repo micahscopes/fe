@@ -92,12 +92,11 @@ pub struct SemanticInstanceKey<'db> {
 
 /// A closed instance has no stored caller environment. Its normalization view
 /// is derived from the very proofs used to bind its body. Residual instances
-/// retain the exact input and an explicit reason completion could not finish.
+/// retain the exact input; completion outcomes are not part of key identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub enum InstanceEvidence<'db> {
     Closed(ClosedBodyEvidence<'db>),
     Residual {
-        reason: ResidualEvidence,
         environment: ImplEnv<'db>,
         supplied: EvidenceList<'db>,
         dispatch: Option<ProvedGoal<'db>>,
@@ -121,7 +120,6 @@ impl<'db> SemanticInstanceKey<'db> {
             subst,
             effect_providers,
             InstanceEvidence::Residual {
-                reason: ResidualEvidence::NotFinalized,
                 environment: impl_env,
                 supplied,
                 dispatch: None,
@@ -187,8 +185,7 @@ impl<'db> SemanticInstanceKey<'db> {
                 | ResidualEvidence::UnboundSuppliedProof
                 | ResidualEvidence::DeferredCompletion),
             ) => return Err(reason),
-            Err(reason) => InstanceEvidence::Residual {
-                reason,
+            Err(_) => InstanceEvidence::Residual {
                 environment: self.impl_env(db),
                 supplied: bounds.map_or(self.evidence(db), |bounds| bounds.entries),
                 dispatch: use_.dispatch,
@@ -224,12 +221,8 @@ impl<'db> SemanticInstanceKey<'db> {
                     .scope(),
             )),
             InstanceEvidence::Residual {
-                reason,
-                supplied,
-                dispatch,
-                ..
+                supplied, dispatch, ..
             } => InstanceEvidence::Residual {
-                reason,
                 environment,
                 supplied,
                 dispatch,
@@ -267,7 +260,6 @@ impl<'db> SemanticInstanceKey<'db> {
                 ))
             }
             InstanceEvidence::Residual {
-                reason,
                 environment,
                 supplied,
                 dispatch,
@@ -278,7 +270,6 @@ impl<'db> SemanticInstanceKey<'db> {
                 }
                 .fold_with(db, folder);
                 InstanceEvidence::Residual {
-                    reason,
                     environment: ImplEnv::new(
                         db,
                         folder.fold_scope(environment.normalization_scope(db)),

@@ -26,8 +26,6 @@ use crate::hir_def::{HirIngot, scope_graph::ScopeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub enum ResidualEvidence {
-    /// Structural keys are not allowed to select or normalize while folding.
-    NotFinalized,
     /// Closure and contract checkers still own their non-function bound layouts.
     BodySchema,
     DestinationSchema,
@@ -342,6 +340,38 @@ mod tests {
                 "body expression {expr:?}"
             );
         }
+    }
+
+    #[test]
+    fn closed_facts_shadow_attempted_completion_is_not_symbolic_key_identity() {
+        use crate::analysis::semantic::identity_semantic_instance_key;
+        use crate::analysis::ty::const_expr::ConstInvocation;
+        use crate::test_db::find_func;
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "symbolic_identity.fe".into(),
+            "const fn size<T>() -> usize { core::size_of<T>() }",
+        );
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        let owner = BodyOwner::func(&db, find_func(&db, module, "size"));
+        let attempted = identity_semantic_instance_key(&db, owner);
+        let structural = SemanticInstanceKey::of(
+            &db,
+            owner,
+            attempted.subst(&db),
+            attempted.effect_providers(&db),
+            attempted.impl_env(&db),
+            attempted.evidence(&db),
+        );
+        assert_eq!(
+            attempted, structural,
+            "a completion attempt adds no semantic input"
+        );
+        assert_eq!(
+            ConstInvocation::new(&db, attempted, Vec::new()),
+            ConstInvocation::new(&db, structural, Vec::new())
+        );
     }
 
     #[test]
@@ -728,32 +758,33 @@ fn root() -> u256 { with (Chosen) { Item::make() } }
     }
     #[test]
     fn closed_facts_shadow_mut_mode_requires_the_selected_impl_capability() {
-        use crate::analysis::ty::ty_def::BorrowKind;
+        use crate::analysis::ty::{ty_def::TyId, ty_lower::CompleteSubst};
+        use crate::hir_def::ModeMarker;
         use crate::test_db::find_func;
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
             "closed_modes.fe".into(),
             r#"
-struct ReadOnly {}
-struct Both {}
 trait Access { fn value(mut? self) -> u256 }
-impl Access for ReadOnly { fn value(self) -> u256 { 1 } }
-impl Access for Both { fn value(mut? self) -> u256 { 2 } }
-fn read_only() where ReadOnly: Access {}
-fn both() where Both: Access {}
+impl Access for bool { fn value(self) -> u256 { 1 } }
+impl Access for u256 { fn value(mut? self) -> u256 { 2 } }
+fn context<T: Access>() {}
 "#,
         );
         let (module, _) = db.top_mod(file);
         db.assert_no_diags(module);
-        for (name, mutable) in [("read_only", false), ("both", true)] {
-            let func = find_func(&db, module, name);
-            let goal = func_signature(&db, func, None).list(&db)[0];
+        let func = find_func(&db, module, "context");
+        for (ty, mutable) in [(TyId::bool(&db), false), (TyId::u256(&db), true)] {
+            let subst = CompleteSubst::for_owner(&db, func.into(), vec![ty]).unwrap();
+            let goals = substitute_complete(&db, func_signature(&db, func, None), &subst).unwrap();
+            let goal = goals.list(&db)[0];
             let proof = prove(&db, TraitSolveCx::new(&db, func.scope()), goal).unwrap();
             assert_eq!(
                 validate_closed_proof(&db, proof, goal, func.scope()),
                 Ok(())
             );
-            let mut_goal = goal.at_mode(&db, Some(BorrowKind::Mut));
+            let mut_goal = goal.with_mode(&db, ModeMarker::Mut);
+            assert!(mut_goal.is_mut(&db));
             assert_eq!(
                 validate_closed_proof(&db, proof, mut_goal, func.scope()),
                 if mutable {
@@ -764,7 +795,6 @@ fn both() where Both: Access {}
             );
         }
     }
-
     #[test]
     fn closed_facts_shadow_constructor_const_ctfe_and_recursive_keys() {
         use super::super::semantic::InstanceEvidence;

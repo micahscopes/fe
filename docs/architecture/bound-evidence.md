@@ -52,8 +52,10 @@ runtime instances.
 
 ## Exact residual boundary
 
-Residual instances retain a reason and their original supplies. They are not a
-second independent selection policy:
+The producer classifies why completion remains residual and preserves the
+original supplies. The classification is not a semantic key input: merely
+attempting completion cannot create a distinct constant term. Residual
+instances are not a second independent selection policy:
 
 - Generic or projected inputs/goals/proofs still require symbolic declaration
   facts. In particular, a selected local implementation may capture a generic

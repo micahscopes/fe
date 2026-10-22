@@ -56,9 +56,9 @@ fn same_closure_multiple_row_dictionaries() {
     with (Price = Item {}) { assert!(apply(f) == 100) }
 }
 
-fn concrete_bound() -> u256 where Item: Pick { Item::value() }
+fn applied_bound<T: Pick>() -> u256 { T::value() }
 #[test]
-fn closed_declared_bound_uses_its_dictionary() {
-    assert!(with (Discount) { concrete_bound() } == 70)
-    assert!(concrete_bound() == 100)
+fn applied_declared_bound_uses_its_dictionary() {
+    assert!(with (Discount) { applied_bound<Item>() } == 70)
+    assert!(applied_bound<Item>() == 100)
 }
