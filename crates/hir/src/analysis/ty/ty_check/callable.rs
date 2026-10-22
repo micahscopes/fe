@@ -23,9 +23,9 @@ use crate::analysis::{
         corelib::resolve_lib_func_path,
         diagnostics::{BodyDiag, FuncBodyDiag},
         evidence::{
-            BoundEvidence, BoundOwner, BoundSchemaId, EvidenceId, EvidenceList, ProofOutcome,
-            RowEvidence, UseEvidence, declared_bound_evidence_with_pending, instantiated_selection,
-            prove_outcome,
+            BoundEvidence, BoundOwner, BoundSchemaId, EffectBindingEvidence, EvidenceId,
+            EvidenceList, ProofOutcome, RowEvidence, UseEvidence,
+            declared_bound_evidence_with_bindings, instantiated_selection, prove_outcome,
         },
         fold::{TyFoldable, TyFolder},
         generic_defaults::{DefaultApplication, GenericArgError},
@@ -74,6 +74,9 @@ pub enum EffectProviderProvenance<'db> {
 pub struct EffectProviderSpecialization<'db> {
     pub provider: ProviderBinding<'db>,
     pub provenance: EffectProviderProvenance<'db>,
+    /// Target validated by call effect-argument resolution, including projections.
+    /// Generated provider substitutions alone do not authorize a capability.
+    pub(crate) checked_target: Option<TyId<'db>>,
 }
 
 impl<'db> TyVisitable<'db> for ProviderBinding<'db> {
@@ -101,6 +104,7 @@ impl<'db> TyVisitable<'db> for EffectProviderSpecialization<'db> {
         V: TyVisitor<'db> + ?Sized,
     {
         self.provider.visit_with(visitor);
+        self.checked_target.visit_with(visitor);
         if let EffectProviderProvenance::Binding { binding, .. } = self.provenance {
             binding.visit_with(visitor);
         }
@@ -165,6 +169,7 @@ impl<'db> TyFoldable<'db> for EffectProviderSpecialization<'db> {
         };
         Self {
             provider: self.provider.fold_with(db, folder),
+            checked_target: self.checked_target.map(|ty| ty.fold_with(db, folder)),
             provenance,
         }
     }
@@ -443,13 +448,6 @@ impl<'db> Callable<'db> {
         let Ok(subst) = CompleteSubst::for_owner(db, func.into(), self.generic_args.clone()) else {
             return false;
         };
-        let (evidence, mut pending) = declared_bound_evidence_with_pending(
-            db,
-            func_declared_bounds(db, func, mode),
-            func_signature(db, func, mode),
-            &subst,
-            solve_cx,
-        );
         let requirements = func
             .effect_requirements(db)
             .iter()
@@ -459,6 +457,64 @@ impl<'db> Callable<'db> {
                 ..requirement.clone()
             })
             .collect::<Vec<_>>();
+        let owner = BodyOwner::func_at(db, func, mode);
+        let mut bindings = Vec::new();
+        let effect_env =
+            crate::core::semantic::EffectEnvView::new(super::EffectParamSite::Func(func));
+        for requirement in &requirements {
+            let Some(target) = requirement.key.key_ty() else {
+                continue;
+            };
+            let Some(resolution) =
+                effect_env.resolved_binding(db, requirement.binding_idx as usize)
+            else {
+                continue;
+            };
+            let Some(specialization) = self.effect_providers.iter().find(|specialization| {
+                specialization.provider.provider_idx == resolution.provider.provider_idx
+            }) else {
+                continue;
+            };
+            let Some(checked_target) = specialization.checked_target else {
+                continue;
+            };
+            if normalize_ty(db, checked_target, func.scope(), solve_cx.assumptions())
+                != normalize_ty(db, target, func.scope(), solve_cx.assumptions())
+                || requirement.is_mut && !specialization.provider.is_mut
+            {
+                continue;
+            }
+            for name in ["EffectRef", "EffectRefMut"] {
+                if name == "EffectRefMut" && !requirement.is_mut {
+                    continue;
+                }
+                let Some(def) =
+                    super::super::corelib::resolve_core_trait(db, func.scope(), &[name])
+                else {
+                    continue;
+                };
+                bindings.push(EffectBindingEvidence {
+                    owner,
+                    requirement: requirement.binding_idx,
+                    goal: TraitInstId::new_simple(
+                        db,
+                        def,
+                        vec![specialization.provider.provider_ty, target],
+                    ),
+                    provider: specialization.provider.clone(),
+                    target,
+                    base: None,
+                });
+            }
+        }
+        let (evidence, mut pending) = declared_bound_evidence_with_bindings(
+            db,
+            func_declared_bounds(db, func, mode),
+            func_signature(db, func, mode),
+            &subst,
+            solve_cx,
+            &bindings,
+        );
         let expansion = super::super::effects::rows::expand_rows(
             db,
             &requirements,

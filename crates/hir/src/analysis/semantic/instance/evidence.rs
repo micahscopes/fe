@@ -254,10 +254,20 @@ fn validate_closed_proof<'db>(
     scope: ScopeId<'db>,
 ) -> Result<(), ResidualEvidence> {
     if let Evidence::EffectBinding(binding) = proof.data(db) {
-        return binding
-            .answers(db, goal)
-            .then_some(())
-            .ok_or(ResidualEvidence::ProofGoalMismatch);
+        if !binding.answers(db, goal) {
+            return Err(ResidualEvidence::ProofGoalMismatch);
+        }
+        if let Some(base) = binding.base {
+            validate_closed_proof(
+                db,
+                base,
+                binding
+                    .base_goal(db)
+                    .ok_or(ResidualEvidence::ProofGoalMismatch)?,
+                scope,
+            )?;
+        }
+        return Ok(());
     }
     let Evidence::Impl {
         selected,
@@ -516,11 +526,7 @@ fn root() -> u256 {
         let instance = get_or_build_semantic_instance(&db, key);
         let mut checked = 0;
         for callee in instance.callees(&db) {
-            let mut request = input(&db, callee.key);
-            // Exercise the absent-slot producer boundary. An already supplied
-            // ordinary or named implementation must continue to be retained.
-            request.supplied.entries = EvidenceList::none(&db);
-            let completed = close_instance_evidence(&db, request).unwrap();
+            let completed = close_instance_evidence(&db, input(&db, callee.key)).unwrap();
             for proof in completed.proofs(&db).entries(&db).iter().flatten() {
                 let Evidence::EffectBinding(binding) = proof.data(&db) else {
                     continue;
@@ -569,6 +575,61 @@ fn root() -> u256 {
             }
         }
         assert!(checked >= 2, "read and write retain checked capabilities");
+    }
+
+    #[test]
+    fn checked_effect_capability_retains_named_base_and_recursive_prerequisites() {
+        use crate::analysis::ty::corelib::resolve_core_trait;
+        use crate::test_db::find_func;
+        for selection in ["NamedRead", "NamedWrite<Value>"] {
+            let mut db = HirAnalysisTestDb::default();
+            let source = format!(
+                r#"
+use core::{{EffectRef, EffectRefMut}}
+struct Value {{ n: u256 }}
+impl EffectRef<Value> for Value as NamedRead {{}}
+impl<T> EffectRefMut<T> for Value as NamedWrite where Value: EffectRef<T> {{}}
+fn write(_ before: u256) uses (value: mut Value, other: u256) {{ value.n = before + other }}
+fn root() {{
+    var value = Value {{ n: 0 }}
+    let other: u256 = 2
+    with (value, other) {{ with ({selection}) {{ write(7) }} }}
+}}
+"#
+            );
+            let file = db.new_stand_alone("named_capability.fe".into(), &source);
+            let (module, _) = db.top_mod(file);
+            db.assert_no_diags(module);
+            let root = find_func(&db, module, "root");
+            let key = root_semantic_instance_key(&db, BodyOwner::func(&db, root)).unwrap();
+            let instance = get_or_build_semantic_instance(&db, key);
+            let callee = instance
+                .callees(&db)
+                .iter()
+                .find(|callee| {
+                    callee.key.owner(&db).scope() == find_func(&db, module, "write").scope()
+                })
+                .unwrap();
+            let completed = close_instance_evidence(&db, input(&db, callee.key)).unwrap();
+            assert!(
+                completed
+                    .proofs(&db)
+                    .entries(&db)
+                    .iter()
+                    .flatten()
+                    .any(|proof| proof.has_named_impl(&db))
+            );
+            if selection == "NamedRead" {
+                let mutable = completed.proofs(&db).entries(&db).iter().flatten().find(|proof| {
+                    matches!(proof.data(&db), Evidence::EffectBinding(binding) if Some(binding.goal.def(&db)) == resolve_core_trait(&db, root.scope(), &["EffectRefMut"]))
+                }).unwrap();
+                assert!(
+                    mutable.has_named_impl(&db),
+                    "mutable certificate owns the selected read dictionary"
+                );
+                assert!(mutable.conds(&db)[0].has_named_impl(&db));
+            }
+        }
     }
 
     #[test]

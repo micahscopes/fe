@@ -1128,6 +1128,7 @@ fn resolve_provider_specializations<'db>(
             EffectProviderSpecialization {
                 provider,
                 provenance: specialization.provenance,
+                checked_target: specialization.checked_target,
             }
         })
         .collect::<Vec<_>>();

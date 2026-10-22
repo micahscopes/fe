@@ -3512,6 +3512,7 @@ impl<'db> TyChecker<'db> {
         EffectProviderSpecialization {
             provider,
             provenance,
+            checked_target: target_ty,
         }
     }
 

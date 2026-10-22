@@ -405,7 +405,16 @@ fn evidence_id_identity<'db>(db: &'db dyn HirAnalysisDb, ev: EvidenceId<'db>) ->
     use hir::analysis::ty::trait_def::ImplementorOrigin;
     match ev.data(db) {
         Evidence::Assumption(idx) => format!("assumption{}", idx.index),
-        Evidence::DeferredSolCodec { .. } | Evidence::EffectBinding(_) => "ordinary".to_string(),
+        Evidence::DeferredSolCodec { .. } => "ordinary".to_string(),
+        Evidence::EffectBinding(binding) => format!(
+            "effect${}${}",
+            trait_identity(db, binding.goal()),
+            ev.conds(db)
+                .iter()
+                .map(|proof| evidence_id_identity(db, *proof))
+                .collect::<Vec<_>>()
+                .join("$")
+        ),
         Evidence::Impl {
             selected,
             instantiated,

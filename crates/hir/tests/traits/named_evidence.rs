@@ -795,3 +795,22 @@ const fn chosen() -> u256 { with (ChosenA, ChosenB) { infer(Item {}) } }
         &[("chosen", 2)],
     );
 }
+
+#[test]
+fn checked_effect_capability_does_not_replace_failed_chosen_base() {
+    let source = r#"
+use core::EffectRef
+struct Value { n: u256 }
+struct Arg {}
+trait Missing {}
+impl<T: Missing> EffectRef<Value> for Value as Broken {}
+fn write() uses (value: mut Value) { value.n = 1 }
+fn root() {
+    var value = Value { n: 0 }
+    with (value) { with (Broken<Arg>) { write() } }
+}
+"#;
+    let failure = diagnostics(source);
+    assert!(failure.contains(&"6-0004".to_string()), "{failure:?}");
+    assert!(diagnostics(&source.replace("with (Broken<Arg>) { write() }", "write()")).is_empty());
+}
