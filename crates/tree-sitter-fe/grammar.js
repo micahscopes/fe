@@ -546,8 +546,10 @@ module.exports = grammar({
         'for',
         field('type', $._type),
         optional(seq('as', field('selection_name', $.identifier))),
-        optional($.where_clause),
-        field('body', $.trait_item_list),
+        choice(
+          seq('with', '(', field('derive_provider', $.path_type), ')'),
+          seq(optional($.where_clause), field('body', $.trait_item_list)),
+        ),
       ),
       seq(
         optional($.attribute_list),
@@ -560,8 +562,10 @@ module.exports = grammar({
         field('type', $._type),
         'as',
         field('selection_name', $.identifier),
-        optional($.where_clause),
-        field('body', $.trait_item_list),
+        choice(
+          seq('with', '(', field('derive_provider', $.path_type), ')'),
+          seq(optional($.where_clause), field('body', $.trait_item_list)),
+        ),
       ),
     ),
 
