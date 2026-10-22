@@ -417,10 +417,9 @@ struct CaptureClosureEvidence<'db> {
 impl<'db> TyFolder<'db> for CaptureClosureEvidence<'db> {
     fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
         let ty = ty.super_fold_with(db, self);
-        let Some(closure) = ty
-            .as_closure(db)
-            .filter(|closure| closure.def(db).body == self.defining_body)
-        else {
+        let Some(closure) = ty.as_closure(db).filter(|closure| {
+            closure.def(db).body == self.defining_body && closure.bound_evidence(db).is_none()
+        }) else {
             return ty;
         };
         TyId::closure(

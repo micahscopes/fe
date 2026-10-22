@@ -366,8 +366,15 @@ fn impl_env_identity<'db>(
         ingot_identity_for_top_mod(db, scope.top_mod(db)),
         module_path_components_for_scope(db, scope).join("$")
     );
-    // Instances that differ only in non-ordinary evidence or evidence parameters
-    // run different code.
+    let proofs = evidence_list_identity(db, evidence);
+    if proofs.is_empty() {
+        identity
+    } else {
+        format!("{identity}$evidence${proofs}")
+    }
+}
+
+fn evidence_list_identity<'db>(db: &'db dyn HirAnalysisDb, evidence: EvidenceList<'db>) -> String {
     let mut parts = Vec::new();
     for (idx, entry) in evidence.entries(db).iter().enumerate() {
         if let Some(ev) = entry
@@ -379,19 +386,16 @@ fn impl_env_identity<'db>(
     for row in evidence.rows(db) {
         if let Some(proof) = row.proof.filter(|proof| proof.has_named_impl(db)) {
             parts.push(format!(
-                "row{}{:?}={}:{}",
+                "row{}{:?}={:?}:{}:{}",
                 row.path.entry,
                 row.path.steps,
+                row.goal.mode(db),
                 trait_identity(db, row.goal),
                 evidence_id_identity(db, proof)
             ));
         }
     }
-    if parts.is_empty() {
-        identity
-    } else {
-        format!("{identity}$evidence${}", parts.join("$"))
-    }
+    parts.join("$")
 }
 
 fn evidence_id_identity<'db>(db: &'db dyn HirAnalysisDb, ev: EvidenceId<'db>) -> String {
@@ -733,26 +737,18 @@ pub fn type_identity<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
                     .join("$");
                 let proofs = closure
                     .bound_evidence(db)
-                    .map(|bound| {
-                        bound
-                            .entries
-                            .entries(db)
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(index, proof)| {
-                                proof.filter(|proof| proof.has_named_impl(db)).map(|proof| {
-                                    format!("{index}={}", evidence_id_identity(db, proof))
-                                })
-                            })
-                            .collect::<Vec<_>>()
-                            .join("$")
-                    })
+                    .map(|bound| evidence_list_identity(db, bound.entries))
                     .unwrap_or_default();
-                format!(
-                    "closure${owner}${}${:?}${tys}$proofs${proofs}",
+                let base = format!(
+                    "closure${owner}${}${:?}${tys}",
                     def.expr.as_u32(),
                     closure.modes(db)
-                )
+                );
+                if proofs.is_empty() {
+                    base
+                } else {
+                    format!("{base}$proofs${proofs}")
+                }
             }
         },
         TyData::TyParam(param) => {
