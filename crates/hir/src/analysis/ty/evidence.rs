@@ -903,7 +903,7 @@ pub(crate) fn declared_bound_evidence_with_pending<'db>(
     subst: &CompleteSubst<'db>,
     solve_cx: TraitSolveCx<'db>,
 ) -> (EvidenceList<'db>, bool) {
-    declared_bound_evidence_in(db, declared, signature, subst, solve_cx)
+    declared_bound_evidence_in(db, declared, signature, subst, solve_cx, None)
 }
 
 fn declared_bound_evidence_in<'db>(
@@ -912,13 +912,18 @@ fn declared_bound_evidence_in<'db>(
     signature: PredicateListId<'db>,
     subst: &CompleteSubst<'db>,
     solve_cx: TraitSolveCx<'db>,
+    supplied: Option<BoundEvidence<'db>>,
 ) -> (EvidenceList<'db>, bool) {
     let assumptions = solve_cx.assumptions().extend_all_bounds(db);
     let mut pending = false;
     let mut declared_proof = |goal| {
         let outcome = prove_outcome(db, solve_cx, goal);
         pending |= matches!(outcome, ProofOutcome::NeedsGeneration);
-        outcome.evidence()
+        let proof = outcome.evidence()?;
+        match supplied {
+            Some(supplied) => proof.rebase(db, supplied),
+            None => Some(proof),
+        }
     };
     let evidence = EvidenceList::of(
         db,
@@ -979,7 +984,7 @@ pub(crate) fn declared_bound_evidence_with_bindings<'db>(
     bindings: &[EffectBindingEvidence<'db>],
 ) -> (EvidenceList<'db>, bool) {
     if bindings.is_empty() {
-        return declared_bound_evidence_in(db, declared, signature, subst, solve_cx);
+        return declared_bound_evidence_in(db, declared, signature, subst, solve_cx, None);
     }
     let original = BoundSchemaId::context(db, solve_cx.assumptions().extend_all_bounds(db));
     let basis = |facts: &[(TraitInstId<'db>, EvidenceId<'db>)]| {
@@ -1065,10 +1070,12 @@ pub(crate) fn declared_bound_evidence_with_bindings<'db>(
         signature,
         subst,
         solve_cx.with_assumptions(supplied.schema.slots(db)),
+        Some(supplied),
     );
-    // All slots in this temporary basis have a retained source. Bind only that
-    // namespace; original caller slots remain owner-qualified and untouched.
-    (evidence.bind(db, supplied), pending || pending_bounds)
+    // The producer rebases each proof before supertrait agreement, so an
+    // intrinsic mutable root projects its retained selected base, not merely
+    // the corresponding temporary assumption slot.
+    (evidence, pending || pending_bounds)
 }
 
 /// An implementation's implied bound is proved in its declaration context,
