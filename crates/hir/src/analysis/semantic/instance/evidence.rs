@@ -513,12 +513,34 @@ fn root() -> u256 {
         let instance = get_or_build_semantic_instance(&db, key);
         let mut checked = 0;
         for callee in instance.callees(&db) {
-            for proof in callee.key.evidence(&db).entries(&db).iter().flatten() {
+            let mut request = input(&db, callee.key);
+            // Exercise the absent-slot producer boundary. An already supplied
+            // ordinary or named implementation must continue to be retained.
+            request.supplied.entries = EvidenceList::none(&db);
+            let completed = close_instance_evidence(&db, request).unwrap();
+            for proof in completed.proofs(&db).entries(&db).iter().flatten() {
                 let Evidence::EffectBinding(binding) = proof.data(&db) else {
                     continue;
                 };
                 assert!(proof.is_closed(&db));
                 assert!(validate_closed_proof(&db, *proof, binding.goal, root.scope()).is_ok());
+                if resolve_core_trait(&db, root.scope(), &["EffectRefMut"])
+                    == Some(binding.goal.def(&db))
+                {
+                    let base = TraitInstId::new_simple(
+                        &db,
+                        resolve_core_trait(&db, root.scope(), &["EffectRef"]).unwrap(),
+                        binding.goal.args(&db).clone(),
+                    );
+                    let projected = crate::analysis::ty::evidence::implied_bound_evidence(
+                        &db,
+                        *proof,
+                        base,
+                        PredicateListId::empty_list(&db),
+                    )
+                    .unwrap();
+                    assert!(validate_closed_proof(&db, projected, base, root.scope()).is_ok());
+                }
                 let other = TraitInstId::new_simple(
                     &db,
                     binding.goal.def(&db),

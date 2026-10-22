@@ -921,6 +921,24 @@ pub(crate) fn implied_bound_evidence<'db>(
     goal: TraitInstId<'db>,
     assumptions: PredicateListId<'db>,
 ) -> Option<EvidenceId<'db>> {
+    if let Evidence::EffectBinding(binding) = proof.data(db) {
+        let scope = binding.owner.scope();
+        let mut_trait = super::corelib::resolve_core_trait(db, scope, &["EffectRefMut"])?;
+        let ref_trait = super::corelib::resolve_core_trait(db, scope, &["EffectRef"])?;
+        if binding.goal.def(db) != mut_trait
+            || goal.def(db) != ref_trait
+            || binding.goal.args(db) != goal.args(db)
+        {
+            return None;
+        }
+        let projected = EffectBindingEvidence {
+            goal,
+            ..binding.clone()
+        };
+        return projected
+            .answers(db, goal)
+            .then(|| EvidenceId::new(db, Evidence::EffectBinding(projected)));
+    }
     if let Evidence::Assumption(slot) = proof.data(db) {
         // Use the producer's positional view, not a newly deduplicated list.
         // Substitution can make two different declaration slots equal.
