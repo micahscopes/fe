@@ -941,7 +941,7 @@ fn semantic_callee_key_with_assumptions<'db>(
     // receives them from the selection's proofs of the implementation's
     // conditions and the call's proofs of the trait method's.
     let subst = GenericSubst::for_owner(db, body_func.into(), subst_args);
-    let evidence = match (callable.bound_evidence(), callable.evidence()) {
+    let mut bounds = match (callable.use_evidence().bounds, callable.evidence()) {
         (Some(bound), _) if body_func == nominal_func => bound,
         (Some(bound), Some(selection)) if matches!(selection.data(db), Evidence::Impl { .. }) => {
             impl_method_bound_evidence(
@@ -952,11 +952,16 @@ fn semantic_callee_key_with_assumptions<'db>(
                 subst,
                 assumptions,
             )
+            .ok_or(MethodArgMapError::InvalidEvidence)?
         }
-        _ => EvidenceList::none(db),
+        _ => crate::analysis::ty::evidence::BoundEvidence {
+            schema: super::evidence::declaration_bound_schema(db, owner)
+                .expect("function declaration schema"),
+            entries: EvidenceList::none(db),
+        },
     };
     let evidence = if body_func == nominal_func {
-        evidence
+        bounds.entries
     } else {
         let (_, nominal_rows) = instantiated_effects(
             db,
@@ -991,13 +996,14 @@ fn semantic_callee_key_with_assumptions<'db>(
                 })
             })
             .collect();
-        evidence.with_rows(db, rows)
+        bounds.entries.with_rows(db, rows)
     };
     let evidence = if collect_flags(db, evidence).contains(TyFlags::HAS_PROJECTION) {
         normalize_ty(db, evidence, impl_env.normalization_scope(db), assumptions)
     } else {
         evidence
     };
+    bounds.entries = evidence;
     Ok(Some(SemanticCallCallee {
         concrete_dispatch: callable.trait_inst().is_none() || selected_impl,
         key: SemanticInstanceKey::of(
@@ -1018,11 +1024,7 @@ fn semantic_callee_key_with_assumptions<'db>(
         .finalize_evidence(
             db,
             crate::analysis::ty::evidence::UseEvidence {
-                bounds: Some(crate::analysis::ty::evidence::BoundEvidence {
-                    schema: super::evidence::declaration_bound_schema(db, owner)
-                        .expect("function declaration schema"),
-                    entries: evidence,
-                }),
+                bounds: Some(bounds),
                 dispatch: callable.use_evidence().dispatch.map(|dispatch| {
                     crate::analysis::ty::evidence::ProvedGoal {
                         goal: selected_trait_method
@@ -1161,12 +1163,13 @@ pub(crate) fn resolve_semantic_const_ref<'db>(
             use_,
             evidence: use_evidence,
         } => {
-            let (body, ty, subst, evidence) = const_ref.trait_const_body(db)?;
-            let evidence = if collect_flags(db, evidence).contains(TyFlags::HAS_PROJECTION) {
-                normalize_ty(db, evidence, use_.origin_scope(), use_.assumptions())
+            let (body, ty, subst, mut bound) = const_ref.trait_const_body(db)?;
+            let evidence = if collect_flags(db, bound.entries).contains(TyFlags::HAS_PROJECTION) {
+                normalize_ty(db, bound.entries, use_.origin_scope(), use_.assumptions())
             } else {
-                evidence
+                bound.entries
             };
+            bound.entries = evidence;
             let subst = GenericSubst::complete(db, subst);
             Some(
                 SemanticInstanceKey::of(
@@ -1185,7 +1188,7 @@ pub(crate) fn resolve_semantic_const_ref<'db>(
                 .finalize_evidence(
                     db,
                     crate::analysis::ty::evidence::UseEvidence {
-                        bounds: None,
+                        bounds: Some(bound),
                         dispatch: use_evidence.dispatch,
                     },
                 )

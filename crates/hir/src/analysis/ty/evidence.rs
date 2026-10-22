@@ -104,6 +104,19 @@ pub struct BoundEvidence<'db> {
 }
 
 impl<'db> BoundEvidence<'db> {
+    pub(crate) fn matches_schema(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        expected: BoundSchemaId<'db>,
+    ) -> bool {
+        self.schema.owner(db) == expected.owner(db)
+            && self
+                .schema
+                .slots(db)
+                .list(db)
+                .starts_with(expected.slots(db).list(db))
+    }
+
     fn get(self, db: &'db dyn HirAnalysisDb, slot: BoundSlotRef<'db>) -> Option<EvidenceId<'db>> {
         let same_basis = self.schema == slot.schema
             || (matches!(self.schema.owner(db), BoundOwner::Body(_))
@@ -220,6 +233,7 @@ impl<'db> TyVisitable<'db> for UseEvidence<'db> {
 #[derive(Debug, Clone, PartialEq, Eq, Update)]
 pub(crate) struct BoundAdaptation<'db> {
     source: BoundSchemaId<'db>,
+    target: BoundSchemaId<'db>,
     proofs: Vec<Option<EvidenceId<'db>>>,
 }
 
@@ -890,13 +904,18 @@ pub(crate) fn implied_bound_evidence<'db>(
     let proofs = basis_proofs(
         db,
         implementation.scope(),
-        BoundOwner::ImplementationConditions(*selected),
+        (
+            BoundOwner::ImplementationConditions(*selected),
+            BoundOwner::Context,
+        ),
         selected.constraints(db).extend_all_bounds(db),
         declared,
         declared,
     );
     let supplied = expanded_condition_evidence(db, proof, assumptions);
-    instantiate_proofs(db, &proofs, &subst, supplied).get(db, 0)
+    instantiate_proofs(db, &proofs, &subst, supplied)
+        .entries
+        .get(db, 0)
 }
 
 /// Extend an implementation's actual prerequisite dictionaries with their
@@ -1158,7 +1177,7 @@ pub(crate) fn impl_method_evidence<'db>(
     Some(basis_proofs(
         db,
         body.scope(),
-        origin,
+        (origin, BoundOwner::Body(BodyOwner::func_at(db, body, mode))),
         basis,
         func_declared_bounds(db, body, mode),
         func_signature(db, body, mode),
@@ -1172,8 +1191,11 @@ pub(crate) fn impl_method_evidence<'db>(
 #[salsa::tracked(return_ref)]
 pub(crate) fn impl_const_evidence<'db>(
     db: &'db dyn HirAnalysisDb,
-    body: Body<'db>,
+    owner: BodyOwner<'db>,
 ) -> Option<BoundAdaptation<'db>> {
+    let BodyOwner::AnonConstBody { body, .. } = owner else {
+        return None;
+    };
     let Some(ItemKind::ImplTrait(impl_trait)) = body.scope().parent_item(db) else {
         return None;
     };
@@ -1181,7 +1203,7 @@ pub(crate) fn impl_const_evidence<'db>(
     Some(basis_proofs(
         db,
         body.scope(),
-        BoundOwner::ConstBasis(body),
+        (BoundOwner::ConstBasis(body), BoundOwner::Body(owner)),
         collect_candidate_constraints(db, impl_trait.into())
             .instantiate_identity()
             .extend_all_bounds(db),
@@ -1198,12 +1220,13 @@ pub(crate) fn impl_const_evidence<'db>(
 fn basis_proofs<'db>(
     db: &'db dyn HirAnalysisDb,
     scope: ScopeId<'db>,
-    owner: BoundOwner<'db>,
+    (source_owner, target_owner): (BoundOwner<'db>, BoundOwner<'db>),
     basis: PredicateListId<'db>,
     declared: PredicateListId<'db>,
     signature: PredicateListId<'db>,
 ) -> BoundAdaptation<'db> {
-    let source = BoundSchemaId::new(db, owner, basis);
+    let source = BoundSchemaId::new(db, source_owner, basis);
+    let target = BoundSchemaId::new(db, target_owner, signature);
     let assumption = |index: usize| source.assumption(db, index);
     // A proof names its assumptions by position in the extended basis.
     let to_basis = || {
@@ -1237,7 +1260,11 @@ fn basis_proofs<'db>(
             )
         })
         .collect();
-    BoundAdaptation { source, proofs }
+    BoundAdaptation {
+        source,
+        target,
+        proofs,
+    }
 }
 
 /// `proofs` of a body's assumptions, in its own terms, instantiated by
@@ -1248,12 +1275,12 @@ fn instantiate_proofs<'db>(
     adaptation: &BoundAdaptation<'db>,
     subst: &CompleteSubst<'db>,
     supplied: EvidenceList<'db>,
-) -> EvidenceList<'db> {
+) -> BoundEvidence<'db> {
     let supplied = BoundEvidence {
         schema: adaptation.source,
         entries: supplied,
     };
-    EvidenceList::of(
+    let entries = EvidenceList::of(
         db,
         adaptation
             .proofs
@@ -1264,7 +1291,11 @@ fn instantiate_proofs<'db>(
                     .rebase(db, supplied)
             })
             .collect::<Vec<_>>(),
-    )
+    );
+    BoundEvidence {
+        schema: adaptation.target,
+        entries,
+    }
 }
 
 /// The proofs a call supplies to the method `body`, of the implementation
@@ -1278,18 +1309,26 @@ pub(crate) fn impl_method_bound_evidence<'db>(
     db: &'db dyn HirAnalysisDb,
     (body, nominal, mode): (Func<'db>, Func<'db>, Option<BorrowKind>),
     selection: EvidenceId<'db>,
-    bound: EvidenceList<'db>,
+    bound: BoundEvidence<'db>,
     subst: GenericSubst<'db>,
     assumptions: PredicateListId<'db>,
-) -> EvidenceList<'db> {
+) -> Option<BoundEvidence<'db>> {
+    let nominal_schema = BoundSchemaId::new(
+        db,
+        BoundOwner::Body(BodyOwner::func_at(db, nominal, mode)),
+        func_signature(db, nominal, BodyOwner::func_at(db, nominal, mode).mode()),
+    );
+    if !bound.matches_schema(db, nominal_schema) {
+        return None;
+    }
     let (Some(proofs), Some(subst)) = (
         impl_method_evidence(db, body, nominal, mode),
         subst.mapping(db).as_ref(),
     ) else {
-        return EvidenceList::none(db);
+        return None;
     };
     let Evidence::Impl { selected, .. } = selection.data(db) else {
-        return EvidenceList::none(db);
+        return None;
     };
     let conditions = expanded_condition_evidence(db, selection, assumptions);
     let condition_count = selected
@@ -1301,10 +1340,10 @@ pub(crate) fn impl_method_bound_evidence<'db>(
         db,
         (0..condition_count)
             .map(|index| conditions.get(db, index))
-            .chain(bound.entries(db).iter().copied())
+            .chain(bound.entries.entries(db).iter().copied())
             .collect::<Vec<_>>(),
     );
-    instantiate_proofs(db, proofs, subst, supplied)
+    Some(instantiate_proofs(db, proofs, subst, supplied))
 }
 
 /// The proofs a use supplies to the value `body` of the implementation's
@@ -1313,17 +1352,17 @@ pub(crate) fn impl_method_bound_evidence<'db>(
 #[salsa::tracked]
 pub(crate) fn impl_const_bound_evidence<'db>(
     db: &'db dyn HirAnalysisDb,
-    body: Body<'db>,
+    owner: BodyOwner<'db>,
     selection: EvidenceId<'db>,
     subst: GenericSubst<'db>,
     assumptions: PredicateListId<'db>,
-) -> EvidenceList<'db> {
-    let (Some(proofs), Some(subst)) = (impl_const_evidence(db, body), subst.mapping(db).as_ref())
+) -> Option<BoundEvidence<'db>> {
+    let (Some(proofs), Some(subst)) = (impl_const_evidence(db, owner), subst.mapping(db).as_ref())
     else {
-        return EvidenceList::none(db);
+        return None;
     };
     let supplied = expanded_condition_evidence(db, selection, assumptions);
-    instantiate_proofs(db, proofs, subst, supplied)
+    Some(instantiate_proofs(db, proofs, subst, supplied))
 }
 
 /// The evidence an instance runs with: its key's proofs, `supplied`, of the
@@ -1355,10 +1394,12 @@ pub(crate) fn instance_evidence<'db>(
                     return (!is_closed_goal(db, goal) || completed.is_closed(db))
                         .then_some(completed);
                 }
-                if is_closed_goal(db, goal) && !supplied.is_some_and(|proof| proof.is_closed(db)) {
-                    prove(db, solve_cx, goal)
-                } else {
-                    supplied
+                match supplied {
+                    Some(proof) => {
+                        (!is_closed_goal(db, goal) || proof.is_closed(db)).then_some(proof)
+                    }
+                    None if is_closed_goal(db, goal) => prove(db, solve_cx, goal),
+                    None => None,
                 }
             })
             .collect(),

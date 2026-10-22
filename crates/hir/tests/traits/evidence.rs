@@ -373,6 +373,7 @@ fn const_body_evidence(db: &HirAnalysisTestDb, body: &TypedBody<'_>) -> Vec<bool
         .trait_const_body(db)
         .expect("the use has a defining body");
     evidence
+        .entries
         .entries(db)
         .iter()
         .map(|entry| entry.is_some_and(|evidence| evidence.is_closed(db)))

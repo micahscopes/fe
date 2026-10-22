@@ -123,14 +123,7 @@ fn close_request<'db>(
 ) -> Result<ClosedBodyEvidence<'db>, ResidualEvidence> {
     let input = request.data(db);
     let schema = declaration_bound_schema(db, input.owner).ok_or(ResidualEvidence::BodySchema)?;
-    if input.supplied.schema.owner(db) != schema.owner(db)
-        || !input
-            .supplied
-            .schema
-            .slots(db)
-            .list(db)
-            .starts_with(schema.slots(db).list(db))
-    {
+    if !input.supplied.matches_schema(db, schema) {
         return Err(ResidualEvidence::DestinationSchema);
     }
     if !ground(

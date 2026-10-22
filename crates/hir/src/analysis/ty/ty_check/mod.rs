@@ -4330,7 +4330,7 @@ impl<'db> ConstRef<'db> {
     pub fn trait_const_body(
         self,
         db: &'db dyn HirAnalysisDb,
-    ) -> Option<(Body<'db>, TyId<'db>, CompleteSubst<'db>, EvidenceList<'db>)> {
+    ) -> Option<(Body<'db>, TyId<'db>, CompleteSubst<'db>, BoundEvidence<'db>)> {
         let ConstRef::TraitConst { use_, evidence } = self else {
             return None;
         };
@@ -4348,22 +4348,33 @@ impl<'db> ConstRef<'db> {
             .and_then(|constant| constant.default_body(db));
         // The trait's default receives the use's proofs; an implementation's
         // value receives them from the selection's proofs of its conditions.
-        let received = match (evidence.bound_proofs(), evidence.dispatch_proof()) {
+        let owner = BodyOwner::AnonConstBody { body, expected: ty };
+        let target_schema = BoundSchemaId::new(
+            db,
+            BoundOwner::Body(owner),
+            const_body_assumptions(db, body.scope()).extend_all_bounds(db),
+        );
+        let received = match (evidence.bounds, evidence.dispatch_proof()) {
             (Some(bound), _) if default == Some(body) => bound,
             (_, Some(selection))
                 if default != Some(body) && matches!(selection.data(db), Evidence::Impl { .. }) =>
             {
                 impl_const_bound_evidence(
                     db,
-                    body,
+                    owner,
                     selection,
                     GenericSubst::complete(db, subst.clone()),
                     use_.solve_cx(db).assumptions(),
-                )
+                )?
             }
-            _ => EvidenceList::none(db),
+            _ => BoundEvidence {
+                schema: target_schema,
+                entries: EvidenceList::none(db),
+            },
         };
-        Some((body, ty, subst, received))
+        received
+            .matches_schema(db, target_schema)
+            .then_some((body, ty, subst, received))
     }
 
     /// Proves, in the use's context, the bounds the trait's default value
