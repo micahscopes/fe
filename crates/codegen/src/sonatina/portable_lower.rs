@@ -4281,8 +4281,14 @@ where
                     };
                     fields.push(field);
                 }
+                let source_name = data.source_ty.pretty_print(self.db);
+                let readable = super::lower_runtime::sanitize_sonatina_ident_segment(&source_name);
+                let prefix = readable.trim_matches('_');
+                let digest = format!("{:x}", Sha256::digest(source_name.as_bytes()));
                 let next_name = format!(
-                    "fe_shader_private_layout_{}",
+                    "fe_{}_{}_{}",
+                    &prefix[..prefix.len().min(80)],
+                    &digest[..8],
                     self.typed_private_layout_names.len()
                 );
                 let name = self
@@ -4290,7 +4296,25 @@ where
                     .entry(layout)
                     .or_insert(next_name)
                     .clone();
-                self.builder.declare_struct_type(&name, &fields, false)
+                let ty = self.builder.declare_struct_type(&name, &fields, false);
+                let source_ty = data.source_ty.as_view(self.db).unwrap_or(data.source_ty);
+                if let Some(AdtRef::Struct(source)) = source_ty
+                    .adt_def(self.db)
+                    .map(|adt| adt.adt_ref(self.db))
+                {
+                    let names = source.hir_fields(self.db).data(self.db)
+                        .iter()
+                        .enumerate()
+                        .map(|(index, field)| field.name.to_opt()
+                            .map(|name| name.data(self.db).to_string())
+                            .unwrap_or_else(|| format!("field_{index}")))
+                        .collect::<Vec<_>>();
+                    if names.len() == fields.len() {
+                        self.builder.ctx.set_struct_field_names(ty, names)
+                            .map_err(LowerError::Internal)?;
+                    }
+                }
+                ty
             }
             Layout::Array(data) => {
                 let Some(elem) = self.typed_private_type_for_class(&data.elem)? else {
@@ -14588,9 +14612,13 @@ pub fn kernel(_ seed: u32) -> u32 {
                 }).count()
         });
         assert!(typed_allocations >= 2, "both value parameters must exercise typed storage");
-        crate::sonatina::shader_driver::compile_runtime_package_spirv_with_workgroup(
+        let artifact = crate::sonatina::shader_driver::compile_runtime_package_spirv_with_workgroup(
             &db, &package, [1, 1, 1],
         ).expect("typed value copies should reach validated SPIR-V");
+        let wgsl = artifact.wgsl.expect("WGSL side artifact");
+        assert!(wgsl.contains("fe_Words_"), "source type must remain recognizable: {wgsl}");
+        assert!(wgsl.contains("enabled:"), "source boolean field must retain its name: {wgsl}");
+        assert!(wgsl.contains("limbs:"), "source array field must retain its name: {wgsl}");
 
         let bytes = crate::BackendKind::Wasm.create().compile(
             &db, top_mod, crate::layout_for(crate::BackendKind::Wasm), crate::OptLevel::O0,

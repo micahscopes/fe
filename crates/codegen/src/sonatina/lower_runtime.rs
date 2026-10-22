@@ -619,7 +619,7 @@ pub(super) fn assign_sonatina_function_symbols<'db>(
         .collect()
 }
 
-fn sanitize_sonatina_ident_segment(value: &str) -> String {
+pub(super) fn sanitize_sonatina_ident_segment(value: &str) -> String {
     let sanitized = value
         .chars()
         .map(|ch| {
