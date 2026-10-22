@@ -1142,7 +1142,7 @@ pub enum SubstError<'db> {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub struct PartialSubst<'db> {
     domain: ParamDomainId<'db>,
     values: Vec<Option<TyId<'db>>>,

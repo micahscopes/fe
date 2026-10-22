@@ -16,14 +16,13 @@ use salsa::Update;
 use super::{
     const_ty::const_body_assumptions,
     fold::{TyFoldable, TyFolder},
-    method_cmp::trait_to_impl_param_subst,
+    method_cmp::method_correspondence,
     normalize::normalize_ty,
     subst::substitute_complete,
     trait_def::{
         ImplementorId, ImplementorOrigin, ResolvedImplInstance, TraitInstId,
         resolve_trait_impl_instance,
     },
-    trait_lower::lower_impl_trait,
     trait_resolution::{
         PredicateListId, Selection, TraitSolveCx, answering_assumption,
         constraint::collect_candidate_constraints, normalize_trait_inst_preserving_validity,
@@ -443,16 +442,14 @@ pub(crate) fn impl_method_evidence<'db>(
     let Some(ItemKind::ImplTrait(impl_trait)) = body.scope().parent_item(db) else {
         return None;
     };
-    let implementor = lower_impl_trait(db, impl_trait)?;
     let conditions = collect_candidate_constraints(db, impl_trait.into()).instantiate_identity();
-    let nominal_mode = BodyOwner::func_at(db, nominal, mode).mode();
-    let mode = BodyOwner::func_at(db, body, mode).mode();
-    let (subst, _, _) = trait_to_impl_param_subst(
-        db,
-        (CallableDef::Func(body), mode),
-        (CallableDef::Func(nominal), nominal_mode),
-        implementor.trait_inst(db),
-    );
+    let correspondence = method_correspondence(db, body, mode).ok()?;
+    if correspondence.nominal != nominal || !correspondence.effects_complete {
+        return None;
+    }
+    let nominal_mode = correspondence.trait_mode;
+    let mode = correspondence.body_mode;
+    let subst = correspondence.trait_to_body;
     let nominal_signature = substitute_complete(
         db,
         func_signature(db, nominal, nominal_mode),

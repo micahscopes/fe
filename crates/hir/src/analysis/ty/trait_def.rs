@@ -2,13 +2,12 @@
 
 use crate::{
     analysis::ty::{
-        method_cmp::{compare_impl_method, method_param_correspondence},
+        method_cmp::{compare_impl_method, method_correspondence},
         trait_lower::{
             ImplSelfKey, collect_trait_impls, complete_impl_trait, complete_selected_impl,
             lower_impl_trait_header,
         },
         trait_resolution::{GoalSatisfiability, PredicateListId, Selection},
-        ty_check::BodyOwner,
     },
     hir_def::{
         Body, Contract, Func, GenericParamOwner, HirIngot, IdentId, ImplTrait, ModeMarker, Trait,
@@ -344,36 +343,18 @@ impl<'db> ResolvedImplInstance<'db> {
                 self.trait_inst().args(db).to_vec(),
             )
         };
-        let (body_to_nominal, effect_pairs) = body.map_or_else(
-            || (Vec::new(), Some(Vec::new())),
-            |body| {
-                if body == declaration {
-                    (
-                        (0..param_schema(db, body.into(), ParamBasis::Full)
-                            .keys(db)
-                            .len())
-                            .map(Some)
-                            .collect(),
-                        None,
-                    )
-                } else {
-                    let correspondence = method_param_correspondence(
-                        db,
-                        body.as_callable(db).expect("selected method is callable"),
-                        BodyOwner::func_at(db, body, mode).mode(),
-                        declaration
-                            .as_callable(db)
-                            .expect("trait method is callable"),
-                        BodyOwner::func_at(db, declaration, mode).mode(),
-                        implementor.trait_inst(db),
-                    );
-                    (
-                        correspondence.body_to_trait_slots,
-                        Some(correspondence.trait_effect_to_body),
-                    )
-                }
-            },
-        );
+        let (body_to_nominal, effect_pairs) = if let Some(body) = body {
+            let correspondence = method_correspondence(db, body, mode).ok()?;
+            if correspondence.nominal != declaration || !correspondence.effects_complete {
+                return None;
+            }
+            (
+                correspondence.body_to_trait_slots,
+                correspondence.trait_effect_to_body,
+            )
+        } else {
+            (Vec::new(), Some(Vec::new()))
+        };
         Some(ResolvedMethodInstance {
             resolved: self,
             declaration,

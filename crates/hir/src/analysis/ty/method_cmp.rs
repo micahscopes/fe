@@ -17,17 +17,20 @@ use super::{
     fold::{TyFoldable, TyFolder},
     normalize::{normalize_from_assumptions, normalize_ty},
     trait_def::TraitInstId,
+    trait_lower::lower_impl_trait,
     trait_resolution::{
         GoalSatisfiability, PredicateListId, TraitSolveCx,
         constraint::collect_func_def_constraints, is_goal_satisfiable,
     },
-    ty_check::{ConstRef, check_anon_const_body},
+    ty_check::{BodyOwner, ConstRef, check_anon_const_body},
     ty_def::{BorrowKind, InvalidCause, TyData, TyId},
     ty_lower::{CompleteSubst, ParamDomainId, ParamSchemaId, PartialSubst},
     unify::UnificationTable,
 };
 use crate::analysis::HirAnalysisDb;
-use crate::hir_def::{CallableDef, Expr, Partial, PathKind, scope_graph::ScopeId};
+use crate::hir_def::{
+    CallableDef, Expr, Func, ItemKind, ModeMarker, Partial, PathKind, scope_graph::ScopeId,
+};
 use common::indexmap::IndexMap;
 
 /// Compares the implementation method with the trait method to ensure they
@@ -106,18 +109,33 @@ pub(super) fn compare_impl_method<'db>(
     let mut err = !compare_arg_label(db, impl_m, trait_m, sink);
 
     // The effects pair at each mode, where a `mut?` effect has its mode.
-    let substs: Vec<_> = modes
+    let CallableDef::Func(body) = impl_m else {
+        return;
+    };
+    let substs: Result<Vec<_>, _> = modes
         .iter()
-        .map(|&(trait_mode, impl_mode)| {
-            let (subst, _, paired) = trait_to_impl_param_subst(
-                db,
-                (impl_m, impl_mode),
-                (trait_m, trait_mode),
-                trait_inst,
-            );
-            (subst.residualize(db), paired)
+        .map(|&(trait_mode, _)| {
+            method_correspondence(db, body, trait_mode).map(|correspondence| {
+                (
+                    correspondence.trait_to_body.residualize(db),
+                    correspondence.effects_complete,
+                )
+            })
         })
         .collect();
+    let Ok(substs) = substs else {
+        // Structural generic errors above retain their specific diagnostics.
+        // A malformed effect/domain correspondence cannot be used as a map.
+        sink.push(
+            ImplDiag::MethodEffectMismatch {
+                trait_m,
+                impl_m,
+                mode: None,
+            }
+            .into(),
+        );
+        return;
+    };
     let unpaired: Vec<_> = modes
         .iter()
         .zip(&substs)
@@ -441,23 +459,25 @@ fn insert_param_mapping<'db>(
     out: &mut PartialSubst<'db>,
     from: TyId<'db>,
     to: TyId<'db>,
-) {
-    let Some(key) = out.domain().schema(db).original_key(db, from) else {
-        return;
-    };
+) -> Result<(), MethodCorrespondenceError> {
+    let key = out
+        .domain()
+        .schema(db)
+        .original_key(db, from)
+        .ok_or(MethodCorrespondenceError::ParameterDomain)?;
     out.bind(db, key, to)
-        .expect("method parameter correspondence must agree");
+        .map_err(|_| MethodCorrespondenceError::ParameterDomain)
 }
 
 /// The trait method's params as the impl method's, the pairs of their
 /// effects at the methods' modes, and whether every effect of the trait
-/// method has its pair. An impl method's extra effects are stricter bounds.
-pub(crate) fn trait_to_impl_param_subst<'db>(
+/// method has its pair and every ordinary body effect has a nominal source.
+fn trait_to_impl_param_subst<'db>(
     db: &'db dyn HirAnalysisDb,
     (impl_m, impl_mode): (CallableDef<'db>, Option<BorrowKind>),
     (trait_m, trait_mode): (CallableDef<'db>, Option<BorrowKind>),
     trait_inst: TraitInstId<'db>,
-) -> (PartialSubst<'db>, Vec<(usize, usize)>, bool) {
+) -> Result<(PartialSubst<'db>, Vec<(usize, usize)>, bool), MethodCorrespondenceError> {
     let schema = ParamSchemaId::callable(db, trait_m);
     let mut out = PartialSubst::new(db, ParamDomainId::full(db, schema));
 
@@ -467,14 +487,17 @@ pub(crate) fn trait_to_impl_param_subst<'db>(
     let trait_inst_args = trait_inst.args(db);
     let trait_m_params = trait_m.params(db);
     let trait_def_params = trait_inst.def(db).params(db);
-    assert!(trait_m_params.len() >= trait_inst_args.len());
-    assert!(trait_def_params.len() >= trait_inst_args.len());
+    if trait_m_params.len() < trait_inst_args.len()
+        || trait_def_params.len() < trait_inst_args.len()
+    {
+        return Err(MethodCorrespondenceError::ParameterDomain);
+    }
     for (idx, &arg) in trait_inst_args.iter().enumerate() {
         if let Some(&trait_param) = trait_m_params.get(idx) {
-            insert_param_mapping(db, &mut out, trait_param, arg);
+            insert_param_mapping(db, &mut out, trait_param, arg)?;
         }
         if let Some(&trait_param) = trait_def_params.get(idx) {
-            insert_param_mapping(db, &mut out, trait_param, arg);
+            insert_param_mapping(db, &mut out, trait_param, arg)?;
         }
     }
 
@@ -484,7 +507,7 @@ pub(crate) fn trait_to_impl_param_subst<'db>(
         .iter()
         .zip(impl_m.explicit_params(db).iter())
     {
-        insert_param_mapping(db, &mut out, trait_param, impl_param);
+        insert_param_mapping(db, &mut out, trait_param, impl_param)?;
     }
 
     let (effect_pairs, effects_paired) = map_effect_provider_params_by_identity(
@@ -493,32 +516,103 @@ pub(crate) fn trait_to_impl_param_subst<'db>(
         (impl_m, impl_mode),
         (trait_m, trait_mode),
         trait_inst,
-    );
+    )?;
 
-    (out, effect_pairs, effects_paired)
+    Ok((out, effect_pairs, effects_paired))
 }
 
+/// One declaration correspondence, before any caller arguments or proofs are supplied.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
-pub(crate) struct MethodParamCorrespondence {
+pub(crate) struct MethodCorrespondence<'db> {
+    pub nominal: Func<'db>,
+    pub trait_inst: TraitInstId<'db>,
+    pub trait_mode: Option<BorrowKind>,
+    pub body_mode: Option<BorrowKind>,
+    pub trait_to_body: PartialSubst<'db>,
     pub body_to_trait_slots: Vec<Option<usize>>,
-    pub trait_effect_to_body: Vec<(usize, usize)>,
+    /// None for a trait default body, whose effects keep their own identity.
+    pub trait_effect_to_body: Option<Vec<(usize, usize)>>,
+    pub effects_complete: bool,
 }
 
-/// The same declaration correspondence used by method conformance, at the
-/// methods' modes, expressed as body slots so call elaboration cannot
-/// reinterpret it by position. Resolving the same trait method at many call
-/// sites asks for it repeatedly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
+pub(crate) enum MethodCorrespondenceError {
+    NotTraitMethod,
+    InvalidImplementation,
+    MissingTraitMethod,
+    WrongBodyForMode,
+    GenericArity,
+    GenericKind,
+    ParameterDomain,
+}
+
+/// The requested *trait* mode selects the contract even when its implementation
+/// is an ordinary function (with body mode None). Derive the other inputs here,
+/// so conformance, call elaboration and proof transport cannot choose them apart.
+/// This query normalizes declaration effect keys; it never checks conformance
+/// or constructs a semantic instance itself.
 #[salsa::tracked]
-pub(crate) fn method_param_correspondence<'db>(
+pub(crate) fn method_correspondence<'db>(
     db: &'db dyn HirAnalysisDb,
-    impl_m: CallableDef<'db>,
-    impl_mode: Option<BorrowKind>,
-    trait_m: CallableDef<'db>,
-    trait_mode: Option<BorrowKind>,
-    trait_inst: TraitInstId<'db>,
-) -> MethodParamCorrespondence {
-    let (mapping, trait_effect_to_body, _) =
-        trait_to_impl_param_subst(db, (impl_m, impl_mode), (trait_m, trait_mode), trait_inst);
+    body: Func<'db>,
+    requested_trait_mode: Option<BorrowKind>,
+) -> Result<MethodCorrespondence<'db>, MethodCorrespondenceError> {
+    let (nominal, trait_inst, is_default) = match body.scope().parent_item(db) {
+        Some(ItemKind::ImplTrait(owner)) => {
+            let implementor = lower_impl_trait(db, owner)
+                .ok_or(MethodCorrespondenceError::InvalidImplementation)?;
+            let name = body
+                .name(db)
+                .to_opt()
+                .ok_or(MethodCorrespondenceError::MissingTraitMethod)?;
+            let nominal = implementor
+                .trait_def(db)
+                .method_defs(db)
+                .get(&name)
+                .copied()
+                .ok_or(MethodCorrespondenceError::MissingTraitMethod)?;
+            if implementor.method_at(db, name, requested_trait_mode) != Some(body) {
+                return Err(MethodCorrespondenceError::WrongBodyForMode);
+            }
+            (nominal, implementor.trait_inst(db), false)
+        }
+        Some(ItemKind::Trait(owner)) if body.body(db).is_some() => (
+            body,
+            TraitInstId::new_simple(db, owner, owner.params(db).to_vec()),
+            true,
+        ),
+        _ => return Err(MethodCorrespondenceError::NotTraitMethod),
+    };
+    let trait_mode = BodyOwner::func_at(db, nominal, requested_trait_mode).mode();
+    if !nominal.modes(db).contains(&trait_mode)
+        || (!nominal.is_maybe_mut(db) && body.is_maybe_mut(db))
+    {
+        return Err(MethodCorrespondenceError::WrongBodyForMode);
+    }
+    let body_mode = BodyOwner::func_at(db, body, requested_trait_mode).mode();
+    let impl_m = CallableDef::Func(body);
+    let trait_m = CallableDef::Func(nominal);
+    if impl_m.explicit_params(db).len() != trait_m.explicit_params(db).len() {
+        return Err(MethodCorrespondenceError::GenericArity);
+    }
+    if impl_m
+        .explicit_params(db)
+        .iter()
+        .zip(trait_m.explicit_params(db))
+        .any(|(&body, &nominal)| !nominal.kind(db).does_match(body.kind(db)))
+    {
+        return Err(MethodCorrespondenceError::GenericKind);
+    }
+    let (mapping, effect_pairs, effects_complete) = if is_default {
+        let schema = ParamSchemaId::callable(db, trait_m);
+        let mut mapping = PartialSubst::new(db, ParamDomainId::full(db, schema));
+        for &param in trait_m.params(db) {
+            insert_param_mapping(db, &mut mapping, param, param)?;
+        }
+        (mapping, Vec::new(), true)
+    } else {
+        trait_to_impl_param_subst(db, (impl_m, body_mode), (trait_m, trait_mode), trait_inst)?
+    };
     let impl_params = impl_m.params(db);
     let mut body_to_trait = vec![None; impl_params.len()];
     for (trait_slot, &trait_param) in trait_m.params(db).iter().enumerate() {
@@ -532,10 +626,16 @@ pub(crate) fn method_param_correspondence<'db>(
             body_to_trait[body_slot] = Some(trait_slot);
         }
     }
-    MethodParamCorrespondence {
+    Ok(MethodCorrespondence {
+        nominal,
+        trait_inst,
+        trait_mode,
+        body_mode,
+        trait_to_body: mapping,
         body_to_trait_slots: body_to_trait,
-        trait_effect_to_body,
-    }
+        trait_effect_to_body: (!is_default).then_some(effect_pairs),
+        effects_complete,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -551,7 +651,7 @@ fn map_effect_provider_params_by_identity<'db>(
     (impl_m, impl_mode): (CallableDef<'db>, Option<BorrowKind>),
     (trait_m, trait_mode): (CallableDef<'db>, Option<BorrowKind>),
     trait_inst: TraitInstId<'db>,
-) -> (Vec<(usize, usize)>, bool) {
+) -> Result<(Vec<(usize, usize)>, bool), MethodCorrespondenceError> {
     let assumptions = collect_func_def_constraints(db, impl_m, true).instantiate_identity();
     // An impl method splices the impl's own rows into its effects: a trait
     // method's entry naming one pairs with the splice, not by identity. A row
@@ -589,7 +689,13 @@ fn map_effect_provider_params_by_identity<'db>(
         assumptions,
     )
     .into_iter()
-    .filter(|entry| !impl_func.is_some_and(|func| func.effect_from_row(db, entry.effect_idx)))
+    .filter(|entry| {
+        !impl_func.is_some_and(|func| func.effect_from_row(db, entry.effect_idx))
+            && !entry
+                .identity
+                .key_row
+                .is_some_and(|row| row_is_empty(db, row, impl_m.scope(), assumptions))
+    })
     .collect();
     let mut used_impl_entries = vec![false; impl_entries.len()];
     let mut effect_pairs = Vec::new();
@@ -609,11 +715,13 @@ fn map_effect_provider_params_by_identity<'db>(
         if let (Some(trait_param), Some(impl_param)) =
             (trait_entry.provider_param, impl_entry.provider_param)
         {
-            insert_param_mapping(db, out, trait_param, impl_param);
+            insert_param_mapping(db, out, trait_param, impl_param)?;
         }
     }
-    let paired = effect_pairs.len() == trait_effects;
-    (effect_pairs, paired)
+    // Entailing a capability predicate does not supply the provider value.
+    // Only row-spliced/empty effects above may lack a nominal provider role.
+    let paired = effect_pairs.len() == trait_effects && used_impl_entries.iter().all(|used| *used);
+    Ok((effect_pairs, paired))
 }
 
 fn collect_effect_provider_entries<'db>(
@@ -1198,5 +1306,221 @@ fn compare_constraints<'db>(
             .into(),
         );
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_db::HirAnalysisTestDb;
+
+    #[test]
+    fn declaration_correspondence_preserves_reordered_effect_provider_roles() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "method_correspondence_effects.fe".into(),
+            r#"
+struct First {}
+struct Second {}
+struct Item {}
+trait Run {
+    fn run(self) -> u256 uses (a: First, b: Second)
+}
+impl Run for Item {
+    fn run(self) -> u256 uses (b: Second, a: First) { 1 }
+}
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        let owner = module.all_impl_traits(&db)[0];
+        let body = owner.methods(&db).next().unwrap();
+        let descriptor = method_correspondence(&db, body, None).unwrap();
+        assert!(descriptor.effects_complete);
+        assert_eq!(descriptor.trait_effect_to_body, Some(vec![(0, 1), (1, 0)]));
+        let implementor = lower_impl_trait(&db, owner).unwrap();
+        let instance = super::super::trait_def::ResolvedImplInstance::new(
+            implementor,
+            implementor,
+            implementor.trait_inst(&db),
+        );
+        let selected = instance.method(&db, body.name(&db).unwrap(), None).unwrap();
+        assert_eq!(
+            selected.effect_pairs(),
+            descriptor.trait_effect_to_body.as_deref()
+        );
+        let nominal_args = CallableDef::Func(descriptor.nominal).params(&db);
+        let completed = selected.complete_body_args(&db, nominal_args).unwrap();
+        let body_params = CallableDef::Func(body).params(&db);
+        for (body_slot, trait_slot) in descriptor.body_to_trait_slots.iter().enumerate() {
+            if let Some(trait_slot) = trait_slot {
+                assert_eq!(completed.values()[body_slot], nominal_args[*trait_slot]);
+            }
+        }
+        assert_eq!(completed.values().len(), body_params.len());
+    }
+
+    #[test]
+    fn declaration_correspondence_distinguishes_split_trait_modes() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "method_correspondence_modes.fe".into(),
+            r#"
+struct Store { value: u256 }
+struct Item { value: u256 }
+trait Slot {
+    fn slot(mut? self) -> mut? u256 uses (store: mut? Store)
+}
+impl Slot for Item {
+    fn slot(self) -> ref u256 uses (store: Store) { ref self.value }
+    fn slot(mut self) -> mut u256 uses (store: mut Store) { mut self.value }
+}
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        let owner = module.all_impl_traits(&db)[0];
+        let implementor = lower_impl_trait(&db, owner).unwrap();
+        let name = IdentId::new(&db, "slot");
+        let read = implementor
+            .method_at(&db, name, Some(BorrowKind::Ref))
+            .unwrap();
+        let write = implementor
+            .method_at(&db, name, Some(BorrowKind::Mut))
+            .unwrap();
+        assert_ne!(read, write);
+        for (body, mode) in [(read, BorrowKind::Ref), (write, BorrowKind::Mut)] {
+            let descriptor = method_correspondence(&db, body, Some(mode)).unwrap();
+            assert_eq!(descriptor.trait_mode, Some(mode));
+            assert_eq!(descriptor.body_mode, None);
+            assert!(descriptor.effects_complete);
+            assert_eq!(descriptor.trait_effect_to_body, Some(vec![(0, 0)]));
+        }
+        assert_eq!(
+            method_correspondence(&db, read, Some(BorrowKind::Mut)),
+            Err(MethodCorrespondenceError::WrongBodyForMode)
+        );
+        assert_eq!(
+            method_correspondence(&db, write, Some(BorrowKind::Ref)),
+            Err(MethodCorrespondenceError::WrongBodyForMode)
+        );
+    }
+
+    #[test]
+    fn declaration_correspondence_keeps_default_and_generic_method_domains() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "method_correspondence_generic.fe".into(),
+            r#"
+struct Item {}
+trait Map<A> {
+    fn convert<T>(_ value: T, _ arg: A) -> T
+    fn fallback<T>(_ value: T) -> T { value }
+}
+impl Map<u256> for Item {
+    fn convert<U>(_ value: U, _ arg: u256) -> U { value }
+}
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        let owner = module.all_impl_traits(&db)[0];
+        let body = owner.methods(&db).next().unwrap();
+        let descriptor = method_correspondence(&db, body, None).unwrap();
+        let nominal = CallableDef::Func(descriptor.nominal);
+        let body = CallableDef::Func(body);
+        let mapped = descriptor.trait_to_body.residualize(&db);
+        let nominal_own = nominal.explicit_params(&db)[0];
+        let key = mapped
+            .domain()
+            .schema(&db)
+            .original_key(&db, nominal_own)
+            .unwrap();
+        assert_eq!(mapped.get(&db, key), Some(body.explicit_params(&db)[0]));
+        let default =
+            descriptor.trait_inst.def(&db).method_defs(&db)[&IdentId::new(&db, "fallback")];
+        let identity = method_correspondence(&db, default, None).unwrap();
+        assert_eq!(identity.nominal, default);
+        assert_eq!(identity.trait_effect_to_body, None);
+        assert_eq!(
+            identity.body_to_trait_slots,
+            (0..CallableDef::Func(default).params(&db).len())
+                .map(Some)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn declaration_correspondence_rejects_an_unprovided_blanket_capability() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "method_correspondence_extra_provider.fe".into(),
+            r#"
+trait Cap {}
+impl<T> Cap for T {}
+struct Item {}
+trait Contract { fn run() }
+impl Contract for Item { fn run() uses (extra: Cap) {} }
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        let owner = module
+            .all_impl_traits(&db)
+            .iter()
+            .copied()
+            .find(|owner| {
+                owner.methods(&db).any(|func| {
+                    func.name(&db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(&db) == "run")
+                })
+            })
+            .unwrap();
+        let body = owner.methods(&db).next().unwrap();
+        let descriptor = method_correspondence(&db, body, None).unwrap();
+        assert!(
+            !descriptor.effects_complete,
+            "a blanket predicate cannot supply a provider value"
+        );
+        assert!(
+            !lower_impl_trait(&db, owner)
+                .unwrap()
+                .diags_method_conformance(&db)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn declaration_correspondence_reports_malformed_generic_arity() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "method_correspondence_invalid.fe".into(),
+            r#"
+struct Item {}
+trait Map { fn convert<T>(_ value: T) -> T }
+impl Map for Item { fn convert(_ value: u256) -> u256 { value } }
+fn unrelated() {}
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        let body = module.all_impl_traits(&db)[0].methods(&db).next().unwrap();
+        assert_eq!(
+            method_correspondence(&db, body, None),
+            Err(MethodCorrespondenceError::GenericArity)
+        );
+        let unrelated = module
+            .children_non_nested(&db)
+            .find_map(|item| match item {
+                ItemKind::Func(func) => Some(func),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            method_correspondence(&db, unrelated, None),
+            Err(MethodCorrespondenceError::NotTraitMethod)
+        );
+        // The public checker retains the source-specific diagnostic instead of panicking.
+        let implementor = lower_impl_trait(&db, module.all_impl_traits(&db)[0]).unwrap();
+        assert!(!implementor.diags_method_conformance(&db).is_empty());
     }
 }
