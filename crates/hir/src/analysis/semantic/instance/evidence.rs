@@ -429,7 +429,10 @@ mod tests {
                     close_instance_evidence(
                         &db,
                         EvidenceCompletion {
-                            supplied,
+                            supplied: BoundEvidence {
+                                schema: closed.schema(&db),
+                                entries: supplied
+                            },
                             ..input(&db, key)
                         }
                     ),
@@ -481,6 +484,80 @@ mod tests {
         assert!(
             rejected_unbound,
             "a supplied open proof must not be replaced ordinarily"
+        );
+    }
+    #[test]
+    fn closed_facts_shadow_dispatch_preserves_and_validates_associated_equalities() {
+        use crate::analysis::ty::{
+            trait_def::TraitInstId,
+            ty_check::{SemanticExprLowering, check_func_body},
+            ty_def::TyId,
+        };
+        use crate::hir_def::IdentId;
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "closed_equalities.fe".into(),
+            r#"
+struct Item {}
+trait Output { type Out fn make() -> Self::Out }
+impl Output for Item { type Out = u256 fn make() -> u256 { 100 } }
+impl Output for Item as Chosen { type Out = u256 fn make() -> u256 { 70 } }
+fn root() -> u256 { with (Chosen) { Item::make() } }
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        let func = crate::test_db::find_func(&db, module, "root");
+        let owner = BodyOwner::func(&db, func);
+        let key = root_semantic_instance_key(&db, owner).unwrap();
+        let typed = &check_func_body(&db, func).1;
+        let body = typed.body().unwrap();
+        let dispatch = body
+            .exprs(&db)
+            .keys()
+            .find_map(|expr| match typed.semantic_expr_lowering(expr) {
+                Some(SemanticExprLowering::Call { callable }) => callable.use_evidence().dispatch,
+                _ => None,
+            })
+            .unwrap();
+        assert!(dispatch.proof.has_named_impl(&db));
+        let goal_with = |ty| {
+            let mut equalities = dispatch.goal.assoc_type_bindings(&db).clone();
+            equalities.insert(IdentId::new(&db, "Out".into()), ty);
+            TraitInstId::new(
+                &db,
+                dispatch.goal.def(&db),
+                dispatch.goal.args(&db).clone(),
+                equalities,
+                dispatch.goal.mode(&db),
+            )
+        };
+        let good = goal_with(TyId::u256(&db));
+        let closed = close_instance_evidence(
+            &db,
+            EvidenceCompletion {
+                dispatch: Some(ProvedGoal {
+                    goal: good,
+                    ..dispatch
+                }),
+                ..input(&db, key)
+            },
+        )
+        .unwrap();
+        assert!(closed.normalization_facts(&db).list(&db).contains(&good));
+        let bad = goal_with(TyId::bool(&db));
+        assert_eq!(
+            close_instance_evidence(
+                &db,
+                EvidenceCompletion {
+                    dispatch: Some(ProvedGoal {
+                        goal: bad,
+                        ..dispatch
+                    }),
+                    ..input(&db, key)
+                }
+            ),
+            Err(ResidualEvidence::ProofGoalMismatch)
         );
     }
 }
