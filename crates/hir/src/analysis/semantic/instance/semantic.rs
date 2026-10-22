@@ -29,7 +29,7 @@ use crate::{
                 EffectKeyKind, instantiate_trait_effect_key, place_effect_provider_param_index_map,
                 rows::{RowExpansion, RowKey, expand_rows},
             },
-            evidence::{EvidenceList, instance_evidence},
+            evidence::{BoundEvidence, EvidenceList, ProvedGoal, UseEvidence, instance_evidence},
             fold::{TyFoldable, TyFolder},
             instantiate_trait_self,
             normalize::{
@@ -72,7 +72,10 @@ use thin_vec::ThinVec;
 
 use super::{
     EffectProviderSubst, GenericSubst, ImplEnv,
-    const_ref::{is_ground, root_impl_env},
+    evidence::{
+        ClosedBodyEvidence, EvidenceCompletion, ResidualEvidence, close_instance_evidence,
+        declaration_bound_schema,
+    },
     instantiate_typed_body, provisional_semantic_callee_key,
     semantic_callee_key_with_effect_providers, typed_body_template,
 };
@@ -83,19 +86,26 @@ pub struct SemanticInstanceKey<'db> {
     pub owner: BodyOwner<'db>,
     pub subst: GenericSubst<'db>,
     pub effect_providers: EffectProviderSubst<'db>,
-    pub impl_env: ImplEnv<'db>,
-    /// Proofs of the assumptions the owner's body is checked under, from the
-    /// call that made this instance. One the list does not supply is proved
-    /// where the body needs it.
-    pub evidence: EvidenceList<'db>,
+    pub evidence_state: InstanceEvidence<'db>,
+}
+
+/// A closed instance has no stored caller environment. Its normalization view
+/// is derived from the very proofs used to bind its body. Residual instances
+/// retain the exact input and an explicit reason completion could not finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
+pub enum InstanceEvidence<'db> {
+    Closed(ClosedBodyEvidence<'db>),
+    Residual {
+        reason: ResidualEvidence,
+        environment: ImplEnv<'db>,
+        supplied: EvidenceList<'db>,
+        dispatch: Option<ProvedGoal<'db>>,
+    },
 }
 
 impl<'db> SemanticInstanceKey<'db> {
-    /// The key for `owner`'s instance with `subst`, given the proofs a use
-    /// supplies of the assumptions its body is checked under. One with
-    /// closed arguments retains only non-ordinary proof trees. Ordinary
-    /// assumptions can be reconstructed by `instance_evidence`; chosen
-    /// dictionaries must survive specialization to concrete types.
+    /// Structural construction only. Selection and normalization belong to
+    /// `finalize_evidence`, never to generic type folders or canonicalization.
     pub fn of(
         db: &'db dyn HirAnalysisDb,
         owner: BodyOwner<'db>,
@@ -104,20 +114,163 @@ impl<'db> SemanticInstanceKey<'db> {
         impl_env: ImplEnv<'db>,
         supplied: EvidenceList<'db>,
     ) -> Self {
-        let evidence = if is_ground(collect_flags(db, subst.generic_args(db))) {
-            EvidenceList::of(
-                db,
-                supplied
-                    .entries(db)
-                    .iter()
-                    .map(|entry| entry.filter(|proof| proof.has_named_impl(db)))
-                    .collect(),
-            )
-            .with_rows(db, supplied.rows(db).clone())
-        } else {
-            supplied
+        Self::new(
+            db,
+            owner,
+            subst,
+            effect_providers,
+            InstanceEvidence::Residual {
+                reason: ResidualEvidence::NotFinalized,
+                environment: impl_env,
+                supplied,
+                dispatch: None,
+            },
+        )
+    }
+
+    pub fn impl_env(self, db: &'db dyn HirAnalysisDb) -> ImplEnv<'db> {
+        match self.evidence_state(db) {
+            InstanceEvidence::Closed(closed) => closed.normalization_env(db),
+            InstanceEvidence::Residual { environment, .. } => environment,
+        }
+    }
+
+    pub fn evidence(self, db: &'db dyn HirAnalysisDb) -> EvidenceList<'db> {
+        match self.evidence_state(db) {
+            InstanceEvidence::Closed(closed) => closed.proofs(db),
+            InstanceEvidence::Residual { supplied, .. } => supplied,
+        }
+    }
+
+    pub(crate) fn dispatch_evidence(self, db: &'db dyn HirAnalysisDb) -> Option<ProvedGoal<'db>> {
+        match self.evidence_state(db) {
+            InstanceEvidence::Closed(closed) => closed.dispatch(db),
+            InstanceEvidence::Residual { dispatch, .. } => dispatch,
+        }
+    }
+
+    /// The common call/constant/root completion boundary. Failed completion
+    /// preserves every supplied proof; it cannot turn a selected tree into an
+    /// absent ordinary obligation. Only validated closed facts shed context.
+    pub(crate) fn finalize_evidence(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        use_: UseEvidence<'db>,
+    ) -> Self {
+        let bounds = use_.bounds.or_else(|| {
+            declaration_bound_schema(db, self.owner(db)).map(|schema| BoundEvidence {
+                schema,
+                entries: self.evidence(db),
+            })
+        });
+        let result = bounds
+            .ok_or(ResidualEvidence::BodySchema)
+            .and_then(|supplied| {
+                close_instance_evidence(
+                    db,
+                    EvidenceCompletion {
+                        owner: self.owner(db),
+                        subst: self.subst(db),
+                        providers: self.effect_providers(db),
+                        supplied,
+                        dispatch: use_.dispatch,
+                        context: self.impl_env(db),
+                    },
+                )
+            });
+        let state = match result {
+            Ok(closed) => InstanceEvidence::Closed(closed),
+            Err(reason) => InstanceEvidence::Residual {
+                reason,
+                environment: self.impl_env(db),
+                supplied: bounds.map_or(self.evidence(db), |bounds| bounds.entries),
+                dispatch: use_.dispatch,
+            },
         };
-        Self::new(db, owner, subst, effect_providers, impl_env, evidence)
+        Self::new(
+            db,
+            self.owner(db),
+            self.subst(db),
+            self.effect_providers(db),
+            state,
+        )
+    }
+
+    /// Context rebasing cannot reopen a closed instance or lose its dispatch.
+    pub(crate) fn with_impl_env(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        environment: ImplEnv<'db>,
+    ) -> Self {
+        let InstanceEvidence::Residual {
+            reason,
+            supplied,
+            dispatch,
+            ..
+        } = self.evidence_state(db)
+        else {
+            return self;
+        };
+        Self::new(
+            db,
+            self.owner(db),
+            self.subst(db),
+            self.effect_providers(db),
+            InstanceEvidence::Residual {
+                reason,
+                environment,
+                supplied,
+                dispatch,
+            },
+        )
+    }
+
+    /// Structural transport keeps closed facts closed and does not run a solver.
+    pub(crate) fn fold_evidence_state<F: TyFolder<'db>>(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        folder: &mut F,
+    ) -> InstanceEvidence<'db> {
+        match self.evidence_state(db) {
+            InstanceEvidence::Closed(closed) => {
+                let use_ = UseEvidence {
+                    dispatch: closed.dispatch(db),
+                    bounds: None,
+                }
+                .fold_with(db, folder);
+                InstanceEvidence::Closed(ClosedBodyEvidence::new(
+                    db,
+                    closed.schema(db),
+                    closed.goals(db).fold_with(db, folder),
+                    closed.proofs(db).fold_with(db, folder),
+                    use_.dispatch,
+                    closed.origin(db),
+                ))
+            }
+            InstanceEvidence::Residual {
+                reason,
+                environment,
+                supplied,
+                dispatch,
+            } => {
+                let use_ = UseEvidence {
+                    dispatch,
+                    bounds: None,
+                }
+                .fold_with(db, folder);
+                InstanceEvidence::Residual {
+                    reason,
+                    environment: ImplEnv::new(
+                        db,
+                        folder.fold_scope(environment.normalization_scope(db)),
+                        environment.assumptions(db).fold_with(db, folder),
+                        environment.witnesses(db).clone().fold_with(db, folder),
+                    ),
+                    supplied: supplied.fold_with(db, folder),
+                    dispatch: use_.dispatch,
+                }
+            }
+        }
     }
 
     /// This key instantiated with its data parameters naming places in
@@ -136,8 +289,7 @@ impl<'db> SemanticInstanceKey<'db> {
             self.owner(db),
             self.subst(db),
             EffectProviderSubst::new(db, providers, param_spaces),
-            self.impl_env(db),
-            self.evidence(db),
+            self.evidence_state(db),
         )
     }
 
@@ -386,12 +538,15 @@ pub fn instantiated_typed_body<'db>(
         });
     }
     let supplied = EvidenceList::of(db, entries).with_rows(db, key.evidence(db).rows(db).clone());
-    let evidence = instance_evidence(
-        db,
-        goals,
-        supplied,
-        TraitSolveCx::new(db, key.impl_env(db).normalization_scope(db)),
-    );
+    let evidence = match key.evidence_state(db) {
+        InstanceEvidence::Closed(closed) => closed.proofs(db),
+        InstanceEvidence::Residual { .. } => instance_evidence(
+            db,
+            goals,
+            supplied,
+            TraitSolveCx::new(db, key.impl_env(db).normalization_scope(db)),
+        ),
+    };
     let bound = crate::analysis::ty::evidence::BoundEvidence {
         schema: body.bound_schema(),
         entries: evidence,
@@ -2401,9 +2556,10 @@ pub fn root_semantic_instance_key<'db>(
         owner,
         subst,
         EffectProviderSubst::new(db, effect_providers, Vec::new()),
-        root_impl_env(db, owner, subst),
+        ImplEnv::empty(db, owner.scope()),
         EvidenceList::none(db),
-    );
+    )
+    .finalize_evidence(db, UseEvidence::default());
     validate_instantiated_effect_env_key(db, key)
         .map_err(RootSemanticInstanceError::UnclosedEffectEnv)?;
     Ok(key)
@@ -2419,9 +2575,10 @@ pub fn identity_semantic_instance_key<'db>(
         owner,
         subst,
         EffectProviderSubst::empty(db),
-        root_impl_env(db, owner, subst),
+        ImplEnv::empty(db, owner.scope()),
         EvidenceList::none(db),
     )
+    .finalize_evidence(db, UseEvidence::default())
 }
 
 #[salsa::tracked]

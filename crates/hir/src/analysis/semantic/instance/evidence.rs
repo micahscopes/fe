@@ -26,6 +26,8 @@ use crate::hir_def::{HirIngot, scope_graph::ScopeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub enum ResidualEvidence {
+    /// Structural keys are not allowed to select or normalize while folding.
+    NotFinalized,
     /// Closure and contract checkers still own their non-function bound layouts.
     BodySchema,
     DestinationSchema,

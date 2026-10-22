@@ -1,5 +1,4 @@
 mod const_ref;
-#[cfg(test)]
 mod evidence;
 mod semantic;
 mod template;

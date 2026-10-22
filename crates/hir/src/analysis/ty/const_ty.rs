@@ -820,38 +820,31 @@ impl<'db> TyFolder<'db> for RebaseConstUseEnv<'db> {
         // bound currently being collected, making every cycle grow another
         // copy of its provenance. Preserve the selected body and witnesses.
         let env = key.impl_env(db);
-        let key = SemanticInstanceKey::of(
-            db,
-            key.owner(db),
-            key.subst(db),
-            key.effect_providers(db),
-            ImplEnv::new(
+        let key = key
+            .with_impl_env(
                 db,
-                env.normalization_scope(db),
-                PredicateListId::empty_list(db),
-                env.witnesses(db).clone(),
-            ),
-            key.evidence(db),
-        )
-        .super_fold_with(db, self);
+                ImplEnv::new(
+                    db,
+                    env.normalization_scope(db),
+                    PredicateListId::empty_list(db),
+                    env.witnesses(db).clone(),
+                ),
+            )
+            .super_fold_with(db, self);
         let (scope, assumptions) = self.env(
             db,
             env.normalization_scope(db),
             key.owner(db).scope(),
             mentioned_params(db, &key),
         );
-        SemanticInstanceKey::of(
+        key.with_impl_env(
             db,
-            key.owner(db),
-            key.subst(db),
-            key.effect_providers(db),
             ImplEnv::new(
                 db,
                 scope,
                 assumptions,
                 key.impl_env(db).witnesses(db).clone(),
             ),
-            key.evidence(db),
         )
     }
 

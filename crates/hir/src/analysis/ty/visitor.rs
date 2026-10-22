@@ -306,6 +306,10 @@ impl<'db> TyVisitable<'db> for SemanticInstanceKey<'db> {
         env.assumptions(db).visit_with(visitor);
         env.witnesses(db).visit_with(visitor);
         self.evidence(db).visit_with(visitor);
+        if let Some(dispatch) = self.dispatch_evidence(db) {
+            dispatch.goal.visit_with(visitor);
+            dispatch.proof.visit_with(visitor);
+        }
     }
 }
 
