@@ -30,3 +30,28 @@ fn effect_row() {
     let f = || charge()
     with (Wholesale, Price = Item {}) { assert!(apply(f) == 70) }
 }
+impl Pick for Item as OtherPick { fn value() -> u256 { 80 } }
+impl Price for Item as Retail { fn amount(self) -> u256 { 80 } }
+fn nested<T: Pick>() -> u256 {
+    let outer = || {
+        let inner = || T::value()
+        apply(inner)
+    }
+    apply(outer)
+}
+#[test]
+fn same_body_two_captures_and_nested_capture() {
+    assert!(with (Discount) { relay<Item>() } == 70)
+    assert!(with (OtherPick) { relay<Item>() } == 80)
+    assert!(relay<Item>() == 100)
+    assert!(with (Discount) { nested<Item>() } == 70)
+    assert!(with (OtherPick) { nested<Item>() } == 80)
+    assert!(nested<Item>() == 100)
+}
+#[test]
+fn same_closure_multiple_row_dictionaries() {
+    let f = || charge()
+    with (Wholesale, Price = Item {}) { assert!(apply(f) == 70) }
+    with (Retail, Price = Item {}) { assert!(apply(f) == 80) }
+    with (Price = Item {}) { assert!(apply(f) == 100) }
+}
