@@ -523,7 +523,7 @@ fn root() -> u256 { with (Chosen) { Item::make() } }
         assert!(dispatch.proof.has_named_impl(&db));
         let goal_with = |ty| {
             let mut equalities = dispatch.goal.assoc_type_bindings(&db).clone();
-            equalities.insert(IdentId::new(&db, "Out".into()), ty);
+            equalities.insert(IdentId::new(&db, "Out"), ty);
             TraitInstId::new(
                 &db,
                 dispatch.goal.def(&db),
