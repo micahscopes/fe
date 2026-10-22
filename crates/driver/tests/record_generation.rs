@@ -1941,3 +1941,36 @@ fn quotation_provider_preserves_master_destructured_function_parameters() {
         if value.to_string() == "42"
     ));
 }
+
+#[test]
+fn canonical_field_queries_allow_only_ordinary_implementations() {
+    let prefix = "struct Family<T> {}\n";
+    for (header, expected_error) in [
+        ("impl core::meta::FieldQuery<usize> for Family<u256>", false),
+        (
+            "impl core::meta::FieldQuery<usize> for Family<u256> as Named",
+            true,
+        ),
+    ] {
+        let (db, file) = input(&format!(
+            "{prefix}{header} {{ const fn evaluate() -> usize {{ 42 }} }}"
+        ));
+        let diagnostics = db.run_on_top_mod(db.top_mod(file)).format_diags(&db);
+        if expected_error {
+            assert!(
+                diagnostics.contains("FieldQuery requires an ordinary implementation"),
+                "{diagnostics}"
+            );
+        } else {
+            assert!(diagnostics.is_empty(), "{diagnostics}");
+        }
+    }
+    let (db, file) = input(
+        "mod core { pub mod meta { pub trait FieldQuery<R> { const fn evaluate() -> R } } }\nstruct Family {}\nimpl ingot::core::meta::FieldQuery<usize> for Family as Named { const fn evaluate() -> usize { 42 } }\n",
+    );
+    let diagnostics = db.run_on_top_mod(db.top_mod(file)).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "a same-spelling user trait remains eligible: {diagnostics}"
+    );
+}
