@@ -556,6 +556,7 @@ pub struct ResolvedMethodInstance<'db> {
 
 #[derive(Debug, Clone)]
 pub enum MethodArgMapError<'db> {
+    InvalidEvidence,
     MissingBody,
     NominalArity {
         expected: usize,

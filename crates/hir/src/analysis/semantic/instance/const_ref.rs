@@ -38,8 +38,7 @@ use crate::{
     },
     core::semantic::{EffectEnvView, EffectRequirement, EffectRequirementKey, ProviderBinding},
     hir_def::{
-        CallableDef, Const, Func, GenericParamOwner, HirIngot, params::FuncParamMode,
-        scope_graph::ScopeId,
+        CallableDef, Const, Func, GenericParamOwner, params::FuncParamMode, scope_graph::ScopeId,
     },
     span::DynLazySpan,
 };
@@ -1032,7 +1031,8 @@ fn semantic_callee_key_with_assumptions<'db>(
                     }
                 }),
             },
-        ),
+        )
+        .map_err(|_| MethodArgMapError::InvalidEvidence)?,
         effect_pairs,
         provider_pairs,
         drops_receiver: false,
@@ -1188,7 +1188,8 @@ pub(crate) fn resolve_semantic_const_ref<'db>(
                         bounds: None,
                         dispatch: use_evidence.dispatch,
                     },
-                ),
+                )
+                .ok()?,
             )
         }
         ConstRef::InherentConst(use_) => semantic_const_key_for_inherent_const(db, use_),
@@ -1210,7 +1211,8 @@ fn semantic_const_key_for_const<'db>(
             ImplEnv::empty(db, owner.scope()),
             EvidenceList::none(db),
         )
-        .finalize_evidence(db, crate::analysis::ty::evidence::UseEvidence::default()),
+        .finalize_evidence(db, crate::analysis::ty::evidence::UseEvidence::default())
+        .ok()?,
     )
 }
 
@@ -1230,7 +1232,8 @@ fn semantic_const_key_for_inherent_const<'db>(
             ImplEnv::new(db, use_.origin_scope(), use_.assumptions(), vec![]),
             EvidenceList::none(db),
         )
-        .finalize_evidence(db, crate::analysis::ty::evidence::UseEvidence::default()),
+        .finalize_evidence(db, crate::analysis::ty::evidence::UseEvidence::default())
+        .ok()?,
     )
 }
 

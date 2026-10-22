@@ -1372,6 +1372,7 @@ fn semantic_instance_for_root_owner<'db>(
     owner: BodyOwner<'db>,
 ) -> Result<SemanticInstance<'db>, LowerError> {
     let key = root_semantic_instance_key(db, owner).map_err(|err| match err {
+        RootSemanticInstanceError::InvalidEvidence { owner } => LowerError::Unsupported(format!("root semantic instance for {owner:?} has invalid supplied evidence")),
         RootSemanticInstanceError::UnsupportedGenericParam {
             owner,
             owner_scope,
@@ -1472,6 +1473,9 @@ fn format_root_semantic_instance_rejection<'db>(
     err: &RootSemanticInstanceError<'db>,
 ) -> String {
     match err {
+        RootSemanticInstanceError::InvalidEvidence { .. } => {
+            format!("function `{func_name}` has invalid supplied evidence")
+        }
         RootSemanticInstanceError::UnsupportedGenericParam {
             offending_ty,
             param_idx,

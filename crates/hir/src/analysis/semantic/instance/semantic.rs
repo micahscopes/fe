@@ -55,7 +55,6 @@ use crate::{
             ty_def::{BorrowKind, InvalidCause, TyData, TyId},
             ty_is_snapshot,
             ty_lower::{ParamSchemaId, SubstError},
-            visitor::collect_flags,
         },
     },
     hir_def::{CallableDef, Contract, ExprId, FuncParamMode, StmtId, scope_graph::ScopeId},
@@ -156,7 +155,7 @@ impl<'db> SemanticInstanceKey<'db> {
         self,
         db: &'db dyn HirAnalysisDb,
         use_: UseEvidence<'db>,
-    ) -> Self {
+    ) -> Result<Self, ResidualEvidence> {
         let bounds = use_.bounds.or_else(|| {
             declaration_bound_schema(db, self.owner(db)).map(|schema| BoundEvidence {
                 schema,
@@ -180,6 +179,12 @@ impl<'db> SemanticInstanceKey<'db> {
             });
         let state = match result {
             Ok(closed) => InstanceEvidence::Closed(closed),
+            Err(
+                reason @ (ResidualEvidence::DestinationSchema
+                | ResidualEvidence::ProofGoalMismatch
+                | ResidualEvidence::UnboundSuppliedProof
+                | ResidualEvidence::DeferredCompletion),
+            ) => return Err(reason),
             Err(reason) => InstanceEvidence::Residual {
                 reason,
                 environment: self.impl_env(db),
@@ -187,13 +192,13 @@ impl<'db> SemanticInstanceKey<'db> {
                 dispatch: use_.dispatch,
             },
         };
-        Self::new(
+        Ok(Self::new(
             db,
             self.owner(db),
             self.subst(db),
             self.effect_providers(db),
             state,
-        )
+        ))
     }
 
     /// Context rebasing cannot reopen a closed instance or lose its dispatch.
@@ -388,6 +393,9 @@ struct ProvisionalCallSiteData<'db, T: Update + PartialEq + Eq + Clone> {
 
 #[derive(Debug, Clone)]
 pub enum RootSemanticInstanceError<'db> {
+    InvalidEvidence {
+        owner: BodyOwner<'db>,
+    },
     UnsupportedGenericParam {
         owner: BodyOwner<'db>,
         owner_scope: ScopeId<'db>,
@@ -2559,7 +2567,8 @@ pub fn root_semantic_instance_key<'db>(
         ImplEnv::empty(db, owner.scope()),
         EvidenceList::none(db),
     )
-    .finalize_evidence(db, UseEvidence::default());
+    .finalize_evidence(db, UseEvidence::default())
+    .map_err(|_| RootSemanticInstanceError::InvalidEvidence { owner })?;
     validate_instantiated_effect_env_key(db, key)
         .map_err(RootSemanticInstanceError::UnclosedEffectEnv)?;
     Ok(key)
@@ -2578,7 +2587,6 @@ pub fn identity_semantic_instance_key<'db>(
         ImplEnv::empty(db, owner.scope()),
         EvidenceList::none(db),
     )
-    .finalize_evidence(db, UseEvidence::default())
 }
 
 #[salsa::tracked]
