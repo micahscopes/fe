@@ -1,0 +1,10 @@
+trait Holds { shape Part }
+trait Driver: Holds { fn at(self) -> Self::Part<ref> }
+struct Cell { x: u256 }
+impl Holds for Cell { shape Part = own u256 }
+impl Driver for Cell { fn at(self) -> Self::Part<ref> { self.x } }
+fn generic<D: Driver>(_ d: D) -> D::Part<ref> { d.at() }
+#[test]
+fn observed() { let c = Cell { x: 7 }
+ let x = generic(c)
+ assert(x == 7) }

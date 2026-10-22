@@ -1,0 +1,3 @@
+trait Driver { shape Part fn at(self) -> Self::Part<ref> }
+struct Cell { x: u256 }
+impl Driver for Cell { shape Part = own u256 fn at(self) -> Self::Part<ref> { self.x } }
