@@ -414,6 +414,9 @@ fn trait_goal_satisfied<'db>(
 
 fn expr_requires_runtime_eval_when_erased(expr: &NExpr<'_>) -> bool {
     match expr {
+        NExpr::ItemQuote { .. } => {
+            unreachable!("compile-time quotation passed runtime phase admission")
+        }
         NExpr::ArrayRepeat { .. } => false,
         NExpr::Unary {
             op: UnOp::Minus, ..
@@ -1017,6 +1020,9 @@ impl<'db> RmirEmitter<'db> {
                         )
                 });
             let read_from_current_slot = match expr {
+                NExpr::ItemQuote { .. } => {
+                    unreachable!("compile-time quotation passed runtime phase admission")
+                }
                 NExpr::Forward { src } | NExpr::StructuralRepack { value: src, .. } => {
                     self.semantic_body.operand_local(*src) == Some(dst)
                         && self.normalized_value_temps[src.value.index()].is_none()
@@ -1182,6 +1188,9 @@ impl<'db> RmirEmitter<'db> {
         };
 
         match expr {
+            NExpr::ItemQuote { .. } => {
+                unreachable!("compile-time quotation passed runtime phase admission")
+            }
             NExpr::Forward { src } | NExpr::StructuralRepack { value: src, .. } => {
                 let value = self.lower_semantic_operand_for_class(bb, *src, &dst_class);
                 let value = self.coerce_value_if_needed(bb, value, &dst_class);
@@ -1590,6 +1599,9 @@ impl<'db> RmirEmitter<'db> {
             );
         }
         match value.value(self.db) {
+            SemConstValue::Meta { .. } | SemConstValue::ItemCode { .. } => unreachable!(
+                "checked compile-time metadata has no normalized runtime representation"
+            ),
             SemConstValue::Tuple { .. }
             | SemConstValue::Struct { .. }
             | SemConstValue::Array { .. }
@@ -1889,6 +1901,9 @@ impl<'db> RmirEmitter<'db> {
         );
         let ty = self.const_lowering_ty(ty, target);
         match value.value(self.db) {
+            SemConstValue::Meta { .. } | SemConstValue::ItemCode { .. } => unreachable!(
+                "checked compile-time metadata has no normalized runtime representation"
+            ),
             SemConstValue::Tuple { elems, .. }
             | SemConstValue::Struct { fields: elems, .. }
             | SemConstValue::Array { elems, .. } => {
@@ -4863,6 +4878,9 @@ impl<'db> RmirEmitter<'db> {
             return false;
         };
         match expr {
+            NExpr::ItemQuote { .. } => {
+                unreachable!("compile-time quotation passed runtime phase admission")
+            }
             NExpr::Load { place, .. }
             | NExpr::Borrow { place, .. }
             | NExpr::MakeView { place, .. } => place == &dst_place,

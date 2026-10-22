@@ -800,7 +800,8 @@ impl<'a, 'db> Analysis<'a, 'db> {
                 }
                 Held::new()
             }
-            NExpr::CodeRegionRef { .. }
+            NExpr::ItemQuote { .. }
+            | NExpr::CodeRegionRef { .. }
             | NExpr::Const(_)
             | NExpr::Unary { .. }
             | NExpr::Binary { .. }
