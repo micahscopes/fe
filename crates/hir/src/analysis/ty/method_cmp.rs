@@ -28,9 +28,7 @@ use super::{
     unify::UnificationTable,
 };
 use crate::analysis::HirAnalysisDb;
-use crate::hir_def::{
-    CallableDef, Expr, Func, ItemKind, ModeMarker, Partial, PathKind, scope_graph::ScopeId,
-};
+use crate::hir_def::{CallableDef, Expr, Func, ItemKind, Partial, PathKind, scope_graph::ScopeId};
 use common::indexmap::IndexMap;
 
 /// Compares the implementation method with the trait method to ensure they
@@ -1312,7 +1310,7 @@ fn compare_constraints<'db>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_db::HirAnalysisTestDb;
+    use crate::{hir_def::IdentId, test_db::HirAnalysisTestDb};
 
     #[test]
     fn declaration_correspondence_preserves_reordered_effect_provider_roles() {
