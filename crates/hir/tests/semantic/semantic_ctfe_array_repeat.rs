@@ -224,7 +224,7 @@ const fn changed_fixed<const N: usize, const I: usize>() -> u8 { fixed_store<N, 
                     )),
                 )
             });
-            let key = SemanticInstanceKey::new(
+            let key = SemanticInstanceKey::of(
                 &db,
                 owner,
                 GenericSubst::for_body_owner(&db, owner, args.to_vec()),
@@ -511,7 +511,7 @@ const fn record<const N: usize, const X: u8>() -> Rows<N> { store_record<N>(X) }
         assert!(matches!(template, EvalOutcome::Blocked(_)), "{template:?}");
         for (len, element) in [(0, 0), (0, 5), (1, 5), (2, 5), (4, 9)] {
             let args = const_args(&db, len, element);
-            let key = SemanticInstanceKey::new(
+            let key = SemanticInstanceKey::of(
                 &db,
                 owner,
                 GenericSubst::for_body_owner(&db, owner, args.to_vec()),
@@ -784,7 +784,7 @@ const fn checked<const N: usize, const X: u8>() -> [Wrapped; N] { [Wrapped { ite
         assert!(matches!(symbolic, EvalOutcome::Blocked(_)), "{symbolic:?}");
         for (len, element) in [(0, 0), (0, 5), (2, 0), (3, 5)] {
             let args = const_args(&db, len, element);
-            let key = SemanticInstanceKey::new(
+            let key = SemanticInstanceKey::of(
                 &db,
                 owner,
                 GenericSubst::for_body_owner(&db, owner, args.to_vec()),
@@ -921,7 +921,7 @@ const fn checked<const N: usize, const X: u8>() -> u8 { [(Pair { value: X }, [10
         assert!(matches!(symbolic, EvalOutcome::Blocked(_)), "{symbolic:?}");
         for (len, element) in [(0, 5), (1, 0), (2, 5)] {
             let args = const_args(&db, len, element);
-            let key = SemanticInstanceKey::new(
+            let key = SemanticInstanceKey::of(
                 &db,
                 owner,
                 GenericSubst::for_body_owner(&db, owner, args.to_vec()),
@@ -976,7 +976,7 @@ fn outer<const A: usize, const B: usize>() {}
         identity_semantic_instance_key(&db, BodyOwner::Func(function(&db, module, "outer"), None));
     let params = outer.subst(&db).generic_args(&db);
     for args in [[params[1], params[0]], [params[0], params[0]]] {
-        let key = SemanticInstanceKey::new(
+        let key = SemanticInstanceKey::of(
             &db,
             owner,
             GenericSubst::for_body_owner(&db, owner, args.to_vec()),

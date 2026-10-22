@@ -3365,7 +3365,7 @@ mod tests {
         let identity = identity_semantic_instance_key(&db, BodyOwner::Func(func, None));
         let assumptions = func.assumptions(&db);
         let witnesses = assumptions.list(&db).clone();
-        let key = SemanticInstanceKey::new(
+        let key = SemanticInstanceKey::of(
             &db,
             identity.owner(&db),
             identity.subst(&db),
@@ -3403,7 +3403,7 @@ mod tests {
             .fold_const_context_key(&db, key);
         assert_eq!(stored.impl_env(&db).assumptions(&db), assumptions);
         assert_eq!(stored.impl_env(&db).witnesses(&db), &witnesses);
-        let empty = SemanticInstanceKey::new(
+        let empty = SemanticInstanceKey::of(
             &db,
             key.owner(&db),
             key.subst(&db),

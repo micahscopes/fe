@@ -3123,7 +3123,7 @@ fn caller(_ x: Slot<7>) { <bool as Has>::take(x) }
         let caller = semantic_instance_for_named_func(&db, top_mod, "caller");
         let mut body = RuntimeSemanticBody::admitted(&db, caller).expect("missing caller body");
         let trait_inst = TraitInstId::new_simple(&db, trait_, vec![TyId::bool(&db)]);
-        let callee_key = SemanticInstanceKey::new(
+        let callee_key = SemanticInstanceKey::of(
             &db,
             BodyOwner::Func(declaration, None),
             GenericSubst::for_owner(&db, declaration.into(), trait_inst.args(&db).to_vec()),

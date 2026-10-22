@@ -231,7 +231,7 @@ fn invocation<'db>(
 ) -> ConstExpr<'db> {
     let owner = BodyOwner::Func(func, None);
     ConstExpr::Invocation(ConstInvocation {
-        key: SemanticInstanceKey::new(
+        key: SemanticInstanceKey::of(
             db,
             owner,
             GenericSubst::for_body_owner(db, owner, generic_args),
@@ -1879,7 +1879,7 @@ const fn selected<const X: usize, const Y: usize>() -> usize { Selected<{ X + 0 
     let caller_y = outer.subst(&db).generic_args(&db)[1];
     let instance = get_or_build_semantic_instance(
         &db,
-        SemanticInstanceKey::new(
+        SemanticInstanceKey::of(
             &db,
             owner,
             GenericSubst::for_body_owner(
@@ -2462,7 +2462,7 @@ const fn pair() -> (u8, u8) { (1, 2) }
     ];
     let instance = get_or_build_semantic_instance(
         &db,
-        SemanticInstanceKey::new(
+        SemanticInstanceKey::of(
             &db,
             owner,
             GenericSubst::for_body_owner(&db, owner, args.to_vec()),

@@ -3094,7 +3094,7 @@ fn impl_sum_semantic_body_uses_self_binding_directly() {
     .expect("missing resolved impl method");
     let instance = get_or_build_semantic_instance(
         &db,
-        fe_hir::analysis::semantic::SemanticInstanceKey::new(
+        fe_hir::analysis::semantic::SemanticInstanceKey::of(
             &db,
             BodyOwner::Func(method, None),
             GenericSubst::for_owner(&db, method.into(), resolved.body_args().to_vec()),
