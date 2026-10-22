@@ -1,0 +1,68 @@
+struct Log { n: u256 }
+struct W<T> { v: T }
+trait Note {
+    fn note(self) -> u256 uses (log: Log)
+    fn bump(self) uses (log: mut Log)
+}
+impl Note for W<u256> {
+    fn note(self) -> u256 uses (log: Log) {
+        log.n + self.v
+    }
+    fn bump(self) uses (log: mut Log) {
+        log.n += self.v
+    }
+}
+impl Note for W<u8> {
+    fn note(self) -> u256 uses (log: Log) {
+        999
+    }
+    fn bump(self) uses (log: mut Log) {
+        log.n += 999
+    }
+}
+#[test]
+fn deferred_siblings_keep_original_provider() {
+    let x = 5
+    let first: u256 = with (Log = Log { n: 65 }) {
+        W { v: x }.note()
+    }
+    let second: u256 = with (Log = Log { n: 95 }) {
+        W { v: x }.note()
+    }
+    let y: u256 = x
+    assert!(first == 70)
+    assert!(second == 100)
+}
+#[test]
+fn delayed_mutations_keep_distinct_places() {
+    var a = Log { n: 65 }
+    var b = Log { n: 95 }
+    let x = 5
+    with (Log = a) {
+        W { v: x }.bump()
+    }
+    with (Log = b) {
+        W { v: x }.bump()
+    }
+    let y: u256 = x
+    assert!(a.n == 70)
+    assert!(b.n == 100)
+}
+#[test]
+fn nested_closure_retains_deferred_local_provider() {
+    let g = || {
+        let h = || {
+            let x = 5
+            let first: u256 = with (Log = Log { n: 65 }) {
+                W { v: x }.note()
+            }
+            let second: u256 = with (Log = Log { n: 95 }) {
+                W { v: x }.note()
+            }
+            let y: u256 = x
+            first + second
+        }
+        h()
+    }
+    assert!(g() == 170)
+}
