@@ -91,8 +91,8 @@ use super::{
     },
     effects::{EffectKeyKind, ResolvedEffectKey, resolve_effect_key, rows::RowPath},
     evidence::{
-        BoundEvidence, BoundSchemaId, Evidence, EvidenceId, EvidenceList, declared_bound_evidence,
-        impl_const_bound_evidence, instantiated_selection,
+        BoundEvidence, BoundOwner, BoundSchemaId, Evidence, EvidenceId, EvidenceList,
+        declared_bound_evidence, impl_const_bound_evidence, instantiated_selection,
     },
     generic_defaults::{GenericDefault, default_assumptions, generic_default},
     instantiate_trait_self,
@@ -1594,7 +1594,11 @@ fn typed_body_for_bodyless_func<'db>(
         body: None,
         result_ty,
         signature: assumptions,
-        bound_schema: BoundSchemaId::new(db, Some(BodyOwner::func_at(db, func, mode)), assumptions),
+        bound_schema: BoundSchemaId::new(
+            db,
+            BoundOwner::Body(BodyOwner::func_at(db, func, mode)),
+            assumptions,
+        ),
         assumptions,
         pat_ty: SecondaryMap::new(),
         expr_ty: SecondaryMap::new(),
@@ -6948,7 +6952,11 @@ impl<'db> TypedBody<'db> {
         TypedBodyTables {
             body: None,
             result_ty: TyId::unit(db),
-            bound_schema: BoundSchemaId::new(db, None, PredicateListId::empty_list(db)),
+            bound_schema: BoundSchemaId::new(
+                db,
+                BoundOwner::Context,
+                PredicateListId::empty_list(db),
+            ),
             signature: PredicateListId::empty_list(db),
             assumptions: PredicateListId::empty_list(db),
             pat_ty: SecondaryMap::new(),

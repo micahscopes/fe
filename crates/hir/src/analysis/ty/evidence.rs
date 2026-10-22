@@ -38,20 +38,35 @@ use crate::{
     hir_def::{Body, CallableDef, Func, ItemKind, scope_graph::ScopeId},
 };
 
+/// Declaration that owns the numbering of a proof basis. A method adapter's
+/// combined implementation/nominal basis is not its checked body's signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
+pub enum BoundOwner<'db> {
+    Body(BodyOwner<'db>),
+    MethodBasis {
+        body: Func<'db>,
+        nominal: Func<'db>,
+        mode: Option<BorrowKind>,
+    },
+    ConstBasis(Body<'db>),
+    ImplementationConditions(ImplementorId<'db>),
+    Context,
+}
+
 /// The namespace of assumption slots. Declaration ownership does not depend on
 /// an instance key. Slots describe the declaration layout; instantiated goals
-/// live in the body's signature, not in this namespace. `None` is a proof
-/// producer's temporary predicate basis, not a checked body.
+/// live in the body's signature and a slot's applied view, not its namespace.
+/// `Context` is a proof producer's temporary basis, not a checked body.
 #[salsa::interned]
 #[derive(Debug)]
 pub struct BoundSchemaId<'db> {
-    pub owner: Option<BodyOwner<'db>>,
+    pub owner: BoundOwner<'db>,
     pub slots: PredicateListId<'db>,
 }
 
 impl<'db> BoundSchemaId<'db> {
     fn context(db: &'db dyn HirAnalysisDb, slots: PredicateListId<'db>) -> Self {
-        Self::new(db, None, slots)
+        Self::new(db, BoundOwner::Context, slots)
     }
 
     pub fn slot(self, db: &'db dyn HirAnalysisDb, index: usize) -> Option<BoundSlotRef<'db>> {
@@ -90,7 +105,7 @@ pub struct BoundEvidence<'db> {
 impl<'db> BoundEvidence<'db> {
     fn get(self, db: &'db dyn HirAnalysisDb, slot: BoundSlotRef<'db>) -> Option<EvidenceId<'db>> {
         let same_basis = self.schema == slot.schema
-            || (self.schema.owner(db).is_some()
+            || (matches!(self.schema.owner(db), BoundOwner::Body(_))
                 && self.schema.owner(db) == slot.schema.owner(db)
                 && self
                     .schema
@@ -190,13 +205,19 @@ impl<'db> EvidenceId<'db> {
     /// dictionary arriving from another checked body.
     pub(crate) fn qualify(self, db: &'db dyn HirAnalysisDb, owner: BodyOwner<'db>) -> Self {
         match self.data(db) {
-            Evidence::Assumption(slot) if slot.schema.owner(db).is_none() => EvidenceId::new(
-                db,
-                Evidence::Assumption(BoundSlotRef {
-                    schema: BoundSchemaId::new(db, Some(owner), slot.schema.slots(db)),
-                    ..*slot
-                }),
-            ),
+            Evidence::Assumption(slot) if slot.schema.owner(db) == BoundOwner::Context => {
+                EvidenceId::new(
+                    db,
+                    Evidence::Assumption(BoundSlotRef {
+                        schema: BoundSchemaId::new(
+                            db,
+                            BoundOwner::Body(owner),
+                            slot.schema.slots(db),
+                        ),
+                        ..*slot
+                    }),
+                )
+            }
             Evidence::Impl {
                 selected,
                 instantiated,
@@ -704,6 +725,7 @@ fn implied_bound_evidence<'db>(
     let proofs = basis_proofs(
         db,
         implementation.scope(),
+        BoundOwner::ImplementationConditions(*selected),
         selected.constraints(db).extend_all_bounds(db),
         declared,
         declared,
@@ -962,10 +984,16 @@ pub(crate) fn impl_method_evidence<'db>(
             .copied()
             .collect::<Vec<_>>(),
     );
+    let origin = BoundOwner::MethodBasis {
+        body,
+        nominal,
+        mode,
+    };
     let mode = BodyOwner::func_at(db, body, mode).mode();
     Some(basis_proofs(
         db,
         body.scope(),
+        origin,
         basis,
         func_declared_bounds(db, body, mode),
         func_signature(db, body, mode),
@@ -988,6 +1016,7 @@ pub(crate) fn impl_const_evidence<'db>(
     Some(basis_proofs(
         db,
         body.scope(),
+        BoundOwner::ConstBasis(body),
         collect_candidate_constraints(db, impl_trait.into())
             .instantiate_identity()
             .extend_all_bounds(db),
@@ -1004,11 +1033,12 @@ pub(crate) fn impl_const_evidence<'db>(
 fn basis_proofs<'db>(
     db: &'db dyn HirAnalysisDb,
     scope: ScopeId<'db>,
+    owner: BoundOwner<'db>,
     basis: PredicateListId<'db>,
     declared: PredicateListId<'db>,
     signature: PredicateListId<'db>,
 ) -> BoundAdaptation<'db> {
-    let source = BoundSchemaId::context(db, basis);
+    let source = BoundSchemaId::new(db, owner, basis);
     let assumption = |index: usize| source.assumption(db, index);
     // A proof names its assumptions by position in the extended basis.
     let to_basis = || {
@@ -1211,7 +1241,8 @@ fn context<T: A, U: A, V: Sub>() {}
         let func = find_func(&db, module, "context");
         let signature = func_signature(&db, func, None);
         assert_eq!(signature.list(&db).len(), 4);
-        let schema = BoundSchemaId::new(&db, Some(BodyOwner::func(&db, func)), signature);
+        let schema =
+            BoundSchemaId::new(&db, BoundOwner::Body(BodyOwner::func(&db, func)), signature);
         let original = schema.assumption(&db, 2);
         let subst = CompleteSubst::for_owner(
             &db,
