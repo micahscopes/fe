@@ -1104,7 +1104,6 @@ impl<'db> ImplementorId<'db> {
                 db,
                 impl_m.as_callable(db).unwrap(),
                 trait_m,
-                self.trait_inst(db),
                 BorrowKind::Ref,
                 &mut diags,
             );
@@ -1113,7 +1112,6 @@ impl<'db> ImplementorId<'db> {
                     db,
                     mut_body.as_callable(db).unwrap(),
                     trait_m,
-                    self.trait_inst(db),
                     BorrowKind::Mut,
                     &mut diags,
                 );

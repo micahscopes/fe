@@ -52,7 +52,6 @@ use common::indexmap::IndexMap;
 /// * `db` - Reference to the database implementing the `HirAnalysisDb` trait.
 /// * `impl_m` - The implementation method to compare.
 /// * `trait_m` - The trait method to compare against.
-/// * `trait_inst` - The instance of the trait being checked.
 /// * `implementor` - The implementor that contains associated type bindings.
 /// * `sink` - A mutable reference to a vector where diagnostic messages will be
 ///   collected.
@@ -64,7 +63,6 @@ pub(super) fn compare_impl_method<'db>(
     db: &'db dyn HirAnalysisDb,
     impl_m: CallableDef<'db>,
     trait_m: CallableDef<'db>,
-    trait_inst: TraitInstId<'db>,
     body_mode: BorrowKind,
     sink: &mut Vec<TyDiagCollection<'db>>,
 ) {
@@ -86,21 +84,17 @@ pub(super) fn compare_impl_method<'db>(
         return;
     }
 
-    let both = [
-        (Some(BorrowKind::Ref), Some(BorrowKind::Ref)),
-        (Some(BorrowKind::Mut), Some(BorrowKind::Mut)),
-    ];
-    let single = [(Some(body_mode), None)];
-    let modes: &[(Option<BorrowKind>, Option<BorrowKind>)] =
-        match (trait_m.modes(db), impl_m.modes(db)) {
-            ([None], [None]) => &[(None, None)],
-            ([None], _) => {
-                sink.push(ImplDiag::MethodMaybeMutMismatch { trait_m, impl_m }.into());
-                return;
-            }
-            (_, [None]) => &single,
-            _ => &both,
-        };
+    let both = [Some(BorrowKind::Ref), Some(BorrowKind::Mut)];
+    let single = [Some(body_mode)];
+    let modes: &[Option<BorrowKind>] = match (trait_m.modes(db), impl_m.modes(db)) {
+        ([None], [None]) => &[None],
+        ([None], _) => {
+            sink.push(ImplDiag::MethodMaybeMutMismatch { trait_m, impl_m }.into());
+            return;
+        }
+        (_, [None]) => &single,
+        _ => &both,
+    };
 
     // Compare the argument labels, argument types, and return type of the impl
     // method with the trait method.
@@ -112,12 +106,10 @@ pub(super) fn compare_impl_method<'db>(
     };
     let substs: Result<Vec<_>, _> = modes
         .iter()
-        .map(|&(trait_mode, _)| {
+        .map(|&trait_mode| {
             method_correspondence(db, body, trait_mode).map(|correspondence| {
-                (
-                    correspondence.trait_to_body.residualize(db),
-                    correspondence.effects_complete,
-                )
+                let subst = correspondence.trait_to_body.residualize(db);
+                (correspondence, subst)
             })
         })
         .collect();
@@ -134,11 +126,10 @@ pub(super) fn compare_impl_method<'db>(
         );
         return;
     };
-    let unpaired: Vec<_> = modes
+    let unpaired: Vec<_> = substs
         .iter()
-        .zip(&substs)
-        .filter(|(_, (_, paired))| !paired)
-        .map(|(&(trait_mode, _), _)| trait_mode)
+        .filter(|(correspondence, _)| !correspondence.effects_complete)
+        .map(|(correspondence, _)| correspondence.trait_mode)
         .collect();
     if matches!(
         (impl_m, trait_m),
@@ -160,13 +151,13 @@ pub(super) fn compare_impl_method<'db>(
         );
         err = true;
     }
-    for (&(trait_mode, impl_mode), (param_subst, _)) in modes.iter().zip(&substs) {
+    for (correspondence, param_subst) in &substs {
         err |= !compare_ty(
             db,
-            (impl_m, impl_mode),
-            (trait_m, trait_mode),
+            (impl_m, correspondence.body_mode),
+            (trait_m, correspondence.trait_mode),
             param_subst,
-            trait_inst,
+            correspondence.trait_inst,
             sink,
         );
     }
@@ -174,12 +165,12 @@ pub(super) fn compare_impl_method<'db>(
         return;
     }
 
-    for (&(trait_mode, impl_mode), (param_subst, _)) in modes.iter().zip(&substs) {
+    for (correspondence, param_subst) in &substs {
         compare_constraints(
             db,
-            (impl_m, impl_mode),
-            (trait_m, trait_mode),
-            trait_inst,
+            (impl_m, correspondence.body_mode),
+            (trait_m, correspondence.trait_mode),
+            correspondence.trait_inst,
             param_subst,
             sink,
         );
