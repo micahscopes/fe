@@ -97,15 +97,28 @@ pub(crate) struct EvidenceCompletion<'db> {
     pub context: ImplEnv<'db>,
 }
 
-#[salsa::tracked]
+#[salsa::interned]
+struct CompletionRequest<'db> {
+    data: EvidenceCompletion<'db>,
+}
+
 pub(crate) fn close_instance_evidence<'db>(
     db: &'db dyn HirAnalysisDb,
     input: EvidenceCompletion<'db>,
 ) -> Result<ClosedBodyEvidence<'db>, ResidualEvidence> {
+    close_request(db, CompletionRequest::new(db, input))
+}
+
+#[salsa::tracked]
+fn close_request<'db>(
+    db: &'db dyn HirAnalysisDb,
+    request: CompletionRequest<'db>,
+) -> Result<ClosedBodyEvidence<'db>, ResidualEvidence> {
+    let input = request.data(db);
     let schema = declaration_bound_schema(db, input.owner).ok_or(ResidualEvidence::BodySchema)?;
     if !ground(
         collect_flags(db, input.subst.generic_args(db))
-            | collect_flags(db, input.providers.providers(db)),
+            | collect_flags(db, input.providers.providers(db).as_slice()),
     ) {
         return Err(ResidualEvidence::GenericOrProjectedInput);
     }
@@ -236,7 +249,7 @@ mod tests {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
             "closed_facts.fe".into(),
-            include_str!("../../../../../../fe/tests/fixtures/fe_test/named_closure_evidence.fe"),
+            include_str!("../../../../../fe/tests/fixtures/fe_test/named_closure_evidence.fe"),
         );
         let (module, _) = db.top_mod(file);
         db.assert_no_diags(module);
