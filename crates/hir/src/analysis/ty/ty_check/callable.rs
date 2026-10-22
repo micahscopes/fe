@@ -23,7 +23,7 @@ use crate::analysis::{
         corelib::resolve_lib_func_path,
         diagnostics::{BodyDiag, FuncBodyDiag},
         evidence::{
-            EvidenceId, EvidenceList, ProofOutcome, declared_bound_evidence,
+            EvidenceId, EvidenceList, ProofOutcome, declared_bound_evidence_with_pending,
             instantiated_selection, prove_outcome,
         },
         fold::{TyFoldable, TyFolder},
@@ -444,25 +444,28 @@ impl<'db> Callable<'db> {
     /// Proves, in the checked body's context `solve_cx`, the bounds the
     /// callee's body declares, instantiated for this call, as
     /// `declared_bound_evidence` records them.
+    /// Returns whether the producer encountered a pending generation request.
     pub(crate) fn record_bound_evidence(
         &mut self,
         db: &'db dyn HirAnalysisDb,
         solve_cx: TraitSolveCx<'db>,
-    ) {
+    ) -> bool {
         let CallableDef::Func(func) = self.callable_def else {
-            return;
+            return false;
         };
         let mode = BodyOwner::func_at(db, func, self.mode).mode();
         let Ok(subst) = CompleteSubst::for_owner(db, func.into(), self.generic_args.clone()) else {
-            return;
+            return false;
         };
-        self.bound_evidence = Some(declared_bound_evidence(
+        let (evidence, pending) = declared_bound_evidence_with_pending(
             db,
             func_declared_bounds(db, func, mode),
             func_signature(db, func, mode),
             &subst,
             solve_cx,
-        ));
+        );
+        self.bound_evidence = Some(evidence);
+        pending
     }
 
     /// Missing dictionaries cannot be reconstructed ordinarily after a lexical
