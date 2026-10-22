@@ -801,8 +801,10 @@ impl<'db> TyChecker<'db> {
         let closure = ClosureTy::new(
             self.db,
             def,
-            parent_args,
-            None,
+            super::super::ty_def::ClosureContext {
+                args: parent_args,
+                evidence: None,
+            },
             info.captures
                 .iter()
                 .map(|capture| capture.ty)

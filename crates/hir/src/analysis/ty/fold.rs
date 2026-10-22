@@ -188,8 +188,10 @@ impl<'db> TyFoldable<'db> for TyId<'db> {
                     ClosureTy::new(
                         db,
                         closure.def(db),
-                        parent_args,
-                        bound_evidence,
+                        super::ty_def::ClosureContext {
+                            args: parent_args,
+                            evidence: bound_evidence,
+                        },
                         captures,
                         params,
                         ret_ty,

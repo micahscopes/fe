@@ -1243,7 +1243,6 @@ pub struct ClosureDef<'db> {
 /// function of the closure's parameters. Closures are values of this type
 /// and implement the core callable shape traits of their parameter modes
 /// (see `ty::closure`).
-#[allow(clippy::too_many_arguments)]
 #[salsa::interned]
 #[derive(Debug)]
 pub struct ClosureTy<'db> {
@@ -1252,10 +1251,7 @@ pub struct ClosureTy<'db> {
     /// closure's semantic instances substitute the parent's typed-body
     /// template with these.
     #[return_ref]
-    pub parent_args: Vec<TyId<'db>>,
-    /// Dictionaries captured when the enclosing body is instantiated. They
-    /// share the enclosing declaration's namespace, never its instance key.
-    pub bound_evidence: Option<super::evidence::BoundEvidence<'db>>,
+    pub context: ClosureContext<'db>,
     /// Environment field types, one per captured binding, in capture order.
     #[return_ref]
     pub captures: Vec<TyId<'db>>,
@@ -1269,7 +1265,26 @@ pub struct ClosureTy<'db> {
     pub effects: Vec<RowComponent<'db>>,
 }
 
+/// Type arguments and dictionaries captured from the enclosing declaration.
+/// This contains no semantic instance key, including for recursive closures.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
+pub struct ClosureContext<'db> {
+    pub args: Vec<TyId<'db>>,
+    pub evidence: Option<super::evidence::BoundEvidence<'db>>,
+}
+
 impl<'db> ClosureTy<'db> {
+    pub fn parent_args(self, db: &'db dyn HirAnalysisDb) -> &'db Vec<TyId<'db>> {
+        &self.context(db).args
+    }
+
+    pub fn bound_evidence(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Option<super::evidence::BoundEvidence<'db>> {
+        self.context(db).evidence
+    }
+
     pub fn modes(self, db: &'db dyn HirAnalysisDb) -> Vec<FuncParamMode> {
         self.params(db).iter().map(|&(mode, _)| mode).collect()
     }

@@ -428,8 +428,10 @@ impl<'db> TyFolder<'db> for CaptureClosureEvidence<'db> {
             crate::analysis::ty::ty_def::ClosureTy::new(
                 db,
                 closure.def(db),
-                closure.parent_args(db).clone(),
-                Some(self.bound),
+                crate::analysis::ty::ty_def::ClosureContext {
+                    args: closure.parent_args(db).clone(),
+                    evidence: Some(self.bound),
+                },
                 closure.captures(db).clone(),
                 closure.params(db).clone(),
                 closure.ret_ty(db),
