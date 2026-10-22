@@ -1081,9 +1081,10 @@ fn prove_in<'db>(
 /// checker proved by one of the body's bounds holds by that bound in every
 /// instance: by the proof the instance's caller gave of it, or by the
 /// instance's own bound where the caller gave none, so it is dispatched
-/// through the bound, unless the instantiation closes it, when it holds by
-/// the implementation every body proves it with. A goal the checker did not
-/// prove is selected in `solve_cx`.
+/// through the bound. Completing an absent ordinary slot belongs to the
+/// instance producer; this consumer never replaces a retained assumption,
+/// even when its goal is ground. A goal the checker did not prove is selected
+/// in `solve_cx`.
 pub(crate) fn instantiated_selection<'db>(
     db: &'db dyn HirAnalysisDb,
     evidence: Option<EvidenceId<'db>>,
@@ -1110,10 +1111,6 @@ pub(crate) fn instantiated_selection<'db>(
             Some(ResolvedImplInstance::new(*selected, instantiated, goal()))
         }
         Some(Evidence::DeferredSolCodec { .. }) => None,
-        Some(Evidence::Assumption(_)) if is_closed_goal(db, inst) => {
-            let ordinary = solve_cx.with_assumptions(PredicateListId::empty_list(db));
-            instantiated_selection(db, prove(db, ordinary, inst), solve_cx, inst)
-        }
         // As selection answers a goal by an assumption.
         Some(Evidence::Assumption(_)) => {
             let goal = goal();
@@ -1431,6 +1428,45 @@ mod schema_tests {
     use super::super::ty_def::TyId;
     use super::*;
     use crate::test_db::{HirAnalysisTestDb, find_func};
+
+    #[test]
+    fn closed_declaration_assumption_is_not_reselected_by_a_consumer() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "closed_assumption.fe".into(),
+            r#"
+struct Item {}
+trait Pick { fn value() -> u256 }
+impl Pick for Item { fn value() -> u256 { 100 } }
+fn context() where Item: Pick {}
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        let func = find_func(&db, module, "context");
+        let goals = func_signature(&db, func, None);
+        let goal = goals.list(&db)[0];
+        assert!(is_closed_goal(&db, goal));
+        let solve = TraitSolveCx::new(&db, func.scope()).with_assumptions(goals);
+        let proof = prove(&db, solve, goal).unwrap();
+        assert!(matches!(proof.data(&db), Evidence::Assumption(_)));
+        let retained = instantiated_selection(&db, Some(proof), solve, goal).unwrap();
+        assert!(matches!(
+            retained.selected().origin(&db),
+            ImplementorOrigin::Assumption
+        ));
+        let ordinary = instantiated_selection(
+            &db,
+            None,
+            solve.with_assumptions(PredicateListId::empty_list(&db)),
+            goal,
+        )
+        .unwrap();
+        assert!(matches!(
+            ordinary.selected().origin(&db),
+            ImplementorOrigin::Hir(_)
+        ));
+    }
 
     #[test]
     fn implied_projection_keeps_declaration_slot_after_parameter_collapse() {

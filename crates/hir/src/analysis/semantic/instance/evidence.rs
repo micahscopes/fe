@@ -437,6 +437,7 @@ mod tests {
         let mut seen = FxHashSet::default();
         let mut closed_count = 0;
         let mut closed_provider = false;
+        let mut rejected_row = false;
         let mut named_count = 0;
         let mut rejected_unbound = false;
         while let Some(key) = work.pop() {
@@ -446,6 +447,30 @@ mod tests {
             assert!(seen.len() < 2000, "instance keys must stabilize");
             let instance = get_or_build_semantic_instance(&db, key);
             work.extend(instance.callees(&db).iter().map(|callee| callee.key));
+            if !rejected_row
+                && matches!(key.owner(&db), BodyOwner::Closure { .. })
+                && !key.evidence(&db).rows(&db).is_empty()
+            {
+                let mut rows = key.evidence(&db).rows(&db).clone();
+                for row in &mut rows {
+                    row.proof = None;
+                }
+                let invalid = SemanticInstanceKey::of(
+                    &db,
+                    key.owner(&db),
+                    key.subst(&db),
+                    key.effect_providers(&db),
+                    key.impl_env(&db),
+                    key.evidence(&db).with_rows(&db, rows),
+                );
+                assert!(
+                    invalid.typed_body(&db).smir_lowering_issues(&db).contains(
+                        &crate::analysis::ty::ty_check::SmirLoweringIssue::InvalidEvidence
+                    ),
+                    "a missing supplied row proof must block body admission, not become ordinary"
+                );
+                rejected_row = true;
+            }
             let completed = close_instance_evidence(&db, input(&db, key));
             if let BodyOwner::Func(func, _) = key.owner(&db)
                 && func
@@ -611,6 +636,7 @@ mod tests {
             rejected_wrong_goal,
             "an unrelated closed proof cannot mint a goal fact"
         );
+        assert!(rejected_row, "exercise supplied closure row failure");
         assert!(
             closed_provider,
             "the graph exercises concrete trait-effect providers"
