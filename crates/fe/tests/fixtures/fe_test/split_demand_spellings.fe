@@ -1,0 +1,94 @@
+struct Cell { n: u256 }
+#[raw_place]
+fn cell(_ c: mut? Cell) -> mut? u256 {
+    mut? c.n
+}
+fn implicit(_ a: mut Cell, _ b: Cell) {
+    let (mut x, y) = unsafe {
+        (cell(mut a), cell(b))
+    }
+    x = y
+}
+
+fn explicit(_ a: mut Cell, _ b: Cell) {
+    let (mut x, y) = unsafe {
+        (mut cell(mut a), cell(b))
+    }
+    x = y
+}
+
+fn reversed_implicit(_ a: mut Cell, _ b: Cell) {
+    let (y, mut x) = unsafe {
+        (cell(b), cell(mut a))
+    }
+    x = y
+}
+
+fn reversed_explicit(_ a: mut Cell, _ b: Cell) {
+    let (y, mut x) = unsafe {
+        (cell(b), mut cell(mut a))
+    }
+    x = y
+}
+
+fn nested_implicit(_ a: mut Cell, _ b: Cell, _ c: Cell) {
+    let ((mut x, y), z) = unsafe {
+        (unsafe { (cell(mut a), cell(b)) }, cell(c))
+    }
+    x = y + z
+}
+
+fn nested_explicit(_ a: mut Cell, _ b: Cell, _ c: Cell) {
+    let ((mut x, y), z) = unsafe {
+        (unsafe { (mut cell(mut a), cell(b)) }, cell(c))
+    }
+    x = y + z
+}
+
+#[test]
+fn split_demand_is_independent_of_spelling() {
+    {
+        var a = Cell { n: 0 }
+        let b = Cell { n: 7 }
+        implicit(mut a, b)
+        assert!(a.n == 7)
+        assert!(b.n == 7)
+    }
+    {
+        var a = Cell { n: 0 }
+        let b = Cell { n: 7 }
+        explicit(mut a, b)
+        assert!(a.n == 7)
+        assert!(b.n == 7)
+    }
+    {
+        var a = Cell { n: 0 }
+        let b = Cell { n: 7 }
+        reversed_implicit(mut a, b)
+        assert!(a.n == 7)
+        assert!(b.n == 7)
+    }
+    {
+        var a = Cell { n: 0 }
+        let b = Cell { n: 7 }
+        reversed_explicit(mut a, b)
+        assert!(a.n == 7)
+        assert!(b.n == 7)
+    }
+    {
+        var a = Cell { n: 0 }
+        let b = Cell { n: 7 }
+        let c = Cell { n: 11 }
+        nested_implicit(mut a, b, c)
+        assert!(a.n == 18)
+        assert!(b.n == 7)
+    }
+    {
+        var a = Cell { n: 0 }
+        let b = Cell { n: 7 }
+        let c = Cell { n: 11 }
+        nested_explicit(mut a, b, c)
+        assert!(a.n == 18)
+        assert!(b.n == 7)
+    }
+}
