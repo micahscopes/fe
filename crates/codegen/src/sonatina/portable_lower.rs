@@ -10167,6 +10167,10 @@ where
         self.native_value_from_leaves(class, ty, &leaves)
     }
 
+    /// Observe one whole value in semantic leaf order. Addressable value
+    /// parameters may occupy typed shader storage or the canonical arena;
+    /// their body plan, not their need for materialization, selects the loader.
+    /// Callers receive all leaves before storing into a possibly reused slot.
     fn local_flat_values(&mut self, local: RLocalId) -> Result<Vec<ValueId>, LowerError> {
         if self.native_aggregate_values.contains(&local) {
             let value = self.local_value(local)?;
@@ -10186,7 +10190,16 @@ where
             let shape = self.local_flat_shape(local)?;
             let pointer = self.local_value(local)?;
             let mut values = Vec::with_capacity(shape.leaf_count());
-            self.load_materialized_leaves(pointer, &class, &shape, &mut values)?;
+            if let Some(typed) = self.typed_private_locals.get(&local) {
+                if typed.pointee != class || self.fb.type_of(pointer) != typed.pointer_ty {
+                    return Err(LowerError::Internal(format!(
+                        "materialized value {local:?} disagrees with its typed-private plan"
+                    )));
+                }
+                self.load_typed_private_leaves(pointer, &class, &mut values)?;
+            } else {
+                self.load_materialized_leaves(pointer, &class, &shape, &mut values)?;
+            }
             return Ok(values);
         }
         if self.materialized_scalar_slots.contains(&local) {
@@ -10475,19 +10488,7 @@ where
                 let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
                     LowerError::Internal(format!("R2.1 tuple dst {dst:?} has no element vars"))
                 })?;
-                let values = if self.is_address_carried_aggregate_value(*src) {
-                    let pointer = self.local_value(*src)?;
-                    let source_class = self.body.value_class(*src).cloned().ok_or_else(|| {
-                        LowerError::Internal(format!(
-                            "materialized parameter {src:?} has no runtime class"
-                        ))
-                    })?;
-                    let mut values = Vec::with_capacity(src_shape.leaf_count());
-                    self.load_materialized_leaves(pointer, &source_class, &src_shape, &mut values)?;
-                    values
-                } else {
-                    self.local_flat_values(*src)?
-                };
+                let values = self.local_flat_values(*src)?;
                 if values.len() != dst_vars.len() {
                     return Err(LowerError::Internal(format!(
                         "R2.1 scalar-tree copy has {} source values but {} destination vars",
@@ -11823,15 +11824,7 @@ where
                 self.fb.insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, ty));
                 return Ok(());
             }
-            let leaves = if self.is_address_carried_aggregate_value(source) {
-                let shape = self.local_flat_shape(source)?;
-                let mut leaves = Vec::with_capacity(shape.leaf_count());
-                let source_pointer = self.local_value(source)?;
-                self.load_materialized_leaves(source_pointer, &source_class, &shape, &mut leaves)?;
-                leaves
-            } else {
-                self.local_flat_values(source)?
-            };
+            let leaves = self.local_flat_values(source)?;
             let mut cursor = 0usize;
             self.store_typed_private_leaves(pointer, &destination_class, &leaves, &mut cursor)?;
             if cursor != leaves.len() {
@@ -11902,6 +11895,11 @@ where
         shape: &FlatShape,
         values: &mut Vec<ValueId>,
     ) -> Result<(), LowerError> {
+        if self.fb.type_of(pointer) != Type::I32 {
+            return Err(LowerError::Internal(
+                "canonical-arena leaf load requires an i32 byte address".to_owned(),
+            ));
+        }
         match (class, shape) {
             (RuntimeClass::Scalar(_), FlatShape::Leaf(ty)) => {
                 values.push(self.load_memory_scalar(pointer, *ty));
@@ -12144,15 +12142,7 @@ where
             self.fb.insert_inst_no_result(Mstore::new(self.inst_set(), pointer, value, local.pointee_ty));
             return Ok(pointer);
         }
-        let leaves = if self.is_address_carried_aggregate_value(src) {
-            let shape = self.local_flat_shape(src)?;
-            let mut leaves = Vec::with_capacity(shape.leaf_count());
-            let source = self.local_value(src)?;
-            self.load_materialized_leaves(source, &class, &shape, &mut leaves)?;
-            leaves
-        } else {
-            self.local_flat_values(src)?
-        };
+        let leaves = self.local_flat_values(src)?;
         // Read every source leaf before a reused slot is overwritten. The
         // interval proof guarantees that the former component is dead here;
         // this ordering also preserves a final by-value copy from that slot.
@@ -14506,6 +14496,115 @@ pub fn kernel(_ seed: u32) -> u32 {
             [1, 1, 1],
         )
         .expect("the typed value-parameter alias should reach validated SPIR-V");
+    }
+
+    #[test]
+    fn shader_ir_copies_addressable_value_parameters_through_typed_storage() {
+        // Both parameters are addressable values, and borrowing a fresh copy
+        // for a helper call must read them through their typed storage plan.
+        // A bool followed by an array distinguishes typed field projection
+        // from the canonical arena's byte offsets. Branches exercise copies
+        // of both parameters; observing the originals detects aliasing.
+        let source = r#"
+use core::marker::Copy
+
+struct Words { enabled: bool, limbs: [u32; 4] }
+impl Copy for Words {}
+
+impl Words {
+    fn less(self, _ other: Self) -> bool {
+        self.limbs[0] < other.limbs[0]
+    }
+
+    fn added(self, _ other: Self) -> Self {
+        let mut result = self
+        let mut index: usize = 0
+        while index < 4 {
+            result.limbs[index] = self.limbs[index] + other.limbs[index]
+            index = index + 1
+        }
+        result
+    }
+
+    fn sum(self) -> u32 {
+        let mut result: u32 = 0
+        let mut index: usize = 0
+        while index < 4 {
+            result = result + self.limbs[index]
+            index = index + 1
+        }
+        result
+    }
+}
+
+fn combine(_ left: own Words, _ right: own Words) -> Words {
+    if left.enabled != right.enabled {
+        if left.less(right) { return right.added(left) }
+        return left.added(right)
+    }
+    left.added(right)
+}
+
+pub fn kernel(_ seed: u32) -> u32 {
+    let left = Words {
+        enabled: (seed & 1) != 0,
+        limbs: [seed + 4, seed + 1, seed + 2, seed + 3],
+    }
+    let right = Words {
+        enabled: (seed & 2) != 0,
+        limbs: [seed + (seed & 7), seed + 5, seed + 6, seed + 7],
+    }
+    let mut combined = combine(left, right)
+    combined.limbs[0] = combined.limbs[0] + 1
+    left.sum() + right.sum() + combined.sum()
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///shader_typed_value_parameter_copy.fe").unwrap();
+        db.workspace().touch(&mut db, url.clone(), Some(source.to_owned()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+        let (module, _) = compile_runtime_package_shader_ir(&db, &package)
+            .expect("addressable value copies should preserve their storage representation");
+        let report = sonatina_verifier::verify_module(
+            &module,
+            &sonatina_verifier::VerifierConfig::for_level(
+                sonatina_verifier::VerificationLevel::Full,
+            ),
+        );
+        assert!(!report.has_errors(), "invalid pre-optimization shader IR: {report}");
+        let copies = module.funcs().into_iter().find(|function|
+            module.ctx.func_sig(*function, |signature| signature.name() == "combine"))
+            .expect("copying helper should be present before optimization");
+        let typed_allocations = module.func_store.view(copies, |body| {
+            body.layout.iter_block().flat_map(|block| body.layout.iter_inst(block))
+                .filter(|inst| {
+                    <&Alloca as sonatina_ir::InstDowncast>::downcast(
+                        body.inst_set(), body.dfg.inst(*inst),
+                    ).is_some()
+                }).count()
+        });
+        assert!(typed_allocations >= 2, "both value parameters must exercise typed storage");
+        crate::sonatina::shader_driver::compile_runtime_package_spirv_with_workgroup(
+            &db, &package, [1, 1, 1],
+        ).expect("typed value copies should reach validated SPIR-V");
+
+        let bytes = crate::BackendKind::Wasm.create().compile(
+            &db, top_mod, crate::layout_for(crate::BackendKind::Wasm), crate::OptLevel::O0,
+        ).expect("canonical-arena value copies should retain the Wasm ABI")
+            .into_bytecode().expect("Wasm bytes");
+        let engine = wasmtime::Engine::default();
+        let wasm = wasmtime::Module::new(&engine, bytes).unwrap();
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &wasm, &[]).unwrap();
+        let kernel = instance.get_typed_func::<i32, i32>(&mut store, "kernel").unwrap();
+        for seed in [0, 1, 2, 3, 5, 6, 7, 42, 1000] {
+            assert_eq!(kernel.call(&mut store, seed).unwrap(), 16 * seed + 57 + 2 * (seed & 7),
+                "a returned copy must not mutate either original value (seed {seed})");
+        }
     }
 
     #[test]
