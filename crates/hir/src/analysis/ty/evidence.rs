@@ -655,13 +655,17 @@ fn implied_bound_evidence<'db>(
     assumptions: PredicateListId<'db>,
 ) -> Option<EvidenceId<'db>> {
     if let Evidence::Assumption(slot) = proof.data(db) {
-        let index = slot
-            .schema
-            .slots(db)
+        // `assumptions` is the applied goal view; the slot keeps its original
+        // declaration namespace through substitution.
+        let index = assumptions
+            .extend_all_bounds(db)
             .list(db)
             .iter()
             .position(|&bound| bound == goal)?;
-        return Some(slot.schema.assumption(db, index));
+        return Some(EvidenceId::new(
+            db,
+            Evidence::Assumption(slot.schema.slot(db, index)?),
+        ));
     }
     let Evidence::Impl {
         selected,
