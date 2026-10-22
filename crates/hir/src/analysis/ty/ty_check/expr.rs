@@ -802,6 +802,7 @@ impl<'db> TyChecker<'db> {
             self.db,
             def,
             parent_args,
+            None,
             info.captures
                 .iter()
                 .map(|capture| capture.ty)

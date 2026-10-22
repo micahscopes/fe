@@ -1252,6 +1252,9 @@ pub struct ClosureTy<'db> {
     /// template with these.
     #[return_ref]
     pub parent_args: Vec<TyId<'db>>,
+    /// Dictionaries captured when the enclosing body is instantiated. They
+    /// share the enclosing declaration's namespace, never its instance key.
+    pub bound_evidence: Option<super::evidence::BoundEvidence<'db>>,
     /// Environment field types, one per captured binding, in capture order.
     #[return_ref]
     pub captures: Vec<TyId<'db>>,

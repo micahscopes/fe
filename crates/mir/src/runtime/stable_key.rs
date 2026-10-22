@@ -724,8 +724,25 @@ pub fn type_identity<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
                     .map(|ty| type_identity(db, *ty))
                     .collect::<Vec<_>>()
                     .join("$");
+                let proofs = closure
+                    .bound_evidence(db)
+                    .map(|bound| {
+                        bound
+                            .entries
+                            .entries(db)
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, proof)| {
+                                proof.filter(|proof| proof.has_named_impl(db)).map(|proof| {
+                                    format!("{index}={}", evidence_id_identity(db, proof))
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                            .join("$")
+                    })
+                    .unwrap_or_default();
                 format!(
-                    "closure${owner}${}${:?}${tys}",
+                    "closure${owner}${}${:?}${tys}$proofs${proofs}",
                     def.expr.as_u32(),
                     closure.modes(db)
                 )

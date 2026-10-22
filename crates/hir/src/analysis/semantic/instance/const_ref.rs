@@ -534,7 +534,9 @@ fn semantic_callee_key_with_assumptions<'db>(
                 subst,
                 EffectProviderSubst::empty(db),
                 ImplEnv::empty(db, owner.scope()),
-                EvidenceList::none(db),
+                closure
+                    .bound_evidence(db)
+                    .map_or_else(|| EvidenceList::none(db), |bound| bound.entries),
             ),
         );
         let effect_pairs: Vec<_> = rows
@@ -584,7 +586,9 @@ fn semantic_callee_key_with_assumptions<'db>(
                 subst,
                 EffectProviderSubst::new(db, providers, Vec::new()),
                 ImplEnv::empty(db, owner.scope()),
-                EvidenceList::none(db),
+                closure
+                    .bound_evidence(db)
+                    .map_or_else(|| EvidenceList::none(db), |bound| bound.entries),
             ),
             concrete_dispatch: true,
             effect_pairs,

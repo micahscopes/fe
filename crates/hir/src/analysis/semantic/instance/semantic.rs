@@ -303,13 +303,22 @@ pub fn instantiated_typed_body<'db>(
         key.evidence(db),
         TraitSolveCx::new(db, key.impl_env(db).normalization_scope(db)),
     );
-    body.bind_evidence(
-        db,
-        crate::analysis::ty::evidence::BoundEvidence {
-            schema: body.bound_schema(),
-            entries: evidence,
-        },
-    );
+    let bound = crate::analysis::ty::evidence::BoundEvidence {
+        schema: body.bound_schema(),
+        entries: evidence,
+    };
+    body.bind_evidence(db, bound);
+    // A closure value carries its defining body's dictionaries through generic
+    // calls and returns. Creating a closure instance does not re-select them.
+    if let Some(defining_body) = body.body() {
+        body = body.fold_with(
+            db,
+            &mut CaptureClosureEvidence {
+                defining_body,
+                bound,
+            },
+        );
+    }
     // A body's row provider parameters are the providers its call binds.
     let owner = match key.owner(db) {
         BodyOwner::Closure { def, .. } => (def.body.scope(), Some(def.expr)),
@@ -331,6 +340,36 @@ pub fn instantiated_typed_body<'db>(
             providers: key.effect_providers(db).providers(db),
         },
     )
+}
+
+struct CaptureClosureEvidence<'db> {
+    defining_body: crate::hir_def::Body<'db>,
+    bound: crate::analysis::ty::evidence::BoundEvidence<'db>,
+}
+
+impl<'db> TyFolder<'db> for CaptureClosureEvidence<'db> {
+    fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+        let ty = ty.super_fold_with(db, self);
+        let Some(closure) = ty
+            .as_closure(db)
+            .filter(|closure| closure.def(db).body == self.defining_body)
+        else {
+            return ty;
+        };
+        TyId::closure(
+            db,
+            crate::analysis::ty::ty_def::ClosureTy::new(
+                db,
+                closure.def(db),
+                closure.parent_args(db).clone(),
+                Some(self.bound),
+                closure.captures(db).clone(),
+                closure.params(db).clone(),
+                closure.ret_ty(db),
+                closure.effects(db).clone(),
+            ),
+        )
+    }
 }
 
 struct RowProviderSubst<'a, 'db> {

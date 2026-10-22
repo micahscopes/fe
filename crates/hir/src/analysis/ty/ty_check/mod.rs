@@ -91,7 +91,7 @@ use super::{
     },
     effects::{EffectKeyKind, ResolvedEffectKey, resolve_effect_key, rows::RowPath},
     evidence::{
-        BoundEvidence, BoundOwner, BoundSchemaId, Evidence, EvidenceId, EvidenceList, UseEvidence,
+        BoundEvidence, BoundOwner, BoundSchemaId, Evidence, EvidenceList, UseEvidence,
         declared_bound_evidence, impl_const_bound_evidence, instantiated_selection,
     },
     generic_defaults::{GenericDefault, default_assumptions, generic_default},
