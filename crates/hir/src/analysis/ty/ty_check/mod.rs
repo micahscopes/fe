@@ -2647,7 +2647,7 @@ impl<'db> TyChecker<'db> {
 
                         if let [candidate] = viable.as_slice() {
                             if self.env.callable_expr(pending.expr).is_none() {
-                                self.env.enter_call_site(&pending.site);
+                                let enclosing_choices = self.env.enter_call_site(&pending.site);
                                 'resolve: {
                                     let call_span = pending.expr.span(body);
                                     let inst = candidate.inst;
@@ -2757,7 +2757,7 @@ impl<'db> TyChecker<'db> {
                                         self.env.register_semantic_call(pending.expr, callable);
                                     }
                                 }
-                                self.env.leave_call_site();
+                                self.env.leave_call_site(enclosing_choices);
                             }
 
                             progressed = true;
@@ -2799,6 +2799,7 @@ impl<'db> TyChecker<'db> {
         let scope = self.env.scope();
         let assumptions = self.env.assumptions();
         let snap = self.snapshot_state();
+        let enclosing_choices = std::mem::replace(&mut self.env.choices, pending.site.choices);
 
         let viability = (|| {
             let inst = candidate.inst;
@@ -2885,6 +2886,7 @@ impl<'db> TyChecker<'db> {
             }
         })();
         self.rollback_state(snap);
+        self.env.choices = enclosing_choices;
         viability
     }
 
