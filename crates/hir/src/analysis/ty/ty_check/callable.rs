@@ -104,7 +104,9 @@ impl<'db> TyVisitable<'db> for EffectProviderSpecialization<'db> {
         V: TyVisitor<'db> + ?Sized,
     {
         self.provider.visit_with(visitor);
-        self.checked_target.visit_with(visitor);
+        if let Some(target) = self.checked_target {
+            target.visit_with(visitor);
+        }
         if let EffectProviderProvenance::Binding { binding, .. } = self.provenance {
             binding.visit_with(visitor);
         }

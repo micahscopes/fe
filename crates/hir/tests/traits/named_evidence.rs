@@ -811,6 +811,6 @@ fn root() {
 }
 "#;
     let failure = diagnostics(source);
-    assert!(failure.contains(&"6-0004".to_string()), "{failure:?}");
+    assert!(failure.contains(&"6-0003".to_string()), "{failure:?}");
     assert!(diagnostics(&source.replace("with (Broken<Arg>) { write() }", "write()")).is_empty());
 }

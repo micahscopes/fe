@@ -793,7 +793,9 @@ impl<'db> TyVisitable<'db> for EvidenceId<'db> {
                 binding.goal.visit_with(visitor);
                 binding.provider.visit_with(visitor);
                 binding.target.visit_with(visitor);
-                binding.base.visit_with(visitor);
+                if let Some(base) = binding.base {
+                    base.visit_with(visitor);
+                }
             }
             Evidence::DeferredSolCodec { goal, .. } => goal.visit_with(visitor),
             Evidence::Assumption(slot) => slot.applied.visit_with(visitor),
