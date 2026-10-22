@@ -50,7 +50,12 @@ fn output(source: &str, target: &str) -> String {
     let file = db.new_stand_alone("richer-review.fe".into(), source);
     db.generation_inputs().set_requests(&mut db).to(vec![plan]);
     let (module, _) = db.top_mod(file);
-    format_diagnostics(&db, &db.run_on_top_mod(module))
+    let mut diagnostics = format_diagnostics(&db, &db.run_on_top_mod(module));
+    for error in fe_hir::lower::generation_lowering_errors(&db, module) {
+        diagnostics.push_str(&error.message);
+        diagnostics.push('\n');
+    }
+    diagnostics
 }
 
 const PRELUDE: &str = "use core::meta::{Code, Item, Record, Expr, Pat, field, field_type, type_is, field_count, variant_count, variant}\nstruct Pair { value: u256 }\n";
@@ -159,14 +164,14 @@ fn pattern_only_fragments_copy_into_generated_bindings() {
 #[test]
 fn member_splices_keep_their_producer_and_method_generic_binders() {
     let source = format!("{PRELUDE}
-        mod author {{ use core::meta::{{Code, Item}}\n
+        mod author {{ use core::meta::{{Code, Item}}\n pub trait Number {{ const fn number() -> u256 }}\n impl Number for u256 {{ const fn number() -> u256 {{ 42 }} }}\n
             const fn private_value() -> u256 {{ 42 }}\n
-            pub const fn methods() -> Code<Item> {{ quote {{ const fn selected<T>(_ x: T) -> u256 {{ private_value() }} }} }}
+            pub const fn methods() -> Code<Item> {{ quote {{ const fn selected<T>(_ x: T) -> u256 {{ private_value() }}\n const fn projected<T: Number>() -> u256 {{ T::number() }} }} }}
         }}
         const fn private_value() -> u256 {{ 999 }}
         const fn make(_ record: Record) -> Code<Item> {{ let methods = author::methods()\n
             quote {{ impl Pair {{ ${{methods}} }}\n
-                const fn generated() -> u256 {{ Pair::selected(7) }} }}
+                const fn generated() -> u256 {{ Pair::selected(7) + Pair::projected<u256>() - 42 }} }}
         }}");
     let plan = request(&source, "Pair").unwrap();
     let mut db = HirAnalysisTestDb::default();
@@ -174,6 +179,7 @@ fn member_splices_keep_their_producer_and_method_generic_binders() {
     db.generation_inputs().set_requests(&mut db).to(vec![plan]);
     let (module, _) = db.top_mod(file);
     db.assert_no_diags(module);
+    assert!(fe_hir::lower::generation_lowering_errors(&db, module).is_empty());
     let owner = BodyOwner::Func(find_func(&db, module, "generated"), None);
     let outcome = fe_hir::analysis::semantic::eval_body_owner_const(
         &db,
