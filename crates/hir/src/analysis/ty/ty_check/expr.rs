@@ -2551,12 +2551,12 @@ impl<'db> TyChecker<'db> {
                     };
 
                     if req.required_mut
-                        && let Some(binding) = provider.binding
-                        && let LocalBinding::EffectParam {
+                        && let Some(LocalBinding::EffectParam {
                             site: EffectParamSite::Closure(closure),
+                            idx,
                             ..
-                        } = binding
-                        && !self.env.require_mut_closure_effect(binding)
+                        }) = provider.binding
+                        && !self.env.require_mut_closure_effect(closure, idx)
                     {
                         self.push_diag(BodyDiag::LateClosureEffect {
                             primary: call_span.clone(),
@@ -2747,10 +2747,19 @@ impl<'db> TyChecker<'db> {
                     ),
                     GoalSatisfiability::UnSat(_)
                 ) => {}
-                None => self.push_diag(BodyDiag::MissingRow {
-                    primary: call_span.clone(),
-                    func,
-                    row,
+                None => self.push_diag(match self.env.late_closure() {
+                    Some(closure) => BodyDiag::LateClosureEffect {
+                        primary: call_span.clone(),
+                        func,
+                        key: requirement.binding_ty,
+                        is_mut: requirement.is_mut,
+                        closure: closure.expr.span(body).into(),
+                    },
+                    None => BodyDiag::MissingRow {
+                        primary: call_span.clone(),
+                        func,
+                        row,
+                    },
                 }),
             }
         }
@@ -2816,7 +2825,7 @@ impl<'db> TyChecker<'db> {
         row: RowKey<'db>,
     ) -> Option<(LocalBinding<'db>, RowPath)> {
         // In a closure's body, a row is a component of the closure's row.
-        if self.env.in_closure() {
+        if self.env.in_closure() || self.env.late_closure().is_some() {
             let (binding, _) = self.env.closure_effect(
                 SemanticEffectRequirementKey::Row(row),
                 requirement.binding_name,
