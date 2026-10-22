@@ -139,3 +139,21 @@ fn quotation_open_binders_and_splice_comments_survive_formatting() {
         formatted
     );
 }
+
+#[test]
+fn named_impl_alias_survives_formatting_and_reparsing() {
+    use parser::{
+        RecoveryMode, SyntaxNode,
+        ast::{ImplTrait, prelude::AstNode},
+        parse_source_file,
+    };
+    let source = "impl<T> Produce for Wrapper<T> as Alt where T: Bound{type Output=u64}";
+    let config = crate::Config::default();
+    let formatted = crate::format_str(source, &config).unwrap();
+    let (green, errors) = parse_source_file(&formatted, RecoveryMode::Recover);
+    assert!(errors.is_empty(), "{errors:?}");
+    let root = SyntaxNode::new_root(green);
+    let item = root.descendants().find_map(ImplTrait::cast).unwrap();
+    assert_eq!(item.selection_name().unwrap().text(), "Alt");
+    assert_eq!(crate::format_str(&formatted, &config).unwrap(), formatted);
+}

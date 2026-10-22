@@ -442,7 +442,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         if place
             .path
             .iter()
-            .any(|projection| matches!(projection, Projection::Entry(_)))
+            .any(|projection| matches!(projection, Projection::Entry(..)))
         {
             return Vec::new();
         }

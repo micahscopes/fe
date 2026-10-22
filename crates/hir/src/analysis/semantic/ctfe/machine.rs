@@ -3173,7 +3173,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                         message: "analysis wildcard index is not valid in CTFE".into(),
                     });
                 }
-                Projection::Entry(_) => {
+                Projection::Entry(..) => {
                     return Err(CtfeError::InvalidOperation {
                         origin,
                         message: "an entry of a storage collection is not available in CTFE".into(),
