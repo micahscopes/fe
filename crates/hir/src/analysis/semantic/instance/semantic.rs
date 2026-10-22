@@ -495,12 +495,18 @@ pub fn instantiated_typed_body<'db>(
     };
     let evidence = match key.evidence_state(db) {
         InstanceEvidence::Closed(closed) => closed.proofs(db),
-        InstanceEvidence::Residual { .. } => instance_evidence(
+        InstanceEvidence::Residual { .. } => match instance_evidence(
             db,
             goals,
             supplied,
             TraitSolveCx::new(db, key.impl_env(db).normalization_scope(db)),
-        ),
+        ) {
+            Some(evidence) => evidence,
+            None => {
+                body.invalidate_evidence();
+                return body;
+            }
+        },
     };
     let bound = crate::analysis::ty::evidence::BoundEvidence {
         schema: body.bound_schema(),

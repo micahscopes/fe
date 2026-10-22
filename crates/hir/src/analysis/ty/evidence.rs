@@ -1366,43 +1366,33 @@ pub(crate) fn impl_const_bound_evidence<'db>(
     Some(instantiate_proofs(db, proofs, subst, supplied))
 }
 
-/// The evidence an instance runs with: its key's proofs, `supplied`, of the
-/// assumptions its body is checked under, instantiated as `goals`, with a
-/// proof in `solve_cx` of each closed goal `supplied` gives no closed proof
-/// of. Closed supplied proofs are authoritative. A residual assumption from
-/// another body cannot be used as an instance dictionary.
+/// Bind a residual instance without replacing any supplied proof. Only absent
+/// slots may receive ordinary proofs. Failure of an explicitly deferred leaf
+/// fails the entire binding instead of becoming another absent slot.
 #[salsa::tracked]
 pub(crate) fn instance_evidence<'db>(
     db: &'db dyn HirAnalysisDb,
     goals: PredicateListId<'db>,
     supplied: EvidenceList<'db>,
     solve_cx: TraitSolveCx<'db>,
-) -> EvidenceList<'db> {
-    EvidenceList::of(
-        db,
-        goals
-            .list(db)
-            .iter()
-            .enumerate()
-            .map(|(index, &goal)| {
-                let supplied = supplied.get(db, index);
-                if let Some(proof) = supplied
-                    && proof.has_deferred(db)
-                {
-                    // A selected parent is authoritative even if one retained
-                    // obligation cannot close. Never replace that tree.
-                    let completed = complete_deferred_evidence(db, proof)?;
-                    return Some(completed);
-                }
-                match supplied {
+) -> Option<EvidenceList<'db>> {
+    let supplied = supplied.complete_deferred(db)?;
+    Some(
+        EvidenceList::of(
+            db,
+            goals
+                .list(db)
+                .iter()
+                .enumerate()
+                .map(|(index, &goal)| match supplied.get(db, index) {
                     Some(proof) => Some(proof),
                     None if is_closed_goal(db, goal) => prove(db, solve_cx, goal),
                     None => None,
-                }
-            })
-            .collect(),
+                })
+                .collect(),
+        )
+        .with_rows(db, supplied.rows(db).clone()),
     )
-    .with_rows(db, supplied.rows(db).clone())
 }
 
 fn prove_cycle_initial<'db>(
@@ -1466,6 +1456,41 @@ fn context() where Item: Pick {}
             ordinary.selected().origin(&db),
             ImplementorOrigin::Hir(_)
         ));
+    }
+
+    #[test]
+    fn failed_owned_completion_cannot_become_an_absent_instance_slot() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "failed_owned_completion.fe".into(),
+            "trait Missing {} fn context<T: Missing>() {}",
+        );
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        let func = find_func(&db, module, "context");
+        let subst = CompleteSubst::for_owner(&db, func.into(), vec![TyId::bool(&db)]).unwrap();
+        let goals = substitute_complete(&db, func_signature(&db, func, None), &subst).unwrap();
+        let goal = goals.list(&db)[0];
+        // A deliberately failing owned leaf tests the failure boundary; it is
+        // not a claim that the codec producer emits this unrelated trait goal.
+        let leaf = EvidenceId::new(
+            &db,
+            Evidence::DeferredSolCodec {
+                goal,
+                scope: func.scope(),
+            },
+        );
+        let solve = TraitSolveCx::new(&db, func.scope());
+        assert_eq!(
+            instance_evidence(&db, goals, EvidenceList::of(&db, vec![Some(leaf)]), solve),
+            None
+        );
+        let absent = instance_evidence(&db, goals, EvidenceList::none(&db), solve).unwrap();
+        assert_eq!(
+            absent.get(&db, 0),
+            None,
+            "genuinely absent schematic obligations stay absent"
+        );
     }
 
     #[test]
