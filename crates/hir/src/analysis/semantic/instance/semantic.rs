@@ -57,7 +57,9 @@ use crate::{
             ty_lower::{ParamSchemaId, SubstError},
         },
     },
-    hir_def::{CallableDef, Contract, ExprId, FuncParamMode, StmtId, scope_graph::ScopeId},
+    hir_def::{
+        CallableDef, Contract, ExprId, FuncParamMode, HirIngot, StmtId, scope_graph::ScopeId,
+    },
     semantic::{
         EffectEnvView, EffectRequirement, EffectRequirementKey, ProviderBinding, ProviderSource,
         ResolvedEffectBinding, effect_param_provider_semantics, effect_requirements_for_site,
@@ -201,32 +203,44 @@ impl<'db> SemanticInstanceKey<'db> {
         ))
     }
 
-    /// Context rebasing cannot reopen a closed instance or lose its dispatch.
-    pub(crate) fn with_impl_env(
+    /// Rebase a retained constant use without reopening its selected proof.
+    /// Closed instances retain their proved facts; only their origin changes.
+    pub(crate) fn rebase_const_context(
         self,
         db: &'db dyn HirAnalysisDb,
         environment: ImplEnv<'db>,
     ) -> Self {
-        let InstanceEvidence::Residual {
-            reason,
-            supplied,
-            dispatch,
-            ..
-        } = self.evidence_state(db)
-        else {
-            return self;
+        let state = match self.evidence_state(db) {
+            InstanceEvidence::Closed(closed) => InstanceEvidence::Closed(ClosedBodyEvidence::new(
+                db,
+                closed.schema(db),
+                closed.goals(db),
+                closed.proofs(db),
+                closed.dispatch(db),
+                environment
+                    .normalization_scope(db)
+                    .ingot(db)
+                    .root_mod(db)
+                    .scope(),
+            )),
+            InstanceEvidence::Residual {
+                reason,
+                supplied,
+                dispatch,
+                ..
+            } => InstanceEvidence::Residual {
+                reason,
+                environment,
+                supplied,
+                dispatch,
+            },
         };
         Self::new(
             db,
             self.owner(db),
             self.subst(db),
             self.effect_providers(db),
-            InstanceEvidence::Residual {
-                reason,
-                environment,
-                supplied,
-                dispatch,
-            },
+            state,
         )
     }
 

@@ -821,7 +821,7 @@ impl<'db> TyFolder<'db> for RebaseConstUseEnv<'db> {
         // copy of its provenance. Preserve the selected body and witnesses.
         let env = key.impl_env(db);
         let key = key
-            .with_impl_env(
+            .rebase_const_context(
                 db,
                 ImplEnv::new(
                     db,
@@ -837,7 +837,7 @@ impl<'db> TyFolder<'db> for RebaseConstUseEnv<'db> {
             key.owner(db).scope(),
             mentioned_params(db, &key),
         );
-        key.with_impl_env(
+        key.rebase_const_context(
             db,
             ImplEnv::new(
                 db,

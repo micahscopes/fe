@@ -90,7 +90,7 @@ impl<'db> ConstInvocation<'db> {
             && scope == scope.ingot(db).root_mod(db).scope()
         {
             let owner = key.owner(db);
-            key.with_impl_env(
+            key.rebase_const_context(
                 db,
                 ImplEnv::empty(db, owner.scope().ingot(db).root_mod(db).scope()),
             )

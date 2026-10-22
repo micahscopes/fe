@@ -130,7 +130,7 @@ fn close_request<'db>(
     }
     if let Some(site) = crate::analysis::semantic::effect_param_site(input.owner)
         && crate::semantic::EffectEnvView::new(site)
-            .providers(db)
+            .resolutions(db)
             .iter()
             .any(|expected| {
                 !input
@@ -334,6 +334,79 @@ mod tests {
                 "body expression {expr:?}"
             );
         }
+    }
+
+    #[test]
+    fn closed_facts_shadow_constant_origin_is_canonical_but_runtime_origin_is_not() {
+        use crate::analysis::ty::const_expr::ConstInvocation;
+        use crate::test_db::find_func;
+        use common::{InputDb, stdlib::HasBuiltinCore};
+
+        let mut db = HirAnalysisTestDb::default();
+        db.initialize_builtin_core();
+        let mut files = Vec::new();
+        for (name, manifest, source) in [
+            ("library", "", "pub const fn target() -> usize { 2 }"),
+            (
+                "first",
+                "[dependencies]\nlibrary = { path = \"../library\" }",
+                "fn caller() -> usize { library::target() }",
+            ),
+            (
+                "second",
+                "[dependencies]\nlibrary = { path = \"../library\" }",
+                "fn caller() -> usize { library::target() }",
+            ),
+        ] {
+            db.workspace().touch(
+                &mut db,
+                format!("file:///closed-const-origin/{name}/fe.toml")
+                    .parse()
+                    .unwrap(),
+                Some(format!(
+                    "[ingot]\nname = \"{name}\"\nversion = \"0.1.0\"\n{manifest}\n"
+                )),
+            );
+            files.push(
+                db.workspace().touch(
+                    &mut db,
+                    format!("file:///closed-const-origin/{name}/src/lib.fe")
+                        .parse()
+                        .unwrap(),
+                    Some(source.into()),
+                ),
+            );
+        }
+        let keys = files[1..]
+            .iter()
+            .map(|&file| {
+                let (module, _) = db.top_mod(file);
+                db.assert_no_diags(module);
+                let root = root_semantic_instance_key(
+                    &db,
+                    BodyOwner::func(&db, find_func(&db, module, "caller")),
+                )
+                .unwrap();
+                get_or_build_semantic_instance(&db, root).callees(&db)[0].key
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(
+            keys[0], keys[1],
+            "runtime library lookup retains its caller ingot"
+        );
+        assert!(keys.iter().all(|key| matches!(
+            key.evidence_state(&db),
+            super::super::semantic::InstanceEvidence::Closed(_)
+        )));
+        let terms = keys
+            .iter()
+            .map(|&key| ConstInvocation::new(&db, key, Vec::new()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terms[0], terms[1],
+            "the same constant call has one cross-ingot identity"
+        );
+        assert_eq!(terms[0].key.evidence(&db), keys[0].evidence(&db));
     }
 
     #[test]
