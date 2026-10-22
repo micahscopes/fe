@@ -818,11 +818,13 @@ fn tree_sitter_agrees_on_pattern_only_quotation_bodies() {
         let errors = parse_errors(&mut parser, &source);
         assert!(errors.is_empty(), "{source}: {errors:?}");
         let tree = parser.parse(&source, None).unwrap();
-        assert!(
-            tree.root_node().to_sexp().contains("quote_pattern"),
-            "{source}: {}",
-            tree.root_node().to_sexp()
-        );
+        if matches!(pattern, "_" | "..") {
+            assert!(
+                tree.root_node().to_sexp().contains("quote_pattern"),
+                "{source}: {}",
+                tree.root_node().to_sexp()
+            );
+        }
     }
     let source = "const fn make() { let p = quote { _ => 7 } }";
     let (_, errors) = parse_source_file(source, RecoveryMode::NoRecover);
@@ -830,4 +832,20 @@ fn tree_sitter_agrees_on_pattern_only_quotation_bodies() {
     assert!(parse_errors(&mut parser, source).is_empty());
     let tree = parser.parse(source, None).unwrap();
     assert!(tree.root_node().to_sexp().contains("match_arm_list"));
+}
+
+#[test]
+fn tree_sitter_agrees_on_reflected_declaration_names_and_trait_member_splices() {
+    let mut parser = new_parser();
+    for source in [
+        "const fn make() { quote { fn ${name}() -> u256 { 7 } } }",
+        "const fn make() { quote { const ${name}: u256 = 3\n impl Pair { const ${name}: u256 = 9 } } }",
+        "const fn make() { quote { fn generated() { trait Local { ${declaration} }\n impl Local for Pair { ${definition} } } } }",
+        "const fn make() { quote { fn generated() { trait Local { const ${name}: u256 }\n impl Local for Pair { const ${name}: u256 = 5 } } } }",
+    ] {
+        let (_, errors) = parse_source_file(source, RecoveryMode::NoRecover);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let errors = parse_errors(&mut parser, source);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+    }
 }

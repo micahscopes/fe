@@ -173,7 +173,7 @@ module.exports = grammar({
       optional($.attribute_list),
       optional($.visibility),
       'const',
-      field('name', $.identifier),
+      field('name', choice($.identifier, $.quote_splice)),
       ':',
       field('type', $._type),
       '=',
@@ -196,7 +196,7 @@ module.exports = grammar({
       optional('unsafe'),
       optional('const'),
       'fn',
-      field('name', $.identifier),
+      field('name', choice($.identifier, $.quote_splice)),
       optional($.generic_param_list),
       $.parameter_list,
       optional(seq('->', field('return_type', $._type))),
@@ -485,6 +485,7 @@ module.exports = grammar({
         $.trait_type_item,
         $.trait_const_item,
         $.trait_uses_item,
+        $.quote_splice,
       )),
       '}',
     ),
@@ -508,7 +509,7 @@ module.exports = grammar({
     trait_const_item: $ => seq(
       optional($.attribute_list),
       'const',
-      field('name', $.identifier),
+      field('name', choice($.identifier, $.quote_splice)),
       ':',
       field('type', $._type),
       optional(seq('=', field('value', $._expression))),
@@ -520,7 +521,7 @@ module.exports = grammar({
       optional($.attribute_list),
       optional($.visibility),
       'const',
-      field('name', $.identifier),
+      field('name', choice($.identifier, $.quote_splice)),
       ':',
       field('type', $._type),
       optional(seq('=', field('value', $._expression))),
@@ -1245,12 +1246,9 @@ module.exports = grammar({
       field('body', choice($.block, $.quote_pattern, $.quote_where, $.match_arm_list)),
     ),
 
-    quote_pattern: $ => prec(1, seq(
-      '{',
-      choice($.wildcard_pattern, $.rest_pattern, $.mut_pattern,
-        $.maybe_mut_pattern, $.ref_pattern, $.var_pattern),
-      '}',
-    )),
+    // Mode-headed patterns already fit the block token grammar. These two
+    // pattern heads cannot form expressions and need an explicit body rule.
+    quote_pattern: $ => seq('{', choice($.wildcard_pattern, $.rest_pattern), '}'),
 
     quote_where: $ => seq('{', $.where_clause, '}'),
 
