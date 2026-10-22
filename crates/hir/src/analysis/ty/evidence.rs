@@ -1172,3 +1172,58 @@ fn prove_cycle_recover<'db>(
 ) -> salsa::CycleRecoveryAction<ProofOutcome<'db>> {
     salsa::CycleRecoveryAction::Iterate
 }
+
+#[cfg(test)]
+mod schema_tests {
+    use super::super::ty_def::TyId;
+    use super::*;
+    use crate::test_db::{HirAnalysisTestDb, find_func};
+
+    #[test]
+    fn implied_projection_keeps_declaration_slot_after_parameter_collapse() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "schema_collapse.fe".into(),
+            r#"
+trait A {}
+trait Base {}
+trait Sub: Base {}
+fn context<T: A, U: A, V: Sub>() {}
+"#,
+        );
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        let func = find_func(&db, module, "context");
+        let signature = func_signature(&db, func, None);
+        assert_eq!(signature.list(&db).len(), 4);
+        let schema = BoundSchemaId::new(&db, Some(BodyOwner::func(&db, func)), signature);
+        let original = schema.assumption(&db, 2);
+        let subst = CompleteSubst::for_owner(
+            &db,
+            func.into(),
+            vec![TyId::u256(&db), TyId::u256(&db), TyId::bool(&db)],
+        )
+        .unwrap();
+        let applied = substitute_complete(&db, signature, &subst).unwrap();
+        let supplied = substitute_complete(&db, original, &subst).unwrap();
+        let goal = applied.list(&db)[3];
+        let deduplicated = applied.extend_all_bounds(&db);
+        assert_eq!(deduplicated.list(&db).len(), 3);
+        assert_eq!(
+            deduplicated
+                .list(&db)
+                .iter()
+                .position(|&candidate| candidate == goal),
+            Some(2)
+        );
+        let projected = implied_bound_evidence(&db, supplied, goal, deduplicated).unwrap();
+        let Evidence::Assumption(slot) = projected.data(&db) else {
+            panic!("projected slot")
+        };
+        assert_eq!(slot.schema, schema);
+        assert_eq!(
+            slot.index, 3,
+            "applied-list position must not address the declaration schema"
+        );
+    }
+}
