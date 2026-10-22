@@ -39,8 +39,9 @@ use crate::{
 };
 
 /// The namespace of assumption slots. Declaration ownership does not depend on
-/// an instance key; goals are a view that folds alongside the corresponding body.
-/// `None` is a proof producer's temporary predicate basis, not a checked body.
+/// an instance key. Slots describe the declaration layout; instantiated goals
+/// live in the body's signature, not in this namespace. `None` is a proof
+/// producer's temporary predicate basis, not a checked body.
 #[salsa::interned]
 #[derive(Debug)]
 pub struct BoundSchemaId<'db> {
@@ -65,14 +66,6 @@ impl<'db> BoundSchemaId<'db> {
             db,
             Evidence::Assumption(self.slot(db, index).expect("bound slot")),
         )
-    }
-}
-
-impl<'db> TyFoldable<'db> for BoundSchemaId<'db> {
-    fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
-        // Owner is declaration identity. In particular an anonymous constant's
-        // expected domain is not replaced with an instance-specific owner.
-        Self::new(db, self.owner(db), self.slots(db).fold_with(db, folder))
     }
 }
 
@@ -466,13 +459,8 @@ impl<'db> TyFoldable<'db> for EvidenceId<'db> {
                     scope: *scope,
                 },
             ),
-            Evidence::Assumption(slot) => EvidenceId::new(
-                db,
-                Evidence::Assumption(BoundSlotRef {
-                    schema: slot.schema.fold_with(db, folder),
-                    index: slot.index,
-                }),
-            ),
+            // A bound slot is a declaration address, not an applied goal.
+            Evidence::Assumption(_) => self,
         }
     }
 }
@@ -1047,11 +1035,8 @@ fn instantiate_proofs<'db>(
     subst: &CompleteSubst<'db>,
     supplied: EvidenceList<'db>,
 ) -> EvidenceList<'db> {
-    let Ok(schema) = substitute_complete(db, adaptation.source, subst) else {
-        return EvidenceList::none(db);
-    };
     let supplied = BoundEvidence {
-        schema,
+        schema: adaptation.source,
         entries: supplied,
     };
     EvidenceList::of(

@@ -4970,7 +4970,6 @@ impl<'db> TyFoldable<'db> for TypedBody<'db> {
         let mut this = Arc::unwrap_or_clone(self.tables);
         this.result_ty = this.result_ty.fold_with(db, folder);
         this.signature = this.signature.fold_with(db, folder);
-        this.bound_schema = this.bound_schema.fold_with(db, folder);
         this.assumptions = this.assumptions.fold_with(db, folder);
         this.pat_ty
             .values_mut()
