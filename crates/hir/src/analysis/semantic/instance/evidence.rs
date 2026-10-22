@@ -34,6 +34,8 @@ pub enum ResidualEvidence {
     ProofGoalMismatch,
     GenericOrProjectedInput,
     GenericOrProjectedGoal,
+    GenericOrProjectedProof,
+    UnboundEffectProviders,
     MissingOrdinaryProof,
     UnboundSuppliedProof,
     DeferredCompletion,
@@ -126,6 +128,20 @@ fn close_request<'db>(
     if !input.supplied.matches_schema(db, schema) {
         return Err(ResidualEvidence::DestinationSchema);
     }
+    if let Some(site) = crate::analysis::semantic::effect_param_site(input.owner)
+        && crate::semantic::EffectEnvView::new(site)
+            .providers(db)
+            .iter()
+            .any(|expected| {
+                !input
+                    .providers
+                    .providers(db)
+                    .iter()
+                    .any(|supplied| supplied.provider_idx == expected.provider_idx)
+            })
+    {
+        return Err(ResidualEvidence::UnboundEffectProviders);
+    }
     if !ground(
         collect_flags(db, input.subst.generic_args(db))
             | collect_flags(db, input.providers.providers(db).as_slice()),
@@ -162,35 +178,35 @@ fn close_request<'db>(
                 Some(proof) => proof,
                 None => prove(db, ordinary, goal).ok_or(ResidualEvidence::MissingOrdinaryProof)?,
             };
-            if !proof.is_closed(db) || !ground(collect_flags(db, proof)) {
+            if !ground(collect_flags(db, proof)) {
+                return Err(ResidualEvidence::GenericOrProjectedProof);
+            }
+            if !proof.is_closed(db) {
                 return Err(ResidualEvidence::UnboundSuppliedProof);
             }
             validate_closed_proof(db, proof, goal, scope)?;
             Ok(Some(proof))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if supplied.rows(db).iter().any(|row| {
-        !ground(collect_flags(db, row.goal))
-            || !row
-                .proof
-                .is_some_and(|proof| proof.is_closed(db) && ground(collect_flags(db, proof)))
-    }) {
-        return Err(ResidualEvidence::UnboundSuppliedProof);
-    }
     for row in supplied.rows(db) {
-        validate_closed_proof(
-            db,
-            row.proof.ok_or(ResidualEvidence::UnboundSuppliedProof)?,
-            row.goal,
-            scope,
-        )?;
+        let proof = row.proof.ok_or(ResidualEvidence::UnboundSuppliedProof)?;
+        if !ground(collect_flags(db, row.goal) | collect_flags(db, proof)) {
+            return Err(ResidualEvidence::GenericOrProjectedProof);
+        }
+        if !proof.is_closed(db) {
+            return Err(ResidualEvidence::UnboundSuppliedProof);
+        }
+        validate_closed_proof(db, proof, row.goal, scope)?;
     }
     let dispatch = input
         .dispatch
         .map(|dispatch| {
             let goal = normalize_ty(db, dispatch.goal, scope, context_facts);
             let proof = normalize_ty(db, dispatch.proof, scope, context_facts);
-            if !ground(collect_flags(db, goal) | collect_flags(db, proof)) || !proof.is_closed(db) {
+            if !ground(collect_flags(db, goal) | collect_flags(db, proof)) {
+                return Err(ResidualEvidence::GenericOrProjectedProof);
+            }
+            if !proof.is_closed(db) {
                 return Err(ResidualEvidence::UnboundSuppliedProof);
             }
             validate_closed_proof(db, proof, goal, scope)?;
@@ -431,7 +447,10 @@ mod tests {
             if !closed.goals(&db).list(&db).is_empty() {
                 let leaf = EvidenceId::new(
                     &db,
-                    Evidence::Assumption(closed.schema(&db).slot(&db, 0).unwrap()),
+                    Evidence::Assumption(crate::analysis::ty::evidence::BoundSlotRef {
+                        applied: closed.goals(&db),
+                        ..closed.schema(&db).slot(&db, 0).unwrap()
+                    }),
                 );
                 let supplied = EvidenceList::of(&db, vec![Some(leaf)]);
                 assert_eq!(

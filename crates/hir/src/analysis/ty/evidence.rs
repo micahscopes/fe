@@ -1395,13 +1395,10 @@ pub(crate) fn instance_evidence<'db>(
                     // A selected parent is authoritative even if one retained
                     // obligation cannot close. Never replace that tree.
                     let completed = complete_deferred_evidence(db, proof)?;
-                    return (!is_closed_goal(db, goal) || completed.is_closed(db))
-                        .then_some(completed);
+                    return Some(completed);
                 }
                 match supplied {
-                    Some(proof) => {
-                        (!is_closed_goal(db, goal) || proof.is_closed(db)).then_some(proof)
-                    }
+                    Some(proof) => Some(proof),
                     None if is_closed_goal(db, goal) => prove(db, solve_cx, goal),
                     None => None,
                 }

@@ -2587,6 +2587,8 @@ pub fn identity_semantic_instance_key<'db>(
         ImplEnv::empty(db, owner.scope()),
         EvidenceList::none(db),
     )
+    .finalize_evidence(db, UseEvidence::default())
+    .expect("ordinary identity evidence must agree with its declaration")
 }
 
 #[salsa::tracked]
