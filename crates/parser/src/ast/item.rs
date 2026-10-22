@@ -88,6 +88,11 @@ impl FuncSignature {
         support::token(self.syntax(), SK::Ident)
     }
 
+    /// `${n}` in place of the name inside a quotation.
+    pub fn name_hole(&self) -> Option<super::QuoteHole> {
+        support::child(self.syntax())
+    }
+
     /// Returns the function's parameter list.
     pub fn params(&self) -> Option<super::FuncParamList> {
         support::child(self.syntax())
@@ -384,6 +389,11 @@ impl TraitConstItem {
         support::token(self.syntax(), SK::Ident)
     }
 
+    /// `${n}` in place of the name inside a quotation.
+    pub fn name_hole(&self) -> Option<super::QuoteHole> {
+        support::child(self.syntax())
+    }
+
     /// Returns the type of the associated const
     pub fn ty(&self) -> Option<super::Type> {
         support::child(self.syntax())
@@ -539,6 +549,11 @@ impl Const {
     /// `FOO` in `const FOO: u32 = 42;`
     pub fn name(&self) -> Option<SyntaxToken> {
         support::token(self.syntax(), SK::Ident)
+    }
+
+    /// `${n}` in place of the name inside a quotation.
+    pub fn name_hole(&self) -> Option<super::QuoteHole> {
+        support::child(self.syntax())
     }
 
     /// Returns the type of the const.
@@ -702,11 +717,21 @@ ast_node! {
     SK::TraitItemList,
     IntoIterator<Item=TraitItem>,
 }
+impl TraitItemList {
+    pub fn hole_items(&self) -> impl Iterator<Item = super::QuoteHole> {
+        support::children(self.syntax())
+    }
+}
 
 ast_node! {
     pub struct ImplItemList,
     SK::ImplItemList,
     IntoIterator<Item=ImplItem>,
+}
+impl ImplItemList {
+    pub fn hole_items(&self) -> impl Iterator<Item = super::QuoteHole> {
+        support::children(self.syntax())
+    }
 }
 
 ast_node! {
