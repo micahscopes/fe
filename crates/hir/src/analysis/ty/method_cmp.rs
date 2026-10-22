@@ -461,12 +461,14 @@ fn insert_param_mapping<'db>(
 /// The trait method's params as the impl method's, the pairs of their
 /// effects at the methods' modes, and whether every effect of the trait
 /// method has its pair and every ordinary body effect has a nominal source.
+type MethodParameterMapping<'db> = (PartialSubst<'db>, Vec<(usize, usize)>, bool);
+
 fn trait_to_impl_param_subst<'db>(
     db: &'db dyn HirAnalysisDb,
     (impl_m, impl_mode): (CallableDef<'db>, Option<BorrowKind>),
     (trait_m, trait_mode): (CallableDef<'db>, Option<BorrowKind>),
     trait_inst: TraitInstId<'db>,
-) -> Result<(PartialSubst<'db>, Vec<(usize, usize)>, bool), MethodCorrespondenceError> {
+) -> Result<MethodParameterMapping<'db>, MethodCorrespondenceError> {
     let schema = ParamSchemaId::callable(db, trait_m);
     let mut out = PartialSubst::new(db, ParamDomainId::full(db, schema));
 

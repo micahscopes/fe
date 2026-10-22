@@ -27,14 +27,14 @@ use super::{
         PredicateListId, Selection, TraitSolveCx, answering_assumption,
         constraint::collect_candidate_constraints, normalize_trait_inst_preserving_validity,
     },
-    ty_check::{BodyOwner, func_declared_bounds, func_signature},
+    ty_check::{func_declared_bounds, func_signature},
     ty_def::{BorrowKind, TyFlags},
     ty_lower::CompleteSubst,
     visitor::{TyVisitable, TyVisitor, collect_flags, mentions_effect_provider},
 };
 use crate::{
     analysis::{HirAnalysisDb, semantic::GenericSubst},
-    hir_def::{Body, CallableDef, Func, ItemKind, scope_graph::ScopeId},
+    hir_def::{Body, Func, ItemKind, scope_graph::ScopeId},
 };
 
 #[salsa::interned]
