@@ -1243,9 +1243,9 @@ pub struct ClosureDef<'db> {
 /// function of the closure's parameters. Closures are values of this type
 /// and implement the core callable shape traits of their parameter modes
 /// (see `ty::closure`).
+#[allow(clippy::too_many_arguments)]
 #[salsa::interned]
 #[derive(Debug)]
-#[allow(clippy::too_many_arguments)]
 pub struct ClosureTy<'db> {
     pub def: ClosureDef<'db>,
     /// Generic arguments of the item whose body defines the closure. The
