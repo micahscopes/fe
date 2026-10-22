@@ -1303,6 +1303,7 @@ impl<'db> ItemCode<'db> {
 pub enum NativeDeriveProviderError<'db> {
     Message(String),
     Target(crate::analysis::ty::ty_check::GroundTypeAdmissionError<'db>),
+    Provider(crate::analysis::ty::ty_check::GroundTypeAdmissionError<'db>),
 }
 impl From<String> for NativeDeriveProviderError<'_> {
     fn from(message: String) -> Self {
@@ -1414,7 +1415,7 @@ fn finalized_derive_provider<'db>(
         .get(&IdentId::new(db, "derive"))
         .copied()
         .ok_or("canonical Derive protocol has no derive method")?;
-    let key = crate::analysis::semantic::generated_callee_key(
+    let finalized = crate::analysis::semantic::generated_callee(
         db,
         scope,
         PredicateListId::empty_list(db),
@@ -1427,7 +1428,28 @@ fn finalized_derive_provider<'db>(
             "no ordinary Derive<requested goal> provider implementation was admitted: {cause:?}"
         )
     })?;
-    Ok((key, input))
+    let proof = finalized
+        .evidence
+        .ok_or("provider application has no retained proof")?;
+    crate::analysis::ty::ty_check::retained_bound_requirements(
+        db,
+        proof,
+        inst,
+        request.scope(),
+        request.span().into(),
+    )
+    .map_err(|(cause, diagnostics)| {
+        NativeDeriveProviderError::Provider(
+            crate::analysis::ty::ty_check::GroundTypeAdmissionError {
+                kind: crate::analysis::ty::ty_check::GroundTypeAdmissionKind::Bound {
+                    goal: inst,
+                    cause,
+                },
+                diagnostics,
+            },
+        )
+    })?;
+    Ok((finalized.key, input))
 }
 
 /// Freeze an elaboration dependency without evaluating metadata or selecting a provider.
