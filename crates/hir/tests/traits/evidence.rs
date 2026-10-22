@@ -205,23 +205,16 @@ fn grow_call_bodies<'db>(db: &'db HirAnalysisTestDb, func: Func<'db>) -> (Option
 /// nothing is assumed, and where the body's assumptions are.
 fn k_use_bodies(db: &HirAnalysisTestDb, func: Func<'_>) -> (bool, bool) {
     let typed_body = check_func_body(db, func).1.clone();
-    let Some(ConstRef::TraitConst {
-        use_,
-        evidence,
-        bound_evidence,
-    }) = typed_body.const_refs().next()
-    else {
+    let Some(ConstRef::TraitConst { use_, evidence }) = typed_body.const_refs().next() else {
         panic!("missing trait constant use");
     };
     let without_assumptions = ConstRef::TraitConst {
         use_: use_.with_env(func.scope(), PredicateListId::empty_list(db)),
         evidence,
-        bound_evidence,
     };
     let with_assumptions = ConstRef::TraitConst {
         use_: use_.with_env(func.scope(), typed_body.assumptions()),
         evidence,
-        bound_evidence,
     };
     (
         without_assumptions.trait_const_body(db).is_some(),

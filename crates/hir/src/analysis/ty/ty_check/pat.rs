@@ -531,8 +531,7 @@ impl<'db> TyChecker<'db> {
                             inst,
                             name,
                         ),
-                        evidence: None,
-                        bound_evidence: None,
+                        evidence: Default::default(),
                     };
                     (
                         ty,

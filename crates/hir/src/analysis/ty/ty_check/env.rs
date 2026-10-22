@@ -1664,12 +1664,12 @@ impl<'db> TyCheckEnv<'db> {
                     use_.solve_cx(self.db).with_choices(choices),
                     use_.inst(),
                 );
-                *evidence = outcome.evidence();
+                evidence.record_dispatch(use_.inst(), outcome.evidence());
                 if matches!(outcome, ProofOutcome::NeedsGeneration) {
                     diags.push(pending_proof(expr.span(self.body).into()));
                     continue;
                 }
-                if choices.is_some() && evidence.is_none() {
+                if choices.is_some() && evidence.dispatch_proof().is_none() {
                     diags.push(failed_proof(use_.inst(), expr.span(self.body).into()));
                 }
             }

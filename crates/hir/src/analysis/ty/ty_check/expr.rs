@@ -4703,8 +4703,7 @@ impl<'db> TyChecker<'db> {
                                 inst,
                                 name,
                             ),
-                            evidence: None,
-                            bound_evidence: None,
+                            evidence: Default::default(),
                         },
                     );
                     // Look up the associated const's declared type in the trait and

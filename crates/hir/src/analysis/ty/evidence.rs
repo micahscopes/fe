@@ -96,7 +96,7 @@ pub struct BoundSlotRef<'db> {
 
 /// Supplies for a particular namespace. Index equality alone never authorizes
 /// replacement. A prefix supply leaves closure-added slots unresolved.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub struct BoundEvidence<'db> {
     pub schema: BoundSchemaId<'db>,
     pub entries: EvidenceList<'db>,
@@ -115,6 +115,118 @@ impl<'db> BoundEvidence<'db> {
         same_basis
             .then(|| self.entries.get(db, slot.index as usize))
             .flatten()
+    }
+}
+
+/// A checked use retains the goal as well as the selected proof: modes and
+/// associated equalities belong to the use, not the implementation identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
+pub struct ProvedGoal<'db> {
+    pub goal: TraitInstId<'db>,
+    pub proof: EvidenceId<'db>,
+}
+
+/// The common transport contract for calls and associated constants. `bounds`
+/// names the destination declaration; leaves in its proofs name their source.
+/// Transport never selects an implementation or erases a failed completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update, Default)]
+pub struct UseEvidence<'db> {
+    pub dispatch: Option<ProvedGoal<'db>>,
+    pub bounds: Option<BoundEvidence<'db>>,
+}
+
+impl<'db> UseEvidence<'db> {
+    pub fn dispatch_proof(self) -> Option<EvidenceId<'db>> {
+        self.dispatch.map(|dispatch| dispatch.proof)
+    }
+
+    pub fn bound_proofs(self) -> Option<EvidenceList<'db>> {
+        self.bounds.map(|bounds| bounds.entries)
+    }
+
+    pub fn record_dispatch(&mut self, goal: TraitInstId<'db>, proof: Option<EvidenceId<'db>>) {
+        self.dispatch = proof.map(|proof| ProvedGoal { goal, proof });
+    }
+
+    pub fn bind(&mut self, db: &'db dyn HirAnalysisDb, supplied: BoundEvidence<'db>) {
+        if let Some(dispatch) = &mut self.dispatch {
+            dispatch.proof = dispatch.proof.bind(db, supplied);
+        }
+        if let Some(bounds) = &mut self.bounds {
+            bounds.entries = bounds.entries.bind(db, supplied);
+        }
+    }
+
+    pub fn qualify(&mut self, db: &'db dyn HirAnalysisDb, owner: BodyOwner<'db>) {
+        if let Some(dispatch) = &mut self.dispatch {
+            dispatch.proof = dispatch.proof.qualify(db, owner);
+        }
+        if let Some(bounds) = &mut self.bounds {
+            bounds.entries = bounds.entries.qualify(db, owner);
+        }
+    }
+
+    pub fn has_deferred(self, db: &'db dyn HirAnalysisDb) -> bool {
+        self.dispatch
+            .is_some_and(|dispatch| dispatch.proof.has_deferred(db))
+            || self.bounds.is_some_and(|bounds| {
+                bounds
+                    .entries
+                    .entries(db)
+                    .iter()
+                    .flatten()
+                    .any(|proof| proof.has_deferred(db))
+            })
+    }
+
+    /// Explicit instance-boundary completion. A present but uncompletable
+    /// selected tree is an error, never an absent proof eligible for re-selection.
+    pub fn complete_deferred(&mut self, db: &'db dyn HirAnalysisDb) -> Option<()> {
+        if let Some(dispatch) = &mut self.dispatch {
+            dispatch.proof = complete_deferred_evidence(db, dispatch.proof)?;
+        }
+        if let Some(bounds) = &mut self.bounds {
+            bounds.entries = EvidenceList::of(
+                db,
+                bounds
+                    .entries
+                    .entries(db)
+                    .iter()
+                    .map(|proof| match proof {
+                        Some(proof) => complete_deferred_evidence(db, *proof).map(Some),
+                        None => Some(None),
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            );
+        }
+        Some(())
+    }
+}
+
+impl<'db> TyFoldable<'db> for UseEvidence<'db> {
+    fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
+        Self {
+            dispatch: self.dispatch.map(|dispatch| ProvedGoal {
+                goal: dispatch.goal.fold_with(db, folder),
+                proof: dispatch.proof.fold_with(db, folder),
+            }),
+            bounds: self.bounds.map(|bounds| BoundEvidence {
+                schema: bounds.schema,
+                entries: bounds.entries.fold_with(db, folder),
+            }),
+        }
+    }
+}
+
+impl<'db> TyVisitable<'db> for UseEvidence<'db> {
+    fn visit_with<V: TyVisitor<'db> + ?Sized>(&self, visitor: &mut V) {
+        if let Some(dispatch) = self.dispatch {
+            dispatch.goal.visit_with(visitor);
+            dispatch.proof.visit_with(visitor);
+        }
+        if let Some(bounds) = self.bounds {
+            bounds.entries.visit_with(visitor);
+        }
     }
 }
 
