@@ -1591,6 +1591,7 @@ fn typed_body_for_bodyless_func<'db>(
     }
     let bindings = func_param_bindings(db, func, mode);
     TypedBodyTables {
+        invalid_evidence: false,
         body: None,
         result_ty,
         signature: assumptions,
@@ -4465,6 +4466,7 @@ entity_impl!(ExprPlaceId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub enum SmirLoweringIssue {
+    InvalidEvidence,
     InvalidExpr(ExprId),
     IncompleteExpr(ExprId),
     InvalidStmt(StmtId),
@@ -4551,6 +4553,7 @@ mod typed_body_tables {
     /// Shared storage behind [`TypedBody`]; its fields are private to type checking.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct TypedBodyTables<'db> {
+        pub(super) invalid_evidence: bool,
         pub(super) body: Option<Body<'db>>,
         pub(super) result_ty: TyId<'db>,
         /// The prefix of `assumptions` the body's owner declares; see
@@ -5063,6 +5066,10 @@ impl<'db> TypedBody<'db> {
         Arc::make_mut(&mut self.tables)
     }
 
+    pub(crate) fn invalidate_evidence(&mut self) {
+        self.tables_mut().invalid_evidence = true;
+    }
+
     /// Replaces the assumptions the body's evidence names with `bound`'s
     /// proofs of them: an instance's own.
     pub(crate) fn bind_evidence(&mut self, db: &'db dyn HirAnalysisDb, bound: BoundEvidence<'db>) {
@@ -5109,6 +5116,9 @@ impl<'db> TypedBody<'db> {
         &self,
         db: &'db dyn HirAnalysisDb,
     ) -> Vec<SmirLoweringIssue> {
+        if self.tables.invalid_evidence {
+            return vec![SmirLoweringIssue::InvalidEvidence];
+        }
         let Some(body) = self.tables.body else {
             return Vec::new();
         };
@@ -6933,6 +6943,7 @@ impl<'db> TypedBody<'db> {
 
     fn empty(db: &'db dyn HirAnalysisDb) -> Self {
         TypedBodyTables {
+            invalid_evidence: false,
             body: None,
             result_ty: TyId::unit(db),
             bound_schema: BoundSchemaId::new(

@@ -1711,6 +1711,7 @@ impl<'db> TyCheckEnv<'db> {
         );
 
         TypedBodyTables {
+            invalid_evidence: false,
             body: Some(self.body),
             result_ty,
             signature,

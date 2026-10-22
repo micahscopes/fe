@@ -158,13 +158,17 @@ fn close_request<'db>(
     facts.extend(input.context.witnesses(db).iter().copied());
     let context_facts = PredicateListId::new(db, facts);
     let scope = input.context.normalization_scope(db);
+    let (goals, supplied) = super::semantic::ProviderEvidenceAdaptation {
+        owner: input.owner,
+        subst: input.subst,
+        providers: input.providers,
+    }
+    .apply(db, goals, input.supplied.entries, context_facts)?;
     let goals = normalize_ty(db, goals, scope, context_facts);
     if !ground(collect_flags(db, goals)) {
         return Err(ResidualEvidence::GenericOrProjectedGoal);
     }
-    let supplied = input
-        .supplied
-        .entries
+    let supplied = supplied
         .complete_deferred(db)
         .ok_or(ResidualEvidence::DeferredCompletion)?;
     let supplied = normalize_ty(db, supplied, scope, context_facts);
@@ -432,6 +436,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut seen = FxHashSet::default();
         let mut closed_count = 0;
+        let mut closed_provider = false;
         let mut named_count = 0;
         let mut rejected_unbound = false;
         while let Some(key) = work.pop() {
@@ -441,7 +446,20 @@ mod tests {
             assert!(seen.len() < 2000, "instance keys must stabilize");
             let instance = get_or_build_semantic_instance(&db, key);
             work.extend(instance.callees(&db).iter().map(|callee| callee.key));
-            let Ok(closed) = close_instance_evidence(&db, input(&db, key)) else {
+            let completed = close_instance_evidence(&db, input(&db, key));
+            if let BodyOwner::Func(func, _) = key.owner(&db)
+                && func
+                    .name(&db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(&db) == "charge")
+            {
+                assert!(
+                    completed.is_ok(),
+                    "ground provider dictionary must close: {completed:?}"
+                );
+                closed_provider = true;
+            }
+            let Ok(closed) = completed else {
                 continue;
             };
             closed_count += 1;
@@ -592,6 +610,10 @@ mod tests {
         assert!(
             rejected_wrong_goal,
             "an unrelated closed proof cannot mint a goal fact"
+        );
+        assert!(
+            closed_provider,
+            "the graph exercises concrete trait-effect providers"
         );
         assert!(closed_count > 10, "exercise real ground instances");
         assert!(named_count >= 2, "exercise different selected dictionaries");

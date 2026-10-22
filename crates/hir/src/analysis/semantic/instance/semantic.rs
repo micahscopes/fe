@@ -477,89 +477,22 @@ pub fn instantiated_typed_body<'db>(
     } else {
         body.signature()
     };
-    let row_owner = match key.owner(db) {
-        BodyOwner::Closure { def, .. } => Some((def.body.scope(), Some(def.expr))),
-        BodyOwner::Func(func, _) => func.body(db).map(|body| (body.scope(), None)),
-        _ => None,
+    let adaptation = ProviderEvidenceAdaptation {
+        owner: key.owner(db),
+        subst: key.subst(db),
+        providers: key.effect_providers(db),
     };
-    // This declaration-side expansion cannot call key.typed_body(): that would
-    // make dictionary transport depend on the result it is constructing.
-    let row_paths = if let Some(site) = effect_param_site(key.owner(db)) {
-        let requirements = EffectEnvView::new(site)
-            .requirements(db)
-            .into_iter()
-            .map(|requirement| {
-                let key_ty = key
-                    .subst(db)
-                    .mapping(db)
-                    .as_ref()
-                    .and_then(|subst| substitute_complete(db, requirement.key.clone(), subst).ok())
-                    .unwrap_or_else(|| requirement.key.clone());
-                EffectRequirement {
-                    key: key_ty,
-                    ..requirement
-                }
-            })
-            .collect::<Vec<_>>();
-        expand_rows(db, &requirements, key.owner(db).scope(), body.assumptions())
-    } else {
-        RowExpansion::default()
-    };
-    if let Some(owner) = row_owner {
-        body = body.fold_with(
-            db,
-            &mut RowProviderSubst {
-                owner,
-                providers: key.effect_providers(db).providers(db),
-            },
-        );
-    }
-    let goals = if matches!(key.owner(db), BodyOwner::Closure { .. }) {
-        body.assumptions()
-    } else {
-        body.signature()
-    };
-    let mut entries = key.evidence(db).entries(db).clone();
-    entries.resize(goals.list(db).len(), None);
-    for (index, &raw_goal) in raw_goals.list(db).iter().enumerate() {
-        let TyData::TyParam(param) = raw_goal.self_ty(db).data(db) else {
-            continue;
-        };
-        if param.row_effect_provider_of() != row_owner || row_owner.is_none() {
-            continue;
+    let assumptions = body.assumptions();
+    body = adaptation.fold(db, body);
+    let (goals, supplied) = match adaptation.apply(db, raw_goals, key.evidence(db), assumptions) {
+        Ok(adapted) => adapted,
+        Err(_) => {
+            // A failed supplied projection is an invalid dictionary, never an
+            // absent entry that ordinary solving may replace.
+            body.invalidate_evidence();
+            return body;
         }
-        let path = row_paths
-            .components
-            .iter()
-            .find(|component| component.requirement.binding_idx as usize == param.idx)
-            .map(|component| component.path.clone())
-            .or_else(|| {
-                matches!(key.owner(db), BodyOwner::Closure { .. })
-                    .then(|| crate::analysis::ty::effects::rows::RowPath::entry(param.idx as u32))
-            });
-        let Some(row) = path.and_then(|path| {
-            key.evidence(db)
-                .rows(db)
-                .iter()
-                .find(|row| row.path == path)
-        }) else {
-            continue;
-        };
-        let goal = goals.list(db)[index];
-        entries[index] = row.proof.and_then(|proof| {
-            if row.goal == goal {
-                Some(proof)
-            } else {
-                crate::analysis::ty::evidence::implied_bound_evidence(
-                    db,
-                    proof,
-                    goal,
-                    body.assumptions(),
-                )
-            }
-        });
-    }
-    let supplied = EvidenceList::of(db, entries).with_rows(db, key.evidence(db).rows(db).clone());
+    };
     let evidence = match key.evidence_state(db) {
         InstanceEvidence::Closed(closed) => closed.proofs(db),
         InstanceEvidence::Residual { .. } => instance_evidence(
@@ -614,6 +547,106 @@ impl<'db> TyFolder<'db> for CaptureClosureEvidence<'db> {
                 closure.effects(db).clone(),
             ),
         )
+    }
+}
+
+/// One declaration-side adaptation for both instance completion and body
+/// binding. It substitutes provider slots and transports the existing row
+/// proofs; it neither selects implementations nor queries an instance body.
+#[derive(Clone, Copy)]
+pub(super) struct ProviderEvidenceAdaptation<'db> {
+    pub owner: BodyOwner<'db>,
+    pub subst: GenericSubst<'db>,
+    pub providers: EffectProviderSubst<'db>,
+}
+
+impl<'db> ProviderEvidenceAdaptation<'db> {
+    fn row_owner(self, db: &'db dyn HirAnalysisDb) -> Option<(ScopeId<'db>, Option<ExprId>)> {
+        match self.owner {
+            BodyOwner::Closure { def, .. } => Some((def.body.scope(), Some(def.expr))),
+            BodyOwner::Func(func, _) => func.body(db).map(|body| (body.scope(), None)),
+            _ => None,
+        }
+    }
+
+    pub fn fold<T: TyFoldable<'db>>(self, db: &'db dyn HirAnalysisDb, value: T) -> T {
+        match self.row_owner(db) {
+            Some(owner) => value.fold_with(
+                db,
+                &mut RowProviderSubst {
+                    owner,
+                    providers: self.providers.providers(db),
+                },
+            ),
+            None => value,
+        }
+    }
+
+    pub fn apply(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        raw_goals: PredicateListId<'db>,
+        supplied: EvidenceList<'db>,
+        assumptions: PredicateListId<'db>,
+    ) -> Result<(PredicateListId<'db>, EvidenceList<'db>), ResidualEvidence> {
+        let goals = self.fold(db, raw_goals);
+        let supplied = self.fold(db, supplied);
+        let assumptions = self.fold(db, assumptions);
+        let row_owner = self.row_owner(db);
+        let row_paths = if let Some(site) = effect_param_site(self.owner) {
+            let requirements = EffectEnvView::new(site)
+                .requirements(db)
+                .into_iter()
+                .map(|requirement| {
+                    let key = match self.subst.mapping(db) {
+                        Some(subst) => substitute_complete(db, requirement.key.clone(), subst)
+                            .map_err(|_| ResidualEvidence::GenericOrProjectedInput)?,
+                        None => requirement.key.clone(),
+                    };
+                    Ok(EffectRequirement { key, ..requirement })
+                })
+                .collect::<Result<Vec<_>, ResidualEvidence>>()?;
+            expand_rows(db, &requirements, self.owner.scope(), assumptions)
+        } else {
+            RowExpansion::default()
+        };
+        let mut entries = supplied.entries(db).clone();
+        entries.resize(goals.list(db).len(), None);
+        for (index, &raw_goal) in raw_goals.list(db).iter().enumerate() {
+            let TyData::TyParam(param) = raw_goal.self_ty(db).data(db) else {
+                continue;
+            };
+            if row_owner.is_none() || param.row_effect_provider_of() != row_owner {
+                continue;
+            }
+            let path = row_paths
+                .components
+                .iter()
+                .find(|component| component.requirement.binding_idx as usize == param.idx)
+                .map(|component| component.path.clone())
+                .or_else(|| {
+                    matches!(self.owner, BodyOwner::Closure { .. }).then(|| {
+                        crate::analysis::ty::effects::rows::RowPath::entry(param.idx as u32)
+                    })
+                });
+            let Some(row) =
+                path.and_then(|path| supplied.rows(db).iter().find(|row| row.path == path))
+            else {
+                continue;
+            };
+            let proof = row.proof.ok_or(ResidualEvidence::UnboundSuppliedProof)?;
+            let goal = goals.list(db)[index];
+            entries[index] = Some(if row.goal == goal {
+                proof
+            } else {
+                crate::analysis::ty::evidence::implied_bound_evidence(db, proof, goal, assumptions)
+                    .ok_or(ResidualEvidence::ProofGoalMismatch)?
+            });
+        }
+        Ok((
+            goals,
+            EvidenceList::of(db, entries).with_rows(db, supplied.rows(db).clone()),
+        ))
     }
 }
 
