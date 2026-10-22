@@ -1418,6 +1418,10 @@ impl<'db> Callable<'db> {
                 TraitObligationOutcome::Requeue(obligation) => {
                     pending_obligations.push(obligation);
                 }
+                TraitObligationOutcome::RequeueProgressed(obligation) => {
+                    progressed = true;
+                    pending_obligations.push(obligation);
+                }
             };
         }
 
@@ -1432,6 +1436,11 @@ impl<'db> Callable<'db> {
                         round_progressed = true;
                     }
                     TraitObligationOutcome::Requeue(obligation) => {
+                        pending_obligations.push(obligation);
+                    }
+                    TraitObligationOutcome::RequeueProgressed(obligation) => {
+                        progressed = true;
+                        round_progressed = true;
                         pending_obligations.push(obligation);
                     }
                 };
