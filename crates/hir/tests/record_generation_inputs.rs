@@ -348,3 +348,17 @@ const fn check_qf(_ ft: FieldType) -> usize { query_field<Ask, usize>(ft) }
         );
     }
 }
+
+#[test]
+fn canonical_trait_identity_does_not_require_instantiating_its_parameters() {
+    use fe_hir::analysis::ty::corelib::{resolve_core_trait, resolve_lib_trait_path};
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone("generic-canonical-trait.fe".into(), "struct Pair {}\n");
+    let (module, _) = db.top_mod(file);
+    let expected = resolve_core_trait(&db, module.scope(), &["EffectRef"])
+        .expect("canonical generic EffectRef declaration");
+    assert_eq!(
+        resolve_lib_trait_path(&db, module.scope(), "core::EffectRef"),
+        Some(expected)
+    );
+}
