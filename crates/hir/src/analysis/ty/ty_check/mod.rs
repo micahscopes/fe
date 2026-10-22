@@ -91,8 +91,8 @@ use super::{
     },
     effects::{EffectKeyKind, ResolvedEffectKey, resolve_effect_key, rows::RowPath},
     evidence::{
-        Evidence, EvidenceId, EvidenceList, declared_bound_evidence, impl_const_bound_evidence,
-        instantiated_selection,
+        BoundEvidence, BoundSchemaId, Evidence, EvidenceId, EvidenceList, declared_bound_evidence,
+        impl_const_bound_evidence, instantiated_selection,
     },
     generic_defaults::{GenericDefault, default_assumptions, generic_default},
     instantiate_trait_self,
@@ -1594,6 +1594,7 @@ fn typed_body_for_bodyless_func<'db>(
         body: None,
         result_ty,
         signature: assumptions,
+        bound_schema: BoundSchemaId::new(db, Some(BodyOwner::func_at(db, func, mode)), assumptions),
         assumptions,
         pat_ty: SecondaryMap::new(),
         expr_ty: SecondaryMap::new(),
@@ -4318,6 +4319,18 @@ pub enum ConstRef<'db> {
 }
 
 impl<'db> ConstRef<'db> {
+    pub(super) fn qualify_evidence(&mut self, db: &'db dyn HirAnalysisDb, owner: BodyOwner<'db>) {
+        if let Self::TraitConst {
+            evidence,
+            bound_evidence,
+            ..
+        } = self
+        {
+            *evidence = evidence.map(|proof| proof.qualify(db, owner));
+            *bound_evidence = bound_evidence.map(|proofs| proofs.qualify(db, owner));
+        }
+    }
+
     /// A trait constant's defining body, its declared type, the substitution
     /// over the body's owner, and the evidence the body's instance receives:
     /// from the implementation the checker selected, or, for a use the
@@ -4549,6 +4562,7 @@ mod typed_body_tables {
         /// The prefix of `assumptions` the body's owner declares; see
         /// `TypedBody::signature`.
         pub(super) signature: PredicateListId<'db>,
+        pub(super) bound_schema: BoundSchemaId<'db>,
         pub(super) assumptions: PredicateListId<'db>,
         pub(super) pat_ty: SecondaryMap<PatId, Option<TyId<'db>>>,
         pub(super) expr_ty: SecondaryMap<ExprId, Option<ExprProp<'db>>>,
@@ -4956,6 +4970,7 @@ impl<'db> TyFoldable<'db> for TypedBody<'db> {
         let mut this = Arc::unwrap_or_clone(self.tables);
         this.result_ty = this.result_ty.fold_with(db, folder);
         this.signature = this.signature.fold_with(db, folder);
+        this.bound_schema = this.bound_schema.fold_with(db, folder);
         this.assumptions = this.assumptions.fold_with(db, folder);
         this.pat_ty
             .values_mut()
@@ -5057,8 +5072,8 @@ impl<'db> TypedBody<'db> {
 
     /// Replaces the assumptions the body's evidence names with `bound`'s
     /// proofs of them: an instance's own.
-    pub(crate) fn bind_evidence(&mut self, db: &'db dyn HirAnalysisDb, bound: EvidenceList<'db>) {
-        if bound.entries(db).is_empty() {
+    pub(crate) fn bind_evidence(&mut self, db: &'db dyn HirAnalysisDb, bound: BoundEvidence<'db>) {
+        if bound.entries.entries(db).is_empty() {
             return;
         }
         let tables = self.tables_mut();
@@ -5342,6 +5357,10 @@ impl<'db> TypedBody<'db> {
     /// The assumptions the body's owner declares, in the order the body's
     /// evidence numbers them: a prefix of `assumptions`, which a closure in
     /// the body extends with its own. An instance receives proofs of these.
+    pub fn bound_schema(&self) -> BoundSchemaId<'db> {
+        self.tables.bound_schema
+    }
+
     pub fn signature(&self) -> PredicateListId<'db> {
         self.tables.signature
     }
@@ -6930,6 +6949,7 @@ impl<'db> TypedBody<'db> {
         TypedBodyTables {
             body: None,
             result_ty: TyId::unit(db),
+            bound_schema: BoundSchemaId::new(db, None, PredicateListId::empty_list(db)),
             signature: PredicateListId::empty_list(db),
             assumptions: PredicateListId::empty_list(db),
             pat_ty: SecondaryMap::new(),

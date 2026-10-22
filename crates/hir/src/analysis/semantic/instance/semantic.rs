@@ -303,7 +303,13 @@ pub fn instantiated_typed_body<'db>(
         key.evidence(db),
         TraitSolveCx::new(db, key.impl_env(db).normalization_scope(db)),
     );
-    body.bind_evidence(db, evidence);
+    body.bind_evidence(
+        db,
+        crate::analysis::ty::evidence::BoundEvidence {
+            schema: body.bound_schema(),
+            entries: evidence,
+        },
+    );
     // A body's row provider parameters are the providers its call binds.
     let owner = match key.owner(db) {
         BodyOwner::Closure { def, .. } => (def.body.scope(), Some(def.expr)),

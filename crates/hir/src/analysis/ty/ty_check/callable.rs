@@ -23,8 +23,8 @@ use crate::analysis::{
         corelib::resolve_lib_func_path,
         diagnostics::{BodyDiag, FuncBodyDiag},
         evidence::{
-            EvidenceId, EvidenceList, ProofOutcome, declared_bound_evidence_with_pending,
-            instantiated_selection, prove_outcome,
+            BoundEvidence, EvidenceId, EvidenceList, ProofOutcome,
+            declared_bound_evidence_with_pending, instantiated_selection, prove_outcome,
         },
         fold::{TyFoldable, TyFolder},
         generic_defaults::{DefaultApplication, GenericArgError},
@@ -495,11 +495,16 @@ impl<'db> Callable<'db> {
 
     /// Replaces the assumptions this call's evidence names, its caller's,
     /// with `bound`'s proofs of them.
-    pub(super) fn bind_evidence(&mut self, db: &'db dyn HirAnalysisDb, bound: EvidenceList<'db>) {
+    pub(super) fn bind_evidence(&mut self, db: &'db dyn HirAnalysisDb, bound: BoundEvidence<'db>) {
         self.evidence = self.evidence.map(|evidence| evidence.bind(db, bound));
         self.bound_evidence = self
             .bound_evidence
             .map(|bound_evidence| bound_evidence.bind(db, bound));
+    }
+
+    pub(super) fn qualify_evidence(&mut self, db: &'db dyn HirAnalysisDb, owner: BodyOwner<'db>) {
+        self.evidence = self.evidence.map(|proof| proof.qualify(db, owner));
+        self.bound_evidence = self.bound_evidence.map(|proofs| proofs.qualify(db, owner));
     }
 
     pub(crate) fn has_deferred_evidence(&self, db: &'db dyn HirAnalysisDb) -> bool {

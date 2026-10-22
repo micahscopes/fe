@@ -38,6 +38,82 @@ use crate::{
     hir_def::{Body, CallableDef, Func, ItemKind, scope_graph::ScopeId},
 };
 
+/// The namespace of assumption slots. Declaration ownership does not depend on
+/// an instance key; goals are a view that folds alongside the corresponding body.
+/// `None` is a proof producer's temporary predicate basis, not a checked body.
+#[salsa::interned]
+#[derive(Debug)]
+pub struct BoundSchemaId<'db> {
+    pub owner: Option<BodyOwner<'db>>,
+    pub slots: PredicateListId<'db>,
+}
+
+impl<'db> BoundSchemaId<'db> {
+    fn context(db: &'db dyn HirAnalysisDb, slots: PredicateListId<'db>) -> Self {
+        Self::new(db, None, slots)
+    }
+
+    pub fn slot(self, db: &'db dyn HirAnalysisDb, index: usize) -> Option<BoundSlotRef<'db>> {
+        (index < self.slots(db).list(db).len()).then_some(BoundSlotRef {
+            schema: self,
+            index: u32::try_from(index).ok()?,
+        })
+    }
+
+    fn assumption(self, db: &'db dyn HirAnalysisDb, index: usize) -> EvidenceId<'db> {
+        EvidenceId::new(
+            db,
+            Evidence::Assumption(self.slot(db, index).expect("bound slot")),
+        )
+    }
+}
+
+impl<'db> TyFoldable<'db> for BoundSchemaId<'db> {
+    fn super_fold_with<F: TyFolder<'db>>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self {
+        // Owner is declaration identity. In particular an anonymous constant's
+        // expected domain is not replaced with an instance-specific owner.
+        Self::new(db, self.owner(db), self.slots(db).fold_with(db, folder))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
+pub struct BoundSlotRef<'db> {
+    pub schema: BoundSchemaId<'db>,
+    pub index: u32,
+}
+
+/// Supplies for a particular namespace. Index equality alone never authorizes
+/// replacement. A prefix supply leaves closure-added slots unresolved.
+#[derive(Debug, Clone, Copy)]
+pub struct BoundEvidence<'db> {
+    pub schema: BoundSchemaId<'db>,
+    pub entries: EvidenceList<'db>,
+}
+
+impl<'db> BoundEvidence<'db> {
+    fn get(self, db: &'db dyn HirAnalysisDb, slot: BoundSlotRef<'db>) -> Option<EvidenceId<'db>> {
+        let same_basis = self.schema == slot.schema
+            || (self.schema.owner(db).is_some()
+                && self.schema.owner(db) == slot.schema.owner(db)
+                && self
+                    .schema
+                    .slots(db)
+                    .list(db)
+                    .starts_with(slot.schema.slots(db).list(db)));
+        same_basis
+            .then(|| self.entries.get(db, slot.index as usize))
+            .flatten()
+    }
+}
+
+/// One explicit change of predicate basis. Both method and constant adapters
+/// interpret these recipes through the same substitution/rebase operation.
+#[derive(Debug, Clone, PartialEq, Eq, Update)]
+pub(crate) struct BoundAdaptation<'db> {
+    source: BoundSchemaId<'db>,
+    proofs: Vec<Option<EvidenceId<'db>>>,
+}
+
 #[salsa::interned]
 #[derive(Debug)]
 pub struct EvidenceId<'db> {
@@ -60,7 +136,7 @@ pub enum Evidence<'db> {
     },
     /// The assumption at this position in the extended assumption list of
     /// the body the goal was proved in.
-    Assumption(u32),
+    Assumption(BoundSlotRef<'db>),
     /// The compiler's provisional ordinary Solidity codec obligation. Its
     /// element is still generic, so the whole-slot fallback is not a selection.
     /// Substitution closes this leaf without replacing any selected parent.
@@ -90,9 +166,9 @@ impl<'db> EvidenceId<'db> {
 
     /// This proof with each assumption it names replaced by `bound`'s proof
     /// of it; absent if `bound` has no proof of one.
-    fn rebase(self, db: &'db dyn HirAnalysisDb, bound: EvidenceList<'db>) -> Option<Self> {
+    fn rebase(self, db: &'db dyn HirAnalysisDb, bound: BoundEvidence<'db>) -> Option<Self> {
         Some(match self.data(db) {
-            Evidence::Assumption(index) => bound.get(db, *index as usize)?,
+            Evidence::Assumption(index) => bound.get(db, *index)?,
             Evidence::DeferredSolCodec { .. } => self,
             Evidence::Impl {
                 selected,
@@ -110,6 +186,31 @@ impl<'db> EvidenceId<'db> {
                 },
             ),
         })
+    }
+
+    /// Attach a checked body's ownership to producer-local assumption slots.
+    /// Existing ownership is never changed: this operation cannot relabel a
+    /// dictionary arriving from another checked body.
+    pub(crate) fn qualify(self, db: &'db dyn HirAnalysisDb, owner: BodyOwner<'db>) -> Self {
+        match self.data(db) {
+            Evidence::Assumption(slot) if slot.schema.owner(db).is_none() => {
+                BoundSchemaId::new(db, Some(owner), slot.schema.slots(db))
+                    .assumption(db, slot.index as usize)
+            }
+            Evidence::Impl {
+                selected,
+                instantiated,
+                conds,
+            } => EvidenceId::new(
+                db,
+                Evidence::Impl {
+                    selected: *selected,
+                    instantiated: *instantiated,
+                    conds: conds.iter().map(|proof| proof.qualify(db, owner)).collect(),
+                },
+            ),
+            Evidence::Assumption(_) | Evidence::DeferredSolCodec { .. } => self,
+        }
     }
 
     /// Whether this proof names no assumption: it holds in any body.
@@ -136,9 +237,9 @@ impl<'db> EvidenceId<'db> {
 
     /// This proof with each assumption it names replaced by `bound`'s proof
     /// of that assumption, where `bound` has one.
-    pub fn bind(self, db: &'db dyn HirAnalysisDb, bound: EvidenceList<'db>) -> Self {
+    pub fn bind(self, db: &'db dyn HirAnalysisDb, bound: BoundEvidence<'db>) -> Self {
         match self.data(db) {
-            Evidence::Assumption(index) => bound.get(db, *index as usize).unwrap_or(self),
+            Evidence::Assumption(index) => bound.get(db, *index).unwrap_or(self),
             Evidence::DeferredSolCodec { .. } => self,
             Evidence::Impl {
                 selected,
@@ -260,6 +361,16 @@ impl<'db> EvidenceList<'db> {
         self.entries(db).get(index).copied().flatten()
     }
 
+    pub(crate) fn qualify(self, db: &'db dyn HirAnalysisDb, owner: BodyOwner<'db>) -> Self {
+        Self::of(
+            db,
+            self.entries(db)
+                .iter()
+                .map(|entry| entry.map(|proof| proof.qualify(db, owner)))
+                .collect(),
+        )
+    }
+
     /// Missing dictionaries in a settled signature. Still-schematic effect
     /// providers and unresolved goals belong to their existing checker paths.
     pub(crate) fn missing_bound_goals(
@@ -287,8 +398,8 @@ impl<'db> EvidenceList<'db> {
     }
 
     /// Each proof with the assumptions it names replaced by `bound`'s proofs.
-    pub fn bind(self, db: &'db dyn HirAnalysisDb, bound: EvidenceList<'db>) -> Self {
-        if bound.entries(db).is_empty() {
+    pub fn bind(self, db: &'db dyn HirAnalysisDb, bound: BoundEvidence<'db>) -> Self {
+        if bound.entries.entries(db).is_empty() {
             return self;
         }
         Self::new(
@@ -355,7 +466,13 @@ impl<'db> TyFoldable<'db> for EvidenceId<'db> {
                     scope: *scope,
                 },
             ),
-            Evidence::Assumption(_) => self,
+            Evidence::Assumption(slot) => EvidenceId::new(
+                db,
+                Evidence::Assumption(BoundSlotRef {
+                    schema: slot.schema.fold_with(db, folder),
+                    index: slot.index,
+                }),
+            ),
         }
     }
 }
@@ -446,7 +563,10 @@ pub(crate) fn prove_outcome<'db>(
             .iter()
             .position(|&bound| bound == goal)
     {
-        return ProofOutcome::Proven(EvidenceId::new(db, Evidence::Assumption(index as u32)));
+        return ProofOutcome::Proven(
+            BoundSchemaId::context(db, solve_cx.assumptions().extend_all_bounds(db))
+                .assumption(db, index),
+        );
     }
     // Closed goals without supplied dictionaries or choices share a proof.
     let solve_cx = if is_closed_goal(db, goal) && solve_cx.choices().is_none() {
@@ -546,13 +666,14 @@ fn implied_bound_evidence<'db>(
     goal: TraitInstId<'db>,
     assumptions: PredicateListId<'db>,
 ) -> Option<EvidenceId<'db>> {
-    if matches!(proof.data(db), Evidence::Assumption(_)) {
-        let index = assumptions
-            .extend_all_bounds(db)
+    if let Evidence::Assumption(slot) = proof.data(db) {
+        let index = slot
+            .schema
+            .slots(db)
             .list(db)
             .iter()
             .position(|&bound| bound == goal)?;
-        return Some(EvidenceId::new(db, Evidence::Assumption(index as u32)));
+        return Some(slot.schema.assumption(db, index));
     }
     let Evidence::Impl {
         selected,
@@ -703,9 +824,10 @@ fn prove_in<'db>(
     }
     let selected_proof = || -> Option<EvidenceId<'db>> {
         let evidence = match resolved.selected().origin(db) {
-            ImplementorOrigin::Assumption => {
-                Evidence::Assumption(answering_assumption(db, solve_cx, goal)? as u32)
-            }
+            ImplementorOrigin::Assumption => Evidence::Assumption(
+                BoundSchemaId::context(db, solve_cx.assumptions().extend_all_bounds(db))
+                    .slot(db, answering_assumption(db, solve_cx, goal)?)?,
+            ),
             ImplementorOrigin::Hir(_) => Evidence::Impl {
                 selected: resolved.selected(),
                 instantiated: resolved.instantiated(),
@@ -804,7 +926,7 @@ pub(crate) fn impl_method_evidence<'db>(
     body: Func<'db>,
     nominal: Func<'db>,
     mode: Option<BorrowKind>,
-) -> Option<Vec<Option<EvidenceId<'db>>>> {
+) -> Option<BoundAdaptation<'db>> {
     let Some(ItemKind::ImplTrait(impl_trait)) = body.scope().parent_item(db) else {
         return None;
     };
@@ -851,7 +973,7 @@ pub(crate) fn impl_method_evidence<'db>(
 pub(crate) fn impl_const_evidence<'db>(
     db: &'db dyn HirAnalysisDb,
     body: Body<'db>,
-) -> Option<Vec<Option<EvidenceId<'db>>>> {
+) -> Option<BoundAdaptation<'db>> {
     let Some(ItemKind::ImplTrait(impl_trait)) = body.scope().parent_item(db) else {
         return None;
     };
@@ -878,8 +1000,9 @@ fn basis_proofs<'db>(
     basis: PredicateListId<'db>,
     declared: PredicateListId<'db>,
     signature: PredicateListId<'db>,
-) -> Vec<Option<EvidenceId<'db>>> {
-    let assumption = |index: usize| EvidenceId::new(db, Evidence::Assumption(index as u32));
+) -> BoundAdaptation<'db> {
+    let source = BoundSchemaId::context(db, basis);
+    let assumption = |index: usize| source.assumption(db, index);
     // A proof names its assumptions by position in the extended basis.
     let to_basis = || {
         EvidenceList::of(
@@ -893,7 +1016,7 @@ fn basis_proofs<'db>(
         )
     };
     let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(basis);
-    signature
+    let proofs = signature
         .list(db)
         .iter()
         .map(|&goal| {
@@ -903,9 +1026,16 @@ fn basis_proofs<'db>(
             if !declared.list(db).contains(&goal) {
                 return None;
             }
-            prove(db, solve_cx, goal)?.rebase(db, to_basis())
+            prove(db, solve_cx, goal)?.rebase(
+                db,
+                BoundEvidence {
+                    schema: BoundSchemaId::context(db, basis.extend_all_bounds(db)),
+                    entries: to_basis(),
+                },
+            )
         })
-        .collect()
+        .collect();
+    BoundAdaptation { source, proofs }
 }
 
 /// `proofs` of a body's assumptions, in its own terms, instantiated by
@@ -913,13 +1043,21 @@ fn basis_proofs<'db>(
 /// proof of it.
 fn instantiate_proofs<'db>(
     db: &'db dyn HirAnalysisDb,
-    proofs: &[Option<EvidenceId<'db>>],
+    adaptation: &BoundAdaptation<'db>,
     subst: &CompleteSubst<'db>,
     supplied: EvidenceList<'db>,
 ) -> EvidenceList<'db> {
+    let Ok(schema) = substitute_complete(db, adaptation.source, subst) else {
+        return EvidenceList::none(db);
+    };
+    let supplied = BoundEvidence {
+        schema,
+        entries: supplied,
+    };
     EvidenceList::of(
         db,
-        proofs
+        adaptation
+            .proofs
             .iter()
             .map(|proof| {
                 substitute_complete(db, (*proof)?, subst)

@@ -40,7 +40,7 @@ use crate::analysis::{
             model::EffectRequirementDecl,
             rows::{RowComponent, expand_rows},
         },
-        evidence::{ProofOutcome, prove_outcome},
+        evidence::{BoundSchemaId, ProofOutcome, prove_outcome},
         fold::{TyFoldable, TyFolder},
         provider::AddressSpace,
         shape::Shape,
@@ -1581,6 +1581,7 @@ impl<'db> TyCheckEnv<'db> {
                     && solve_cx.choices().is_some()
                     && matches!(outcome, super::super::evidence::ProofOutcome::Unavailable);
                 pending |= callable.record_bound_evidence(self.db, solve_cx);
+                callable.qualify_evidence(self.db, self.owner);
             }
             calls.codec_choice_failed = codec_choice_failed;
             if pending {
@@ -1605,6 +1606,7 @@ impl<'db> TyCheckEnv<'db> {
             let callable = lowering.callable_mut();
             let outcome = callable.record_evidence(self.db, solve_cx);
             let pending_bounds = callable.record_bound_evidence(self.db, solve_cx);
+            callable.qualify_evidence(self.db, self.owner);
             if matches!(outcome, ProofOutcome::NeedsGeneration) || pending_bounds {
                 diags.push(pending_proof(expr.span(self.body).into()));
                 continue;
@@ -1633,6 +1635,7 @@ impl<'db> TyCheckEnv<'db> {
             for call in &mut plan.calls {
                 let outcome = call.callable.record_evidence(self.db, solve_cx);
                 let pending_bounds = call.callable.record_bound_evidence(self.db, solve_cx);
+                call.callable.qualify_evidence(self.db, self.owner);
                 if matches!(outcome, ProofOutcome::NeedsGeneration) || pending_bounds {
                     diags.push(pending_proof(stmt.span(self.body).into()));
                     continue;
@@ -1673,6 +1676,7 @@ impl<'db> TyCheckEnv<'db> {
             for goal in const_ref.record_bound_evidence(self.db, choices) {
                 diags.push(failed_proof(goal, expr.span(self.body).into()));
             }
+            const_ref.qualify_evidence(self.db, self.owner);
         }
         self.closure_infos
             .values_mut()
@@ -1710,6 +1714,7 @@ impl<'db> TyCheckEnv<'db> {
             body: Some(self.body),
             result_ty,
             signature,
+            bound_schema: BoundSchemaId::new(self.db, Some(self.owner), assumptions),
             assumptions,
             pat_ty: self.pat_ty,
             expr_ty: self.expr_ty,
