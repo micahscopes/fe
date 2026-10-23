@@ -975,7 +975,10 @@ fn const_ty_is_fully_ground<'db>(db: &'db dyn HirAnalysisDb, const_ty: ConstTyId
             ty.is_some_and(|ty| ty_is_fully_ground(db, ty))
                 && match capture {
                     ConstCaptureEnv::Empty => true,
-                    ConstCaptureEnv::Identity(_) => false,
+                    // An identity capture reads its owner's formals without
+                    // spelling them; with no formals, such as the `4` in
+                    // `impl Report for Buf<4>`, the body depends on none.
+                    ConstCaptureEnv::Identity(domain) => !domain.has_formals(db),
                     ConstCaptureEnv::Bound(subst) => subst
                         .values()
                         .iter()
