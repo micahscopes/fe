@@ -389,6 +389,10 @@ fn lower_scoped_derive<'db>(
         None,
     );
     let trait_ref = TraitRefId::new(db, Partial::Present(trait_path));
+    let index = ctxt.next_impl_trait_idx();
+    let id = ctxt.joined_id(TrackedItemVariant::ImplTrait(index));
+    ctxt.enter_item_scope(id, false);
+    // Inside the implementation, so constant arguments are its bodies.
     let target_args = match &scoped.demand.target.args {
         Some(args) => GenericArgListId::thaw(ctxt, args),
         None => GenericArgListId::none(db),
@@ -397,9 +401,6 @@ fn lower_scoped_derive<'db>(
         .authored_record(&scoped.demand.target)
         .path(db, target_args);
     let ty = TypeId::new(db, TypeKind::Path(Partial::Present(target)));
-    let index = ctxt.next_impl_trait_idx();
-    let id = ctxt.joined_id(TrackedItemVariant::ImplTrait(index));
-    ctxt.enter_item_scope(id, false);
     lower_derive_method(ctxt, code);
     let implementation = ImplTrait::new(
         db,
