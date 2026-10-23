@@ -48,17 +48,31 @@ fn suspension_effect_footprint_includes_supertraits() {
     let file = db.new_stand_alone(
         Utf8PathBuf::from("suspension_effects.fe"),
         r#"
-use core::task::Suspend
+use core::task::{Pending, Suspend, TaskOutcome}
 trait Extended: Suspend {}
 trait Unrelated {}
+struct Native {}
+impl Suspend for Native {
+    type Backend = Native
+    type Error = u64
+    fn suspend<T>(mut self, _ pending: own Pending<Native, T>) -> TaskOutcome<u64, T> {
+        TaskOutcome::Cancelled
+    }
+}
 fn direct() uses (cap: mut Suspend) {}
 fn extended() uses (cap: mut Extended) {}
+fn concrete() uses (cap: mut Native) {}
 fn unrelated() uses (cap: mut Unrelated) {}
 "#,
     );
     let (module, _) = db.top_mod(file);
     db.assert_no_diags(module);
-    for (name, expected) in [("direct", true), ("extended", true), ("unrelated", false)] {
+    for (name, expected) in [
+        ("direct", true),
+        ("extended", true),
+        ("concrete", true),
+        ("unrelated", false),
+    ] {
         let func = find_func(&db, module, name);
         let requirements = effect_requirements_for_site(&db, EffectParamSite::Func(func, None));
         assert_eq!(requirements.len(), 1);
