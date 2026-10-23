@@ -16,10 +16,11 @@
 //!   over these. So unfolding a ground application descends on a natural
 //!   number and stops.
 //! - Unfolding runs in the normalizer, which charges each unfolding to the
-//!   same nesting and work limits as projections, refuses an application that
-//!   is already being unfolded (a projection in an arm can lead back to it),
-//!   and does not reuse an unfolding inside one normalization, so a result too
-//!   large to write out reaches the work limit.
+//!   same nesting and work limits as projections and refuses an application
+//!   that is already being unfolded (a projection in an arm can lead back to
+//!   it). Only the single step below is memoized: every occurrence of an
+//!   application is unfolded and charged again, so a result too large to
+//!   write out reaches the work limit.
 //! - Payloads run on the ordinary compile-time evaluator with its fuel. A
 //!   payload call passes only values, so the computed types its evaluation
 //!   can need are fixed by the program text rather than by the subject.

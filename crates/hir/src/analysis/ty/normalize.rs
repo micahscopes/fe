@@ -337,11 +337,11 @@ impl<'db> TypeNormalizer<'db> {
     /// tree.
     fn unfold_computed(&mut self, ty: TyId<'db>) -> Option<TyId<'db>> {
         let db = self.db;
-        if !self.resolve_impls || super::type_fn::in_definition(db, self.scope) {
+        if !self.resolve_impls || !ty.has_projection(db) || ty.has_invalid(db) {
             return None;
         }
         let (def, args) = super::type_fn::as_computed_application(db, ty)?;
-        if ty.has_invalid(db) {
+        if super::type_fn::in_definition(db, self.scope) {
             return None;
         }
         let params = collect_generic_params(db, def.into()).params(db).len();
