@@ -1,0 +1,65 @@
+// Uses of recursive type fns: requirements, implementation headers, partial
+// application and faults are reported where the type is written.
+trait Marker {}
+struct Good {}
+struct Bad {}
+impl Marker for Good {}
+struct Pair<A, B> {}
+struct Wrap<T> {}
+struct Slot<const I: usize> {}
+
+// A requirement on a parameter the result drops is still checked.
+recursive type fn Req<T, const N: usize>() -> (*) where T: Marker {
+    match N {
+        0 => bool
+        _ => Req<T, {N - 1}>
+    }
+}
+fn req_good(x: own Req<Good, 2>) -> bool { x }
+fn req_bad(x: own Req<Bad, 2>) -> bool { x }
+fn req_generic_missing<T>(x: own Req<T, 2>) -> bool { x }
+fn req_generic_bounded<T: Marker>(x: own Req<T, 2>) -> bool { x }
+
+recursive type fn Tree<const N: usize>() -> (*) {
+    match N {
+        0 => bool
+        _ => Pair<bool, Tree<{N - 1}>>
+    }
+}
+// An implementation belongs on the type a computed type unfolds to.
+type Alias = Tree<1>
+trait Mark { fn value() -> u256 }
+trait Other<T> {}
+impl Mark for Pair<bool, bool> { fn value() -> u256 { 11 } }
+impl Mark for Tree<2> { fn value() -> u256 { 11 } }
+impl Mark for Alias { fn value() -> u256 { 11 } }
+impl<const N: usize> Mark for Wrap<Tree<N>> { fn value() -> u256 { 11 } }
+impl Other<Tree<1>> for Wrap<bool> {}
+impl Tree<1> { fn get(self) -> u256 { 1 } }
+
+// Only a full application is a type.
+fn partial(x: own Tree) {}
+type PartialAlias = Tree
+
+// Faults while unfolding.
+const fn tenth(_ i: usize) -> usize { 10 / i }
+recursive type fn Fault<const N: usize>() -> (*) {
+    match N {
+        0 => bool
+        _ => Pair<Slot<{tenth(N - 1)}>, Fault<{N - 1}>>
+    }
+}
+// `Fault<0>` is `bool`; every larger size reaches `tenth(0)`.
+fn fault_free(x: own Fault<0>) -> bool { x }
+fn fault_deep(x: own Fault<2>) {}
+fn fault_param(x: own Fault<1>) {}
+fn fault_let() {
+    let _: Fault<1> = Pair<Slot<0>, bool> {}
+}
+fn fault_call_arg() -> u256 { core::size_of<Fault<1>>() }
+fn subject_fault(x: own Tree<{1 - 2}>) {}
+fn h<const N: usize>(_ b: bool) -> Tree<{N - 5}> { h<N>(b) }
+fn fault_at_call(_ b: bool) -> u256 {
+    if b { return 0 }
+    h<2>(b)
+}

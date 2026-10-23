@@ -1,0 +1,109 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/computed_type_uses.fe
+---
+error[2-0011]: incorrect number of generic arguments for `Tree`; expected 1, given 0
+   ┌─ computed_type_uses.fe:41:19
+   │
+41 │ fn partial(x: own Tree) {}
+   │                   ^^^^ expected 1 arguments, but 0 were given
+
+error[2-0011]: incorrect number of generic arguments for `Tree`; expected 1, given 0
+   ┌─ computed_type_uses.fe:42:21
+   │
+42 │ type PartialAlias = Tree
+   │                     ^^^^ expected 1 arguments, but 0 were given
+
+error[3-0034]: arithmetic overflow in const context
+   ┌─ computed_type_uses.fe:60:31
+   │
+60 │ fn subject_fault(x: own Tree<{1 - 2}>) {}
+   │                               ^^^^^ checked arithmetic overflowed during const evaluation
+
+error[3-0073]: division by zero in const context
+   ┌─ computed_type_uses.fe:54:22
+   │
+45 │ const fn tenth(_ i: usize) -> usize { 10 / i }
+   │                                       ------ cannot divide by zero
+   ·
+54 │ fn fault_deep(x: own Fault<2>) {}
+   │                      ^^^^^^^^ while computing this type
+
+error[3-0073]: division by zero in const context
+   ┌─ computed_type_uses.fe:55:23
+   │
+45 │ const fn tenth(_ i: usize) -> usize { 10 / i }
+   │                                       ------ cannot divide by zero
+   ·
+55 │ fn fault_param(x: own Fault<1>) {}
+   │                       ^^^^^^^^ while computing this type
+
+error[3-0073]: division by zero in const context
+   ┌─ computed_type_uses.fe:57:12
+   │
+45 │ const fn tenth(_ i: usize) -> usize { 10 / i }
+   │                                       ------ cannot divide by zero
+   ·
+57 │     let _: Fault<1> = Pair<Slot<0>, bool> {}
+   │            ^^^^^^^^ while computing this type
+
+error[3-0073]: division by zero in const context
+   ┌─ computed_type_uses.fe:59:45
+   │
+45 │ const fn tenth(_ i: usize) -> usize { 10 / i }
+   │                                       ------ cannot divide by zero
+   ·
+59 │ fn fault_call_arg() -> u256 { core::size_of<Fault<1>>() }
+   │                                             ^^^^^^^^ while computing this type
+
+error[3-0088]: computed types are not allowed in implementation headers
+   ┌─ computed_type_uses.fe:34:15
+   │
+34 │ impl Mark for Tree<2> { fn value() -> u256 { 11 } }
+   │               ^^^^^^^ implement the trait for the type it computes instead
+
+error[3-0088]: computed types are not allowed in implementation headers
+   ┌─ computed_type_uses.fe:35:15
+   │
+35 │ impl Mark for Alias { fn value() -> u256 { 11 } }
+   │               ^^^^^ implement the trait for the type it computes instead
+
+error[3-0088]: computed types are not allowed in implementation headers
+   ┌─ computed_type_uses.fe:36:31
+   │
+36 │ impl<const N: usize> Mark for Wrap<Tree<N>> { fn value() -> u256 { 11 } }
+   │                               ^^^^^^^^^^^^^ implement the trait for the type it computes instead
+
+error[3-0088]: computed types are not allowed in implementation headers
+   ┌─ computed_type_uses.fe:37:25
+   │
+37 │ impl Other<Tree<1>> for Wrap<bool> {}
+   │                         ^^^^^^^^^^ implement the trait for the type it computes instead
+
+error[3-0088]: computed types are not allowed in implementation headers
+   ┌─ computed_type_uses.fe:38:6
+   │
+38 │ impl Tree<1> { fn get(self) -> u256 { 1 } }
+   │      ^^^^^^^ implement the trait for the type it computes instead
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ computed_type_uses.fe:19:15
+   │
+19 │ fn req_bad(x: own Req<Bad, 2>) -> bool { x }
+   │               ^^^^^^^^^^^^^^^ `Bad` doesn't implement `Marker`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ computed_type_uses.fe:20:30
+   │
+20 │ fn req_generic_missing<T>(x: own Req<T, 2>) -> bool { x }
+   │                              ^^^^^^^^^^^^^ `T` doesn't implement `Marker`
+
+error[8-0096]: arithmetic overflow in const context
+   ┌─ computed_type_uses.fe:64:5
+   │
+61 │ fn h<const N: usize>(_ b: bool) -> Tree<{N - 5}> { h<N>(b) }
+   │                                          ----- checked arithmetic overflowed during const evaluation
+   ·
+64 │     h<2>(b)
+   │     ^^^^^^^ in the return type of this call

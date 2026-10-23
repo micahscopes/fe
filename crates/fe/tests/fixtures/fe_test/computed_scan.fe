@@ -1,0 +1,147 @@
+// Computed tree depth selects one shared scan implementation at four and eight
+// leaves. Compare every exclusive prefix with an independent flat accumulator.
+// The scan runs sequentially.
+
+pub struct Leaf {
+    pub v: u256,
+}
+pub struct Node<A> {
+    pub l: A,
+    pub r: A,
+}
+
+// A value tree indexed by depth:
+//   VTree<0> = Leaf ; VTree<N> = Node<VTree<N - 1>>
+recursive type fn VTree<const N: usize>() -> (*) {
+    match N {
+        0 => Leaf
+        _ => Node<VTree<{N - 1}>>
+    }
+}
+
+// Adds `d` to every leaf of a tree.
+trait AddAll {
+    fn add_all(self, _ d: u256) -> Self
+}
+impl AddAll for Leaf {
+    fn add_all(self, _ d: u256) -> Self {
+        Leaf { v: self.v + d }
+    }
+}
+impl<A: AddAll> AddAll for Node<A> {
+    fn add_all(self, _ d: u256) -> Self {
+        Node { l: self.l.add_all(d), r: self.r.add_all(d) }
+    }
+}
+
+// The Sklansky scan, written once per tree shape.
+// Returns the tree of exclusive prefixes and the total.
+trait Scan {
+    fn scan(self) -> (Self, u256)
+}
+impl Scan for Leaf {
+    fn scan(self) -> (Self, u256) {
+        (Leaf { v: 0 }, self.v)
+    }
+}
+impl<A: Scan + AddAll> Scan for Node<A> {
+    fn scan(self) -> (Self, u256) {
+        // the two halves are independent
+        let ls = self.l.scan()
+        let rs = self.r.scan()
+        // the adjust phase: the left total flows into every right prefix
+        (Node { l: ls.0, r: rs.0.add_all(ls.1) }, ls.1 + rs.1)
+    }
+}
+
+// leaf readback (structural fold to pick leaf i, MSB-first path).
+trait GetLeaf {
+    fn get_leaf(self, _ i: u256, _ size: u256) -> u256
+}
+impl GetLeaf for Leaf {
+    fn get_leaf(self, _ i: u256, _ size: u256) -> u256 {
+        self.v
+    }
+}
+impl<A: GetLeaf> GetLeaf for Node<A> {
+    fn get_leaf(self, _ i: u256, _ size: u256) -> u256 {
+        let half = size / 2
+        if i < half {
+            self.l.get_leaf(i, half)
+        } else {
+            self.r.get_leaf(i - half, half)
+        }
+    }
+}
+
+// Each signature applies the computed type. One set of impls serves both sizes;
+// the code's structure follows from the type.
+fn scan_tree2(_ t: VTree<2>) -> (VTree<2>, u256) {
+    t.scan()
+}
+fn scan_tree3(_ t: VTree<3>) -> (VTree<3>, u256) {
+    t.scan()
+}
+
+fn build4(_ a0: u256, _ a1: u256, _ a2: u256, _ a3: u256) -> VTree<2> {
+    Node {
+        l: Node { l: Leaf { v: a0 }, r: Leaf { v: a1 } },
+        r: Node { l: Leaf { v: a2 }, r: Leaf { v: a3 } },
+    }
+}
+
+fn build8(_ a0: u256, _ a1: u256, _ a2: u256, _ a3: u256,
+          _ a4: u256, _ a5: u256, _ a6: u256, _ a7: u256) -> VTree<3> {
+    Node {
+        l: Node {
+            l: Node { l: Leaf { v: a0 }, r: Leaf { v: a1 } },
+            r: Node { l: Leaf { v: a2 }, r: Leaf { v: a3 } },
+        },
+        r: Node {
+            l: Node { l: Leaf { v: a4 }, r: Leaf { v: a5 } },
+            r: Node { l: Leaf { v: a6 }, r: Leaf { v: a7 } },
+        },
+    }
+}
+
+// Size 8 (VTree<3>): the scan matches a flat running sum.
+#[test]
+fn test_type_fn_scan8_matches_oracle() {
+    let input: [u256; 8] = [5, 15, 39, 77, 129, 195, 275, 369]
+    let t = build8(input[0], input[1], input[2], input[3],
+                   input[4], input[5], input[6], input[7])
+    // the scan here is the Sklansky recursion over VTree<3>.
+    let scanned = scan_tree3(t)
+    let total = scanned.1
+    let s = scanned.0
+
+    // Reference: a flat left-to-right running sum, not the tree recursion. Exclusive prefixes: [0,5,20,59,136,265,460,735].
+    var acc: u256 = 0
+    for i in 0..8 {
+        assert!(s.get_leaf(i as u256, 8) == acc)
+        acc += input[i]
+    }
+    // the returned total is the inclusive sum of every leaf (1104).
+    assert!(total == acc)
+    assert!(total == 1104)
+}
+
+// Size 4 (VTree<2>): the same impls at a smaller depth
+// (VTree<2> = Node<Node<Leaf>>).
+#[test]
+fn test_type_fn_scan4_matches_oracle() {
+    let input: [u256; 4] = [3, 9, 27, 81]
+    let t = build4(input[0], input[1], input[2], input[3])
+    let scanned = scan_tree2(t)
+    let total = scanned.1
+    let s = scanned.0
+
+    // Reference: a flat running sum. Exclusive prefixes: [0,3,12,39].
+    var acc: u256 = 0
+    for i in 0..4 {
+        assert!(s.get_leaf(i as u256, 4) == acc)
+        acc += input[i]
+    }
+    assert!(total == acc)
+    assert!(total == 120)
+}

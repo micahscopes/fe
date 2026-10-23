@@ -359,8 +359,6 @@ pub enum ComputedTypeError {
     SubjectNotUsize,
     /// The body matches on something other than the subject.
     MatchNotOnSubject,
-    /// A `where` clause has a const condition.
-    ConstCondition,
     /// A `where` clause bounds something other than a type parameter.
     BoundOnNonParameter,
     DuplicateLiteral,
@@ -406,7 +404,6 @@ impl ComputedTypeError {
             }
             Self::SubjectNotUsize => "the final recursion subject must have type `usize`",
             Self::MatchNotOnSubject => "match must inspect the final recursion subject",
-            Self::ConstCondition => "recursive type functions do not admit const where predicates",
             Self::BoundOnNonParameter => {
                 "recursive type function where clauses may bound only type parameters"
             }

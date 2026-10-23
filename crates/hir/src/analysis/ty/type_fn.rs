@@ -409,13 +409,9 @@ pub(crate) fn declaration_shape<'db>(
         ),
     }
 
+    // Const conditions are rejected for this kind of item by the general
+    // const `where` check.
     let clause = def.where_clause(db);
-    if !clause.const_predicates(db).is_empty() {
-        report(
-            def.span().where_clause().into(),
-            ComputedTypeError::ConstCondition,
-        );
-    }
     for (_, predicate) in clause.type_predicates(db) {
         let on_parameter = predicate.ty.to_opt().is_some_and(|ty| {
             let TypeKind::Path(Partial::Present(path)) = ty.data(db) else {
@@ -859,5 +855,323 @@ impl<'db> TyFolder<'db> for PayloadEvaluator<'db> {
             return TyId::const_ty(db, evaluated);
         }
         ty.super_fold_with(db, self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+    use salsa::Setter;
+
+    use super::*;
+    use crate::test_db::{HirAnalysisTestDb, format_diagnostics};
+
+    fn definition<'db>(db: &'db HirAnalysisTestDb, file: common::file::File) -> TypeFnDef<'db> {
+        let (top, _) = db.top_mod(file);
+        top.all_items(db)
+            .iter()
+            .find_map(|item| match item {
+                ItemKind::TypeFn(def) => Some(*def),
+                _ => None,
+            })
+            .expect("a recursive type fn")
+    }
+
+    fn checked(name: &str, source: &str) -> String {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from(name), source);
+        let (top, _) = db.top_mod(file);
+        format_diagnostics(&db, &db.run_on_top_mod(top))
+    }
+
+    #[test]
+    fn match_bounds_follow_unmatched_values_not_arm_count() {
+        for (patterns, expected) in [
+            ("0 => T\n2 => T\n_ => T", vec![0u32, 2, 1]),
+            ("2 => T\n0 => T\n1 => T\n_ => T", vec![2, 0, 1, 3]),
+            ("5 => T\n_ => T", vec![5, 0]),
+            ("_ => T", vec![0]),
+        ] {
+            let mut db = HirAnalysisTestDb::default();
+            let source = format!(
+                "recursive type fn Tree<T, const O: usize, const N: usize>() -> (*) {{ match N {{ {patterns} }} }}"
+            );
+            let file = db.new_stand_alone(Utf8PathBuf::from("bounds.fe"), &source);
+            let shape = declaration_shape(&db, definition(&db, file));
+            assert!(shape.diags.is_empty(), "{:?}", shape.diags);
+            assert_eq!(
+                shape.lower_bounds,
+                Some(expected.into_iter().map(BigUint::from).collect())
+            );
+        }
+    }
+
+    #[test]
+    fn declaration_errors_survive_edits_and_restore() {
+        let valid = "recursive type fn Tree<T, const O: usize, const N: usize>() -> (*) { match N { 0 => T, _ => Tree<T, O, {N - 1}> } }";
+        // The message expected, and the number of errors: a `bool` subject
+        // also makes the payload `N - 1` an ill-typed expression.
+        let cases = [
+            (
+                valid.replace("const N: usize", "N"),
+                "requires a final const recursion subject",
+                1,
+            ),
+            (
+                valid.replace("const N: usize", "const N: bool"),
+                "must have type `usize`",
+                2,
+            ),
+            (valid.replace("match N", "match O"), "match must inspect", 1),
+            (
+                valid.replace("0 => T", "0 => T, 0 => T"),
+                "duplicate literal match arm",
+                1,
+            ),
+            (
+                valid.replace("0 => T", "_ => T"),
+                "the wildcard must be the final match arm",
+                1,
+            ),
+            (
+                valid.replace(", _ => Tree<T, O, {N - 1}>", ""),
+                "a final wildcard arm is required",
+                1,
+            ),
+            (
+                valid.replace("{N - 1}", "{N + 1}"),
+                "the recursive subject must strictly decrease",
+                1,
+            ),
+        ];
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("declaration.fe"), valid);
+        for (invalid, message, count) in cases {
+            for (source, expected) in [
+                (valid, None),
+                (invalid.as_str(), Some((message, count))),
+                (valid, None),
+            ] {
+                file.set_text(&mut db).to(source.to_owned());
+                let (top, _) = db.top_mod(file);
+                let actual = format_diagnostics(&db, &db.run_on_top_mod(top));
+                match expected {
+                    Some((expected, count)) => {
+                        assert!(actual.contains(expected), "{expected}: {actual}");
+                        assert_eq!(actual.matches("error[").count(), count, "{actual}");
+                        assert!(check_definition(&db, definition(&db, file)).arms.is_none());
+                    }
+                    None => {
+                        assert!(actual.is_empty(), "{actual}");
+                        assert!(check_definition(&db, definition(&db, file)).arms.is_some());
+                    }
+                }
+                assert_eq!(
+                    actual,
+                    checked("declaration.fe", source),
+                    "warm and fresh differ for {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recursion_is_checked_in_every_arm_and_qualified_parent() {
+        let template = r#"
+trait Output { type Out }
+struct Wrapper<T> {}
+impl<T> Output for Wrapper<T> { type Out = T }
+recursive type fn Tree<T, const O: usize, const N: usize>() -> (*) {
+    match N {
+        BASE
+        _ => STEP
+    }
+}
+"#;
+        const UNDERFLOW: &str = "the recursive subtraction may underflow in this arm";
+        const DECREASE: &str = "the recursive subject must strictly decrease";
+        const FORWARD: &str =
+            "recursive calls must forward invariant parameters unchanged and in order";
+        for (base, step, expected) in [
+            ("0 => T", "Tree<T, O, {N - 1}>", None),
+            ("0 => T", "Tree<T, O, {N / 2}>", None),
+            ("0 => T", "Tree<T, O, {0}>", None),
+            ("0 => T", "Tree<T, O, 0>", None),
+            ("0 => T, 1 => T", "Tree<T, O, {N - 2}>", None),
+            ("0 => T, 2 => T", "Tree<T, O, {N - 2}>", Some(UNDERFLOW)),
+            (
+                "",
+                "Tree<T, O, {N / 2}>",
+                Some("recursive division does not decrease the subject at zero"),
+            ),
+            ("0 => T", "Tree<T, O, {N / 1}>", Some(DECREASE)),
+            ("0 => T", "Tree<T, O, {N - 0}>", Some(DECREASE)),
+            ("0 => T", "Tree<T, O, {N + 1}>", Some(DECREASE)),
+            ("0 => T", "Tree<T, O, {1}>", Some(DECREASE)),
+            (
+                "0 => T",
+                "Tree<T, O, {O - 1}>",
+                Some("the recursive subject must decrease from the declared subject"),
+            ),
+            (
+                "0 => T",
+                "Tree<T, O, {N - O}>",
+                Some("the recursion step must use a literal amount"),
+            ),
+            ("0 => T", "Tree<bool, O, {N - 1}>", Some(FORWARD)),
+            ("0 => T", "Tree<T, {O + 1}, {N - 1}>", Some(FORWARD)),
+            ("0 => T", "Tree<T, N, {N - 1}>", Some(FORWARD)),
+            (
+                "0 => T",
+                "Tree<T, {N - 1}>",
+                Some("a recursive call must supply every parameter"),
+            ),
+            (
+                "0 => T",
+                "<Wrapper<Tree<T, O, {N - 1}>> as Output>::Out",
+                None,
+            ),
+            (
+                "0 => T",
+                "<Wrapper<Tree<T, O, {N + 1}>> as Output>::Out",
+                Some(DECREASE),
+            ),
+            (
+                "0 => Tree<T, O, {N - 1}>",
+                "Tree<T, O, {N - 1}>",
+                Some(UNDERFLOW),
+            ),
+            (
+                "0 => T, 3 => Tree<T, O, {N - 3}>",
+                "Tree<T, O, {N - 1}>",
+                None,
+            ),
+            (
+                "0 => T, 3 => Tree<T, O, {N - 4}>",
+                "Tree<T, O, {N - 1}>",
+                Some(UNDERFLOW),
+            ),
+        ] {
+            let source = template.replace("BASE", base).replace("STEP", step);
+            let actual = checked("recursion.fe", &source);
+            match expected {
+                None => assert!(actual.is_empty(), "{source}\n{actual}"),
+                Some(reason) => {
+                    assert_eq!(actual.matches("error[").count(), 1, "{source}\n{actual}");
+                    assert!(actual.contains(reason), "{source}\n{actual}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn arm_checks_cover_payloads_kinds_and_hidden_calls() {
+        let template = r#"
+struct Pair<A, B> {}
+struct Term<const I: usize> {}
+const fn payload(_ i: usize) -> usize { i + 1 }
+fn runtime(_ i: usize) -> usize { i + 1 }
+type Keep<X> = X
+type Mask<X, T, const O: usize, const N: usize> = Tree<T, O, N>
+recursive type fn Tree<T, const O: usize, const N: usize>() -> (*) {
+    match N {
+        0 => BASE
+        _ => STEP
+    }
+}
+"#;
+        const PAYLOAD: &str = "a const argument here can only be";
+        // `Some("")`: an ordinary lowering error.
+        for (base, step, expected) in [
+            ("T", "Tree<T, O, {N - 1}>", None),
+            ("T", "Keep<Tree<T, O, {N - 1}>>", None),
+            (
+                "T",
+                "Pair<Term<{payload(N - 1)}>, Tree<T, O, {N - 1}>>",
+                None,
+            ),
+            ("T", "Pair<Term<O>, Tree<T, O, {N - 1}>>", None),
+            ("T", "Pair<Term<{N}>, Tree<T, O, {N - 1}>>", None),
+            ("Missing", "Tree<T, O, {N - 1}>", Some("")),
+            (
+                "Pair",
+                "Tree<T, O, {N - 1}>",
+                Some("every arm must produce a type of the declared return kind"),
+            ),
+            ("Term<{true}>", "Tree<T, O, {N - 1}>", Some("")),
+            (
+                "T",
+                "Pair<Term<{runtime(N - 1)}>, Tree<T, O, {N - 1}>>",
+                Some(PAYLOAD),
+            ),
+            (
+                "T",
+                "Pair<Term<{payload(N + 1)}>, Tree<T, O, {N - 1}>>",
+                Some(PAYLOAD),
+            ),
+            (
+                "T",
+                "Pair<Term<{if false { 0 } else { 1 }}>, Tree<T, O, {N - 1}>>",
+                Some(PAYLOAD),
+            ),
+            (
+                "T",
+                "Mask<Tree<T, O, {N - 1}>, T, O, N>",
+                Some("hides or adds a recursive call"),
+            ),
+            (
+                "T",
+                "Pair<T, bool>",
+                Some("a recursive type function must contain a self-call"),
+            ),
+        ] {
+            let source = template.replace("BASE", base).replace("STEP", step);
+            let mut db = HirAnalysisTestDb::default();
+            let file = db.new_stand_alone(Utf8PathBuf::from("arms.fe"), &source);
+            let check = check_definition(&db, definition(&db, file));
+            assert_eq!(check.arms.is_some(), expected.is_none(), "{source}");
+            let (top, _) = db.top_mod(file);
+            let actual = format_diagnostics(&db, &db.run_on_top_mod(top));
+            match expected {
+                None => assert!(actual.is_empty(), "{source}\n{actual}"),
+                Some(reason) => {
+                    assert_eq!(actual.matches("error[").count(), 1, "{source}\n{actual}");
+                    assert!(actual.contains(reason), "{source}\n{actual}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unfolding_matches_handwritten_types_and_follows_payload_edits() {
+        let template = r#"
+struct Pair<A, B> {}
+struct Term<const I: usize> {}
+const fn payload(_ i: usize, _ o: usize) -> usize { i * 3 + o }
+recursive type fn Tree<T, const O: usize, const N: usize>() -> (*) {
+    match N {
+        0 => T
+        _ => Pair<Term<{payload(N - 1, O)}>, Tree<T, O, {N - 1}>>
+    }
+}
+type Expected<T> = Pair<Term<FIRST>, Pair<Term<10>, Pair<Term<7>, T>>>
+fn forward(x: own Tree<bool, 7, 3>) -> Expected<bool> { x }
+fn backward(x: own Expected<bool>) -> Tree<bool, 7, 3> { x }
+fn generic<T>(x: own Tree<T, 7, 3>) -> Expected<T> { x }
+fn symbolic<const N: usize>(x: own Tree<bool, 7, N>) -> Tree<bool, 7, N> { x }
+"#;
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("normalized.fe"), "");
+        for (first, accepted) in [("13", true), ("14", false), ("13", true)] {
+            let source = template.replace("FIRST", first);
+            file.set_text(&mut db).to(source.clone());
+            let (top, _) = db.top_mod(file);
+            let actual = format_diagnostics(&db, &db.run_on_top_mod(top));
+            assert_eq!(actual.is_empty(), accepted, "{actual}");
+            if !accepted {
+                assert_eq!(actual.matches("type mismatch").count(), 3, "{actual}");
+            }
+            assert_eq!(actual, checked("normalized.fe", &source));
+        }
     }
 }

@@ -1,0 +1,156 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/computed_type_declarations.fe
+---
+error[3-0087]: invalid recursive type function declaration
+  ┌─ computed_type_declarations.fe:8:81
+  │
+8 │ recursive type fn Inc<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<Inc<{N + 1}>> } }
+  │                                                                                 ^^^^^^^^^^^^ the recursive subject must strictly decrease
+
+error[3-0087]: invalid recursive type function declaration
+  ┌─ computed_type_declarations.fe:9:89
+  │
+9 │ recursive type fn SameSubject<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<SameSubject<{N - 0}>> } }
+  │                                                                                         ^^^^^^^^^^^^^^^^^^^^ the recursive subject must strictly decrease
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:10:84
+   │
+10 │ recursive type fn DivOne<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<DivOne<{N / 1}>> } }
+   │                                                                                    ^^^^^^^^^^^^^^^ the recursive subject must strictly decrease
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:11:98
+   │
+11 │ recursive type fn FromOther<const O: usize, const N: usize>() -> (*) { match N { 0 => bool, _ => FromOther<O, {O - 1}> } }
+   │                                                                                                  ^^^^^^^^^^^^^^^^^^^^^ the recursive subject must decrease from the declared subject
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:13:94
+   │
+13 │ recursive type fn Under<const N: usize>() -> (*) { match N { 0 => bool, 2 => bool, _ => Node<Under<{N - 2}>> } }
+   │                                                                                              ^^^^^^^^^^^^^^ the recursive subtraction may underflow in this arm
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:15:70
+   │
+15 │ recursive type fn BaseCall<const N: usize>() -> (*) { match N { 0 => BaseCall<{N - 1}>, _ => BaseCall<{N - 1}> } }
+   │                                                                      ^^^^^^^^^^^^^^^^^ the recursive subtraction may underflow in this arm
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:16:74
+   │
+16 │ recursive type fn DivZero<const N: usize>() -> (*) { match N { _ => Node<DivZero<{N / 2}>> } }
+   │                                                                          ^^^^^^^^^^^^^^^^ recursive division does not decrease the subject at zero
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:17:80
+   │
+17 │ recursive type fn Forward<T, const N: usize>() -> (*) { match N { 0 => T, _ => Forward<bool, {N - 1}> } }
+   │                                                                                ^^^^^^^^^^^^^^^^^^^^^^ recursive calls must forward invariant parameters unchanged and in order
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:18:78
+   │
+18 │ recursive type fn Arity<T, const N: usize>() -> (*) { match N { 0 => T, _ => Arity<{N - 1}> } }
+   │                                                                              ^^^^^^^^^^^^^^ a recursive call must supply every parameter
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:21:1
+   │
+21 │ recursive type fn NoSelf<const N: usize>() -> (*) { match N { 0 => bool, _ => u8 } }
+   │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ a recursive type function must contain a self-call
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:22:61
+   │
+22 │ recursive type fn NoWild<const N: usize>() -> (*) { match N { 0 => bool, 1 => NoWild<{0}> } }
+   │                                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ a final wildcard arm is required
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:23:71
+   │
+23 │ recursive type fn Dup<const N: usize>() -> (*) { match N { 0 => bool, 0 => bool, _ => Dup<{N - 1}> } }
+   │                                                                       ^^^^^^^^^ duplicate literal match arm
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:24:66
+   │
+24 │ recursive type fn WildFirst<const N: usize>() -> (*) { match N { _ => bool, 0 => WildFirst<{0}> } }
+   │                                                                  ^^^^^^^^^ the wildcard must be the final match arm
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:25:30
+   │
+25 │ recursive type fn BoolSubject<const N: bool>() -> (*) { match N { _ => BoolSubject<{N}> } }
+   │                              ^^^^^^^^^^^^^^^ the final recursion subject must have type `usize`
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:26:28
+   │
+26 │ recursive type fn NoSubject<T>() -> (*) { match T { _ => NoSubject<T> } }
+   │                            ^^^ a recursive type function requires a final const recursion subject
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:27:79
+   │
+27 │ recursive type fn WrongMatch<const O: usize, const N: usize>() -> (*) { match O { 0 => bool, _ => WrongMatch<O, {N - 1}> } }
+   │                                                                               ^ match must inspect the final recursion subject
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:29:58
+   │
+29 │ recursive type fn BoundOther<T, const N: usize>() -> (*) where Node<T>: Marker { match N { 0 => T, _ => BoundOther<T, {N - 1}> } }
+   │                                                          ^^^^^^^^^^^^^^^^^^^^^ recursive type function where clauses may bound only type parameters
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:32:84
+   │
+32 │ recursive type fn Other<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<(Inc<{N - 1}>, Other<{N - 1}>)> } }
+   │                                                                                    ^^^^^^^^^^^^ recursive type function bodies cannot call another type function
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:33:66
+   │
+33 │ recursive type fn Kind<const N: usize>() -> (*) { match N { 0 => Node, _ => Kind<{N - 1}> } }
+   │                                                                  ^^^^ every arm must produce a type of the declared return kind
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:35:91
+   │
+35 │ recursive type fn Payload<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<(Term<{runtime(N)}>, Payload<{N - 1}>)> } }
+   │                                                                                           ^^^^^^^^^^^^ a const argument here can only be a literal, a const parameter, `N - k` or `N / k`, or a call to a `const fn` with such arguments
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:37:98
+   │
+37 │ recursive type fn GenericPayload<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<(Term<{tagged<1>(N)}>, GenericPayload<{N - 1}>)> } }
+   │                                                                                                  ^^^^^^^^^^^^^^ a const argument here can only be a literal, a const parameter, `N - k` or `N / k`, or a call to a `const fn` with such arguments
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:38:93
+   │
+38 │ recursive type fn IfPayload<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<(Term<{if true { 1 } else { 2 }}>, IfPayload<{N - 1}>)> } }
+   │                                                                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^ a const argument here can only be a literal, a const parameter, `N - k` or `N / k`, or a call to a `const fn` with such arguments
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:42:79
+   │
+42 │ recursive type fn Masked<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<(Masked<{N - 1}>, Mask<N>)> } }
+   │                                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ a type alias or associated type here hides or adds a recursive call; write recursive calls directly
+
+error[3-0087]: invalid recursive type function declaration
+   ┌─ computed_type_declarations.fe:44:85
+   │
+44 │ recursive type fn ThroughAlias<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<(Hidden<N>, ThroughAlias<{N - 1}>)> } }
+   │                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ a type alias or qualified path refers to another recursive type function
+
+error[8-0092]: const where predicates are not supported here yet
+   ┌─ computed_type_declarations.fe:28:61
+   │
+28 │ recursive type fn ConstWhere<const N: usize>() -> (*) where N > 0 { match N { 0 => bool, _ => ConstWhere<{N - 1}> } }
+   │                                                             ^^^^^ not yet supported in traits, trait impls with generic parameters, generic `impl` blocks, or items nested in generic items
+   │
+   = const where predicates are supported on functions, structs, enums, and inherent methods, including methods of generic `impl` blocks; inside an `impl`, the conditions of the types in its header hold without restating them

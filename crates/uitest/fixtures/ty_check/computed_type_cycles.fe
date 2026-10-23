@@ -1,0 +1,44 @@
+// Computing a recursive type fn application that needs its own result is
+// reported where the application is written.
+struct Cell<const N: u256> {}
+struct Pair<A, B> {}
+
+// A const payload that asks for the size of its own type.
+const fn own_size() -> u256 { core::size_of<Selfish<1>>() }
+recursive type fn Selfish<const N: usize>() -> (*) {
+    match N {
+        0 => Cell<{own_size()}>
+        _ => Selfish<{N - 1}>
+    }
+}
+fn selfish_signature(x: own Selfish<1>) {}
+fn selfish_let() {
+    let _: Selfish<1> = Cell<1> {}
+}
+fn selfish_call_arg() -> u256 { core::size_of<Selfish<0>>() }
+const SELFISH: u256 = own_size()
+
+// Through another const fn.
+const fn deep_size() -> u256 { core::size_of<Deep<1>>() }
+const fn via() -> u256 { deep_size() + 1 }
+recursive type fn Deep<const N: usize>() -> (*) {
+    match N {
+        0 => Cell<{via()}>
+        _ => Deep<{N - 1}>
+    }
+}
+fn deep_let() {
+    let _: Deep<1> = Cell<1> {}
+}
+
+// Through an associated type whose implementation names the application.
+trait Out { type O }
+struct W<const K: usize> {}
+impl<const K: usize> Out for W<K> { type O = Back<K> }
+recursive type fn Back<const N: usize>() -> (*) {
+    match N {
+        0 => bool
+        _ => Pair<Back<{N - 1}>, <W<N> as Out>::O>
+    }
+}
+fn back(x: own Back<2>) {}
