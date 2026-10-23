@@ -2278,15 +2278,27 @@ impl<'a, 'db> Analysis<'a, 'db> {
         }
         // Check the definition locally. Callers continue to depend only on
         // its signature, even if it constructs a provider inside its body.
-        if suspension_contract(self.db, self.instance.key(self.db))
-            .entries
-            .is_empty()
-        {
+        let caller_contract = suspension_contract(self.db, self.instance.key(self.db));
+        if caller_contract.entries.is_empty() {
             return Err(self.diag(
                 SemanticDiagnosticKind::TransportViolation,
                 origin,
                 "this call may suspend, but this function declares no suspension capability or effect row".into(),
             ));
+        }
+        if !caller_contract
+            .entries
+            .iter()
+            .any(|entry| entry.footprint == SuspensionFootprint::MaySuspend)
+        {
+            self.deferred_suspension.push(
+                self.diag(
+                    SemanticDiagnosticKind::TransportViolation,
+                    origin,
+                    "this function's suspension authority must be resolved before runtime lowering"
+                        .into(),
+                ),
+            );
         }
         if contract
             .entries
