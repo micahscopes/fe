@@ -464,7 +464,7 @@ pub fn native_suspension_primitive<'db>(db: &'db dyn HirAnalysisDb, func: Func<'
 
 /// A declaration's suspension footprint. An unresolved row or proof is not
 /// evidence that a call cannot suspend; concrete admission must discharge it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::SalsaValue)]
 pub enum SuspensionFootprint {
     Absent,
     MaySuspend,

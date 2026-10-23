@@ -24,7 +24,7 @@ use crate::{
 /// Where a possible or unresolved suspension footprint comes from. Retaining
 /// the declaration and row path allows admission to diagnose the actual
 /// requirement rather than an unrelated argument at the call site.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, salsa::SalsaValue)]
 pub enum SuspensionContractOrigin<'db> {
     Method,
     NativeCut,
@@ -43,7 +43,7 @@ pub enum SuspensionContractOrigin<'db> {
     InvalidEnvironment,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, salsa::SalsaValue)]
 pub struct SuspensionContractEntry<'db> {
     pub origin: SuspensionContractOrigin<'db>,
     pub footprint: SuspensionFootprint,
@@ -51,7 +51,7 @@ pub struct SuspensionContractEntry<'db> {
 
 /// Only nonempty or unresolved footprints are retained. An empty contract is
 /// proved absent; an unresolved entry must survive until concrete admission.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, salsa::SalsaValue)]
 pub struct SuspensionContract<'db> {
     pub entries: Vec<SuspensionContractEntry<'db>>,
 }
@@ -67,6 +67,7 @@ impl<'db> SuspensionContract<'db> {
 
 /// Read the selected instance's signature, including capability-bearing data
 /// inputs and effect rows. This does not normalize or inspect its body.
+#[salsa::tracked]
 pub fn suspension_contract<'db>(
     db: &'db dyn HirAnalysisDb,
     key: SemanticInstanceKey<'db>,
