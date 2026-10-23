@@ -25,13 +25,14 @@ use crate::analysis::{
         diagnostics::{BodyDiag, FuncBodyDiag},
         evidence::{
             BoundEvidence, BoundOwner, BoundSchemaId, EvidenceId, EvidenceList, ProofOutcome,
-            RowEvidence, UseEvidence, declared_bound_evidence_with_pending, instantiated_selection,
-            prove_outcome,
+            ProvedGoal, RowEvidence, UseEvidence, declared_bound_evidence_with_pending,
+            instantiated_selection, prove_outcome,
         },
         fold::{TyFoldable, TyFolder},
         generic_defaults::{DefaultApplication, GenericArgError},
         normalize::{normalize_ty, normalize_with_trait_evidence},
         shape::Shape,
+        subst::substitute_complete,
         trait_def::{AssocBinding, ResolvedMethodInstance, TraitInstId},
         trait_resolution::{
             TraitSolveCx, check_trait_inst_wf, constraint::collect_func_decl_constraints,
@@ -532,6 +533,43 @@ impl<'db> Callable<'db> {
     /// caller's checked body gives them.
     pub fn bound_evidence(&self) -> Option<EvidenceList<'db>> {
         self.use_evidence.bound_proofs()
+    }
+
+    /// The recorded proof of an exact applied callee bound. Declaration-owned
+    /// slots are matched after substitution; this operation never proves or
+    /// selects an implementation when the recorded proof is unavailable.
+    pub fn proved_bound(
+        &self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+    ) -> Option<ProvedGoal<'db>> {
+        let CallableDef::Func(func) = self.callable_def else {
+            return None;
+        };
+        let owner = BodyOwner::func_at(db, func, self.mode);
+        let bound = self.use_evidence.bounds?;
+        if bound.schema.owner(db) != BoundOwner::Body(owner)
+            || bound.schema.slots(db) != func_signature(db, func, owner.mode())
+        {
+            return None;
+        }
+        let subst = CompleteSubst::for_owner(db, func.into(), self.generic_args.clone()).ok()?;
+        bound
+            .schema
+            .slots(db)
+            .list(db)
+            .iter()
+            .enumerate()
+            .find_map(|(index, &declared)| {
+                let applied = substitute_complete(db, declared, &subst).ok()?;
+                (applied == goal)
+                    .then(|| bound.entries.get(db, index))
+                    .flatten()
+                    .map(|proof| ProvedGoal {
+                        goal: applied,
+                        proof,
+                    })
+            })
     }
 
     /// Replaces the assumptions this call's evidence names, its caller's,

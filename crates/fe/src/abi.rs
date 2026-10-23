@@ -5,16 +5,23 @@ use driver::DriverDataBase;
 use hir::{
     analysis::{
         name_resolution::{PathRes, resolve_path},
+        semantic::{
+            EvalOutcome, SemConstScalar, SemConstValue, SemOrigin, SemanticInstance,
+            SemanticInstanceKey, eval_const_ref, resolve_semantic_const_ref,
+            root_semantic_instance_key,
+        },
         ty::{
             abi_ty::{self, AbiComponent, AbiTypeDesc, ParsedFunctionSignature},
             adt_def::AdtRef,
+            assoc_const::AssocConstUse,
             binder::Binder,
             corelib::{RuntimeBuiltinFuncKind, runtime_builtin_func_kind},
+            evidence::UseEvidence,
             normalize::normalize_from_assumptions,
             trait_def::TraitInstId,
             trait_resolution::{PredicateListId, TraitSolveCx},
-            ty_check::{BodyOwner, check_body},
-            ty_def::{BorrowKind, TyBase, TyData, TyId},
+            ty_check::{BodyOwner, ConstRef, check_body},
+            ty_def::{BorrowKind, PrimTy, TyBase, TyData, TyId},
         },
     },
     hir_def::{
@@ -151,17 +158,12 @@ pub fn generate_contract_abi(
         }
     }
 
-    for struct_ in collect_contract_event_structs(db, contract, false) {
+    for struct_ in collect_contract_event_structs(db, contract) {
         entries.push(event_struct_to_abi_entry(db, struct_)?);
     }
 
-    for struct_ in collect_contract_event_structs(db, contract, true) {
-        let mut entry = event_struct_to_abi_entry(db, struct_)?;
-        entry.entry_type = "error".to_string();
-        entry.anonymous = None;
-        for input in entry.inputs.iter_mut().flatten() {
-            input.indexed = None;
-        }
+    for error_ty in collect_contract_error_types(db, contract)? {
+        let entry = error_type_to_abi_entry(db, error_ty)?;
         // Solidity's built-in errors are implicit. Declaring them as custom
         // errors makes consumers such as ethers reject the entire ABI.
         if let Some([input]) = entry.inputs.as_deref()
@@ -308,20 +310,203 @@ fn event_struct_to_abi_entry(db: &DriverDataBase, struct_: Struct<'_>) -> Result
     })
 }
 
-fn collect_contract_event_structs<'db>(
+fn error_type_to_abi_entry(db: &DriverDataBase, ty: TyId<'_>) -> Result<AbiEntry, String> {
+    let struct_ = struct_from_ty(db, ty).ok_or("error type is not a struct")?;
+    let name = struct_
+        .name(db)
+        .to_opt()
+        .ok_or("error struct is missing a name")?;
+    let inputs = struct_ty_to_abi_param_descs(db, struct_, ty, |_| None)?;
+    Ok(AbiEntry {
+        entry_type: "error".to_string(),
+        name: Some(name.data(db).to_string()),
+        inputs: Some(
+            inputs
+                .into_iter()
+                .map(NamedAbiParamDesc::into_param)
+                .collect(),
+        ),
+        outputs: None,
+        state_mutability: None,
+        anonymous: None,
+    })
+}
+
+/// Error reachability follows the same applied instances and proof transport
+/// used by execution. The complete type remains attached to its field layout.
+fn collect_contract_error_types<'db>(
     db: &'db DriverDataBase,
     contract: hir::hir_def::Contract<'db>,
-    errors: bool,
-) -> Vec<Struct<'db>> {
-    let mut events = Vec::new();
-    let mut seen = HashSet::new();
-    let mut visited_funcs = HashSet::new();
-    let emit_traits = resolve_event_emit_traits(db, contract.scope());
+) -> Result<Vec<TyId<'db>>, String> {
     let error_func = hir::analysis::ty::corelib::resolve_lib_func_path(
         db,
         contract.scope(),
         "std::evm::effects::revert_error",
     );
+    let error_trait = resolve_lib_trait_path(db, contract.scope(), "core::error::ErrorVariant");
+    let sol_ty = resolve_sol_abi_ty(db, contract.scope())?;
+    let mut owners = Vec::new();
+    if contract.init(db).is_some() {
+        owners.push(BodyOwner::ContractInit { contract });
+    }
+    for recv in contract.recv_views(db) {
+        for arm in recv.arms(db) {
+            owners.push(BodyOwner::ContractRecvArm {
+                contract,
+                recv_idx: recv.index(db),
+                arm_idx: arm.index(db),
+            });
+        }
+    }
+    let mut pending = owners
+        .into_iter()
+        .map(|owner| {
+            root_semantic_instance_key(db, owner)
+                .map_err(|error| format!("cannot prepare error ABI reachability: {error:?}"))
+        })
+        .collect::<Result<Vec<SemanticInstanceKey<'db>>, String>>()?;
+    let mut visited = HashSet::new();
+    let mut seen = HashSet::new();
+    let mut errors = Vec::new();
+    while let Some(key) = pending.pop() {
+        if !visited.insert(key) {
+            continue;
+        }
+        let typed = key.typed_body(db);
+        let Some(body) = typed.body() else { continue };
+        for (expr, partial) in body.exprs(db).iter() {
+            let hir::hir_def::Partial::Present(hir::hir_def::Expr::Call(_, args)) = partial else {
+                continue;
+            };
+            let Some(callable) = typed.callable_expr(expr) else {
+                continue;
+            };
+            let hir::hir_def::CallableDef::Func(func) = callable.callable_def else {
+                continue;
+            };
+            let is_revert = Some(func) == error_func;
+            let is_panic =
+                runtime_builtin_func_kind(db, func) == Some(RuntimeBuiltinFuncKind::PanicWithValue);
+            if !is_revert && !is_panic {
+                continue;
+            }
+            let Some(arg) = args.first() else { continue };
+            let mut ty = typed.expr_ty(db, arg.expr);
+            while let Some((_, inner)) = ty.as_capability(db) {
+                ty = inner;
+            }
+            let Some(struct_) = struct_from_ty(db, ty) else {
+                continue;
+            };
+            if is_panic {
+                // This intrinsic declares no ErrorVariant bound. Its existing
+                // compiler-issued error origin remains the supported contract.
+                if !matches!(
+                    hir::span::struct_ast(db, struct_),
+                    hir::span::HirOrigin::Desugared(hir::span::DesugaredOrigin::Error(_))
+                ) {
+                    continue;
+                }
+            } else {
+                let error_trait =
+                    error_trait.ok_or("missing canonical ErrorVariant declaration")?;
+                let goal = TraitInstId::new_simple(db, error_trait, vec![ty, sol_ty]);
+                let proved = callable.proved_bound(db, goal).ok_or_else(|| {
+                    format!(
+                        "missing declaration-owned checked ErrorVariant proof for `{}`",
+                        ty.pretty_print(db)
+                    )
+                })?;
+                if !proved.proof.is_closed(db) || proved.proof.answering(db, goal).is_none() {
+                    return Err(format!(
+                        "error ABI requires a closed checked ErrorVariant proof for `{}`",
+                        ty.pretty_print(db)
+                    ));
+                }
+                let inputs = struct_ty_to_abi_param_descs(db, struct_, ty, |_| None)?;
+                let name = struct_
+                    .name(db)
+                    .to_opt()
+                    .ok_or("error struct is missing a name")?;
+                let signature = format!(
+                    "{}({})",
+                    name.data(db),
+                    inputs
+                        .iter()
+                        .map(|input| input.desc.canonical_type.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+                let mut evidence = UseEvidence::default();
+                evidence.record_dispatch(goal, Some(proved.proof));
+                let reference = ConstRef::TraitConst {
+                    use_: AssocConstUse::new(
+                        body.scope(),
+                        typed.assumptions(),
+                        goal,
+                        IdentId::new(db, "SELECTOR".to_string()),
+                    ),
+                    evidence,
+                };
+                let selector_ty = TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::U32)));
+                let reference = resolve_semantic_const_ref(
+                    db,
+                    reference,
+                    selector_ty,
+                    SemOrigin::Expr(expr),
+                )
+                .ok_or_else(|| format!("missing checked error SELECTOR for `{signature}`"))?;
+                let value = match eval_const_ref(db, reference) {
+                    EvalOutcome::Ready(value) => value,
+                    failure => {
+                        return Err(format!(
+                            "error SELECTOR evaluation failed for `{signature}`: {failure:?}"
+                        ));
+                    }
+                };
+                let selector = match value.value(db) {
+                    SemConstValue::Scalar {
+                        value: SemConstScalar::Int { value },
+                        ..
+                    } => value.to_string().parse::<u32>().ok(),
+                    _ => None,
+                }
+                .ok_or_else(|| format!("error SELECTOR is not u32 for `{signature}`"))?;
+                if selector != selector_for_signature(&signature) {
+                    return Err(format!(
+                        "error SELECTOR does not match canonical signature `{signature}`"
+                    ));
+                }
+            }
+            if seen.insert(ty) {
+                errors.push(ty);
+            }
+        }
+        let instance = SemanticInstance::new(db, key);
+        if let Some(diagnostic) = instance.call_site_finalization_diagnostic(db) {
+            return Err(format!(
+                "cannot finalize error ABI call graph: {diagnostic:?}"
+            ));
+        }
+        pending.extend(
+            instance
+                .call_sites(db)
+                .iter()
+                .flatten()
+                .filter_map(|site| site.callee.map(|callee| callee.key)),
+        );
+    }
+    Ok(errors)
+}
+
+fn collect_contract_event_structs<'db>(
+    db: &'db DriverDataBase,
+    contract: hir::hir_def::Contract<'db>,
+) -> Vec<Struct<'db>> {
+    let mut events = Vec::new();
+    let mut seen = HashSet::new();
+    let mut visited_funcs = HashSet::new();
+    let emit_traits = resolve_event_emit_traits(db, contract.scope());
 
     if contract.init(db).is_some() {
         let (_, typed_body) = hir::analysis::ty::ty_check::check_contract_init_body(db, contract);
@@ -329,8 +514,6 @@ fn collect_contract_event_structs<'db>(
             db,
             typed_body,
             &emit_traits,
-            errors,
-            error_func,
             &mut events,
             &mut seen,
             &mut visited_funcs,
@@ -349,8 +532,6 @@ fn collect_contract_event_structs<'db>(
                 db,
                 typed_body,
                 &emit_traits,
-                errors,
-                error_func,
                 &mut events,
                 &mut seen,
                 &mut visited_funcs,
@@ -366,8 +547,6 @@ fn collect_typed_body_event_structs<'db>(
     db: &'db DriverDataBase,
     typed_body: &hir::analysis::ty::ty_check::TypedBody<'db>,
     emit_traits: &EventEmitTraits<'db>,
-    errors: bool,
-    error_func: Option<Func<'db>>,
     out: &mut Vec<Struct<'db>>,
     seen: &mut HashSet<Struct<'db>>,
     visited_funcs: &mut HashSet<VisitedFuncBody<'db>>,
@@ -380,15 +559,7 @@ fn collect_typed_body_event_structs<'db>(
         let hir::hir_def::Partial::Present(_) = partial_expr else {
             continue;
         };
-        if errors {
-            if let Some(struct_) = reverted_error_struct(db, typed_body, body, expr_id, error_func)
-                && seen.insert(struct_)
-            {
-                out.push(struct_);
-            }
-        } else if let Some(struct_) =
-            emitted_event_struct(db, typed_body, body, expr_id, emit_traits)
-        {
+        if let Some(struct_) = emitted_event_struct(db, typed_body, body, expr_id, emit_traits) {
             push_event_struct(db, out, seen, struct_);
         }
 
@@ -419,8 +590,6 @@ fn collect_typed_body_event_structs<'db>(
                 db,
                 &func_typed_body,
                 emit_traits,
-                errors,
-                error_func,
                 out,
                 seen,
                 visited_funcs,
@@ -532,34 +701,6 @@ fn emitted_event_struct<'db>(
     }
 
     None
-}
-
-fn reverted_error_struct<'db>(
-    db: &'db DriverDataBase,
-    typed_body: &hir::analysis::ty::ty_check::TypedBody<'db>,
-    body: hir::hir_def::Body<'db>,
-    expr_id: hir::hir_def::ExprId,
-    error_func: Option<Func<'db>>,
-) -> Option<Struct<'db>> {
-    let hir::hir_def::Partial::Present(hir::hir_def::Expr::Call(_, args)) = expr_id.data(db, body)
-    else {
-        return None;
-    };
-    let callable = typed_body.callable_expr(expr_id)?;
-    let hir::hir_def::CallableDef::Func(func) = callable.callable_def else {
-        return None;
-    };
-    if Some(func) != error_func
-        && runtime_builtin_func_kind(db, func) != Some(RuntimeBuiltinFuncKind::PanicWithValue)
-    {
-        return None;
-    }
-    let struct_ = struct_from_ty(db, typed_body.expr_ty(db, args.first()?.expr))?;
-    matches!(
-        hir::span::struct_ast(db, struct_),
-        hir::span::HirOrigin::Desugared(hir::span::DesugaredOrigin::Error(_))
-    )
-    .then_some(struct_)
 }
 
 fn push_event_struct<'db>(
@@ -844,9 +985,19 @@ mod tests {
         let url = url::Url::from_file_path(&file_path).expect("file path to url");
         let mut db = DriverDataBase::default();
         let file = db.workspace().touch(&mut db, url, Some(code.to_string()));
-        let top_mod = db.top_mod(file);
-        generate_contract_abi(&db, top_mod, contract_name)?
-            .ok_or_else(|| format!("contract `{contract_name}` not found"))
+        let prepared = driver::generation::prepare_file(&db, file)
+            .map_err(|error| format!("generation failed: {error:?}"))?;
+        if let Some(output) = prepared {
+            let output_file = output
+                .workspace()
+                .get(&output, &file.url(&db).unwrap())
+                .unwrap();
+            generate_contract_abi(&output, output.top_mod(output_file), contract_name)?
+                .ok_or_else(|| format!("contract `{contract_name}` not found"))
+        } else {
+            generate_contract_abi(&db, db.top_mod(file), contract_name)?
+                .ok_or_else(|| format!("contract `{contract_name}` not found"))
+        }
     }
 
     fn generate_test_abi(code: &str, contract_name: &str) -> Result<String, String> {
@@ -1831,6 +1982,114 @@ pub contract Foo {
         assert_eq!(function["inputs"][1]["type"], "int24");
         assert_eq!(function["inputs"][1]["name"], "value");
     }
+    const APPLIED_ERROR_SOURCE: &str = r#"
+use core::abi::{AbiFrame, AbiSize, Encode, abi_field_head_size, dynamic_payload_size, encode_field}
+use core::error::ErrorVariant
+use std::abi::{Sol, sol}
+use std::evm::revert_error
+
+struct Failure<T> { value: T }
+impl<T: AbiSize> AbiSize for Failure<T> {
+    const HEAD_SIZE: u256 = abi_field_head_size<T>()
+    const IS_DYNAMIC: bool = <T as AbiSize>::IS_DYNAMIC
+    fn payload_size(self) -> u256 { Self::HEAD_SIZE + dynamic_payload_size(self.value) }
+}
+impl<T: AbiSize + Encode<Sol>> Encode<Sol> for Failure<T> {
+    fn encode(own self, _ out: AbiFrame) {
+        let tails = out.tail(<Self as AbiSize>::HEAD_SIZE)
+        let _ = encode_field<Sol, T>(self.value, out, head_pos: 0, tails: tails)
+    }
+}
+impl ErrorVariant<Sol> for Failure<u256> {
+    const SELECTOR: u32 = sol("Failure(uint256)")
+}
+impl ErrorVariant<Sol> for Failure<bool> {
+    const SELECTOR: u32 = sol("Failure(bool)")
+}
+struct NonError { value: u256 }
+mod lookalike {
+    pub fn revert_error<T>(_ value: own T) { let _ = value }
+}
+fn fail<T: ErrorVariant<Sol> + Encode<Sol>>(_ error: own T) { revert_error(error) }
+msg M {
+    #[selector = sol("fail(bool)")]
+    Fail { boolean: bool }
+}
+pub contract C {
+    recv M {
+        Fail { boolean } {
+            lookalike::revert_error(NonError { value: 7 })
+            if boolean { fail(Failure<bool> { value: true }) }
+            else { fail(Failure<u256> { value: 7 }) }
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn handwritten_errors_retain_applied_fields_through_generic_calls() {
+        let entries = abi_entries(APPLIED_ERROR_SOURCE, "C");
+        let errors = entries
+            .iter()
+            .filter(|entry| entry["type"] == "error")
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 2, "{entries:?}");
+        assert!(errors.iter().all(|entry| entry["name"] == "Failure"));
+        assert!(
+            errors
+                .iter()
+                .any(|entry| entry["inputs"]
+                    == serde_json::json!([{"name":"value","type":"uint256"}]))
+        );
+        assert!(errors.iter().any(|entry| entry["inputs"] == serde_json::json!([{"name":"value","type":"bool"}])));
+        assert!(!entries.iter().any(|entry| entry["name"] == "NonError"));
+    }
+
+    #[test]
+    fn handwritten_error_noncanonical_selector_is_refused() {
+        let source = APPLIED_ERROR_SOURCE.replace("sol(\"Failure(bool)\")", "0");
+        let error = generate_test_abi_result(&source, "C")
+            .err()
+            .expect("noncanonical error selector");
+        assert!(
+            error.contains("error SELECTOR does not match canonical signature `Failure(bool)`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn generated_error_uses_checked_selector_and_reachability() {
+        let source = r#"
+use std::abi::sol
+use std::derive::error_struct
+use std::evm::revert_error
+#[generate(error_struct)]
+struct GeneratedFailure { first: u256, second: u256 }
+#[generate(error_struct)]
+struct UnusedFailure { first: u256 }
+msg M {
+    #[selector = sol("fail()")]
+    Fail {}
+}
+pub contract C {
+    recv M { Fail {} { revert_error(GeneratedFailure { first: 1, second: 2 }) } }
+}
+"#;
+        let entries = abi_entries(source, "C");
+        let errors = entries
+            .iter()
+            .filter(|entry| entry["type"] == "error")
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1, "{entries:?}");
+        assert_eq!(errors[0]["name"], "GeneratedFailure");
+        assert_eq!(
+            errors[0]["inputs"],
+            serde_json::json!([
+                {"name":"first","type":"uint256"}, {"name":"second","type":"uint256"}
+            ])
+        );
+    }
+
     #[test]
     fn custom_errors_include_reachable_reverts_only() {
         let code = r#"
