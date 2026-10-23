@@ -2320,6 +2320,43 @@ pub contract C {{
     }
 
     #[test]
+    fn error_selector_evaluation_keeps_division_fault() {
+        let source = APPLIED_ERROR_SOURCE
+            .replace("sol(\"Failure(bool)\")", "{ let zero: u32 = 0\n1 / zero }");
+        let error = generate_test_abi_result(&source, "C")
+            .err()
+            .expect("selector evaluation fault");
+        assert!(error.contains("SELECTOR evaluation failed"), "{error}");
+        assert!(error.contains("DivisionByZero"), "{error}");
+    }
+
+    #[test]
+    fn error_abi_discovery_keeps_shared_growing_instance_refusal() {
+        let source = r#"
+use std::abi::sol
+fn recur<T: Copy>(_ value: T, _ n: u256) -> u256 {
+    if n == 0 { 0 } else { 1 + recur(value, n - 1) }
+}
+msg M {
+    #[selector = sol("run()")]
+    Run {} -> u256
+}
+pub contract C { recv M { Run {} -> u256 { recur(1 as u256, 0) } } }
+"#;
+        generate_test_abi_result(source, "C")
+            .expect("same-instance recursion is bounded by key identity");
+        let growing = source.replace("recur(value, n - 1)", "recur((value, value), n - 1)");
+        let error = generate_test_abi_result(&growing, "C")
+            .err()
+            .expect("shared instance growth refusal");
+        assert!(
+            error.contains("cannot admit error ABI call graph"),
+            "{error}"
+        );
+        assert!(error.contains("InstanceLimit"), "{error}");
+    }
+
+    #[test]
     fn custom_errors_include_reachable_reverts_only() {
         let code = r#"
 use std::abi::sol
