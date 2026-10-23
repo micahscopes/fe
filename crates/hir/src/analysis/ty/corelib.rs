@@ -444,6 +444,44 @@ fn trait_reaches<'db>(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>, target: Tr
             .any(|bound| trait_reaches(db, bound.def(db), target))
 }
 
+/// Whether a resolved method's contract permits runtime suspension. The
+/// nominal capability, rather than the method's spelling or implementation
+/// body, establishes this footprint.
+pub fn suspension_capability_method<'db>(db: &'db dyn HirAnalysisDb, func: Func<'db>) -> bool {
+    let func = func.trait_method_def(db).unwrap_or(func);
+    let Some(containing_trait) = func.containing_trait(db) else {
+        return false;
+    };
+    resolve_lib_trait_path(db, func.scope(), "core::task::Suspend")
+        .is_some_and(|target| trait_reaches(db, containing_trait, target))
+}
+
+/// Whether a declared effect permits suspension. Callers expand effect rows
+/// before classifying their components. Concrete provider types are checked
+/// against the same nominal capability as trait-keyed requirements.
+pub fn effect_key_may_suspend<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    key: EffectRequirementKey<'db>,
+) -> bool {
+    let Some(target) = resolve_lib_trait_path(db, scope, "core::task::Suspend") else {
+        return false;
+    };
+    match key {
+        EffectRequirementKey::Trait(inst) => trait_reaches(db, inst.def(db), target),
+        EffectRequirementKey::Type(ty) => matches!(
+            is_goal_satisfiable(
+                db,
+                TraitSolveCx::new(db, scope).with_assumptions(assumptions),
+                TraitInstId::new_simple(db, target, vec![ty]),
+            ),
+            GoalSatisfiability::Satisfied(_)
+        ),
+        EffectRequirementKey::Row(_) | EffectRequirementKey::Other => false,
+    }
+}
+
 /// The persistent and transient state an external execution started by `func`
 /// can access. A call or creation can reenter the contract and write any slot;
 /// a static call only reads; precompiles cannot call back. Methods of reentrant
