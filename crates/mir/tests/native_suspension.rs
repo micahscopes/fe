@@ -43,6 +43,22 @@ fn entry(_ native: own Native) -> u64 {
         TaskOutcome::Cancelled => 0
     }
 }
+fn entry_twice(_ native: own Native) -> u64 {
+    var cap = native
+    let first = unsafe { fixture_pending() }
+    let keep: u64 = 5
+    let subtotal = match hop(mut cap, first) {
+        TaskOutcome::Success(value) => keep + value
+        TaskOutcome::Failure(error) => error
+        TaskOutcome::Cancelled => 0
+    }
+    let second = unsafe { fixture_pending() }
+    match hop(mut cap, second) {
+        TaskOutcome::Success(value) => subtotal + value
+        TaskOutcome::Failure(error) => error
+        TaskOutcome::Cancelled => 0
+    }
+}
 "#
             .into(),
         ),
@@ -129,4 +145,32 @@ fn entry(_ native: own Native) -> u64 {
         fe_mir::runtime::runtime_instance_stable_key(&db, generated[0]),
         fe_mir::runtime::runtime_instance_stable_key(&db, generated[1]),
     );
+    let twice = module
+        .all_funcs(&db)
+        .iter()
+        .copied()
+        .find(|func| {
+            func.name(&db)
+                .to_opt()
+                .is_some_and(|name| name.data(&db) == "entry_twice")
+        })
+        .unwrap();
+    let semantic = SemanticInstance::new(
+        &db,
+        root_semantic_instance_key(&db, BodyOwner::Func(twice, None)).unwrap(),
+    );
+    let twice = get_or_build_runtime_instance(
+        &db,
+        RuntimeInstanceKey::new(&db, RuntimeInstanceSource::Semantic(semantic), vec![]),
+    );
+    let twice_plan = plan_native_scalar_task(&db, twice).expect("two sequential cuts");
+    let twice_segments = twice_plan.instances(&db);
+    assert_eq!(twice_segments.len(), 3);
+    for segment in twice_segments {
+        assert!(
+            prepare_native_scalar_cuts(&db, segment.body(&db))
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
