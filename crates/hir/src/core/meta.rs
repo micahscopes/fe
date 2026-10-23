@@ -384,6 +384,18 @@ impl<'db> RecordInput<'db> {
         }
     }
 
+    /// Nominal authored name, or the selected enum payload's variant name.
+    pub fn name(self, db: &'db dyn HirAnalysisDb) -> Option<IdentId<'db>> {
+        match (self.owner, self.variant_index) {
+            (RecordOwner::Struct(record), None) => record.name(db).to_opt(),
+            (RecordOwner::Enum(record), None) => record.name(db).to_opt(),
+            (RecordOwner::Enum(record), Some(index)) => {
+                record.variants_list(db).data(db).get(index)?.name.to_opt()
+            }
+            _ => None,
+        }
+    }
+
     pub fn scope(self) -> crate::hir_def::scope_graph::ScopeId<'db> {
         match self.owner {
             RecordOwner::Struct(s) => s.scope(),
@@ -922,6 +934,9 @@ pub enum CodeData<'db> {
     Empty {
         kind: common::generation::FrozenCodeKind,
     },
+    RecordName {
+        record: RecordInput<'db>,
+    },
     VariantBinders {
         record: RecordInput<'db>,
         group: usize,
@@ -945,6 +960,29 @@ impl<'db> ItemCode<'db> {
         Self {
             data: CodeData::Empty { kind },
         }
+    }
+
+    pub fn record_name(record: RecordInput<'db>) -> Self {
+        Self {
+            data: CodeData::RecordName { record },
+        }
+    }
+
+    fn record_name_cost(
+        db: &'db dyn HirAnalysisDb,
+        record: RecordInput<'db>,
+    ) -> Result<usize, &'static str> {
+        record.validate(db)?;
+        let name = record
+            .name(db)
+            .ok_or("record_name requires an authored declaration name")?;
+        let mut width = crate::core::lower::signature_name_chunks(name.data(db)).len();
+        let mut nodes = width;
+        while width > 16 {
+            nodes += width / 16 + usize::from(width % 16 > 1);
+            width = width.div_ceil(16);
+        }
+        Ok(nodes + usize::from(width > 1))
     }
 
     pub fn variant_binders(record: RecordInput<'db>, group: usize) -> Self {
@@ -976,7 +1014,9 @@ impl<'db> ItemCode<'db> {
         match &self.data {
             CodeData::Template { kind, .. } | CodeData::Empty { kind } => *kind,
             CodeData::VariantBinders { .. } => FrozenCodeKind::Pat,
-            CodeData::VariantBinderField { .. } => FrozenCodeKind::Expr,
+            CodeData::VariantBinderField { .. } | CodeData::RecordName { .. } => {
+                FrozenCodeKind::Expr
+            }
         }
     }
 
@@ -1156,6 +1196,21 @@ impl<'db> ItemCode<'db> {
         use crate::analysis::semantic::SemConstValue;
         use common::generation::{FrozenCode, FrozenHoleValue};
         match &self.data {
+            CodeData::RecordName { record } => {
+                let cost = Self::record_name_cost(db, *record)?;
+                if cost > *remaining_nodes {
+                    return Err("generated code tree exceeds the expanded AST node limit of 4096");
+                }
+                *remaining_nodes -= cost;
+                Ok(FrozenCode::RecordName {
+                    record: record.freeze(db)?,
+                    name: record
+                        .name(db)
+                        .ok_or("record_name requires an authored declaration name")?
+                        .data(db)
+                        .to_string(),
+                })
+            }
             CodeData::Empty { kind } => Ok(FrozenCode::Empty { kind: *kind }),
             CodeData::VariantBinders { record, group } => {
                 if *remaining_nodes == 0 {
@@ -1313,6 +1368,14 @@ impl<'db> ItemCode<'db> {
         use crate::analysis::semantic::SemConstValue;
         use common::generation::FrozenCodeKind;
         match &self.data {
+            CodeData::RecordName { record } => {
+                let cost = Self::record_name_cost(db, *record)?;
+                if cost > *remaining_nodes {
+                    return Err("generated code tree exceeds the expanded AST node limit of 4096");
+                }
+                *remaining_nodes -= cost;
+                return Ok(());
+            }
             CodeData::Empty { .. } => return Ok(()),
             CodeData::VariantBinders { .. } | CodeData::VariantBinderField { .. } => {
                 if *remaining_nodes == 0 {

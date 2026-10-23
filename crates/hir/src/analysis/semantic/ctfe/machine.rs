@@ -1979,6 +1979,7 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         let value = match ctfe_extern_intrinsic_kind(self.db, func) {
             Some(
                 kind @ (CtfeExternIntrinsic::MetaFieldCount
+                | CtfeExternIntrinsic::MetaRecordName
                 | CtfeExternIntrinsic::MetaVariantCount
                 | CtfeExternIntrinsic::MetaVariant
                 | CtfeExternIntrinsic::MetaTypeIs
@@ -2042,6 +2043,42 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
         origin: SemOrigin<'db>,
     ) -> EvalResult<'db, CtfeConstValue<'db>> {
         match kind {
+            CtfeExternIntrinsic::MetaRecordName => {
+                let [arg] = args else {
+                    return Err(CtfeError::NotConstEvaluable { origin }.into());
+                };
+                let value = arg.materialize(self.db);
+                let SemConstValue::Meta {
+                    value: crate::core::meta::MetaValue::Record(record),
+                    ..
+                } = value.value(self.db)
+                else {
+                    return Err(CtfeError::InvalidOperation {
+                        origin,
+                        message: "record_name requires a compiler-issued Record".into(),
+                    }
+                    .into());
+                };
+                record
+                    .validate(self.db)
+                    .map_err(|message| CtfeError::InvalidOperation {
+                        origin,
+                        message: message.into(),
+                    })?;
+                let value = SemConstId::new(
+                    self.db,
+                    SemConstValue::ItemCode {
+                        ty: result_ty,
+                        code: crate::core::meta::ItemCode::record_name(*record),
+                    },
+                );
+                let verified = VerifiedConstValueId::from_complete_execution(self.db, value)
+                    .map_err(|message| CtfeError::InvalidOperation {
+                        origin,
+                        message: message.into(),
+                    })?;
+                Ok(CtfeConstValue::concrete(self.db, verified))
+            }
             CtfeExternIntrinsic::MetaFieldCount => {
                 let [arg] = args else {
                     return Err(CtfeError::NotConstEvaluable { origin }.into());

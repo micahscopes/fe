@@ -1,5 +1,5 @@
 use core::abi::AbiSize
-use core::meta::{Code, Expr, Field, Item, Record, field, field_count, field_type}
+use core::meta::{Code, Expr, Field, Item, Record, field, field_count, field_type, record_name}
 
 /// One step of a fold over the fields of a record, written as code.
 ///
@@ -142,9 +142,10 @@ pub const fn sol_tuple_type(_ record: Record) -> Code<Expr> {
 /// Generate the ordinary error selector implementation for a record.
 pub const fn error_variant(_ record: Record) -> Code<Item> {
     let tuple_ty = sol_tuple_type(record)
+    let name = record_name(record)
     quote {
         impl core::error::ErrorVariant<ingot::abi::Sol> for ${record} {
-            const SELECTOR: u32 = ingot::abi::sol((${record}, ${tuple_ty}))
+            const SELECTOR: u32 = ingot::abi::sol((${name}, ${tuple_ty}))
         }
     }
 }
