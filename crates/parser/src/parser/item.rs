@@ -132,6 +132,12 @@ impl super::Parse for ItemScope {
             parser.error(&error_msg);
         }
 
+        // `recursive` is a keyword only at the head of an item.
+        if parser.is_ident("recursive") {
+            parser.parse_cp(super::type_fn::RecursiveTypeFnScope::default(), checkpoint)?;
+            return Ok(());
+        }
+
         parser.expect(
             &[
                 ModKw,

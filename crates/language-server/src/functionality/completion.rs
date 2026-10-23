@@ -383,7 +383,7 @@ fn build_auto_import_completion<'db>(
                 name_str.clone(),
             )
         }
-        ItemKind::TypeAlias(_) | ItemKind::Contract(_) => {
+        ItemKind::TypeAlias(_) | ItemKind::TypeFn(_) | ItemKind::Contract(_) => {
             if matches!(context, CompletionContext::Expression) {
                 return None;
             }
@@ -715,7 +715,7 @@ fn collect_path_completions<'db>(
                 }
                 (CompletionItemKind::INTERFACE, None)
             }
-            ItemKind::TypeAlias(_) => {
+            ItemKind::TypeAlias(_) | ItemKind::TypeFn(_) => {
                 if matches!(context, CompletionContext::Expression) {
                     continue;
                 }
@@ -1261,7 +1261,7 @@ fn name_res_to_completion<'db>(
             })
         }
 
-        Some(ItemKind::TypeAlias(_)) => {
+        Some(ItemKind::TypeAlias(_) | ItemKind::TypeFn(_)) => {
             // Type aliases are types
             if matches!(context, CompletionContext::Expression) {
                 return None;

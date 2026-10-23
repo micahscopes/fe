@@ -257,6 +257,7 @@ pub fn named_item_symbol(db: &dyn SpannedHirDb, item: ItemKind) -> Option<(Symbo
         ItemKind::Enum(e) => (SymbolKind::ENUM, "enum", e.name(db)),
         ItemKind::Trait(t) => (SymbolKind::INTERFACE, "trait", t.name(db)),
         ItemKind::TypeAlias(ta) => (SymbolKind::CLASS, "type", ta.name(db)),
+        ItemKind::TypeFn(def) => (SymbolKind::CLASS, "recursive type fn", def.name(db)),
         ItemKind::Const(c) => (SymbolKind::CONSTANT, "const", c.name(db)),
         ItemKind::Mod(m) => (SymbolKind::MODULE, "mod", m.name(db)),
         ItemKind::Contract(c) => (SymbolKind::CLASS, "contract", c.name(db)),

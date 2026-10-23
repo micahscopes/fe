@@ -56,6 +56,13 @@
     "type" @context
     name: (_) @name) @item
 
+(type_function_definition
+    (visibility)? @context
+    "recursive" @context
+    "type" @context
+    "fn" @context
+    name: (_) @name) @item
+
 (trait_type_item
     "type" @context
     name: (_) @name) @item

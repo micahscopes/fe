@@ -284,3 +284,34 @@ mod strings {
     let reformatted = format_str(&formatted, &Config::default()).expect("reformat should succeed");
     assert_eq!(reformatted, formatted, "formatting is not stable");
 }
+
+#[test]
+fn recursive_type_fn_in_a_module_formats_once() {
+    let source = "mod shapes {\n    pub recursive   type fn Tree<const N:usize>()->(*){\n        match N {\n            0 => Leaf\n            _ => Node<Leaf, Tree<{N - 1}>>\n        }\n    }\n}\n";
+    let formatted = format_str(source, &Config::default()).unwrap();
+    assert_eq!(
+        format_str(&formatted, &Config::default()).unwrap(),
+        formatted
+    );
+    assert!(
+        formatted.contains(
+            "    pub recursive type fn Tree<const N: usize>() -> (*) {\n        match N {\n            0 => Leaf\n"
+        ),
+        "{formatted}"
+    );
+    let (_, errors) = parse_source_file(&formatted, RecoveryMode::NoRecover);
+    assert!(errors.is_empty(), "{errors:?}\n{formatted}");
+}
+
+#[test]
+fn commented_recursive_type_fn_keeps_its_text_and_formats_once() {
+    let source = "mod shapes {\n        recursive type fn Tree<const N: usize>() -> * {\n            match N {\n                // the leaf\n                0 => Leaf\n                _ => Node<Tree<{N - 1}>>\n            }\n        }\n}\n";
+    let formatted = format_str(source, &Config::default()).unwrap();
+    assert!(formatted.contains("// the leaf"), "{formatted}");
+    assert_eq!(
+        format_str(&formatted, &Config::default()).unwrap(),
+        formatted
+    );
+    let (_, errors) = parse_source_file(&formatted, RecoveryMode::NoRecover);
+    assert!(errors.is_empty(), "{errors:?}\n{formatted}");
+}

@@ -654,3 +654,36 @@ fn tree_sitter_agrees_on_where_clauses_and_function_bodies() {
         ["enum", "function", "impl", "impl trait", "struct", "trait"],
     );
 }
+
+#[test]
+fn recursive_type_functions_parse_alike_in_both_frontends() {
+    let mut parser = new_parser();
+    for source in [
+        "recursive type fn Choose<const N: usize>() -> (*) { match N { 0 => u256\n _ => bool } }",
+        "pub recursive type fn Fixed<const N: usize>() -> * { match N { 0 => u256, _ => Fixed<{N - 1}> } }",
+        "recursive type fn Nest<T, const N: usize>() -> (*) where T: Marker {\n    match N {\n        0 => T\n        _ => (Nest<T, {N - 1}>, bool)\n    }\n}",
+        "recursive type fn Lift<F: * -> *, const N: usize>() -> * -> * { match N { 0 => F, _ => Lift<F, {N / 2}> } }",
+        "fn recursive(recursive: u8) -> u8 {\n    recursive\n}",
+    ] {
+        let (_, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let errors = parse_errors(&mut parser, source);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+    }
+    for source in [
+        "type fn Identity<T>() -> (*) { T }",
+        "recursive type fn Bad<const N: usize>() -> (*) { match N { true => u256 } }",
+        "recursive type fn Identity<T>() -> (*) { T }",
+        "recursive type fn NoKind<const N: usize>() { match N { _ => u256 } }",
+        "recursive type fn Params<const N: usize>(x: u8) -> (*) { match N { _ => u256 } }",
+        "recursive fn Missing<const N: usize>() -> (*) { match N { _ => u256 } }",
+        "recursive type fn Missing<const N: usize>() -> (*) { match N { 0 => u256",
+    ] {
+        let (_, errors) = parse_source_file(source, RecoveryMode::Recover);
+        assert!(!errors.is_empty(), "native parser accepted {source}");
+        assert!(
+            !parse_errors(&mut parser, source).is_empty(),
+            "tree-sitter accepted {source}"
+        );
+    }
+}

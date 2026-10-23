@@ -94,6 +94,7 @@
   "mut"
   "mut?"
   "own"
+  "recursive"
   "recv"
   "self"
   "struct"

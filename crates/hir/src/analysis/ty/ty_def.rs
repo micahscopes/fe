@@ -5,7 +5,7 @@ use std::fmt;
 use crate::{
     hir_def::{
         Body, Enum, ExprId, GenericParamOwner, IdentId, ItemKind, PathId, Struct,
-        TypeAlias as HirTypeAlias, VariantKind,
+        TypeAlias as HirTypeAlias, TypeFnDef, VariantKind,
         params::FuncParamMode,
         prim_ty::{IntTy as HirIntTy, PrimTy as HirPrimTy, UintTy as HirUintTy},
         scope_graph::ScopeId,
@@ -215,6 +215,9 @@ impl<'db> TyId<'db> {
                         return contract.top_mod(db).ingot(db).into();
                     }
                     TyData::TyBase(TyBase::Func(def)) => return def.ingot(db).into(),
+                    TyData::TyBase(TyBase::TypeFn(def)) => {
+                        return def.top_mod(db).ingot(db).into();
+                    }
                     TyData::TyBase(TyBase::Closure(_)) => return None,
                     TyData::TyApp(lhs, _) => {
                         ty = *lhs;
@@ -228,6 +231,7 @@ impl<'db> TyId<'db> {
             TyData::TyBase(TyBase::Adt(adt)) => adt.ingot(db).into(),
             TyData::TyBase(TyBase::Contract(contract)) => contract.top_mod(db).ingot(db).into(),
             TyData::TyBase(TyBase::Func(def)) => def.ingot(db).into(),
+            TyData::TyBase(TyBase::TypeFn(def)) => def.top_mod(db).ingot(db).into(),
             TyData::TyBase(TyBase::Closure(_)) => None,
             TyData::TyApp(lhs, _) => lhs.ingot(db),
             // Projection types don't have a single defining ingot, but we still want an ingot
@@ -282,7 +286,9 @@ impl<'db> TyId<'db> {
         self.flags(db).contains(TyFlags::HAS_VAR)
     }
 
-    /// Returns whether this type contains an unresolved trait projection.
+    /// Returns whether this type contains an unresolved trait projection or a
+    /// full application of a recursive type fn, which normalization may
+    /// rewrite.
     pub fn has_projection(self, db: &dyn HirAnalysisDb) -> bool {
         self.flags(db).contains(TyFlags::HAS_PROJECTION)
     }
@@ -509,6 +515,12 @@ impl<'db> TyId<'db> {
         contract: crate::hir_def::Contract<'db>,
     ) -> Self {
         Self::new(db, TyData::TyBase(TyBase::Contract(contract)))
+    }
+
+    /// The unapplied recursive type fn `def`; only its full applications are
+    /// types.
+    pub(crate) fn type_fn(db: &'db dyn HirAnalysisDb, def: TypeFnDef<'db>) -> Self {
+        Self::new(db, TyData::TyBase(TyBase::TypeFn(def)))
     }
 
     // TODO: Add semantic view and restrict visibility
@@ -748,6 +760,7 @@ impl<'db> TyId<'db> {
             TyData::TyBase(TyBase::Adt(adt)) => Some(adt.scope(db)),
             TyData::TyBase(TyBase::Contract(c)) => Some(c.scope()),
             TyData::TyBase(TyBase::Func(func)) => Some(func.scope()),
+            TyData::TyBase(TyBase::TypeFn(def)) => Some(def.scope()),
             TyData::TyBase(TyBase::Closure(_) | TyBase::Prim(..)) => None,
             TyData::ConstTy(const_ty) => match const_ty.data(db) {
                 ConstTyData::TyVar(..) => None,
@@ -775,6 +788,7 @@ impl<'db> TyId<'db> {
             TyData::TyBase(TyBase::Adt(adt)) => Some(adt.name_span(db)),
             TyData::TyBase(TyBase::Contract(c)) => c.scope().name_span(db),
             TyData::TyBase(TyBase::Func(func)) => Some(func.name_span()),
+            TyData::TyBase(TyBase::TypeFn(def)) => Some(def.span().name().into()),
             TyData::TyBase(TyBase::Closure(_) | TyBase::Prim(_)) => None,
 
             TyData::ConstTy(ty) => match ty.data(db) {
@@ -1096,6 +1110,13 @@ impl<'db> TyId<'db> {
                 let param = params.get(args.len()).copied();
                 param.and_then(|ty| ty.const_ty_ty(db))
             }
+
+            // Arguments beyond the declared parameters apply the result,
+            // whose kind the declaration states.
+            TyBase::TypeFn(def) => collect_generic_params(db, (*def).into())
+                .params(db)
+                .get(args.len())
+                .and_then(|param| param.const_ty_ty(db)),
 
             TyBase::Prim(PrimTy::Array) => {
                 if args.len() == 1 {
@@ -1450,6 +1471,14 @@ pub enum InvalidCause<'db> {
     /// than the normalizer allows.
     TypeNormalizationLimit,
 
+    /// An application of a recursive type fn whose definition is invalid. The
+    /// definition reports its own error, so uses report nothing more.
+    ComputedTypeDefinitionInvalid,
+
+    /// Computing this application of a recursive type fn needed its own result,
+    /// through a const payload or an associated type.
+    ComputedTypeCycle,
+
     // TraitConstraintNotSat(PredicateId),
     ParseError,
 
@@ -1641,6 +1670,8 @@ impl InvalidCause<'_> {
             InvalidCause::ConstEvalRecursiveConst { .. } => "ConstEvalRecursiveConst".into(),
             InvalidCause::TypeLoweringCycle => "TypeLoweringCycle".into(),
             InvalidCause::TypeNormalizationLimit => "TypeNormalizationLimit".into(),
+            InvalidCause::ComputedTypeDefinitionInvalid => "ComputedTypeDefinitionInvalid".into(),
+            InvalidCause::ComputedTypeCycle => "ComputedTypeCycle".into(),
         }
     }
 }
@@ -2046,6 +2077,9 @@ pub enum TyBase<'db> {
     Contract(crate::hir_def::Contract<'db>),
     Func(CallableDef<'db>),
     Closure(ClosureTy<'db>),
+    /// A recursive type fn. Its full applications unfold during
+    /// normalization; a partial application is not a type.
+    TypeFn(TypeFnDef<'db>),
 }
 
 impl<'db> TyBase<'db> {
@@ -2115,6 +2149,11 @@ impl<'db> TyBase<'db> {
             ),
 
             Self::Closure(closure) => closure.pretty_print(db),
+
+            Self::TypeFn(def) => def
+                .name(db)
+                .to_opt()
+                .map_or_else(|| "<unknown>".to_string(), |name| name.data(db).to_string()),
         }
     }
 
@@ -2310,6 +2349,7 @@ impl HasKind for TyBase<'_> {
             TyBase::Contract(_) => Kind::Star, // Contracts have no generic params
             TyBase::Func(func) => func.kind(db),
             TyBase::Closure(_) => Kind::Star,
+            TyBase::TypeFn(def) => def.kind(db),
         }
     }
 }
@@ -2334,6 +2374,23 @@ impl HasKind for AdtDef<'_> {
             kind = Kind::abs(param.kind(db).clone(), kind);
         }
 
+        kind
+    }
+}
+
+impl HasKind for TypeFnDef<'_> {
+    fn kind(&self, db: &dyn HirAnalysisDb) -> Kind {
+        let mut kind = self
+            .ret_kind(db)
+            .to_opt()
+            .map_or(Kind::Star, |kind| super::ty_lower::lower_kind(&kind));
+        for param in collect_generic_params(db, (*self).into())
+            .params(db)
+            .iter()
+            .rev()
+        {
+            kind = Kind::abs(param.kind(db).clone(), kind);
+        }
         kind
     }
 }
@@ -2585,9 +2642,18 @@ pub(crate) fn ty_flags<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyFlag
         }
     }
 
+    // A full application of a recursive type fn reduces during normalization,
+    // as a projection does.
+    let is_computed_application = || {
+        let (base, args) = ty.decompose_ty_app(db);
+        matches!(base.data(db), TyData::TyBase(TyBase::TypeFn(def))
+            if args.len() >= collect_generic_params(db, (*def).into()).params(db).len())
+    };
     let mut collector = Collector {
         db,
-        flags: if matches!(ty.data(db), TyData::AssocTy(_) | TyData::QualifiedTy(_)) {
+        flags: if matches!(ty.data(db), TyData::AssocTy(_) | TyData::QualifiedTy(_))
+            || is_computed_application()
+        {
             TyFlags::HAS_PROJECTION
         } else {
             TyFlags::empty()
