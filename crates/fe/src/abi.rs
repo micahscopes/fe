@@ -2357,6 +2357,81 @@ pub contract C { recv M { Run {} -> u256 { recur(1 as u256, 0) } } }
     }
 
     #[test]
+    fn abi_runtime_payloads_match_empty_nested_and_dynamic_literal_oracles() {
+        use contract_harness::{ExecutionOptions, FeContractHarness, HarnessError};
+        let mut nested = vec![0u8; 96];
+        nested[31] = 1;
+        nested[63] = 2;
+        nested[95] = 3;
+        let mut dynamic = vec![0u8; 128];
+        dynamic[31] = 7;
+        dynamic[63] = 64;
+        dynamic[95] = 3;
+        dynamic[96..99].copy_from_slice(&[0xaa, 0xbb, 0xcc]);
+        let cases = [
+            ("", "Payload {}", 0, false, "let _ = out", Vec::new()),
+            (
+                "pair: (u256, u256), third: u256",
+                "Payload { pair: (1, 2), third: 3 }",
+                96,
+                false,
+                "out.store_word(at: 0, value: self.pair.0)\nout.store_word(at: 32, value: self.pair.1)\nout.store_word(at: 64, value: self.third)",
+                nested,
+            ),
+            (
+                "id: u256, bytes: Bytes",
+                "Payload { id: 7, bytes: std::abi::bytes_from_words_prefix<3, 1>([0xaabbcc0000000000000000000000000000000000000000000000000000000000]) }",
+                64,
+                true,
+                "out.store_word(at: 0, value: self.id)\nout.store_word(at: 32, value: 64)\nself.bytes.encode(out.tail(64))",
+                dynamic,
+            ),
+        ];
+        for (fields, value, head, is_dynamic, handwritten_encode, expected) in cases {
+            let record = format!("struct Payload {{ {fields} }}");
+            let handwritten_size = if is_dynamic { "128" } else { "Self::HEAD_SIZE" };
+            let manual = format!(
+                r#"
+{record}
+impl AbiSize for Payload {{
+    const HEAD_SIZE: u256 = {head}
+    const IS_DYNAMIC: bool = {is_dynamic}
+    fn payload_size(self) -> u256 {{ {handwritten_size} }}
+}}
+impl Encode<Sol> for Payload {{
+    fn encode(own self, _ out: AbiFrame) {{ {handwritten_encode} }}
+}}
+"#
+            );
+            for declaration in [
+                format!(
+                    "#[generate(std::derive::abi_size)]\n#[generate(std::derive::abi_encode)]\n{record}"
+                ),
+                format!("#[abi]\n{record}"),
+                manual,
+            ] {
+                let source =
+                    include_str!("../../driver/tests/fixtures/four_clients_runtime_payload.fe")
+                        .replace("DECLARATION", &declaration)
+                        .replace("VALUE", value);
+                let harness =
+                    FeContractHarness::compile("C", &source).expect("compile payload twin");
+                let mut instance = harness.deploy_instance().expect("deploy payload twin");
+                let error = instance
+                    .call_function("payload()", &[], ExecutionOptions::default())
+                    .expect_err("raw encoded payload revert");
+                let HarnessError::Revert(bytes) = error else {
+                    panic!("{error:?}")
+                };
+                assert_eq!(
+                    bytes.0, expected,
+                    "fields={fields} declaration={declaration}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn custom_errors_include_reachable_reverts_only() {
         let code = r#"
 use std::abi::sol
