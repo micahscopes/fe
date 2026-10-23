@@ -24,13 +24,14 @@ use url::Url;
 const PREFIX: &str = r#"
 use core::task::{Native, Suspend, TaskOutcome}
 extern { unsafe fn native_task_probe() -> u64 }
+extern { unsafe fn native_task_seed() -> u64 }
 "#;
 const SINGLE: &str = r#"
 fn entry(_ native: own Native) -> u64 {
     var cap = native
     let _ = unsafe { native_task_probe() }
     let pending = cap.begin()
-    let keep: u64 = 5
+    let keep: u64 = unsafe { native_task_seed() }
     match cap.suspend(pending) {
         TaskOutcome::Success(value) => keep + value
         TaskOutcome::Failure(error) => error
@@ -129,6 +130,10 @@ fn execute(name: &str, source: &str, checks: &str, invalid_tag: bool) {
     );
     let artifact = emit_native_scalar_task(&db, module, instance, OptLevel::O0)
         .expect("emit actual native scalar task");
+    assert!(
+        !artifact.ir.contains("native_suspend"),
+        "raw cut must not survive emission"
+    );
     fs::write(dir.join("task.o"), &artifact.object).unwrap();
     fs::write(dir.join("task.snt"), &artifact.ir).unwrap();
     let declarations = artifact
@@ -149,6 +154,8 @@ use std::{{rc::Rc,cell::Cell}};
 unsafe extern "C" {{ {declarations} }}
 #[derive(Clone,Copy)] enum Probe {{ Queue(*const Task<()>,Ticket), Cancel(*const Task<()>) }}
 thread_local! {{ static PROBE: Cell<Option<Probe>> = const {{ Cell::new(None) }}; }}
+thread_local! {{ static SEED: Cell<u64> = const {{ Cell::new(5) }}; }}
+#[unsafe(no_mangle)] extern "C" fn native_task_seed()->u64 {{ SEED.get() }}
 #[unsafe(no_mangle)] extern "C" fn native_task_probe()->u64 {{
     if let Some(probe)=PROBE.get() {{
         match probe {{
@@ -239,9 +246,11 @@ fn emitted_scalar_outcomes_and_delivery_custody() {
         SINGLE,
         r#"
 let task=Task::new(code.clone()).unwrap(); let ticket=waiting(&task);
+SEED.set(99);
 assert_eq!(task.deliver(ticket,Delivery::Success(9)),Ok(()));
 assert_eq!(task.deliver(ticket,Delivery::Success(9)),Err(Error::Duplicate));
 done(&task,14,false);
+SEED.set(5);
 assert_eq!(task.deliver(ticket,Delivery::Success(9)),Err(Error::Duplicate));
 let failure=Task::new(code.clone()).unwrap(); let f=waiting(&failure);
 assert_eq!(failure.deliver(ticket,Delivery::Success(9)),Err(Error::Foreign));
