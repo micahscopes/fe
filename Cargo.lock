@@ -2383,7 +2383,6 @@ version = "26.4.0"
 dependencies = [
  "camino",
  "codespan-reporting",
- "dir-test",
  "fe-common",
  "fe-hir",
  "fe-resolver",
@@ -2434,6 +2433,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "paste",
+ "petgraph",
  "ruint",
  "rustc-hash 2.1.1",
  "salsa",
@@ -2515,7 +2515,6 @@ dependencies = [
  "derive_more 1.0.0",
  "dir-test",
  "fe-test-utils",
- "lazy_static",
  "logos",
  "num_enum",
  "rowan",
@@ -2585,6 +2584,7 @@ name = "fe-test-utils"
 version = "26.4.0"
 dependencies = [
  "fe-common",
+ "glob",
  "insta",
  "regex",
  "tracing",
