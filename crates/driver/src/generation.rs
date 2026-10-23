@@ -670,7 +670,6 @@ fn admit_requests(
     // Every retry starts from unchanged authored text and the cumulative plan.
     // A bounded transaction never recursively treats generated output as input.
     for _ in 0..128 {
-        refuse_mutual_generation(&requests)?;
         let output = prepared_view(db, basis, &requests);
         let output_module = |url: &url::Url| {
             let file = output
@@ -955,92 +954,6 @@ fn scoped_provider_error(
             ..fallback
         },
     )
-}
-
-/// Lowering a module's generated code reads the declarations of every other
-/// module it names: the quote's producer scope, `${record}` targets and scoped
-/// trait goals (`resolve_producer_scope`, `resolve_record_item`,
-/// `resolve_trait_item`). When two modules both receive code that reads the
-/// other, their lowerings depend on each other. Refuse that before publishing
-/// rather than let lowering recurse; lowering authored declarations apart from
-/// generated output would lift it (SIX-AREA-PLAN A4).
-fn refuse_mutual_generation(
-    requests: &[common::generation::FrozenGenerationRequest],
-) -> Result<(), GenerationError> {
-    use common::generation::{FrozenCode, FrozenHoleValue};
-    fn code_modules<'a>(code: &'a FrozenCode, out: &mut Vec<&'a url::Url>) {
-        match code {
-            FrozenCode::Template {
-                quote_file, holes, ..
-            } => {
-                out.push(quote_file);
-                for hole in holes {
-                    match hole {
-                        FrozenHoleValue::Record(record) => out.push(&record.target_file),
-                        FrozenHoleValue::Field(field) | FrozenHoleValue::FieldType(field) => {
-                            out.push(&field.record.target_file)
-                        }
-                        FrozenHoleValue::Code(nested) => code_modules(nested, out),
-                        FrozenHoleValue::Scalar(_) => {}
-                    }
-                }
-            }
-            FrozenCode::VariantBinders { record, .. }
-            | FrozenCode::VariantBinderField { record, .. } => out.push(&record.target_file),
-            FrozenCode::Empty { .. } => {}
-        }
-    }
-    let mut reads: std::collections::BTreeMap<&url::Url, std::collections::BTreeSet<&url::Url>> =
-        Default::default();
-    for request in requests {
-        let mut named = Vec::new();
-        code_modules(&request.code, &mut named);
-        if let Some(scoped) = &request.scoped_impl {
-            named.push(&scoped.demand.trait_ref.file);
-            named.push(&scoped.demand.target.target_file);
-        }
-        let entry = reads.entry(&request.target_file).or_default();
-        entry.extend(named.into_iter().filter(|url| *url != &request.target_file));
-    }
-    // A module that reads another module which (transitively) reads it back.
-    for &start in reads.keys() {
-        let mut stack = vec![start];
-        let mut seen = std::collections::BTreeSet::new();
-        while let Some(module) = stack.pop() {
-            for &next in reads.get(module).into_iter().flatten() {
-                if next == start {
-                    let request = requests
-                        .iter()
-                        .find(|request| &request.target_file == start)
-                        .expect("a reading module has a request");
-                    let (file, range) = match &request.scoped_impl {
-                        Some(scoped) => (
-                            scoped.demand.opening.file.clone(),
-                            scoped.demand.opening.binding_range,
-                        ),
-                        None => (
-                            start.clone(),
-                            request
-                                .request_impl
-                                .unwrap_or_else(|| parser::TextRange::empty(0.into())),
-                        ),
-                    };
-                    return Err(GenerationError {
-                        file,
-                        range,
-                        cause: format!(
-                            "generated code in {start} and {module} reads each other's declarations; \
-                             mutual generation between modules is not supported yet"
-                        ),
-                    });
-                }
-                if seen.insert(next) {
-                    stack.push(next);
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 fn prepared_view(

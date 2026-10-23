@@ -495,82 +495,286 @@ fn forked_inputs_keep_trust_roots_removals_and_settings() {
     );
 }
 
-const MUTUAL_FIRST: &str = r#"use core::derive::Derive
+/// Module `a` declares `ProviderA` and `Left`, which derives with `ProviderB`;
+/// module `b` declares `ProviderB` and `Right`, which derives with
+/// `ProviderA`. Each module's output is written in the other module and names
+/// the other module's declarations. `{b_score}` is `ProviderB`'s method body.
+const MUTUAL_A_USES: &str = "use core::derive::Derive
 use core::meta::{Code, Item, Record, field_count}
 use ingot::score::Score
-use ingot::second::SecondProvider
-
-pub struct FirstProvider {}
-impl Derive<Score> for FirstProvider {
+use ingot::{b}::ProviderB
+";
+const MUTUAL_A_ITEMS: [&str; 4] = [
+    "pub struct ProviderA {}\n",
+    r#"impl Derive<Score> for ProviderA {
     const fn derive(_ record: Record) -> Code<Item> {
         let n = field_count(record)
         quote { const fn score() -> usize { ${n} } }
     }
 }
-pub struct Left { pub only: u8 }
-impl Score for Left with (SecondProvider)
-pub const fn left_total() -> usize { Left::score() }
-"#;
-const MUTUAL_SECOND: &str = r#"use core::derive::Derive
+"#,
+    "pub struct Left {\n    pub only: u8,\n}\n\nimpl Score for Left with (ProviderB)\n",
+    "pub const fn left_total() -> usize {\n    Left::score()\n}\n",
+];
+const MUTUAL_B_USES: &str = "use core::derive::Derive
 use core::meta::{Code, Item, Record, field_count}
 use ingot::score::Score
-use ingot::first::FirstProvider
-
-pub struct SecondProvider {}
-impl Derive<Score> for SecondProvider {
+use ingot::{a}::ProviderA
+";
+const MUTUAL_B_ITEMS: [&str; 4] = [
+    "pub struct ProviderB {}\n",
+    r#"impl Derive<Score> for ProviderB {
     const fn derive(_ record: Record) -> Code<Item> {
         let n = field_count(record)
-        quote { const fn score() -> usize { ${n} } }
+        quote { const fn score() -> usize { {b_score} } }
     }
 }
-pub struct Right { pub only: u8 }
-impl Score for Right with (FirstProvider)
-pub const fn right_total() -> usize { Right::score() }
-"#;
+"#,
+    "pub struct Right {\n    pub only: u8,\n}\n\nimpl Score for Right with (ProviderA)\n",
+    "pub const fn right_total() -> usize {\n    Right::score()\n}\n",
+];
 
-/// Two files that derive with each other's providers: lowering each file's
-/// output reads the other file's declarations.
-fn mutual_files() -> [(&'static str, &'static str); 5] {
-    [
-        ("app/fe.toml", APP_TOML),
-        ("app/src/lib.fe", ""),
-        ("app/src/score.fe", SCORE),
-        ("app/src/first.fe", MUTUAL_FIRST),
-        ("app/src/second.fe", MUTUAL_SECOND),
+fn module_path(name: &str) -> &'static str {
+    match name {
+        "alpha" => "app/src/alpha.fe",
+        "beta" => "app/src/beta.fe",
+        _ => unreachable!("fixture module {name}"),
+    }
+}
+
+/// The mutual pair with module `a` named `a` and module `b` named `b`, items in
+/// written or reversed order, and `ProviderB` emitting `b_score`.
+fn mutual_package(
+    a: &'static str,
+    b: &'static str,
+    reversed: bool,
+    b_score: &str,
+) -> Vec<(&'static str, String)> {
+    let module = |uses: &str, items: &[&str]| {
+        let mut items = items.to_vec();
+        if reversed {
+            items.reverse();
+        }
+        format!("{uses}\n{}", items.join("\n"))
+            .replace("{a}", a)
+            .replace("{b}", b)
+            .replace("{b_score}", b_score)
+    };
+    vec![
+        ("app/fe.toml", APP_TOML.to_string()),
+        ("app/src/lib.fe", String::new()),
+        ("app/src/score.fe", SCORE.to_string()),
+        (module_path(a), module(MUTUAL_A_USES, &MUTUAL_A_ITEMS)),
+        (module_path(b), module(MUTUAL_B_USES, &MUTUAL_B_ITEMS)),
     ]
 }
 
-/// Executed at `4e49f5f54`: lowering recursed (salsa cycle in
-/// `scope_graph_impl`). Mutual generation is now refused before publication,
-/// with a diagnostic instead of a crash.
+/// The A4 destination. Executed at `4e49f5f54` this crashed (salsa cycle in
+/// `scope_graph_impl`: lowering each module read the other's lowered HIR);
+/// `071f26908` refused mutual generation before publication, and this test
+/// was ignored. Generated code now names authored declarations of other
+/// modules by authored references bound at resolution, so both modules
+/// prepare. Both file orders and both declaration orders, with independent
+/// expected values: each record has one field.
 #[test]
-fn mutually_deriving_files_are_refused_before_lowering() {
-    let files = mutual_files();
-    let db = project(&files);
-    let error = prepare_ingots(&db, &[url("app/")])
-        .err()
-        .expect("mutual generation is refused");
-    assert!(
-        error
-            .cause
-            .contains("mutual generation between modules is not supported yet"),
-        "{error}"
-    );
-    assert!(
-        error.cause.contains("app/src/first.fe") && error.cause.contains("app/src/second.fe"),
-        "{error}"
-    );
-    assert_authored_unchanged(&db, &files);
+fn mutually_deriving_files_prepare_without_a_cycle() {
+    for (a, b) in [("alpha", "beta"), ("beta", "alpha")] {
+        for reversed in [false, true] {
+            let files = mutual_package(a, b, reversed, "${n}");
+            let files = borrow(&files);
+            let db = project(&files);
+            let prepared = prepare(&db, "app/");
+            let case = format!("a = {a}, reversed = {reversed}");
+            assert_eq!(eval(&prepared, module_path(a), "left_total"), "1", "{case}");
+            assert_eq!(
+                eval(&prepared, module_path(b), "right_total"),
+                "1",
+                "{case}"
+            );
+            assert_eq!(ingot_errors(&prepared, "app/"), "", "{case}");
+            assert_authored_unchanged(&db, &files);
+        }
+    }
 }
 
-/// The destination: lowering authored declarations apart from generated
-/// output (SIX-AREA-PLAN A4) lets both files prepare. Not done; refused today.
+/// Generated output may name other generated output across modules: `Left`'s
+/// method, written in `b`, calls `Right`'s, written in `a`. Neither provider
+/// executes generated code; the output is checked once.
 #[test]
-#[ignore = "A4: needs authored declarations lowered apart from generated output"]
-fn mutually_deriving_files_prepare_without_a_cycle() {
-    let files = mutual_files();
-    let db = project(&files);
+fn mutually_generated_outputs_name_each_other_across_modules() {
+    let files = mutual_package("alpha", "beta", false, "${n} + Right::score()");
+    let db = project(&borrow(&files));
     let prepared = prepare(&db, "app/");
-    assert_eq!(eval(&prepared, "app/src/first.fe", "left_total"), "1");
-    assert_eq!(eval(&prepared, "app/src/second.fe", "right_total"), "1");
+    assert_eq!(eval(&prepared, "app/src/beta.fe", "right_total"), "1");
+    assert_eq!(eval(&prepared, "app/src/alpha.fe", "left_total"), "2");
+    assert_eq!(ingot_errors(&prepared, "app/"), "");
+}
+
+/// Warm edits in either module of the mutual pair against fresh preparations
+/// of the same text: a field added to `Right` and a literal in `ProviderA`,
+/// each followed by a restore.
+#[test]
+fn mutual_generation_edits_and_restores_agree_with_fresh_preparation() {
+    let original = mutual_package("alpha", "beta", false, "${n} + Right::score()");
+    let edit = |path: &str, from: &str, to: &str| {
+        original
+            .iter()
+            .map(|(name, text)| {
+                let text = if *name == path {
+                    assert!(text.contains(from), "{path} lacks {from:?}");
+                    text.replace(from, to)
+                } else {
+                    text.clone()
+                };
+                (*name, text)
+            })
+            .collect::<Vec<_>>()
+    };
+    let steps = [
+        (original.clone(), ("2", "1")),
+        (
+            edit(
+                "app/src/beta.fe",
+                "    pub only: u8,\n",
+                "    pub only: u8,\n    pub more: bool,\n",
+            ),
+            ("3", "2"),
+        ),
+        (original.clone(), ("2", "1")),
+        (
+            edit("app/src/alpha.fe", "{ ${n} }", "{ ${n} + 10 }"),
+            ("12", "11"),
+        ),
+        (original.clone(), ("2", "1")),
+    ];
+    let mut warm = project(&borrow(&original));
+    for (index, (files, (left, right))) in steps.iter().enumerate() {
+        for (path, text) in files {
+            warm.workspace().update(&mut warm, url(path), text.clone());
+        }
+        let warm_view = prepare(&warm, "app/");
+        let fresh = project(&borrow(files));
+        let fresh_view = prepare(&fresh, "app/");
+        for view in [&warm_view, &fresh_view] {
+            assert_eq!(
+                eval(view, "app/src/alpha.fe", "left_total"),
+                *left,
+                "left at step {index}"
+            );
+            assert_eq!(
+                eval(view, "app/src/beta.fe", "right_total"),
+                *right,
+                "right at step {index}"
+            );
+        }
+        assert_eq!(
+            ingot_errors(&warm_view, "app/"),
+            ingot_errors(&fresh_view, "app/"),
+            "diagnostics at step {index}"
+        );
+        assert_eq!(
+            warm_view.generation_inputs().requests(&warm_view),
+            fresh_view.generation_inputs().requests(&fresh_view),
+            "frozen requests at step {index}"
+        );
+    }
+}
+
+const HOLDS: &str = "pub trait Holds {\n    type Part\n}\n";
+const CYCLE_ALPHA: &str = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+use ingot::holds::Holds
+use ingot::beta::PartOfRight
+
+pub struct PartOfLeft {}
+
+impl Derive<Holds> for PartOfLeft {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { type Part = <Left as Holds>::Part }
+    }
+}
+
+pub struct Left {}
+
+impl Holds for Left with (PartOfRight)
+"#;
+const CYCLE_BETA: &str = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+use ingot::holds::Holds
+use ingot::alpha::PartOfLeft
+
+pub struct PartOfRight {}
+
+impl Derive<Holds> for PartOfRight {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { type Part = <Right as Holds>::Part }
+    }
+}
+
+pub struct Right {}
+
+impl Holds for Right with (PartOfLeft)
+"#;
+const CYCLE_ALPHA_HANDWRITTEN: &str = r#"use ingot::holds::Holds
+use ingot::beta::Right
+
+pub struct Left {}
+
+impl Holds for Left {
+    type Part = <Right as Holds>::Part
+}
+"#;
+const CYCLE_BETA_HANDWRITTEN: &str = r#"use ingot::holds::Holds
+use ingot::alpha::Left
+
+pub struct Right {}
+
+impl Holds for Right {
+    type Part = <Left as Holds>::Part
+}
+"#;
+
+fn error_headers(errors: &str) -> Vec<&str> {
+    let mut headers = errors
+        .lines()
+        .filter(|line| line.starts_with("error"))
+        .collect::<Vec<_>>();
+    headers.sort();
+    headers
+}
+
+/// A genuine cycle in the source program, here between two generated
+/// associated types whose quotes name each other's records, is the ordinary
+/// cycle error, the same as for the handwritten twin. Preparation itself
+/// succeeds: the cycle is in the program, not in generation.
+#[test]
+fn a_cycle_between_mutually_generated_associated_types_is_the_ordinary_cycle_error() {
+    let generated = [
+        ("app/fe.toml", APP_TOML),
+        ("app/src/lib.fe", ""),
+        ("app/src/holds.fe", HOLDS),
+        ("app/src/alpha.fe", CYCLE_ALPHA),
+        ("app/src/beta.fe", CYCLE_BETA),
+    ];
+    let handwritten = [
+        ("app/fe.toml", APP_TOML),
+        ("app/src/lib.fe", ""),
+        ("app/src/holds.fe", HOLDS),
+        ("app/src/alpha.fe", CYCLE_ALPHA_HANDWRITTEN),
+        ("app/src/beta.fe", CYCLE_BETA_HANDWRITTEN),
+    ];
+    let db = project(&generated);
+    let prepared = prepare(&db, "app/");
+    let generated_errors = ingot_errors(&prepared, "app/");
+    let handwritten_errors = ingot_errors(&project(&handwritten), "app/");
+    assert!(
+        handwritten_errors.contains("cycle detected while resolving this type"),
+        "{handwritten_errors}"
+    );
+    assert_eq!(
+        error_headers(&generated_errors),
+        error_headers(&handwritten_errors),
+        "generated:\n{generated_errors}\nhandwritten:\n{handwritten_errors}"
+    );
+    assert_authored_unchanged(&db, &generated);
 }
