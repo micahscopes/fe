@@ -968,6 +968,7 @@ fn synthetic_context_instances<'db>(
 ) -> Vec<RuntimeInstance<'db>> {
     match spec {
         RuntimeSyntheticSpec::NativeTaskSegment { plan, .. } => vec![plan.source(db)],
+        RuntimeSyntheticSpec::NativeTaskAdapter { plan, .. } => vec![plan.task(db).source(db)],
         RuntimeSyntheticSpec::MainRoot { callee, .. }
         | RuntimeSyntheticSpec::TestRoot { callee, .. }
         | RuntimeSyntheticSpec::ManualContractRoot { callee, .. } => vec![callee],

@@ -613,6 +613,18 @@ pub fn build_native_task_runtime_package<'db>(
     Ok(package)
 }
 
+pub fn build_native_task_adapter_package<'db>(
+    db: &'db dyn MirDb,
+    top_mod: TopLevelMod<'db>,
+    plan: super::suspension::NativeScalarAbiPlan<'db>,
+) -> Result<RuntimePackage<'db>, LowerError> {
+    let package = build_sectioned_package(db, top_mod, plan.instances(db), Vec::new(), None)?;
+    verify_runtime_package(db, package).map_err(|error| {
+        LowerError::Unsupported(format!("invalid native task adapter package: {error:?}"))
+    })?;
+    Ok(package)
+}
+
 fn manual_contract_objects<'db>(
     db: &'db dyn MirDb,
     top_mod: TopLevelMod<'db>,
@@ -1255,6 +1267,7 @@ fn resolved_section_region<'db>(
         RuntimeFunctionOwner::Synthetic(
             RuntimeSyntheticSpec::MainRoot { .. }
             | RuntimeSyntheticSpec::NativeTaskSegment { .. }
+            | RuntimeSyntheticSpec::NativeTaskAdapter { .. }
             | RuntimeSyntheticSpec::TestRoot { .. }
             | RuntimeSyntheticSpec::ContractInitAbi { .. }
             | RuntimeSyntheticSpec::ContractRecvAbi { .. },
@@ -1374,6 +1387,7 @@ fn materialized_contracts_for_roots<'db>(
                 | RuntimeSyntheticSpec::ContractRuntimeRoot { contract, .. } => Some(contract),
                 RuntimeSyntheticSpec::MainRoot { .. }
                 | RuntimeSyntheticSpec::NativeTaskSegment { .. }
+                | RuntimeSyntheticSpec::NativeTaskAdapter { .. }
                 | RuntimeSyntheticSpec::TestRoot { .. }
                 | RuntimeSyntheticSpec::ManualContractRoot { .. }
                 | RuntimeSyntheticSpec::ContractInitAbi { .. }
@@ -2006,6 +2020,10 @@ fn runtime_synthetic_spec_key<'db>(
 ) -> String {
     let instance_key = |instance| runtime_instance_key_in_mode(db, instance, mode);
     match spec {
+        RuntimeSyntheticSpec::NativeTaskAdapter { plan, index } => format!(
+            "__synthetic:native_task_adapter:{}:{index}",
+            instance_key(plan.task(db).source(db))
+        ),
         RuntimeSyntheticSpec::NativeTaskSegment { plan, index } => format!(
             "__synthetic:native_task:{}:{index}",
             instance_key(plan.source(db))
@@ -2443,6 +2461,9 @@ fn symbol_base_for_runtime_instance<'db>(
         RuntimeSyntheticSpec::MainRoot { .. } => "main_root".to_string(),
         RuntimeSyntheticSpec::NativeTaskSegment { index, .. } => {
             format!("native_task_segment_{index}")
+        }
+        RuntimeSyntheticSpec::NativeTaskAdapter { index, .. } => {
+            format!("native_task_adapter_{index}")
         }
         RuntimeSyntheticSpec::TestRoot { name, .. } => {
             format!("test_root_{}", sanitize_symbol(name))

@@ -53,7 +53,8 @@ pub(crate) fn runtime_synthetic_exit_behavior<'db>(
 ) -> RuntimeExitBehavior {
     match spec {
         RuntimeSyntheticSpec::ContractInitAbi { .. }
-        | RuntimeSyntheticSpec::NativeTaskSegment { .. } => RuntimeExitBehavior::MayReturn,
+        | RuntimeSyntheticSpec::NativeTaskSegment { .. }
+        | RuntimeSyntheticSpec::NativeTaskAdapter { .. } => RuntimeExitBehavior::MayReturn,
         RuntimeSyntheticSpec::MainRoot { .. }
         | RuntimeSyntheticSpec::TestRoot { .. }
         | RuntimeSyntheticSpec::ManualContractRoot { .. }
@@ -70,6 +71,9 @@ pub(crate) fn runtime_synthetic_interface_signature<'db>(
     if let RuntimeSyntheticSpec::NativeTaskSegment { plan, index } = spec {
         return plan.segments(db)[usize::from(index)].signature.clone();
     }
+    if let RuntimeSyntheticSpec::NativeTaskAdapter { plan, index } = spec {
+        return plan.bodies(db)[usize::from(index)].signature.clone();
+    }
     RuntimeInterfaceSignature {
         params: Vec::new(),
         ret: None,
@@ -81,6 +85,16 @@ pub(crate) fn lower_synthetic_runtime_body<'db>(
     instance: RuntimeInstance<'db>,
     spec: RuntimeSyntheticSpec<'db>,
 ) -> Result<RuntimeBody<'db>, LowerError> {
+    if let RuntimeSyntheticSpec::NativeTaskAdapter { plan, index } = &spec {
+        let mut body = plan
+            .bodies(db)
+            .get(usize::from(*index))
+            .cloned()
+            .ok_or_else(|| LowerError::Unsupported("invalid native task adapter index".into()))?;
+        body.owner = instance;
+        body.key = instance.key(db);
+        return Ok(body);
+    }
     if let RuntimeSyntheticSpec::NativeTaskSegment { plan, index } = &spec {
         let mut body = plan
             .segments(db)
@@ -93,7 +107,8 @@ pub(crate) fn lower_synthetic_runtime_body<'db>(
     }
     let mut builder = SyntheticBodyBuilder::new(db, instance);
     match spec {
-        RuntimeSyntheticSpec::NativeTaskSegment { .. } => unreachable!("handled above"),
+        RuntimeSyntheticSpec::NativeTaskSegment { .. }
+        | RuntimeSyntheticSpec::NativeTaskAdapter { .. } => unreachable!("handled above"),
         RuntimeSyntheticSpec::MainRoot { callee, entry_args }
         | RuntimeSyntheticSpec::TestRoot {
             callee, entry_args, ..

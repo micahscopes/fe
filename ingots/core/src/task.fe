@@ -31,6 +31,14 @@ pub trait Suspend {
 /// Runtime task identity and retained values live in the task frame, not here.
 pub struct Native {}
 
+impl Native {
+    /// Begin a native scalar delivery owned by the currently running task.
+    /// The runtime retains registration custody until delivery or task exit.
+    pub fn begin(mut self) -> Pending<Native, u64> {
+        unsafe { Pending { id: native_task_begin() } }
+    }
+}
+
 impl Suspend for Native {
     type Backend = Native
     type Error = u64
@@ -41,6 +49,8 @@ impl Suspend for Native {
 }
 
 extern {
+    unsafe fn native_task_begin() -> u64
+
     /// The native runtime's privileged control transfer. Its failure payload
     /// has one fixed schema; another provider may translate it but cannot
     /// select a different decoder for this pending identity.
