@@ -1,0 +1,28 @@
+/// A single pending delivery from backend `B`, carrying a value of type `T`.
+///
+/// The runtime owns the identity. Safe code cannot mint or duplicate a pending
+/// delivery, and suspending consumes it. The backend parameter prevents a
+/// delivery from one backend being used with another backend's capability.
+pub struct Pending<B, T> {
+    unsafe id: u64,
+}
+
+/// The result delivered when a suspended computation is resumed.
+#[must_use]
+pub enum TaskOutcome<E, T> {
+    Failure(E),
+    Success(T),
+    Cancelled,
+}
+
+/// Authority to suspend for a delivery from this provider's backend.
+///
+/// This capability describes a possible control transfer, including when a
+/// particular implementation can supply the result immediately. It does not
+/// grant permission to retain borrowed data across that transfer.
+pub trait Suspend {
+    type Backend
+    type Error
+
+    fn suspend<T>(mut self, _ pending: own Pending<Self::Backend, T>) -> TaskOutcome<Self::Error, T>
+}
