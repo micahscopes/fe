@@ -6,7 +6,7 @@ use crate::{
     HirDb, SpannedHirDb,
     core::hir_def::{
         Body, Const, Contract, Enum, Func, Impl, ImplTrait, Mod, StaticAssert, Struct, TopLevelMod,
-        Trait, TypeAlias, Use, scope_graph::ScopeId,
+        Trait, TypeAlias, TypeFnDef, Use, scope_graph::ScopeId,
     },
     core::lower::top_mod_ast,
 };
@@ -43,7 +43,9 @@ pub mod lazy_spans {
             LazyContractSpan, LazyEnumSpan, LazyFieldDefListSpan, LazyFieldDefSpan,
             LazyFuncSignatureSpan, LazyFuncSpan, LazyImplSpan, LazyImplTraitSpan, LazyItemSpan,
             LazyModSpan, LazyRecvArmListSpan, LazyRecvArmSpan, LazyStaticAssertSpan,
-            LazyStructSpan, LazyTopModSpan, LazyTraitSpan, LazyTypeAliasSpan, LazyUseSpan,
+            LazyStructSpan, LazyTopModSpan, LazyTraitSpan, LazyTypeAliasSpan,
+            LazyTypeFnArmListSpan, LazyTypeFnArmPatSpan, LazyTypeFnArmSpan, LazyTypeFnBodySpan,
+            LazyTypeFnMatchSpan, LazyTypeFnRetKindSpan, LazyTypeFnSpan, LazyUseSpan,
             LazyVariantDefListSpan, LazyVariantDefSpan,
         },
         params::{
@@ -145,6 +147,13 @@ pub fn type_alias_ast<'db>(
     db: &'db dyn SpannedHirDb,
     item: TypeAlias<'db>,
 ) -> &'db HirOrigin<ast::TypeAlias> {
+    item.origin(db)
+}
+
+pub fn type_fn_ast<'db>(
+    db: &'db dyn SpannedHirDb,
+    item: TypeFnDef<'db>,
+) -> &'db HirOrigin<ast::RecursiveTypeFn> {
     item.origin(db)
 }
 

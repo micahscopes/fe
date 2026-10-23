@@ -414,6 +414,20 @@ pub enum SyntaxKind {
     Enum,
     /// `type Foo = i32`
     TypeAlias,
+    /// `recursive type fn Tree<T, const N: usize>() -> * { match N { .. } }`
+    RecursiveTypeFn,
+    /// `-> *` return kind of a recursive type fn
+    TypeFnRetKind,
+    /// `{ match N { .. } }` body of a recursive type fn
+    TypeFnBody,
+    /// `match N { .. }` in a recursive type fn body
+    TypeFnMatch,
+    /// arms of a recursive type fn match
+    TypeFnArmList,
+    /// `0 => Leaf` arm of a recursive type fn match
+    TypeFnArm,
+    /// `0` or `_` pattern of a recursive type fn arm
+    TypeFnArmPat,
     /// `impl Foo { .. }`
     Impl,
     /// `{ fn ... }`
@@ -797,6 +811,13 @@ impl SyntaxKind {
             SyntaxKind::MsgVariantList => "message variants",
             SyntaxKind::Enum => "enum definition",
             SyntaxKind::TypeAlias => "type alias",
+            SyntaxKind::RecursiveTypeFn => "recursive type fn",
+            SyntaxKind::TypeFnRetKind => "recursive type fn return kind",
+            SyntaxKind::TypeFnBody => "recursive type fn body",
+            SyntaxKind::TypeFnMatch => "recursive type fn match",
+            SyntaxKind::TypeFnArmList => "recursive type fn arms",
+            SyntaxKind::TypeFnArm => "recursive type fn arm",
+            SyntaxKind::TypeFnArmPat => "recursive type fn pattern",
             SyntaxKind::Impl => "`impl` block",
             SyntaxKind::ImplItemList => "`impl` item list",
             SyntaxKind::Trait => "trait definition",

@@ -15,7 +15,9 @@ use crate::analysis::{
             normalize_const_tys_for_comparison, ty_is_fully_ground,
         },
         fold::{TyFoldable, TyFolder},
+        normalize::normalize_ty,
         subst::substitute_complete,
+        trait_resolution::PredicateListId,
         ty_def::{InvalidCause, PrimTy, TyBase, TyData, TyId, TyVarSort, prim_int_bits},
         ty_error::first_invalid_ty_cause,
     },
@@ -953,16 +955,27 @@ fn adt_variant_field_views<'db>(
     if source.adt_def(db) != Some(adt) || source_args.len() != args.len() {
         return Err(RuntimeSizeError::UnavailableConcrete);
     }
+    // An instantiated field can be a projection or a computed type, which
+    // only normalization resolves. `ty` is ground here, so the declaration's
+    // scope with no assumptions is its context.
+    let normalize = |field: TyId<'db>| {
+        if field.has_projection(db) {
+            normalize_ty(db, field, adt.scope(db), PredicateListId::empty_list(db))
+        } else {
+            field
+        }
+    };
     Ok((0..adt.fields(db)[variant_idx].num_types())
         .map(|field_idx| {
-            instantiate_adt_field_for_concrete_demand(
+            let view = instantiate_adt_field_for_concrete_demand(
                 db,
                 adt,
                 variant_idx,
                 field_idx,
                 args,
                 source_args,
-            )
+            );
+            ConcreteTypeView::new(normalize(view.canonical), normalize(view.source))
         })
         .collect())
 }

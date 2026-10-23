@@ -6,8 +6,8 @@ use super::{
     define_lazy_span_node,
     expr::LazyExprSpan,
     params::{
-        LazyFuncParamListSpan, LazyGenericParamListSpan, LazyTypeBoundListSpan, LazyUsesClauseSpan,
-        LazyUsesParamSpan, LazyWhereClauseSpan,
+        LazyFuncParamListSpan, LazyGenericParamListSpan, LazyKindBoundSpan, LazyTypeBoundListSpan,
+        LazyUsesClauseSpan, LazyUsesParamSpan, LazyWhereClauseSpan,
     },
     pat::LazyPatSpan,
     path::LazyPathSpan,
@@ -18,7 +18,7 @@ use super::{
 use crate::{
     hir_def::{
         Body, Const, Contract, Enum, Func, Impl, ImplTrait, ItemKind, Mod, StaticAssert, Struct,
-        TopLevelMod, Trait, TypeAlias, Use,
+        TopLevelMod, Trait, TypeAlias, TypeFnDef, Use,
     },
     span::{
         DesugaredOrigin, DesugaredUseFocus, MsgDesugaredFocus,
@@ -272,6 +272,74 @@ impl<'db> LazyTypeAliasSpan<'db> {
         Self(crate::span::transition::SpanTransitionChain::new(t))
     }
 }
+
+define_lazy_span_node!(
+    LazyTypeFnSpan,
+    ast::RecursiveTypeFn,
+    @token {
+        (pub_kw, pub_kw),
+        (unsafe_kw, unsafe_kw),
+        (name, name),
+    }
+    @node {
+        (attributes, attr_list, LazyAttrListSpan),
+        (generic_params, generic_params, LazyGenericParamListSpan),
+        (where_clause, where_clause, LazyWhereClauseSpan),
+        (ret_kind, ret_kind, LazyTypeFnRetKindSpan),
+        (body, body, LazyTypeFnBodySpan),
+    }
+);
+impl<'db> LazyTypeFnSpan<'db> {
+    pub fn new(t: TypeFnDef<'db>) -> Self {
+        Self(crate::span::transition::SpanTransitionChain::new(t))
+    }
+}
+
+define_lazy_span_node!(
+    LazyTypeFnRetKindSpan,
+    ast::TypeFnRetKind,
+    @node {
+        (kind_bound, kind_bound, LazyKindBoundSpan),
+    }
+);
+
+define_lazy_span_node!(
+    LazyTypeFnBodySpan,
+    ast::TypeFnBody,
+    @node {
+        (match_, match_, LazyTypeFnMatchSpan),
+    }
+);
+
+define_lazy_span_node!(
+    LazyTypeFnMatchSpan,
+    ast::TypeFnMatch,
+    @token {
+        (subject, subject),
+    }
+    @node {
+        (arms, arms, LazyTypeFnArmListSpan),
+    }
+);
+
+define_lazy_span_node!(
+    LazyTypeFnArmListSpan,
+    ast::TypeFnArmList,
+    @idx {
+        (arm, LazyTypeFnArmSpan),
+    }
+);
+
+define_lazy_span_node!(
+    LazyTypeFnArmSpan,
+    ast::TypeFnArm,
+    @node {
+        (pat, pat, LazyTypeFnArmPatSpan),
+        (ty, ty, LazyTySpan),
+    }
+);
+
+define_lazy_span_node!(LazyTypeFnArmPatSpan, ast::TypeFnArmPat,);
 
 define_lazy_span_node!(
     LazyImplSpan,

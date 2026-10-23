@@ -10,9 +10,9 @@ use parser::ast;
 
 use super::{
     AttrListId, Body, CompBinOp, EffectParamListId, FuncParamListId, FuncParamName,
-    GenericParamListId, HirIngot, IdentId, InlineAttr, InlineAttrErrorKind, InlineHint, KindBound,
-    ManualContractRootAttr, Partial, Pat, PatId, TupleTypeId, TypeBound, TypeId, UseAlias,
-    WhereClauseId,
+    GenericParamListId, HirIngot, IdentId, InlineAttr, InlineAttrErrorKind, InlineHint, IntegerId,
+    KindBound, ManualContractRootAttr, Partial, Pat, PatId, TupleTypeId, TypeBound, TypeId,
+    UseAlias, WhereClauseId,
     scope_graph::{ScopeGraph, ScopeId},
 };
 use crate::{
@@ -24,8 +24,8 @@ use crate::{
         item::{
             LazyConstSpan, LazyContractSpan, LazyEnumSpan, LazyFuncSpan, LazyImplSpan,
             LazyImplTraitSpan, LazyItemSpan, LazyModSpan, LazyStaticAssertSpan, LazyStructSpan,
-            LazyTopModSpan, LazyTraitSpan, LazyTraitTypeSpan, LazyTypeAliasSpan, LazyUseSpan,
-            LazyVariantDefSpan,
+            LazyTopModSpan, LazyTraitSpan, LazyTraitTypeSpan, LazyTypeAliasSpan, LazyTypeFnSpan,
+            LazyUseSpan, LazyVariantDefSpan,
         },
         params::LazyGenericParamListSpan,
     },
@@ -52,6 +52,7 @@ pub enum ItemKind<'db> {
     Contract(Contract<'db>),
     Enum(Enum<'db>),
     TypeAlias(TypeAlias<'db>),
+    TypeFn(TypeFnDef<'db>),
     Impl(Impl<'db>),
     Trait(Trait<'db>),
     ImplTrait(ImplTrait<'db>),
@@ -82,6 +83,7 @@ impl<'db> ItemKind<'db> {
             Contract(contract_) => contract_.name(db).to_opt(),
             Enum(enum_) => enum_.name(db).to_opt(),
             TypeAlias(alias) => alias.name(db).to_opt(),
+            TypeFn(def) => def.name(db).to_opt(),
             Trait(trait_) => trait_.name(db).to_opt(),
             Const(const_) => const_.name(db).to_opt(),
             Use(_) | StaticAssert(_) | Body(_) | Impl(_) | ImplTrait(_) => None,
@@ -98,6 +100,7 @@ impl<'db> ItemKind<'db> {
             Self::Contract(contract) => contract.attributes(db),
             Self::Enum(enum_) => enum_.attributes(db),
             Self::TypeAlias(alias) => alias.attributes(db),
+            Self::TypeFn(def) => def.attributes(db),
             Self::Impl(impl_) => impl_.attributes(db),
             Self::Trait(trait_) => trait_.attributes(db),
             Self::ImplTrait(impl_trait) => impl_trait.attributes(db),
@@ -119,6 +122,7 @@ impl<'db> ItemKind<'db> {
             Contract(_) => "contract",
             Enum(_) => "enum",
             TypeAlias(_) => "type",
+            TypeFn(_) => "recursive type fn",
             Trait(_) => "trait",
             Impl(_) => "impl",
             ImplTrait(_) => "impl trait",
@@ -138,6 +142,7 @@ impl<'db> ItemKind<'db> {
             Contract(contract_) => Some(contract_.span().name().into()),
             Enum(enum_) => Some(enum_.span().name().into()),
             TypeAlias(alias) => Some(alias.span().alias().into()),
+            TypeFn(def) => Some(def.span().name().into()),
             Trait(trait_) => Some(trait_.span().name().into()),
             Const(const_) => Some(const_.span().name().into()),
             TopMod(_) | StaticAssert(_) | Use(_) | Body(_) | Impl(_) | ImplTrait(_) => None,
@@ -154,6 +159,7 @@ impl<'db> ItemKind<'db> {
             Contract(contract) => contract.vis(db),
             Enum(enum_) => enum_.vis(db),
             TypeAlias(type_) => type_.vis(db),
+            TypeFn(def) => def.vis(db),
             Trait(trait_) => trait_.vis(db),
             Const(const_) => const_.vis(db),
             Use(use_) => use_.vis(db),
@@ -170,6 +176,7 @@ impl<'db> ItemKind<'db> {
             ItemKind::Contract(contract) => contract.top_mod(db),
             ItemKind::Enum(enum_) => enum_.top_mod(db),
             ItemKind::TypeAlias(type_) => type_.top_mod(db),
+            ItemKind::TypeFn(def) => def.top_mod(db),
             ItemKind::Trait(trait_) => trait_.top_mod(db),
             ItemKind::Impl(impl_) => impl_.top_mod(db),
             ItemKind::ImplTrait(impl_trait) => impl_trait.top_mod(db),
@@ -183,7 +190,11 @@ impl<'db> ItemKind<'db> {
     pub fn is_type(self) -> bool {
         matches!(
             self,
-            Self::Struct(_) | Self::Enum(_) | Self::Contract(_) | Self::TypeAlias(_)
+            Self::Struct(_)
+                | Self::Enum(_)
+                | Self::Contract(_)
+                | Self::TypeAlias(_)
+                | Self::TypeFn(_)
         )
     }
 
@@ -199,6 +210,7 @@ impl<'db> From<GenericParamOwner<'db>> for ItemKind<'db> {
             GenericParamOwner::Struct(struct_) => ItemKind::Struct(struct_),
             GenericParamOwner::Enum(enum_) => ItemKind::Enum(enum_),
             GenericParamOwner::TypeAlias(type_alias) => ItemKind::TypeAlias(type_alias),
+            GenericParamOwner::TypeFn(def) => ItemKind::TypeFn(def),
             GenericParamOwner::Impl(impl_) => ItemKind::Impl(impl_),
             GenericParamOwner::Trait(trait_) => ItemKind::Trait(trait_),
             GenericParamOwner::ImplTrait(impl_trait) => ItemKind::ImplTrait(impl_trait),
@@ -212,6 +224,7 @@ impl<'db> From<WhereClauseOwner<'db>> for ItemKind<'db> {
             WhereClauseOwner::Func(func) => ItemKind::Func(func),
             WhereClauseOwner::Struct(struct_) => ItemKind::Struct(struct_),
             WhereClauseOwner::Enum(enum_) => ItemKind::Enum(enum_),
+            WhereClauseOwner::TypeFn(def) => ItemKind::TypeFn(def),
             WhereClauseOwner::Impl(impl_) => ItemKind::Impl(impl_),
             WhereClauseOwner::Trait(trait_) => ItemKind::Trait(trait_),
             WhereClauseOwner::ImplTrait(impl_trait) => ItemKind::ImplTrait(impl_trait),
@@ -237,6 +250,7 @@ pub enum GenericParamOwner<'db> {
     Struct(Struct<'db>),
     Enum(Enum<'db>),
     TypeAlias(TypeAlias<'db>),
+    TypeFn(TypeFnDef<'db>),
     Impl(Impl<'db>),
     Trait(Trait<'db>),
     ImplTrait(ImplTrait<'db>),
@@ -253,6 +267,7 @@ impl<'db> GenericParamOwner<'db> {
             GenericParamOwner::Struct(struct_) => struct_.generic_params(db),
             GenericParamOwner::Enum(enum_) => enum_.generic_params(db),
             GenericParamOwner::TypeAlias(type_alias) => type_alias.generic_params(db),
+            GenericParamOwner::TypeFn(def) => def.generic_params(db),
             GenericParamOwner::Impl(impl_) => impl_.generic_params(db),
             GenericParamOwner::Trait(trait_) => trait_.generic_params(db),
             GenericParamOwner::ImplTrait(impl_trait) => impl_trait.generic_params(db),
@@ -265,6 +280,7 @@ impl<'db> GenericParamOwner<'db> {
             GenericParamOwner::Struct(struct_) => struct_.name(db).to_opt(),
             GenericParamOwner::Enum(enum_) => enum_.name(db).to_opt(),
             GenericParamOwner::TypeAlias(type_alias) => type_alias.name(db).to_opt(),
+            GenericParamOwner::TypeFn(def) => def.name(db).to_opt(),
             GenericParamOwner::Impl(_) => None,
             GenericParamOwner::Trait(trait_) => trait_.name(db).to_opt(),
             GenericParamOwner::ImplTrait(_) => None,
@@ -277,6 +293,7 @@ impl<'db> GenericParamOwner<'db> {
             GenericParamOwner::Struct(_) => "struct",
             GenericParamOwner::Enum(_) => "enum",
             GenericParamOwner::TypeAlias(_) => "type",
+            GenericParamOwner::TypeFn(_) => "recursive type fn",
             GenericParamOwner::Impl(_) => "impl",
             GenericParamOwner::Trait(_) => "trait",
             GenericParamOwner::ImplTrait(_) => "impl trait",
@@ -289,6 +306,7 @@ impl<'db> GenericParamOwner<'db> {
             GenericParamOwner::Struct(struct_) => struct_.span().generic_params(),
             GenericParamOwner::Enum(enum_) => enum_.span().generic_params(),
             GenericParamOwner::TypeAlias(type_alias) => type_alias.span().generic_params(),
+            GenericParamOwner::TypeFn(def) => def.span().generic_params(),
             GenericParamOwner::Impl(impl_) => impl_.span().generic_params(),
             GenericParamOwner::Trait(trait_) => trait_.span().generic_params(),
             GenericParamOwner::ImplTrait(impl_trait) => impl_trait.span().generic_params(),
@@ -305,6 +323,7 @@ impl<'db> GenericParamOwner<'db> {
             ItemKind::Struct(struct_) => Some(GenericParamOwner::Struct(struct_)),
             ItemKind::Enum(enum_) => Some(GenericParamOwner::Enum(enum_)),
             ItemKind::TypeAlias(type_alias) => Some(GenericParamOwner::TypeAlias(type_alias)),
+            ItemKind::TypeFn(def) => Some(GenericParamOwner::TypeFn(def)),
             ItemKind::Impl(impl_) => Some(GenericParamOwner::Impl(impl_)),
             ItemKind::Trait(trait_) => Some(GenericParamOwner::Trait(trait_)),
             ItemKind::ImplTrait(impl_trait) => Some(GenericParamOwner::ImplTrait(impl_trait)),
@@ -322,6 +341,7 @@ impl<'db> GenericParamOwner<'db> {
             ItemKind::Struct(struct_) => Some(GenericParamOwner::Struct(struct_)),
             ItemKind::Enum(enum_) => Some(GenericParamOwner::Enum(enum_)),
             ItemKind::TypeAlias(type_alias) => Some(GenericParamOwner::TypeAlias(type_alias)),
+            ItemKind::TypeFn(def) => Some(GenericParamOwner::TypeFn(def)),
             ItemKind::Impl(impl_) => Some(GenericParamOwner::Impl(impl_)),
             ItemKind::Trait(trait_) => Some(GenericParamOwner::Trait(trait_)),
             ItemKind::ImplTrait(impl_trait) => Some(GenericParamOwner::ImplTrait(impl_trait)),
@@ -350,6 +370,7 @@ pub enum WhereClauseOwner<'db> {
     Func(Func<'db>),
     Struct(Struct<'db>),
     Enum(Enum<'db>),
+    TypeFn(TypeFnDef<'db>),
     Impl(Impl<'db>),
     Trait(Trait<'db>),
     ImplTrait(ImplTrait<'db>),
@@ -365,6 +386,7 @@ impl<'db> WhereClauseOwner<'db> {
             Self::Func(func) => func.where_clause(db),
             Self::Struct(struct_) => struct_.where_clause(db),
             Self::Enum(enum_) => enum_.where_clause(db),
+            Self::TypeFn(def) => def.where_clause(db),
             Self::Impl(impl_) => impl_.where_clause(db),
             Self::Trait(trait_) => trait_.where_clause(db),
             Self::ImplTrait(impl_trait) => impl_trait.where_clause(db),
@@ -391,6 +413,7 @@ impl<'db> WhereClauseOwner<'db> {
             ItemKind::Func(func) => Some(Self::Func(func)),
             ItemKind::Struct(struct_) => Some(Self::Struct(struct_)),
             ItemKind::Enum(enum_) => Some(Self::Enum(enum_)),
+            ItemKind::TypeFn(def) => Some(Self::TypeFn(def)),
             ItemKind::Impl(impl_) => Some(Self::Impl(impl_)),
             ItemKind::Trait(trait_) => Some(Self::Trait(trait_)),
             ItemKind::ImplTrait(impl_trait) => Some(Self::ImplTrait(impl_trait)),
@@ -406,6 +429,7 @@ impl<'db> From<WhereClauseOwner<'db>> for GenericParamOwner<'db> {
             WhereClauseOwner::Func(func) => Self::Func(func),
             WhereClauseOwner::Struct(struct_) => Self::Struct(struct_),
             WhereClauseOwner::Enum(enum_) => Self::Enum(enum_),
+            WhereClauseOwner::TypeFn(def) => Self::TypeFn(def),
             WhereClauseOwner::Impl(impl_) => Self::Impl(impl_),
             WhereClauseOwner::Trait(trait_) => Self::Trait(trait_),
             WhereClauseOwner::ImplTrait(impl_trait) => Self::ImplTrait(impl_trait),
@@ -1198,6 +1222,59 @@ impl<'db> TypeAlias<'db> {
     // raw type_ref access kept; shim exposes public ___tmp method.
 }
 
+/// A pattern of a recursive type fn arm. It matches the subject's value and
+/// binds nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum TypeFnPat<'db> {
+    Lit(IntegerId<'db>),
+    Wild,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct TypeFnArmData<'db> {
+    pub pat: Partial<TypeFnPat<'db>>,
+    pub ty: Partial<TypeId<'db>>,
+}
+
+/// `recursive type fn Name<..>() -> KIND where .. { match N { .. } }`: a
+/// family of types computed from its arguments. Its definition is checked by
+/// `analysis::ty::type_fn`; applications unfold during normalization.
+#[salsa::tracked]
+#[derive(Debug, PartialOrd, Ord)]
+pub struct TypeFnDef<'db> {
+    #[returns(copy)]
+    id: TrackedItemId<'db>,
+
+    #[returns(copy)]
+    pub name: Partial<IdentId<'db>>,
+    #[returns(copy)]
+    pub(in crate::core) attributes: AttrListId<'db>,
+    #[returns(copy)]
+    pub vis: Visibility,
+    #[returns(copy)]
+    pub(crate) generic_params: GenericParamListId<'db>,
+    #[returns(copy)]
+    pub(crate) where_clause: WhereClauseId<'db>,
+    pub(crate) ret_kind: Partial<KindBound>,
+    #[returns(copy)]
+    pub(crate) match_subject: Partial<IdentId<'db>>,
+    pub(crate) arms: Vec<TypeFnArmData<'db>>,
+    #[returns(copy)]
+    pub top_mod: TopLevelMod<'db>,
+
+    pub(crate) origin: HirOrigin<ast::RecursiveTypeFn>,
+}
+
+impl<'db> TypeFnDef<'db> {
+    pub fn span(self) -> LazyTypeFnSpan<'db> {
+        LazyTypeFnSpan::new(self)
+    }
+
+    pub fn scope(self) -> ScopeId<'db> {
+        ScopeId::from_item(self.into())
+    }
+}
+
 #[salsa::tracked]
 #[derive(Debug, PartialOrd, Ord)]
 pub struct Impl<'db> {
@@ -1885,6 +1962,7 @@ pub enum TrackedItemVariant<'db> {
     Contract(Partial<IdentId<'db>>),
     Enum(Partial<IdentId<'db>>),
     TypeAlias(Partial<IdentId<'db>>),
+    TypeFn(Partial<IdentId<'db>>),
     Impl(u32),
     Trait(Partial<IdentId<'db>>),
     ImplTrait(u32),

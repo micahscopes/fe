@@ -259,6 +259,16 @@ pub enum TyLowerDiag<'db> {
     ConstEvalRecursiveConst(DynLazySpan<'db>),
     TypeLoweringCycle(DynLazySpan<'db>),
     TypeNormalizationLimit(DynLazySpan<'db>),
+    /// Computing the recursive type fn application written here needed its
+    /// own result.
+    ComputedTypeCycle(DynLazySpan<'db>),
+    /// A recursive type fn declaration breaks one of its rules.
+    ComputedTypeDeclaration {
+        span: DynLazySpan<'db>,
+        error: ComputedTypeError,
+    },
+    /// A recursive type fn application in an implementation header.
+    ComputedTypeImplHeader(DynLazySpan<'db>),
 
     NonTrailingDefaultGenericParam(LazyGenericParamSpan<'db>),
 
@@ -336,6 +346,97 @@ pub enum TyLowerDiag<'db> {
 pub enum RevealedBy {
     AppliedDefault,
     Evaluation,
+    /// Unfolding a recursive type fn application evaluated a const payload.
+    ComputedType,
+}
+
+/// The rule of a recursive type fn declaration that a definition breaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SalsaValue)]
+pub enum ComputedTypeError {
+    /// The last generic parameter is not a `const` parameter.
+    MissingSubject,
+    /// The subject is not a `usize`.
+    SubjectNotUsize,
+    /// The body matches on something other than the subject.
+    MatchNotOnSubject,
+    /// A `where` clause has a const condition.
+    ConstCondition,
+    /// A `where` clause bounds something other than a type parameter.
+    BoundOnNonParameter,
+    DuplicateLiteral,
+    WildcardNotLast,
+    MissingWildcard,
+    /// No arm applies the declaration itself.
+    MissingSelfCall,
+    /// A recursive call omits or adds arguments.
+    CallArity,
+    /// A recursive call changes a parameter other than the subject.
+    NotForwarded,
+    /// The recursive subject is not a smaller value of the subject.
+    NotDecreasing,
+    /// The recursive subject steps from something other than the subject.
+    NotFromSubject,
+    /// The recursive subject steps by an amount that is not a literal.
+    StepNotLiteral,
+    /// `N - k` in an arm that can see a subject below `k`.
+    MayUnderflow,
+    /// `N / k` in an arm that can see a subject of 0.
+    DivisionAtZero,
+    /// The body applies another recursive type fn.
+    OtherTypeFn,
+    /// A type alias or qualified path in the body names another recursive
+    /// type fn.
+    OtherTypeFnIndirect,
+    /// A recursive type fn in the body is not fully applied.
+    NotFullyApplied,
+    /// An alias or associated type hides or adds a recursive call.
+    HiddenRecursiveCall,
+    /// A const argument is not a literal, parameter, safe step or `const fn`
+    /// call over these.
+    PayloadNotAdmitted,
+    /// An arm's type has a kind other than the declared return kind.
+    ArmKind,
+}
+
+impl ComputedTypeError {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::MissingSubject => {
+                "a recursive type function requires a final const recursion subject"
+            }
+            Self::SubjectNotUsize => "the final recursion subject must have type `usize`",
+            Self::MatchNotOnSubject => "match must inspect the final recursion subject",
+            Self::ConstCondition => "recursive type functions do not admit const where predicates",
+            Self::BoundOnNonParameter => {
+                "recursive type function where clauses may bound only type parameters"
+            }
+            Self::DuplicateLiteral => "duplicate literal match arm",
+            Self::WildcardNotLast => "the wildcard must be the final match arm",
+            Self::MissingWildcard => "a final wildcard arm is required",
+            Self::MissingSelfCall => "a recursive type function must contain a self-call",
+            Self::CallArity => "a recursive call must supply every parameter",
+            Self::NotForwarded => {
+                "recursive calls must forward invariant parameters unchanged and in order"
+            }
+            Self::NotDecreasing => "the recursive subject must strictly decrease",
+            Self::NotFromSubject => "the recursive subject must decrease from the declared subject",
+            Self::StepNotLiteral => "the recursion step must use a literal amount",
+            Self::MayUnderflow => "the recursive subtraction may underflow in this arm",
+            Self::DivisionAtZero => "recursive division does not decrease the subject at zero",
+            Self::OtherTypeFn => "recursive type function bodies cannot call another type function",
+            Self::OtherTypeFnIndirect => {
+                "a type alias or qualified path refers to another recursive type function"
+            }
+            Self::NotFullyApplied => "a recursive type function must be fully applied",
+            Self::HiddenRecursiveCall => {
+                "a type alias or associated type here hides or adds a recursive call; write recursive calls directly"
+            }
+            Self::PayloadNotAdmitted => {
+                "a const argument here can only be a literal, a const parameter, `N - k` or `N / k`, or a call to a `const fn` with such arguments"
+            }
+            Self::ArmKind => "every arm must produce a type of the declared return kind",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SalsaValue)]
@@ -401,6 +502,9 @@ impl TyLowerDiag<'_> {
             Self::ConstEvalRecursiveConst(_) => 37,
             Self::TypeLoweringCycle(_) => 38,
             Self::TypeNormalizationLimit(_) => 58,
+            Self::ComputedTypeDeclaration { .. } => 87,
+            Self::ComputedTypeImplHeader(_) => 88,
+            Self::ComputedTypeCycle(_) => 79,
             Self::MixedRefSelfPrefixWithExplicitType { .. } => 28,
             Self::MixedOwnSelfPrefixWithExplicitType { .. } => 29,
             Self::InvalidVarSelfWithExplicitType { .. } => 30,

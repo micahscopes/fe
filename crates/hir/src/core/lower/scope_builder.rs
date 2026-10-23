@@ -251,6 +251,19 @@ impl<'db> ScopeGraphBuilder<'db> {
                     .map_or_else(EdgeKind::anon, EdgeKind::type_)
             }
 
+            TypeFn(inner) => {
+                self.graph.add_lex_edge(item_node, parent_node);
+                self.add_generic_param_scope(
+                    item_node,
+                    inner.into(),
+                    inner.generic_params(self.db),
+                );
+                inner
+                    .name(self.db)
+                    .to_opt()
+                    .map_or_else(EdgeKind::anon, EdgeKind::type_)
+            }
+
             Impl(inner) => {
                 self.graph.add_lex_edge(item_node, parent_node);
                 self.add_generic_param_scope(

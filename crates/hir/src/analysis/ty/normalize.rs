@@ -25,6 +25,7 @@ use super::{
         AssocTy, InvalidCause, ShapeCon, ShapeMode, TyBase, TyData, TyId, TyParam,
         collect_variables,
     },
+    ty_lower::collect_generic_params,
     unify::UnificationTable,
     visitor::{TyVisitor, walk_ty},
 };
@@ -106,6 +107,8 @@ pub struct TypeNormalizer<'db> {
     /// Size of the projections resolved so far, counted against
     /// [`PROJECTION_WORK_LIMIT`].
     projection_work: usize,
+    /// Recursive type fn applications being unfolded, innermost last.
+    unfolding: Vec<TyId<'db>>,
 }
 
 impl<'db> TypeNormalizer<'db> {
@@ -122,6 +125,7 @@ impl<'db> TypeNormalizer<'db> {
             cache: FxHashMap::default(),
             projection_depth: 0,
             projection_work: 0,
+            unfolding: Vec::new(),
         }
     }
 
@@ -314,8 +318,55 @@ impl<'db> TyFolder<'db> for TypeNormalizer<'db> {
                     shape => self.fold_ty(db, shape.carrier_ty(db)),
                 }
             }
-            _ => ty.super_fold_with(db, self),
+            _ => {
+                let folded = ty.super_fold_with(db, self);
+                self.unfold_computed(folded).unwrap_or(folded)
+            }
         }
+    }
+}
+
+impl<'db> TypeNormalizer<'db> {
+    /// Unfolds `ty` if it is a full application of a recursive type fn with
+    /// a ground subject and normalized arguments, and normalizes the result.
+    ///
+    /// Each unfolding counts as a projection against the nesting and work
+    /// limits. Unfoldings are not reused within one normalization, so a
+    /// result whose tree is too large to write out reaches the work limit
+    /// instead of being built as a shared graph that later passes walk as a
+    /// tree.
+    fn unfold_computed(&mut self, ty: TyId<'db>) -> Option<TyId<'db>> {
+        let db = self.db;
+        if !self.resolve_impls || super::type_fn::in_definition(db, self.scope) {
+            return None;
+        }
+        let (def, args) = super::type_fn::as_computed_application(db, ty)?;
+        if ty.has_invalid(db) {
+            return None;
+        }
+        let params = collect_generic_params(db, def.into()).params(db).len();
+        let (base, _) = ty.decompose_ty_app(db);
+        let application = TyId::foldl(db, base, &args[..params]);
+        if self.unfolding.contains(&application) {
+            return Some(TyId::invalid(db, InvalidCause::ComputedTypeCycle));
+        }
+        if let Err(limit) = self.enter_projection(application) {
+            return Some(limit);
+        }
+        let unfolded = super::type_fn::unfold_application(db, application).map(|unfolded| {
+            self.unfolding.push(application);
+            let normalized = self.fold_ty(db, unfolded);
+            self.unfolding.pop();
+            normalized
+        });
+        self.projection_depth -= 1;
+        let unfolded = unfolded?;
+        // A result of a higher kind takes the remaining arguments.
+        Some(if args.len() > params {
+            self.fold_ty(db, TyId::foldl(db, unfolded, &args[params..]))
+        } else {
+            unfolded
+        })
     }
 }
 

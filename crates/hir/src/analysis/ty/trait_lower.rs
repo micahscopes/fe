@@ -83,7 +83,8 @@ fn raw_impl_self_key<'db>(
                     | TyBase::Contract(_)
                     | TyBase::Func(_)
                     | TyBase::Closure(_)
-                    | TyBase::Shape(_) => unreachable!(),
+                    | TyBase::Shape(_)
+                    | TyBase::TypeFn(_) => unreachable!(),
                 },
                 NameResKind::Scope(
                     scope @ ScopeId::Item(
