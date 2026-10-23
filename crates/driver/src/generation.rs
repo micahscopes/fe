@@ -522,17 +522,17 @@ fn file_requests(
                     "cannot recover authored derive header identity".into(),
                 )
             })?;
-        let segments = path.segments().map(|segment| {
-            if segment.generic_args().is_some() || segment.qualified_type().is_some() {
-                return Err(error(segment.syntax().text_range(), "bounded native derive provider path does not support generic or qualified segments".into()));
-            }
-            segment.ident().map(|token| token.text().to_string())
-                .ok_or_else(|| error(segment.syntax().text_range(), "invalid native derive provider path segment".into()))
-        }).collect::<Result<Vec<_>, _>>()?;
-        let segments = segments.iter().map(String::as_str).collect::<Vec<_>>();
+        // The provider path as written and lowered with the header, including
+        // its arguments (`Scaled<10>`).
+        let provider_path = request.derive_provider(db).ok_or_else(|| {
+            error(
+                path.syntax().text_range(),
+                "invalid native derive provider path".into(),
+            )
+        })?;
         let resolved = hir::analysis::name_resolution::resolve_path(
             db,
-            hir::hir_def::PathId::from_segments(db, &segments),
+            provider_path,
             request.scope(),
             hir::analysis::ty::trait_resolution::PredicateListId::empty_list(db),
             true,

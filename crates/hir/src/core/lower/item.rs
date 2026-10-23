@@ -1275,6 +1275,11 @@ impl<'db> ImplTrait<'db> {
         });
         types.extend(out_types);
 
+        // Lowered in the header's own scope, so constant arguments of the
+        // provider (`Scaled<10>`) are bodies of this implementation.
+        let derive_provider = ast
+            .derive_provider()
+            .map(|path| PathId::lower_ast(ctxt, path));
         let impl_trait = Self::new(
             ctxt.db(),
             id,
@@ -1290,6 +1295,7 @@ impl<'db> ImplTrait<'db> {
                 is_unsafe: ast.unsafe_kw().is_some(),
                 selection_name: IdentId::lower_token_partial(ctxt, ast.selection_name()).to_opt(),
                 vis: super::lower_visibility(&ast),
+                derive_provider,
             },
             ctxt.top_mod(),
             origin,

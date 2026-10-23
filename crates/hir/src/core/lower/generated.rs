@@ -394,6 +394,7 @@ fn lower_scoped_derive<'db>(
             is_unsafe: false,
             selection_name: Some(IdentId::new(db, scoped.selection_name.clone())),
             vis: Visibility::Private,
+            derive_provider: None,
         },
         ctxt.top_mod(),
         crate::span::HirOrigin::synthetic(),
