@@ -87,9 +87,10 @@ pub struct FrozenDeclRef {
     pub range: TextRange,
 }
 
-/// A ground type of the authored view, by declaration identity: the actual
-/// type and constant arguments of a reflected record or field, rebound by the
-/// same declarations in the output view.
+/// A type of the authored view by declaration identity: the actual type and
+/// constant arguments of a reflected record or field, ground except for the
+/// parameters of the request's own header, rebound by the same declarations
+/// in the output view.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FrozenTy {
     /// An authored struct or enum applied to its arguments.
@@ -106,16 +107,25 @@ pub enum FrozenTy {
     Tuple(Vec<FrozenTy>),
     Array {
         elem: Box<FrozenTy>,
-        len: FrozenScalar,
+        len: FrozenConst,
     },
     Ptr(Box<FrozenTy>),
     Never,
+    /// A type parameter of the request's own authored header, by position.
+    HeaderParam(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FrozenGenericArg {
     Type(FrozenTy),
-    Const(FrozenScalar),
+    Const(FrozenConst),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FrozenConst {
+    Value(FrozenScalar),
+    /// A const parameter of the request's own authored header, by position.
+    HeaderParam(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
