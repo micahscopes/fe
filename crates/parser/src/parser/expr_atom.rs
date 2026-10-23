@@ -624,6 +624,7 @@ fn quote_body_kind<S: TokenStream>(parser: &mut Parser<S>) -> QuoteBodyKind {
                 Some(kind) if kind.is_item_head() || kind == SyntaxKind::Pound => {
                     return QuoteBodyKind::Items;
                 }
+                Some(SyntaxKind::Ident) if at_quoted_shape(p) => return QuoteBodyKind::Items,
                 _ => {
                     // Only an arrow at this body's top level introduces arm syntax.
                     // Arrows inside nested matches and record/tuple patterns do not.
@@ -666,6 +667,13 @@ fn quote_body_kind<S: TokenStream>(parser: &mut Parser<S>) -> QuoteBodyKind {
     });
     parser.set_newline_as_trivia(newline_as_trivia);
     kind
+}
+
+/// Whether the next tokens start an associated shape member, `shape Step ..`.
+/// `shape` is an ordinary identifier outside this position.
+fn at_quoted_shape<S: TokenStream>(parser: &mut Parser<S>) -> bool {
+    parser.is_ident("shape")
+        && parser.peek_n_non_trivia(2).as_slice() == [SyntaxKind::Ident, SyntaxKind::Ident]
 }
 
 define_scope! { QuotePatScope, QuotePat, (RBrace) }
@@ -715,9 +723,7 @@ impl super::Parse for QuoteItemListScope {
             }
             if parser.current_kind() == Some(SyntaxKind::Dollar) {
                 parser.parse(QuoteHoleScope::default())?;
-            } else if parser.is_ident("shape")
-                && parser.peek_n_non_trivia(2).as_slice() == [SyntaxKind::Ident, SyntaxKind::Ident]
-            {
+            } else if at_quoted_shape(parser) {
                 // An associated shape member, `shape Step = (own u256, ref T)`: it
                 // has no module item form, so only a member splice can lower it.
                 parser.parse(super::item::TraitShapeItemScope::default())?;
