@@ -1503,3 +1503,87 @@ impl<'db> Callable<'db> {
         progressed
     }
 }
+
+#[cfg(test)]
+mod checked_bound_consumer_tests {
+    use super::*;
+    use crate::test_db::{HirAnalysisTestDb, find_func};
+
+    #[test]
+    fn checked_bound_consumer_keeps_owner_schema_and_missing_slot_boundaries() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "checked_bound_consumer.fe".into(),
+            "trait Mark {}\nimpl Mark for u256 {}\nimpl Mark for bool {}\n\
+             fn sink<T: Mark, U: Mark>(_ first: T, _ second: U) {}\n\
+             fn caller() { let n: u256 = 1\nsink(n, true) }\n\
+             fn collapsed() { let n: u256 = 1\nsink(n, n) }",
+        );
+        let (module, _) = db.top_mod(file);
+        db.assert_no_diags(module);
+        let sink = find_func(&db, module, "sink");
+        for caller_name in ["caller", "collapsed"] {
+            let caller = find_func(&db, module, caller_name);
+            let (_, typed) = super::super::check_body(&db, BodyOwner::Func(caller, None));
+            let body = typed.body().unwrap();
+            let callable = body
+                .exprs(&db)
+                .keys()
+                .find_map(|expr| {
+                    typed
+                        .callable_expr(expr)
+                        .filter(|call| call.callable_def == CallableDef::Func(sink))
+                })
+                .unwrap()
+                .clone();
+            let bound = callable.use_evidence.bounds.expect("checked callee bounds");
+            let subst =
+                CompleteSubst::for_owner(&db, sink.into(), callable.generic_args.clone()).unwrap();
+            let goals = bound
+                .schema
+                .slots(&db)
+                .list(&db)
+                .iter()
+                .map(|&goal| substitute_complete(&db, goal, &subst).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(goals.len(), 2);
+            assert!(
+                goals
+                    .iter()
+                    .all(|&goal| callable.proved_bound(&db, goal).is_some())
+            );
+
+            let mut wrong_owner = callable.clone();
+            wrong_owner.use_evidence.bounds.as_mut().unwrap().schema = BoundSchemaId::new(
+                &db,
+                BoundOwner::Body(BodyOwner::Func(caller, None)),
+                bound.schema.slots(&db),
+            );
+            assert!(wrong_owner.proved_bound(&db, goals[0]).is_none());
+
+            let mut wrong_schema = callable.clone();
+            wrong_schema.use_evidence.bounds.as_mut().unwrap().schema = BoundSchemaId::new(
+                &db,
+                bound.schema.owner(&db),
+                crate::analysis::ty::trait_resolution::PredicateListId::empty_list(&db),
+            );
+            assert!(wrong_schema.proved_bound(&db, goals[0]).is_none());
+
+            let mut missing = callable.clone();
+            missing.use_evidence.bounds.as_mut().unwrap().entries = EvidenceList::none(&db);
+            assert!(missing.proved_bound(&db, goals[0]).is_none());
+
+            if caller_name == "collapsed" {
+                assert_eq!(goals[0], goals[1]);
+                // Applied equality must not renumber the declaration's slots:
+                // the second slot remains available when the first is absent.
+                let second = bound.entries.get(&db, 1).unwrap();
+                missing.use_evidence.bounds.as_mut().unwrap().entries =
+                    EvidenceList::of(&db, vec![None, Some(second)]);
+                assert_eq!(missing.proved_bound(&db, goals[0]).unwrap().proof, second);
+            } else {
+                assert_ne!(goals[0], goals[1]);
+            }
+        }
+    }
+}
