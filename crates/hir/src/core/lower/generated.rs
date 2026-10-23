@@ -16,10 +16,8 @@ pub(crate) struct ActiveQuoteFrame<'db> {
     pub(super) frame_id: usize,
     pub(super) quote_top_mod: TopLevelMod<'db>,
     pub(super) quote_range: parser::TextRange,
-    pub(super) producer_scope: crate::hir_def::scope_graph::ScopeId<'db>,
-    /// The authored ranges `producer_scope` was resolved from.
-    pub(super) producer_module: Option<parser::TextRange>,
-    pub(super) producer_block: Option<parser::TextRange>,
+    /// Where the quotation was written; its free names resolve there.
+    pub(super) producer: crate::hir_def::AuthoredScope<'db>,
     pub(super) is_sub_quote: bool,
     /// Members keep their public/local binder names but resolve free names in
     /// the spliced template's producer, not the containing quote's producer.
@@ -64,17 +62,18 @@ pub(super) fn append_functions<'db>(ctxt: &mut FileLowerCtxt<'db>) {
                     .collect()
             })
             .unwrap_or_default();
-        let producer_scope =
-            ctxt.builder
-                .resolve_producer_scope(top_mod, plan.producer_module, plan.producer_block);
+        let producer = crate::hir_def::AuthoredScope::producer(
+            db,
+            top_mod,
+            plan.producer_module,
+            plan.producer_block,
+        );
         let frame_id = ctxt.next_quote_frame_id();
         ctxt.quote_frames.push(ActiveQuoteFrame {
             frame_id,
             quote_top_mod: top_mod,
             quote_range: plan.quote_range,
-            producer_scope,
-            producer_module: plan.producer_module,
-            producer_block: plan.producer_block,
+            producer,
             is_sub_quote: false,
             is_member_quote: false,
             open_names,
@@ -109,11 +108,8 @@ pub(super) fn append_functions<'db>(ctxt: &mut FileLowerCtxt<'db>) {
         );
         let generated = Func::lower_ast(ctxt, function);
         ctxt.pop_quote_frame();
-        ctxt.builder.set_quoted_function_origin(
-            generated,
-            plan.producer_module,
-            plan.producer_block,
-        );
+        ctxt.builder
+            .set_quoted_item_origin(generated.into(), producer);
     }
 
     let requests = db
@@ -205,18 +201,13 @@ pub(super) fn lower_generated_item_code<'db>(ctxt: &mut FileLowerCtxt<'db>, code
                 false,
                 holes.clone(),
             );
-            let quote_top_mod = frame.quote_top_mod;
+            let producer = frame.producer;
             ctxt.quote_frames.push(frame);
             if let Some(item_list) = quote.item_list() {
                 for child in item_list.syntax().children() {
                     if let Some(item) = ast::Item::cast(child.clone()) {
                         if let Some(lowered) = lower_quoted_ast_item(ctxt, item) {
-                            ctxt.builder.set_quoted_item_origin(
-                                lowered,
-                                quote_top_mod,
-                                *producer_module,
-                                *producer_block,
-                            );
+                            ctxt.builder.set_quoted_item_origin(lowered, producer);
                         }
                     } else if let Some(hole) = ast::QuoteHole::cast(child) {
                         if let Some(FrozenHoleValue::Code(nested)) =
@@ -234,12 +225,7 @@ pub(super) fn lower_generated_item_code<'db>(ctxt: &mut FileLowerCtxt<'db>, code
             } else if let Some(block) = quote.body() {
                 for item in block.items() {
                     if let Some(lowered) = lower_quoted_ast_item(ctxt, item) {
-                        ctxt.builder.set_quoted_item_origin(
-                            lowered,
-                            quote_top_mod,
-                            *producer_module,
-                            *producer_block,
-                        );
+                        ctxt.builder.set_quoted_item_origin(lowered, producer);
                     }
                 }
                 for stmt in block.stmts() {
@@ -307,7 +293,7 @@ pub(super) fn lower_derive_method<'db>(ctxt: &mut FileLowerCtxt<'db>, code: &Fro
         false,
         holes.clone(),
     );
-    let quote_top_mod = frame.quote_top_mod;
+    let producer = frame.producer;
     // Admission covers the complete output, not just the children that happen
     // to cast to items. In particular, a sibling item hole must not disappear
     // before the bounded single-function check.
@@ -354,12 +340,8 @@ pub(super) fn lower_derive_method<'db>(ctxt: &mut FileLowerCtxt<'db>, code: &Fro
     );
     let generated = Func::lower_ast(ctxt, function);
     ctxt.pop_quote_frame();
-    ctxt.builder.defer_quoted_item_origin(
-        generated.into(),
-        quote_top_mod,
-        *producer_module,
-        *producer_block,
-    );
+    ctxt.builder
+        .defer_quoted_item_origin(generated.into(), producer);
 }
 
 /// Install a scoped output as a private named candidate, never an ordinary impl.
@@ -369,24 +351,25 @@ fn lower_scoped_derive<'db>(
     code: &FrozenCode,
 ) {
     use crate::hir_def::{
-        AttrListId, GenericParamListId, IdentId, ImplTraitModifiers, Partial, PathId, PathKind,
-        TrackedItemVariant, TraitRefId, TypeId, TypeKind, Visibility, WhereClauseId,
+        AttrListId, GenericArgListId, GenericParamListId, IdentId, ImplTraitModifiers, Partial,
+        PathId, PathKind, TrackedItemVariant, TraitRefId, TypeId, TypeKind, Visibility,
+        WhereClauseId,
     };
     let db = ctxt.db();
-    let trait_ = ctxt.resolve_trait_item(&scoped.demand.trait_ref);
-    let target = ctxt.resolve_record_item(&scoped.demand.target);
-    let bound_path = |item: ItemKind<'db>| {
-        PathId::new(
-            db,
-            PathKind::BoundItem {
-                item: item.scope(),
-                display: PathId::from_ident(db, item.name(db).expect("named source declaration")),
-            },
-            None,
-        )
-    };
-    let trait_ref = TraitRefId::new(db, Partial::Present(bound_path(trait_.into())));
-    let ty = TypeId::new(db, TypeKind::Path(Partial::Present(bound_path(target))));
+    let (trait_, trait_name) = ctxt.authored_trait(&scoped.demand.trait_ref);
+    let trait_path = PathId::new(
+        db,
+        PathKind::BoundItem {
+            item: trait_,
+            display: PathId::from_ident(db, trait_name.to_opt().expect("named source declaration")),
+        },
+        None,
+    );
+    let trait_ref = TraitRefId::new(db, Partial::Present(trait_path));
+    let target = ctxt
+        .authored_record(&scoped.demand.target)
+        .path(db, GenericArgListId::none(db));
+    let ty = TypeId::new(db, TypeKind::Path(Partial::Present(target)));
     let index = ctxt.next_impl_trait_idx();
     let id = ctxt.joined_id(TrackedItemVariant::ImplTrait(index));
     ctxt.enter_item_scope(id, false);
@@ -427,12 +410,14 @@ fn lower_scoped_derive<'db>(
         .ancestors()
         .find_map(ast::BlockExpr::cast)
         .map(|block| block.syntax().text_range());
-    ctxt.builder.defer_quoted_item_origin(
-        implementation.into(),
+    let producer = crate::hir_def::AuthoredScope::producer(
+        db,
         ctxt.top_mod(),
         producer_module,
         producer_block,
     );
+    ctxt.builder
+        .defer_quoted_item_origin(implementation.into(), producer);
 }
 
 /// Lower member code into the already-entered destination declaration, in

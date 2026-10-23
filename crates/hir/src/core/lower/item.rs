@@ -801,7 +801,16 @@ fn merge_target_record_generics<'db>(
         return (explicit_params, explicit_where);
     };
     let db = ctxt.db();
-    let item = ctxt.resolve_record_item(&record_ref);
+    // Whole-item output is published in its record's own module, after the
+    // record is lowered, so the header copies the record's lowered binders.
+    let Some(item) = ctxt.local_record_item(&record_ref) else {
+        ctxt.record_generation_error(
+            hole.syntax().text_range(),
+            "an implementation for a reflected record must be generated in the record's module",
+        );
+        return (explicit_params, explicit_where);
+    };
+    let scope = ctxt.authored_record(&record_ref).scope;
     let (record_params, record_where) = match item {
         ItemKind::Struct(s) => (s.generic_params(db), s.where_clause(db)),
         ItemKind::Enum(e) => (e.generic_params(db), e.where_clause(db)),
@@ -814,7 +823,7 @@ fn merge_target_record_generics<'db>(
         .data(db)
         .iter()
         .cloned()
-        .map(|p| super::types::bind_generic_param_to_scope(db, p, item))
+        .map(|p| super::types::bind_generic_param_to_scope(db, p, scope, item))
         .collect();
     for param in explicit_params.data(db) {
         let Some(copied) = params.iter_mut().find(|p| p.name() == param.name()) else {
@@ -850,7 +859,7 @@ fn merge_target_record_generics<'db>(
         .predicates(db)
         .iter()
         .cloned()
-        .map(|pred| super::types::bind_where_predicate_to_scope(db, pred, item))
+        .map(|pred| super::types::bind_where_predicate_to_scope(db, pred, scope, item))
         .collect();
     predicates.extend(explicit_where.predicates(db).iter().cloned());
     (

@@ -101,6 +101,10 @@ fn lower_hir_ty_impl<'db>(
             TyId::new(db, TyData::TyBase(super::ty_def::TyBase::from(*primitive)))
         }
         HirTyKind::Never => TyId::never(db),
+        HirTyKind::AuthoredField(field) => match field.bound_type(db) {
+            Some(ty) => lower_hir_ty_impl(db, ty, scope, assumptions, lowering_cx),
+            None => TyId::invalid(db, InvalidCause::Other),
+        },
     };
     // A `#[view]` type exists only behind accesses, never inside a value.
     match lowered.view_part(db) {

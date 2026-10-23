@@ -34,6 +34,10 @@ pub struct ScopeGraph<'db> {
     pub unresolved_uses: FxHashSet<Use<'db>>,
     /// The diagnostics reported while lowering the graph's items.
     pub lower_diagnostics: Vec<LowerDiagnostic>,
+    /// Generated items whose lexical parent is a producer scope in another
+    /// module. Lowering records them; the module's linked graph adds each as
+    /// the item's lexical edge, so lowering never reads the other module.
+    pub foreign_origins: Vec<(ScopeId<'db>, super::AuthoredScope<'db>)>,
 }
 
 impl<'db> ScopeGraph<'db> {

@@ -459,7 +459,7 @@ impl<'db> TopLevelMod<'db> {
     }
 
     pub fn scope_graph(self, db: &'db dyn HirDb) -> &'db ScopeGraph<'db> {
-        lower::scope_graph_impl(db, self)
+        lower::linked_scope_graph(db, self)
     }
 
     /// Returns the child top level modules of `self`.

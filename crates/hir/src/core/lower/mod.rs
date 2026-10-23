@@ -13,10 +13,10 @@ use self::{item::lower_module_items, scope_builder::ScopeGraphBuilder};
 use crate::{
     HirDb, LowerHirDb,
     hir_def::{
-        AttrListId, Body, ExprId, Func, IdentId, IntegerId, ItemKind, LitKind, ModuleTree, Partial,
-        PathId, StringId, TopLevelMod, TrackedItemId, TrackedItemVariant, Use, Visibility,
-        module_tree_impl,
-        scope_graph::ScopeGraph,
+        AttrListId, AuthoredLocator, AuthoredScope, Body, ExprId, Func, IdentId, IntegerId,
+        ItemKind, LitKind, ModuleTree, Partial, PathId, StringId, TopLevelMod, TrackedItemId,
+        TrackedItemVariant, Use, Visibility, module_tree_impl,
+        scope_graph::{ScopeGraph, ScopeId},
         use_tree::{UsePathId, UsePathSegment},
     },
     span::HirOrigin,
@@ -121,7 +121,119 @@ pub fn scope_graph<'db>(
     db: &'db dyn LowerHirDb,
     top_mod: TopLevelMod<'db>,
 ) -> &'db ScopeGraph<'db> {
-    scope_graph_impl(db, top_mod)
+    linked_scope_graph(db, top_mod)
+}
+
+/// The scope graph of `top_mod` with every generated item's lexical edge to a
+/// producer in another module. Lowering leaves those edges out, so that no
+/// module's lowering reads another module's lowered graph; linking reads the
+/// producer modules' lowered graphs only, which never wait for this module.
+pub(crate) fn linked_scope_graph<'db>(
+    db: &'db dyn HirDb,
+    top_mod: TopLevelMod<'db>,
+) -> &'db ScopeGraph<'db> {
+    linked_scope_graph_impl(db, top_mod)
+        .as_ref()
+        .unwrap_or_else(|| scope_graph_impl(db, top_mod))
+}
+
+#[salsa::tracked]
+fn linked_scope_graph_impl<'db>(
+    db: &'db dyn HirDb,
+    top_mod: TopLevelMod<'db>,
+) -> Option<ScopeGraph<'db>> {
+    let lowered = scope_graph_impl(db, top_mod);
+    if lowered.foreign_origins.is_empty() {
+        return None;
+    }
+    let mut linked = lowered.clone();
+    for (item, producer) in std::mem::take(&mut linked.foreign_origins) {
+        let edge = crate::hir_def::scope_graph::ScopeEdge {
+            dest: resolve_authored_scope(db, producer),
+            kind: crate::hir_def::scope_graph::EdgeKind::lex(),
+        };
+        let scope = linked
+            .scopes
+            .get_mut(&item)
+            .expect("a generated item has a scope in its module");
+        // External edges precede the item's own edges, as lowering orders them.
+        scope.edges = std::iter::once(edge)
+            .chain(std::mem::take(&mut scope.edges))
+            .collect();
+    }
+    Some(linked)
+}
+
+/// Bind an authored reference in its module's lowered scope graph. The
+/// referenced declaration was validated when its request was frozen and its
+/// source is unchanged in this view.
+#[salsa::tracked(returns(copy))]
+pub(crate) fn resolve_authored_scope<'db>(
+    db: &'db dyn HirDb,
+    reference: AuthoredScope<'db>,
+) -> ScopeId<'db> {
+    let top_mod = reference.top_mod(db);
+    let graph = scope_graph_impl(db, top_mod);
+    match reference.locator(db) {
+        AuthoredLocator::Producer { module, block } => scope_builder::find_producer_scope(
+            db,
+            top_mod,
+            graph.scopes.keys().copied(),
+            module,
+            block,
+        ),
+        AuthoredLocator::Item(range) => {
+            let written_at = |origin: Option<ast::SyntaxNodePtr>| {
+                origin.is_some_and(|ptr| ptr.text_range() == range)
+            };
+            graph
+                .scopes
+                .keys()
+                .copied()
+                .find(|scope| match *scope {
+                    ScopeId::Item(ItemKind::Struct(s)) => written_at(raw_origin(s.origin(db))),
+                    ScopeId::Item(ItemKind::Enum(e)) => written_at(raw_origin(e.origin(db))),
+                    ScopeId::Item(ItemKind::Trait(t)) => written_at(raw_origin(t.origin(db))),
+                    _ => false,
+                })
+                .expect("validated authored declaration exists in unchanged source")
+        }
+    }
+}
+
+/// The declared type of an authored record's field, bound as a type splice
+/// copies it: names in the record's scope, its generic parameters left to the
+/// use site.
+#[salsa::tracked(returns(copy))]
+pub(crate) fn authored_field_type<'db>(
+    db: &'db dyn HirDb,
+    field: crate::hir_def::AuthoredFieldType<'db>,
+) -> Option<crate::hir_def::TypeId<'db>> {
+    use crate::hir_def::VariantKind;
+    let record = field.record(db);
+    let item = record.resolve(db).to_item()?;
+    let index = field.index(db);
+    let ty = match (item, field.variant(db)) {
+        (ItemKind::Struct(s), None) => s.fields(db).data(db).get(index)?.type_ref.to_opt(),
+        (ItemKind::Enum(e), Some(variant)) => {
+            match &e.variants_list(db).data(db).get(variant)?.kind {
+                VariantKind::Tuple(elems) => elems.data(db).get(index)?.to_opt(),
+                VariantKind::Record(fields) => fields.data(db).get(index)?.type_ref.to_opt(),
+                VariantKind::Unit => None,
+            }
+        }
+        _ => None,
+    }?;
+    Some(types::bind_type_to_scope(db, ty, record, item))
+}
+
+fn raw_origin<T: AstNode<Language = parser::FeLang>>(
+    origin: &HirOrigin<T>,
+) -> Option<ast::SyntaxNodePtr> {
+    match origin {
+        HirOrigin::Raw(ptr) => Some(ptr.syntax_node_ptr()),
+        _ => None,
+    }
 }
 
 pub fn generation_lowering_errors<'db>(
@@ -241,6 +353,134 @@ pub(super) struct FileLowerCtxt<'db> {
     pub(super) quote_frames: Vec<generated::ActiveQuoteFrame<'db>>,
 }
 
+/// An authored record named by a frozen reference: its reference, bound by
+/// ordinary resolution, and the syntax lowering reads names and shapes from.
+pub(super) struct AuthoredRecord<'db> {
+    pub(super) scope: AuthoredScope<'db>,
+    pub(super) syntax: RecordSyntax,
+}
+
+pub(super) enum RecordSyntax {
+    Struct(ast::Struct),
+    Enum(ast::Enum),
+}
+
+/// The fields of a struct or of one enum variant, named as lowering names
+/// them: tuple struct fields by position, tuple variant fields by count.
+pub(super) enum AuthoredFields<'db> {
+    Unit,
+    Tuple(usize),
+    Named(Vec<Partial<IdentId<'db>>>),
+}
+
+impl<'db> AuthoredRecord<'db> {
+    pub(super) fn name(&self, db: &'db dyn HirDb) -> Partial<IdentId<'db>> {
+        let name = match &self.syntax {
+            RecordSyntax::Struct(s) => s.name(),
+            RecordSyntax::Enum(e) => e.name(),
+        };
+        name.map(|name| IdentId::new(db, name.text().to_string()))
+            .into()
+    }
+
+    pub(super) fn generic_params(&self) -> Option<ast::GenericParamList> {
+        match &self.syntax {
+            RecordSyntax::Struct(s) => s.generic_params(),
+            RecordSyntax::Enum(e) => e.generic_params(),
+        }
+    }
+
+    pub(super) fn variant(&self, index: usize) -> Option<ast::VariantDef> {
+        let RecordSyntax::Enum(e) = &self.syntax else {
+            return None;
+        };
+        e.variants()?.into_iter().nth(index)
+    }
+
+    /// The struct's fields, or variant `variant`'s; `None` when the reference
+    /// does not name fields of this record.
+    pub(super) fn fields(
+        &self,
+        db: &'db dyn HirDb,
+        variant: Option<usize>,
+    ) -> Option<AuthoredFields<'db>> {
+        let named = |list: Option<ast::RecordFieldDefList>| {
+            let Some(list) = list else {
+                return AuthoredFields::Named(Vec::new());
+            };
+            let is_tuple = list.is_tuple();
+            AuthoredFields::Named(
+                list.into_iter()
+                    .enumerate()
+                    .map(|(index, field)| {
+                        if is_tuple {
+                            Partial::Present(IdentId::new(db, index.to_string()))
+                        } else {
+                            field
+                                .name()
+                                .map(|name| IdentId::new(db, name.text().to_string()))
+                                .into()
+                        }
+                    })
+                    .collect(),
+            )
+        };
+        match (&self.syntax, variant) {
+            (RecordSyntax::Struct(s), None) => Some(named(s.fields())),
+            (RecordSyntax::Enum(_), Some(index)) => Some(match self.variant(index)?.kind() {
+                ast::VariantKind::Unit => AuthoredFields::Unit,
+                ast::VariantKind::Tuple(tuple) => AuthoredFields::Tuple(tuple.into_iter().count()),
+                ast::VariantKind::Record(fields) => named(Some(fields)),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Whether field `index` of the struct, or of variant `variant`, declares
+    /// a type.
+    pub(super) fn field_has_type(&self, variant: Option<usize>, index: usize) -> bool {
+        match (&self.syntax, variant) {
+            (RecordSyntax::Struct(s), None) => s
+                .fields()
+                .and_then(|fields| fields.into_iter().nth(index))
+                .is_some_and(|field| field.ty().is_some()),
+            (RecordSyntax::Enum(_), Some(v)) => match self.variant(v).map(|v| v.kind()) {
+                Some(ast::VariantKind::Tuple(tuple)) => tuple.into_iter().nth(index).is_some(),
+                Some(ast::VariantKind::Record(fields)) => fields
+                    .into_iter()
+                    .nth(index)
+                    .is_some_and(|field| field.ty().is_some()),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// A path naming the record itself, bound when it is resolved.
+    pub(super) fn path(
+        &self,
+        db: &'db dyn HirDb,
+        generic_args: crate::hir_def::GenericArgListId<'db>,
+    ) -> PathId<'db> {
+        let display = PathId::new(
+            db,
+            crate::hir_def::PathKind::Ident {
+                ident: self.name(db),
+                generic_args,
+            },
+            None,
+        );
+        PathId::new(
+            db,
+            crate::hir_def::PathKind::BoundItem {
+                item: self.scope,
+                display,
+            },
+            None,
+        )
+    }
+}
+
 impl<'db> FileLowerCtxt<'db> {
     pub(super) fn enter_top_mod(db: &'db dyn HirDb, top_mod: TopLevelMod<'db>) -> Self {
         Self {
@@ -329,17 +569,12 @@ impl<'db> FileLowerCtxt<'db> {
     /// every other generated item: its quote's producer is its lexical origin
     /// and the enclosing declaration its publication parent.
     pub(super) fn defer_generated_member_origin(&mut self, item: ItemKind<'db>) {
-        let frame = self
+        let producer = self
             .quote_frames
             .last()
-            .expect("a generated member is lowered inside its quote");
-        let (quote_top_mod, producer_module, producer_block) = (
-            frame.quote_top_mod,
-            frame.producer_module,
-            frame.producer_block,
-        );
-        self.builder
-            .defer_quoted_item_origin(item, quote_top_mod, producer_module, producer_block);
+            .expect("a generated member is lowered inside its quote")
+            .producer;
+        self.builder.defer_quoted_item_origin(item, producer);
     }
 
     /// The module whose syntax is being lowered: the active quotation's, or
@@ -404,9 +639,7 @@ impl<'db> FileLowerCtxt<'db> {
                     .collect()
             })
             .unwrap_or_default();
-        let producer_scope =
-            self.builder
-                .resolve_producer_scope(quote_top_mod, producer_module, producer_block);
+        let producer = AuthoredScope::producer(db, quote_top_mod, producer_module, producer_block);
         let frame_id = self.next_quote_frame_id();
         (
             quote,
@@ -414,9 +647,7 @@ impl<'db> FileLowerCtxt<'db> {
                 frame_id,
                 quote_top_mod,
                 quote_range,
-                producer_scope,
-                producer_module,
-                producer_block,
+                producer,
                 is_sub_quote,
                 is_member_quote: false,
                 open_names,
@@ -426,80 +657,72 @@ impl<'db> FileLowerCtxt<'db> {
         )
     }
 
-    pub(super) fn resolve_record_item(
+    /// The authored record a frozen reference names, read from its file's
+    /// syntax. Lowering takes the record's names and shapes from here, not
+    /// from its lowered HIR, which may depend on this module's own output.
+    pub(super) fn authored_record(
         &self,
         record_ref: &common::generation::FrozenRecordRef,
-    ) -> ItemKind<'db> {
+    ) -> AuthoredRecord<'db> {
         let db = self.db();
         let file = db
             .workspace()
             .get(db, &record_ref.target_file)
             .expect("validated frozen record file exists in workspace");
-        let record_top_mod = map_file_to_mod_impl(db, file);
-        if record_top_mod == self.top_mod() {
-            return self
-                .builder
-                .find_item_by_range(record_ref.target_range)
-                .expect("validated authored record item exists in module");
-        }
-        let root = top_mod_ast(db, record_top_mod);
-        record_top_mod
-            .scope_graph(db)
-            .scopes
-            .keys()
-            .find_map(|scope| match *scope {
-                crate::hir_def::scope_graph::ScopeId::Item(item @ ItemKind::Struct(s)) => {
-                    let HirOrigin::Raw(ptr) = s.origin(db) else {
-                        return None;
-                    };
-                    (ptr.to_node(root.syntax()).syntax().text_range() == record_ref.target_range)
-                        .then_some(item)
-                }
-                crate::hir_def::scope_graph::ScopeId::Item(item @ ItemKind::Enum(e)) => {
-                    let HirOrigin::Raw(ptr) = e.origin(db) else {
-                        return None;
-                    };
-                    (ptr.to_node(root.syntax()).syntax().text_range() == record_ref.target_range)
-                        .then_some(item)
-                }
-                _ => None,
+        let top_mod = map_file_to_mod_impl(db, file);
+        let syntax = top_mod_ast(db, top_mod)
+            .syntax()
+            .descendants()
+            .filter(|node| node.text_range() == record_ref.target_range)
+            .find_map(|node| {
+                ast::Struct::cast(node.clone())
+                    .map(RecordSyntax::Struct)
+                    .or_else(|| ast::Enum::cast(node).map(RecordSyntax::Enum))
             })
-            .expect("validated authored record item exists in target module")
+            .expect("validated authored record item exists in target module");
+        AuthoredRecord {
+            scope: AuthoredScope::item(db, top_mod, record_ref.target_range),
+            syntax,
+        }
     }
 
-    pub(super) fn resolve_trait_item(
+    /// The record's lowered item, when it is declared in this module and was
+    /// lowered already: its generic header is copied, not only named.
+    pub(super) fn local_record_item(
+        &self,
+        record_ref: &common::generation::FrozenRecordRef,
+    ) -> Option<ItemKind<'db>> {
+        let db = self.db();
+        let file = db.workspace().get(db, &record_ref.target_file)?;
+        (map_file_to_mod_impl(db, file) == self.top_mod())
+            .then(|| self.builder.find_item_by_range(record_ref.target_range))
+            .flatten()
+    }
+
+    /// The authored trait a frozen reference names, and its name.
+    pub(super) fn authored_trait(
         &self,
         reference: &common::generation::FrozenTraitRef,
-    ) -> crate::hir_def::Trait<'db> {
+    ) -> (AuthoredScope<'db>, Partial<IdentId<'db>>) {
         let db = self.db();
         let file = db
             .workspace()
             .get(db, &reference.file)
             .expect("validated frozen trait file exists in workspace");
-        let module = map_file_to_mod_impl(db, file);
-        if module == self.top_mod() {
-            return self
-                .builder
-                .find_trait_by_range(reference.range)
-                .expect("validated trait exists in unchanged source");
-        }
-        let root = top_mod_ast(db, module);
-        module
-            .scope_graph(db)
-            .scopes
-            .keys()
-            .find_map(|scope| {
-                let crate::hir_def::scope_graph::ScopeId::Item(ItemKind::Trait(trait_)) = *scope
-                else {
-                    return None;
-                };
-                let HirOrigin::Raw(ptr) = trait_.origin(db) else {
-                    return None;
-                };
-                (ptr.to_node(root.syntax()).syntax().text_range() == reference.range)
-                    .then_some(trait_)
-            })
-            .expect("validated trait exists in unchanged source")
+        let top_mod = map_file_to_mod_impl(db, file);
+        let trait_ = top_mod_ast(db, top_mod)
+            .syntax()
+            .descendants()
+            .filter_map(ast::Trait::cast)
+            .find(|trait_| trait_.syntax().text_range() == reference.range)
+            .expect("validated trait exists in unchanged source");
+        (
+            AuthoredScope::item(db, top_mod, reference.range),
+            trait_
+                .name()
+                .map(|name| IdentId::new(db, name.text().to_string()))
+                .into(),
+        )
     }
 
     pub(super) fn lower_field_hole_ident(
@@ -515,12 +738,10 @@ impl<'db> FileLowerCtxt<'db> {
             return Partial::Absent;
         };
         let db = self.db();
-        match (
-            self.resolve_record_item(&field_ref.record),
-            field_ref.record.variant_index,
-        ) {
-            (ItemKind::Struct(s), None) => match s.fields(db).data(db).get(field_ref.index) {
-                Some(f) => f.name,
+        let record = self.authored_record(&field_ref.record);
+        match record.fields(db, field_ref.record.variant_index) {
+            Some(AuthoredFields::Named(names)) => match names.get(field_ref.index) {
+                Some(name) => *name,
                 None => {
                     self.record_generation_error(
                         range,
@@ -529,35 +750,12 @@ impl<'db> FileLowerCtxt<'db> {
                     Partial::Absent
                 }
             },
-            (ItemKind::Enum(e), Some(v)) => {
-                match e.variants_list(db).data(db).get(v).map(|v| &v.kind) {
-                    Some(crate::hir_def::VariantKind::Record(fields)) => {
-                        match fields.data(db).get(field_ref.index) {
-                            Some(f) => f.name,
-                            None => {
-                                self.record_generation_error(
-                                    range,
-                                    "invalid field splice in record field label",
-                                );
-                                Partial::Absent
-                            }
-                        }
-                    }
-                    Some(crate::hir_def::VariantKind::Tuple(_)) => {
-                        self.record_generation_error(
-                            range,
-                            "tuple variant field cannot be used as a named record field label",
-                        );
-                        Partial::Absent
-                    }
-                    _ => {
-                        self.record_generation_error(
-                            range,
-                            "invalid field splice in record field label",
-                        );
-                        Partial::Absent
-                    }
-                }
+            Some(AuthoredFields::Tuple(_)) => {
+                self.record_generation_error(
+                    range,
+                    "tuple variant field cannot be used as a named record field label",
+                );
+                Partial::Absent
             }
             _ => {
                 self.record_generation_error(range, "invalid field splice in record field label");
@@ -577,33 +775,19 @@ impl<'db> FileLowerCtxt<'db> {
             return Partial::Absent;
         };
         let db = self.db();
-        let res: Partial<FieldIndex<'db>> = match (
-            self.resolve_record_item(&field_ref.record),
-            field_ref.record.variant_index,
-        ) {
-            (ItemKind::Struct(s), None) => s
-                .fields(db)
-                .data(db)
-                .get(field_ref.index)
-                .and_then(|f| f.name.to_opt())
-                .map(FieldIndex::Ident)
-                .into(),
-            (ItemKind::Enum(e), Some(v)) => {
-                match e.variants_list(db).data(db).get(v).map(|v| &v.kind) {
-                    Some(crate::hir_def::VariantKind::Record(fields)) => fields
-                        .data(db)
-                        .get(field_ref.index)
-                        .and_then(|f| f.name.to_opt())
-                        .map(FieldIndex::Ident)
-                        .into(),
-                    Some(crate::hir_def::VariantKind::Tuple(_)) => Partial::Present(
-                        FieldIndex::Index(IntegerId::new(db, BigUint::from(field_ref.index))),
-                    ),
-                    _ => Partial::Absent,
-                }
-            }
-            _ => Partial::Absent,
-        };
+        let record = self.authored_record(&field_ref.record);
+        let res: Partial<FieldIndex<'db>> =
+            match record.fields(db, field_ref.record.variant_index) {
+                Some(AuthoredFields::Named(names)) => names
+                    .get(field_ref.index)
+                    .and_then(|name| name.to_opt())
+                    .map(FieldIndex::Ident)
+                    .into(),
+                Some(AuthoredFields::Tuple(_)) => Partial::Present(FieldIndex::Index(
+                    IntegerId::new(db, BigUint::from(field_ref.index)),
+                )),
+                _ => Partial::Absent,
+            };
         if res.to_opt().is_none() {
             self.record_generation_error(range, "invalid field splice in field projection");
         }
