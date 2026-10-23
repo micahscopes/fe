@@ -2,7 +2,7 @@ mod callable;
 mod const_requirements;
 pub use const_requirements::{
     EvaluationStop, GroundBoundAdmissionCause, GroundTypeAdmissionError, GroundTypeAdmissionKind,
-    RequirementFailure, admit_ground_type_application,
+    RequirementFailure, admit_ground_type_application, admit_header_type_application,
 };
 pub(crate) use const_requirements::{
     check_declared_type_requirements, retained_bound_requirements,

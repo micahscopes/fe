@@ -469,3 +469,83 @@ const fn twenty() -> u256 { Other::payload_bits() }
     assert_eq!(eval(&output, "ten"), "10");
     assert_eq!(eval(&output, "twenty"), "20");
 }
+
+/// A complete authored header with binders: the provider sees the target over
+/// the header's own parameter, and the generated body names that parameter
+/// through the header, never by spelling. Each instance then has its own
+/// width, as for a handwritten `impl<T: Bits> Report for Envelope<T>`.
+#[test]
+fn a_generic_header_generates_for_every_instance_under_its_own_bounds() {
+    let header = INSTANCES
+        .replace(
+            "impl Report for Envelope<u8> with (FirstField)\nimpl Report for Envelope<u256> with (FirstField)\n",
+            "impl<T: Bits> Report for Envelope<T> with (FirstField)\n",
+        )
+        .replace(
+            "impl Report for Buf<4> with (FirstField)\n",
+            "impl<const N: usize> Report for Buf<N> with (FirstField)\n",
+        );
+    assert_ne!(header, INSTANCES);
+    let output = prepare(&header).unwrap();
+    assert_eq!(eval(&output, "narrow"), "8");
+    assert_eq!(eval(&output, "wide"), "256");
+    assert_eq!(eval(&output, "buffer"), "32");
+    assert_eq!(eval(&output, "nested"), "16");
+
+    // The same requirement written as a `where` clause after the provider.
+    let where_clause = header.replace(
+        "impl<T: Bits> Report for Envelope<T> with (FirstField)\n",
+        "impl<T> Report for Envelope<T> with (FirstField) where T: Bits\n",
+    );
+    assert_ne!(where_clause, header);
+    let output = prepare(&where_clause).unwrap();
+    assert_eq!(eval(&output, "narrow"), "8");
+    assert_eq!(eval(&output, "wide"), "256");
+}
+
+/// The header's bounds are the generated implementation's requirements: an
+/// instance without `Bits` is the ordinary unmet bound where it is used, and a
+/// header that omits the bound its generated body needs is an ordinary error
+/// in that body.
+#[test]
+fn generic_header_bounds_are_ordinary_requirements() {
+    let header = INSTANCES.replace(
+        "impl Report for Envelope<u8> with (FirstField)\nimpl Report for Envelope<u256> with (FirstField)\n",
+        "impl<T: Bits> Report for Envelope<T> with (FirstField)\nstruct Opaque {}\nconst fn opaque() -> u256 { <Envelope<Opaque> as Report>::payload_bits() }\n",
+    );
+    assert_ne!(header, INSTANCES);
+    let cause = prepare_err(&header);
+    assert!(cause.contains("Bits"), "{cause}");
+    assert!(cause.contains("Opaque"), "{cause}");
+
+    let unbounded = INSTANCES.replace(
+        "impl Report for Envelope<u8> with (FirstField)\nimpl Report for Envelope<u256> with (FirstField)\n",
+        "impl<T> Report for Envelope<T> with (FirstField)\n",
+    );
+    let cause = prepare_err(&unbounded);
+    assert!(cause.contains("Bits"), "{cause}");
+}
+
+/// Reflection over a header parameter has no ground answer: asking whether
+/// `T` is `u256` fails at the request instead of answering false.
+#[test]
+fn reflecting_on_a_header_parameter_fails_at_the_request() {
+    let source = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record, field, field_type, type_is}
+
+trait Report { const fn payload_bits() -> u256 }
+struct Envelope<T> { value: T }
+
+struct Asks {}
+impl Derive<Report> for Asks {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let wide = type_is<u256>(field_type(field(record, 0)))
+        quote { const fn payload_bits() -> u256 { if ${wide} { 256 } else { 0 } } }
+    }
+}
+
+impl<T> Report for Envelope<T> with (Asks)
+"#;
+    let cause = prepare_err(source);
+    assert!(cause.contains("concrete ground types"), "{cause}");
+}
