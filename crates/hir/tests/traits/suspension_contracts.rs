@@ -56,14 +56,26 @@ trait Effects { uses E }
 struct Wrapped<C> {}
 impl<C: Effects> Effects for Wrapped<C> { uses E = C::E }
 fn direct<C: Effects>() uses C::E {}
-fn nested<C: Effects>() uses Wrapped<C>::E {}
+fn nested<W: Effects>() uses W::E {}
+fn invoke<C: Effects>() uses C::E { nested<Wrapped<C>>() }
 "#,
     );
     let (module, _) = db.top_mod(file);
     db.assert_no_diags(module);
     for name in ["direct", "nested"] {
-        let func = find_func(&db, module, name);
+        let func = find_func(&db, module, if name == "nested" { "invoke" } else { name });
         let key = identity_semantic_instance_key(&db, BodyOwner::Func(func, None));
+        let key = if name == "nested" {
+            SemanticInstance::new(&db, key)
+                .call_sites(&db)
+                .iter()
+                .flatten()
+                .find_map(|site| site.callee)
+                .expect("nested row call")
+                .key
+        } else {
+            key
+        };
         let contract = suspension_contract(&db, key);
         assert!(!contract.entries.is_empty(), "{name}");
         assert!(
@@ -122,13 +134,13 @@ impl Pair {
 }
 fn projection_live() uses (cap: mut Native) {
     var pair = Pair { first: 5, second: Owned { value: 1 } }
-    let held = pair.part()
+    let held = mut pair.part()
     cut()
     held = 9
 }
 fn projection_ended() uses (cap: mut Native) {
     var pair = Pair { first: 5, second: Owned { value: 1 } }
-    let held = pair.part()
+    let held = mut pair.part()
     held = 9
     cut()
 }
