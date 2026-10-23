@@ -7,6 +7,8 @@ struct Empty {}
 struct TwoWords { first: u256, second: u256 }
 #[generate(abi_size)]
 struct Nested { child: TwoWords, third: u256 }
+#[generate(abi_size)]
+struct Dynamic { first: u256, bytes: core::abi::Bytes }
 
 struct HandwrittenTwoWords { first: u256, second: u256 }
 impl AbiSize for HandwrittenTwoWords {
@@ -22,4 +24,6 @@ const fn check_layout() -> bool {
         && <HandwrittenTwoWords as AbiSize>::HEAD_SIZE == 64
         && <Nested as AbiSize>::HEAD_SIZE == 96
         && !<Nested as AbiSize>::IS_DYNAMIC
+        && <Dynamic as AbiSize>::HEAD_SIZE == 64
+        && <Dynamic as AbiSize>::IS_DYNAMIC
 }

@@ -1,0 +1,17 @@
+use core::abi::AbiSize
+use core::error::ErrorVariant
+use std::abi::{Sol, sol}
+use std::derive::error_struct
+
+#[generate(error_struct)]
+struct GeneratedError { first: u256, second: u256 }
+
+#[error]
+struct CompilerError { first: u256, second: u256 }
+
+const fn check_error() -> bool {
+    <GeneratedError as AbiSize>::HEAD_SIZE == 64
+        && !<GeneratedError as AbiSize>::IS_DYNAMIC
+        && <GeneratedError as ErrorVariant<Sol>>::SELECTOR == sol("GeneratedError(uint256,uint256)")
+        && <CompilerError as ErrorVariant<Sol>>::SELECTOR == sol("CompilerError(uint256,uint256)")
+}
