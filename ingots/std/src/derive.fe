@@ -85,3 +85,78 @@ pub const fn abi_size(_ record: Record) -> Code<Item> {
         }
     }
 }
+
+/// Encode fields in declaration order, advancing the head and tail positions.
+pub struct AbiEncodeStep {}
+impl FieldStep for AbiEncodeStep {
+    const fn unit() -> Code<Expr> {
+        quote { () }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote(out, head_pos, tails) {
+            {
+                ${acc}
+                tails = core::abi::encode_field<ingot::abi::Sol, ${ty}>(
+                    self.${field}, out, head_pos: head_pos, tails: tails,
+                )
+                head_pos += core::abi::abi_field_head_size<${ty}>()
+            }
+        }
+    }
+}
+
+/// Generate Solidity ABI encoding using the record's shared layout metadata.
+pub const fn abi_encode(_ record: Record) -> Code<Item> {
+    let steps = fold_fields<AbiEncodeStep>(record)
+    quote(out, head_pos, tails) {
+        impl core::abi::Encode<ingot::abi::Sol> for ${record} {
+            fn encode(own self, _ out: core::abi::AbiFrame) {
+                var tails = out.tail(<Self as core::abi::AbiSize>::HEAD_SIZE)
+                var head_pos: u256 = 0
+                let _ = tails
+                let _ = head_pos
+                ${steps}
+            }
+        }
+    }
+}
+
+/// Solidity tuple signature of the record's fields, for selector hashing.
+pub const fn sol_tuple_type(_ record: Record) -> Code<Expr> {
+    let n = field_count(record)
+    if n == 0 {
+        return quote { "()" }
+    }
+    let ty0 = field_type(field(record, 0))
+    var acc: Code<Expr> = quote { ("(", <${ty0} as ingot::abi::SolCompat>::SOL_TYPE) }
+    var i: usize = 1
+    while i < n {
+        let ty = field_type(field(record, i))
+        acc = quote { (${acc}, ",", <${ty} as ingot::abi::SolCompat>::SOL_TYPE) }
+        i += 1
+    }
+    quote { (${acc}, ")") }
+}
+
+/// Generate the ordinary error selector implementation for a record.
+pub const fn error_variant(_ record: Record) -> Code<Item> {
+    let tuple_ty = sol_tuple_type(record)
+    quote {
+        impl core::error::ErrorVariant<ingot::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ingot::abi::sol((${record}, ${tuple_ty}))
+        }
+    }
+}
+
+/// Generate an error's selector, layout and encoding implementations together.
+pub const fn error_struct(_ record: Record) -> Code<Item> {
+    let variant = error_variant(record)
+    let size = abi_size(record)
+    let encode = abi_encode(record)
+    quote {
+        ${variant}
+        ${size}
+        ${encode}
+    }
+}
