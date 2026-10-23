@@ -456,6 +456,23 @@ pub(super) enum QuotedMember {
     Shape(ast::TraitShapeItem),
 }
 
+impl QuotedMember {
+    /// The item form of this member; a shape has none.
+    pub(super) fn item_kind(&self) -> Option<ast::ItemKind> {
+        match self {
+            Self::Item(item) => item.kind(),
+            Self::Shape(_) => None,
+        }
+    }
+
+    pub(super) fn syntax(&self) -> &parser::SyntaxNode {
+        match self {
+            Self::Item(item) => item.syntax(),
+            Self::Shape(shape) => shape.syntax(),
+        }
+    }
+}
+
 /// Lower member code into the already-entered destination declaration, in
 /// order. Each template resolves its free names in its own producer; nested
 /// `Code<Item>` holes splice their members in place; any other block statement

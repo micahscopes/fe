@@ -889,10 +889,8 @@ impl<'db> Impl<'db> {
             for child in item_list.syntax().children() {
                 let Some(impl_item) = ast::ImplItem::cast(child.clone()) else {
                     if let Some(hole) = ast::QuoteHole::cast(child) {
-                        super::generated::lower_member_hole(
-                            ctxt,
-                            hole,
-                            &mut |ctxt, item| match item.kind() {
+                        super::generated::lower_member_hole(ctxt, hole, &mut |ctxt, member| {
+                            match member.item_kind() {
                                 Some(ast::ItemKind::Func(func)) => {
                                     Func::lower_ast(ctxt, func);
                                 }
@@ -900,11 +898,11 @@ impl<'db> Impl<'db> {
                                     consts.push(AssocConstDef::lower_quoted_const(ctxt, c));
                                 }
                                 _ => ctxt.record_generation_error(
-                                    item.syntax().text_range(),
+                                    member.syntax().text_range(),
                                     "impl member quotation requires functions or constants",
                                 ),
-                            },
-                        );
+                            }
+                        });
                     }
                     continue;
                 };
@@ -975,10 +973,8 @@ impl<'db> Trait<'db> {
             for child in item_list.syntax().children() {
                 let Some(impl_item) = ast::TraitItem::cast(child.clone()) else {
                     if let Some(hole) = ast::QuoteHole::cast(child) {
-                        super::generated::lower_member_hole(
-                            ctxt,
-                            hole,
-                            &mut |ctxt, item| match item.kind() {
+                        super::generated::lower_member_hole(ctxt, hole, &mut |ctxt, member| {
+                            match member.item_kind() {
                                 Some(ast::ItemKind::Func(func)) => {
                                     Func::lower_ast(ctxt, func);
                                 }
@@ -986,11 +982,11 @@ impl<'db> Trait<'db> {
                                     consts.push(AssocConstDecl::lower_quoted_const(ctxt, c));
                                 }
                                 _ => ctxt.record_generation_error(
-                                    item.syntax().text_range(),
+                                    member.syntax().text_range(),
                                     "impl member quotation requires functions or constants",
                                 ),
-                            },
-                        );
+                            }
+                        });
                     }
                     continue;
                 };
