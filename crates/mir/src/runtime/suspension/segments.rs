@@ -46,7 +46,7 @@ impl<'db> NativeScalarTaskPlan<'db> {
                     index: index as u16,
                 };
                 let synthetic = RuntimeSyntheticInstance::new(db, spec);
-                let params = body
+                let params: Vec<_> = body
                     .signature
                     .params
                     .iter()
@@ -71,7 +71,7 @@ pub fn plan_native_scalar_task<'db>(
 ) -> Result<NativeScalarTaskPlan<'db>, LowerError> {
     let composed = super::compose_native_scalar_task(db, source)?;
     let segments = build_native_scalar_segments(db, &composed)?;
-    let bodies = std::iter::once(segments.entry)
+    let bodies: Vec<_> = std::iter::once(segments.entry)
         .chain(segments.resumes)
         .collect();
     Ok(NativeScalarTaskPlan::new(
