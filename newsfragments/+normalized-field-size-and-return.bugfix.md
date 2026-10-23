@@ -1,0 +1,1 @@
+`size_of` of a struct or enum whose field is written as an associated type, such as `f: <A as Tr>::Out`, now has the field's size instead of failing, and an explicit `return` in a function whose return type is written as an associated type is compared with the type it resolves to.
