@@ -2,6 +2,9 @@
 //! operation is a cut; a capability call must first have its continuation
 //! composed with the caller. Projection yields remain ordinary MIR control.
 
+mod segments;
+pub use segments::{NativeScalarSegments, build_native_scalar_segments};
+
 use std::collections::BTreeSet;
 
 use cranelift_entity::EntityRef;

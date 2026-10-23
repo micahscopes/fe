@@ -1,0 +1,216 @@
+//! Typed segment construction. These bodies are detached transform results,
+//! not registered runtime instances: their source owner records provenance,
+//! and must not be used to query their changed signatures or bodies.
+
+use std::collections::VecDeque;
+
+use cranelift_entity::EntityRef;
+use hir::analysis::ty::ty_def::TyId;
+use rustc_hash::FxHashMap;
+
+use super::{NativeSuspensionCut, ScalarCapture, live_on_entry, prepare_native_scalar_cuts};
+use crate::{
+    MirDb,
+    runtime::{
+        EnumLayoutKey, EnumVariantLayout, LayoutId, LayoutKey, LowerError, RBlock, RBlockId, RExpr,
+        RLocal, RLocalId, RStmt, RTerminator, RuntimeBody, RuntimeCarrier, RuntimeClass,
+        RuntimeLocalRoot, RuntimeParam, VariantId,
+    },
+    verify::verify_runtime_body,
+};
+
+/// The internal typed protocol is Complete(return value), or one variant per
+/// cut containing the consumed pending identity followed by scalar captures.
+/// Resume parameters are those captures followed by the fixed-schema outcome.
+/// Neither this layout nor the detached bodies constitute a host ABI.
+#[derive(Clone, Debug)]
+pub struct NativeScalarSegments<'db> {
+    pub step_layout: LayoutId<'db>,
+    pub cuts: Vec<NativeSuspensionCut<'db>>,
+    pub entry: RuntimeBody<'db>,
+    pub resumes: Vec<RuntimeBody<'db>>,
+}
+
+pub fn build_native_scalar_segments<'db>(
+    db: &'db dyn MirDb,
+    source: &RuntimeBody<'db>,
+) -> Result<NativeScalarSegments<'db>, LowerError> {
+    let cuts = prepare_native_scalar_cuts(db, source)?;
+    // Variant ids use u16. Complete occupies the first variant.
+    if cuts.len() > usize::from(u16::MAX) {
+        return Err(LowerError::Unsupported("too many native task cuts".into()));
+    }
+    let mut variants = vec![EnumVariantLayout {
+        fields: source.signature.ret.clone().into_iter().collect(),
+    }];
+    for cut in &cuts {
+        let mut fields = vec![value_class(source, cut.pending)?];
+        fields.extend(cut.captures.iter().map(|capture| {
+            let ScalarCapture::Value { class, .. } = capture;
+            RuntimeClass::Scalar(class.clone())
+        }));
+        variants.push(EnumVariantLayout {
+            fields: fields.into(),
+        });
+    }
+    let step_layout = LayoutId::new(
+        db,
+        LayoutKey::Enum(EnumLayoutKey {
+            variants: variants.into(),
+        }),
+    );
+    let entry = segment(db, source, &cuts, step_layout, None)?;
+    let resumes = (0..cuts.len())
+        .map(|cut| segment(db, source, &cuts, step_layout, Some(cut)))
+        .collect::<Result<_, _>>()?;
+    Ok(NativeScalarSegments {
+        step_layout,
+        cuts,
+        entry,
+        resumes,
+    })
+}
+
+fn value_class<'db>(
+    body: &RuntimeBody<'db>,
+    local: RLocalId,
+) -> Result<RuntimeClass<'db>, LowerError> {
+    match &body.locals[local.index()].carrier {
+        RuntimeCarrier::Value(class) => Ok(class.clone()),
+        RuntimeCarrier::Erased => Err(LowerError::Unsupported(
+            "native task protocol value was erased".into(),
+        )),
+    }
+}
+
+fn segment<'db>(
+    db: &'db dyn MirDb,
+    source: &RuntimeBody<'db>,
+    cuts: &[NativeSuspensionCut<'db>],
+    layout: LayoutId<'db>,
+    resume: Option<usize>,
+) -> Result<RuntimeBody<'db>, LowerError> {
+    let mut body = source.clone();
+    body.blocks.clear();
+    body.stmt_origins.clear();
+    body.terminator_origins.clear();
+    let step = RLocalId::new(body.locals.len());
+    let step_class = RuntimeClass::AggregateValue { layout };
+    body.locals.push(RLocal {
+        semantic_ty: TyId::unit(db),
+        carrier: RuntimeCarrier::Value(step_class.clone()),
+        root: RuntimeLocalRoot::None,
+    });
+    body.signature.ret = Some(step_class);
+    let start = if let Some(index) = resume {
+        let cut = &cuts[index];
+        body.signature.params = cut
+            .captures
+            .iter()
+            .map(|capture| {
+                let ScalarCapture::Value { local, class } = capture;
+                RuntimeParam {
+                    local: *local,
+                    class: RuntimeClass::Scalar(class.clone()),
+                }
+            })
+            .collect();
+        body.signature.params.push(RuntimeParam {
+            local: cut.outcome,
+            class: value_class(source, cut.outcome)?,
+        });
+        (cut.block, cut.statement + 1)
+    } else {
+        (RBlockId::new(0), 0)
+    };
+    // A loop can revisit the start of the block containing a cut. Its suffix
+    // is a distinct node, so a resume never skips a subsequent loop iteration.
+    let mut ids = FxHashMap::default();
+    ids.insert(start, RBlockId::new(0));
+    let mut queue = VecDeque::from([start]);
+    while let Some((source_block, offset)) = queue.pop_front() {
+        let original = &source.blocks[source_block.index()];
+        let cut = cuts
+            .iter()
+            .enumerate()
+            .find(|(_, cut)| cut.block == source_block && cut.statement >= offset);
+        let end = cut.map_or(original.stmts.len(), |(_, cut)| cut.statement);
+        let mut block = RBlock {
+            stmts: original.stmts[offset..end].to_vec(),
+            terminator: original.terminator.clone(),
+        };
+        let mut origins = source.stmt_origins[source_block.index()][offset..end].to_vec();
+        let terminator_origin;
+        if let Some((index, cut)) = cut {
+            let mut fields = vec![cut.pending];
+            fields.extend(cut.captures.iter().map(|capture| {
+                let ScalarCapture::Value { local, .. } = capture;
+                *local
+            }));
+            block.stmts.push(RStmt::Assign {
+                dst: step,
+                expr: RExpr::EnumMake {
+                    layout,
+                    variant: VariantId {
+                        enum_layout: layout,
+                        index: (index + 1) as u16,
+                    },
+                    fields: fields.into(),
+                },
+            });
+            origins.push(cut.origin);
+            block.terminator = RTerminator::Return(Some(step));
+            terminator_origin = cut.origin;
+        } else {
+            terminator_origin = source.terminator_origins[source_block.index()];
+            if let RTerminator::Return(value) = &block.terminator {
+                block.stmts.push(RStmt::Assign {
+                    dst: step,
+                    expr: RExpr::EnumMake {
+                        layout,
+                        variant: VariantId {
+                            enum_layout: layout,
+                            index: 0,
+                        },
+                        fields: value.iter().copied().collect(),
+                    },
+                });
+                origins.push(terminator_origin);
+                block.terminator = RTerminator::Return(Some(step));
+            }
+            for successor in block.terminator.successors_mut() {
+                let node = (*successor, 0);
+                let next = RBlockId::new(ids.len());
+                *successor = *ids.entry(node).or_insert_with(|| {
+                    queue.push_back(node);
+                    next
+                });
+            }
+        }
+        debug_assert_eq!(ids[&(source_block, offset)].index(), body.blocks.len());
+        body.blocks.push(block);
+        body.stmt_origins.push(origins);
+        body.terminator_origins.push(terminator_origin);
+    }
+    verify_runtime_body(db, &db, &body).map_err(|error| {
+        LowerError::Unsupported(format!("invalid native task segment: {error:?}"))
+    })?;
+    // MIR's class verifier does not establish value availability. Every value
+    // read before a definition at a resume must arrive through its parameters.
+    if resume.is_some() {
+        for local in &live_on_entry(&body.blocks)[0] {
+            if body.locals[local.index()].carrier != RuntimeCarrier::Erased
+                && !body
+                    .signature
+                    .params
+                    .iter()
+                    .any(|param| param.local == *local)
+            {
+                return Err(LowerError::Unsupported(format!(
+                    "native resume is missing live input {local:?}"
+                )));
+            }
+        }
+    }
+    Ok(body)
+}
