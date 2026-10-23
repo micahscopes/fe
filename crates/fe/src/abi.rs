@@ -2196,6 +2196,43 @@ pub contract C {{ recv M {{ Fail {{}} {{
     }
 
     #[test]
+    fn error_protocol_identity_ignores_nested_core_and_std_lookalikes() {
+        for shadows in [
+            "",
+            "mod core { pub mod error { pub trait ErrorVariant<A> {} } }\nmod std { pub mod abi { pub struct Sol {} } }",
+        ] {
+            let source = format!(
+                r#"
+use std::abi::sol
+use std::evm::revert_error
+#[error]
+struct Failure {{ code: u256 }}
+msg M {{
+    #[selector = sol("fail()")]
+    Fail {{}}
+}}
+mod client {{
+    use super::{{revert_error, M, Failure}}
+    {shadows}
+    pub contract C {{ recv M {{ Fail {{}} {{ revert_error(Failure {{ code: 7 }}) }} }} }}
+}}
+"#
+            );
+            let entries = abi_entries(&source, "C");
+            let errors = entries
+                .iter()
+                .filter(|entry| entry["type"] == "error")
+                .collect::<Vec<_>>();
+            assert_eq!(errors.len(), 1, "shadows={shadows} entries={entries:?}");
+            assert_eq!(errors[0]["name"], "Failure");
+            assert_eq!(
+                errors[0]["inputs"],
+                serde_json::json!([{"name":"code","type":"uint256"}])
+            );
+        }
+    }
+
+    #[test]
     fn custom_errors_include_reachable_reverts_only() {
         let code = r#"
 use std::abi::sol
