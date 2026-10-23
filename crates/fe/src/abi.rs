@@ -2233,6 +2233,93 @@ mod client {{
     }
 
     #[test]
+    fn abi_error_runtime_and_json_match_literal_two_word_oracle() {
+        use contract_harness::{ExecutionOptions, FeContractHarness, HarnessError, U256};
+
+        let declarations = [
+            r#"#[generate(std::derive::error_struct)]
+struct InsufficientBalance { available: u256, required: u256 }"#,
+            r#"#[error]
+struct InsufficientBalance { available: u256, required: u256 }"#,
+            r#"struct InsufficientBalance { available: u256, required: u256 }
+impl core::abi::AbiSize for InsufficientBalance {
+    const HEAD_SIZE: u256 = 64
+    const IS_DYNAMIC: bool = false
+}
+impl core::abi::Encode<std::abi::Sol> for InsufficientBalance {
+    fn encode(own self, _ out: core::abi::AbiFrame) {
+        out.store_word(at: 0, value: self.available)
+        out.store_word(at: 32, value: self.required)
+    }
+}
+impl core::error::ErrorVariant<std::abi::Sol> for InsufficientBalance {
+    const SELECTOR: u32 = 0xcf479181
+}"#,
+        ];
+        // Literal selector and two big-endian words are independent of both
+        // the generator and the compiler's legacy error construction.
+        let mut expected = vec![0xcf, 0x47, 0x91, 0x81];
+        let mut payload = [0u8; 64];
+        payload[31] = 10;
+        payload[63] = 25;
+        expected.extend_from_slice(&payload);
+        assert_eq!(expected.len(), 68);
+        assert_eq!(
+            selector_for_signature("InsufficientBalance(uint256,uint256)"),
+            0xcf479181
+        );
+        for declaration in declarations {
+            let source = format!(
+                r#"
+use std::abi::sol
+use std::evm::revert_error
+{declaration}
+msg M {{
+    #[selector = sol("fail()")]
+    Fail {{}}
+    #[selector = sol("headSize()")]
+    HeadSize {{}} -> u256
+}}
+pub contract C {{
+    recv M {{
+        Fail {{}} {{ revert_error(InsufficientBalance {{ available: 10, required: 25 }}) }}
+        HeadSize {{}} -> u256 {{ <InsufficientBalance as core::abi::AbiSize>::HEAD_SIZE }}
+    }}
+}}
+"#
+            );
+            let entries = abi_entries(&source, "C");
+            let errors = entries
+                .iter()
+                .filter(|entry| entry["type"] == "error")
+                .collect::<Vec<_>>();
+            assert_eq!(errors.len(), 1, "{entries:?}");
+            assert_eq!(errors[0]["name"], "InsufficientBalance");
+            assert_eq!(
+                errors[0]["inputs"],
+                serde_json::json!([
+                    {"name":"available","type":"uint256"},
+                    {"name":"required","type":"uint256"}
+                ])
+            );
+            let harness = FeContractHarness::compile("C", &source).expect("compile oracle twin");
+            let mut instance = harness.deploy_instance().expect("deploy oracle twin");
+            let options = ExecutionOptions::default();
+            let head = instance
+                .call_function("headSize()", &[], options)
+                .expect("head size");
+            assert_eq!(U256::from_be_slice(&head.return_data), U256::from(64u64));
+            let failure = instance
+                .call_function("fail()", &[], options)
+                .expect_err("custom error revert");
+            let HarnessError::Revert(bytes) = failure else {
+                panic!("{failure:?}")
+            };
+            assert_eq!(bytes.0, expected);
+        }
+    }
+
+    #[test]
     fn custom_errors_include_reachable_reverts_only() {
         let code = r#"
 use std::abi::sol
