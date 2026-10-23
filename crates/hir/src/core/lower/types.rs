@@ -13,11 +13,11 @@ impl<'db> TypeId<'db> {
             ast::TypeKind::QuoteHole(hole) => {
                 let db = ctxt.db();
                 match ctxt.current_hole(hole.syntax().text_range()) {
-                    Some(common::generation::FrozenHoleValue::Record(record_ref))
+                    Some(common::generation::FrozenHoleValue::Record(ref record_ref))
                         if let Some(args) = &record_ref.args =>
                     {
                         // The record's actual arguments.
-                        let record = ctxt.authored_record(&record_ref);
+                        let record = ctxt.authored_record(record_ref);
                         let generic_args = GenericArgListId::thaw(ctxt, args);
                         TypeKind::Path(Partial::Present(record.path(db, generic_args)))
                     }
@@ -536,7 +536,7 @@ impl<'db> TypeId<'db> {
                 let elems = elems
                     .iter()
                     .map(|elem| Partial::Present(Self::thaw(ctxt, elem)))
-                    .collect();
+                    .collect::<Vec<_>>();
                 TypeKind::Tuple(TupleTypeId::new(db, elems))
             }
             FrozenTy::Array { elem, len } => TypeKind::Array(
@@ -573,7 +573,7 @@ impl<'db> GenericArgListId<'db> {
                     })
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
         Self::new(db, args, true)
     }
 }
