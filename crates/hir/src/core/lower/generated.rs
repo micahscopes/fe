@@ -366,9 +366,13 @@ fn lower_scoped_derive<'db>(
         None,
     );
     let trait_ref = TraitRefId::new(db, Partial::Present(trait_path));
+    let target_args = match &scoped.demand.target.args {
+        Some(args) => GenericArgListId::thaw(ctxt, args),
+        None => GenericArgListId::none(db),
+    };
     let target = ctxt
         .authored_record(&scoped.demand.target)
-        .path(db, GenericArgListId::none(db));
+        .path(db, target_args);
     let ty = TypeId::new(db, TypeKind::Path(Partial::Present(target)));
     let index = ctxt.next_impl_trait_idx();
     let id = ctxt.joined_id(TrackedItemVariant::ImplTrait(index));

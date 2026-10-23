@@ -1814,9 +1814,22 @@ pub fn freeze_generation_request<'db>(
             )
         }
     };
-    if !goal.self_ty(db).decompose_ty_app(db).1.is_empty() {
-        return Err("scoped derive cannot yet preserve concrete generic target arguments".into());
-    }
+    // A generic target keeps its actual arguments, which must be ground: a
+    // scoped opening has no header whose binders a generated item could name.
+    let target_args = goal.self_ty(db).decompose_ty_app(db).1;
+    let args = if target_args.is_empty() {
+        None
+    } else {
+        if !crate::analysis::ty::const_ty::ty_is_fully_ground(db, goal.self_ty(db)) {
+            return Err("scoped derive requires a ground target".into());
+        }
+        Some(
+            target_args
+                .iter()
+                .map(|arg| freeze_generic_arg(db, *arg))
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+    };
     if !opening.provider_ty(db).decompose_ty_app(db).1.is_empty() {
         return Err(
             "bounded scoped derive does not yet admit concrete generic provider applications"
@@ -1847,9 +1860,152 @@ pub fn freeze_generation_request<'db>(
                 .ok_or("target declaration has no source URL")?,
             target_range,
             variant_index: None,
-            args: None,
+            args,
         },
     })
+}
+
+/// Rebind a frozen type in this view by declaration identity: the semantic
+/// twin of lowering's `TypeId::thaw`, for a scoped demand's target.
+fn thaw_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    frozen: &common::generation::FrozenTy,
+) -> Result<TyId<'db>, String> {
+    use crate::analysis::ty::ty_def::{PrimTy, TyBase, TyData};
+    use common::generation::FrozenTy;
+    let args = |args: &[common::generation::FrozenGenericArg]| {
+        args.iter()
+            .map(|arg| thaw_generic_arg(db, arg))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let base = |prim: PrimTy| TyId::new(db, TyData::TyBase(TyBase::Prim(prim)));
+    Ok(match frozen {
+        FrozenTy::Declared {
+            decl,
+            args: decl_args,
+        } => TyId::foldl(db, thaw_decl(db, decl)?, &args(decl_args)?),
+        FrozenTy::Primitive {
+            name,
+            args: prim_args,
+        } => {
+            let primitive =
+                crate::hir_def::prim_ty::PrimTy::from_name(db, IdentId::new(db, name.clone()))
+                    .ok_or("a frozen primitive is not a builtin type")?;
+            let base = TyId::new(db, TyData::TyBase(TyBase::from(primitive)));
+            TyId::foldl(db, base, &args(prim_args)?)
+        }
+        FrozenTy::Tuple(elems) => {
+            let elems = elems
+                .iter()
+                .map(|elem| thaw_ty(db, elem))
+                .collect::<Result<Vec<_>, _>>()?;
+            TyId::foldl(db, base(PrimTy::Tuple(elems.len())), &elems)
+        }
+        FrozenTy::Array { elem, len } => TyId::foldl(
+            db,
+            base(PrimTy::Array),
+            &[thaw_ty(db, elem)?, thaw_const(db, len)?],
+        ),
+        FrozenTy::Ptr(pointee) => TyId::ptr_to(db, thaw_ty(db, pointee)?),
+        FrozenTy::Never => TyId::never(db),
+        FrozenTy::HeaderParam(_) => {
+            return Err("a scoped demand names no derive header parameters".into());
+        }
+    })
+}
+
+fn thaw_generic_arg<'db>(
+    db: &'db dyn HirAnalysisDb,
+    arg: &common::generation::FrozenGenericArg,
+) -> Result<TyId<'db>, String> {
+    match arg {
+        common::generation::FrozenGenericArg::Type(ty) => thaw_ty(db, ty),
+        common::generation::FrozenGenericArg::Const(value) => thaw_const(db, value),
+    }
+}
+
+fn thaw_const<'db>(
+    db: &'db dyn HirAnalysisDb,
+    frozen: &common::generation::FrozenConst,
+) -> Result<TyId<'db>, String> {
+    use crate::analysis::semantic::{SemConstId, SemConstScalar, SemConstValue};
+    use crate::analysis::ty::ty_def::{TyBase, TyData};
+    use common::generation::{FrozenConst, FrozenScalar};
+    let FrozenConst::Value(scalar) = frozen else {
+        return Err("a scoped demand names no derive header parameters".into());
+    };
+    let primitive = |name: &str| {
+        crate::hir_def::prim_ty::PrimTy::from_name(db, IdentId::new(db, name.to_string()))
+            .map(|primitive| TyId::new(db, TyData::TyBase(TyBase::from(primitive))))
+            .ok_or("a frozen constant has no builtin type")
+    };
+    let (ty, value) = match scalar {
+        FrozenScalar::Bool(value) => (primitive("bool")?, SemConstScalar::Bool(*value)),
+        FrozenScalar::Int {
+            negative,
+            bytes,
+            primitive: name,
+        } => {
+            let sign = if *negative {
+                num_bigint::Sign::Minus
+            } else {
+                num_bigint::Sign::Plus
+            };
+            (
+                primitive(name)?,
+                SemConstScalar::Int {
+                    value: num_bigint::BigInt::from_bytes_be(sign, bytes),
+                },
+            )
+        }
+    };
+    let value = SemConstId::new(db, SemConstValue::Scalar { ty, value });
+    Ok(TyId::const_ty(
+        db,
+        crate::analysis::ty::const_ty::const_ty_from_sem_const(db, value),
+    ))
+}
+
+/// The struct or enum written at `decl` in this view.
+fn thaw_decl<'db>(
+    db: &'db dyn HirAnalysisDb,
+    decl: &common::generation::FrozenDeclRef,
+) -> Result<TyId<'db>, String> {
+    use crate::analysis::ty::adt_def::AdtRef;
+    let file = db
+        .workspace()
+        .get(db, &decl.file)
+        .ok_or("a frozen declaration's file is missing")?;
+    let module = crate::lower::map_file_to_mod_impl(db, file);
+    let written_at = |origin: Option<ast::SyntaxNodePtr>| {
+        origin.is_some_and(|pointer| pointer.text_range() == decl.range)
+    };
+    let declaration = module
+        .all_structs(db)
+        .iter()
+        .copied()
+        .find(|s| {
+            written_at(match s.origin(db) {
+                HirOrigin::Raw(pointer) => Some(pointer.syntax_node_ptr()),
+                _ => None,
+            })
+        })
+        .map(AdtRef::Struct)
+        .or_else(|| {
+            module
+                .all_enums(db)
+                .iter()
+                .copied()
+                .find(|e| {
+                    written_at(match e.origin(db) {
+                        HirOrigin::Raw(pointer) => Some(pointer.syntax_node_ptr()),
+                        _ => None,
+                    })
+                })
+                .map(AdtRef::Enum)
+        })
+        .ok_or("a frozen declaration is missing in unchanged source")?;
+    Ok(TyId::adt(db, declaration.as_adt(db)))
 }
 
 /// Rebind an accumulated dependency through exact declarations and the checked
@@ -1919,8 +2075,15 @@ pub fn rebind_generation_request<'db>(
         common::generation::ScopedDeriveMode::Ref => crate::hir_def::ModeMarker::None,
         common::generation::ScopedDeriveMode::Mut => crate::hir_def::ModeMarker::Mut,
     };
-    let goal = TraitInstId::new_simple(db, trait_, vec![TyId::adt(db, target.as_adt(db))])
-        .with_mode(db, mode);
+    let args = demand
+        .target
+        .args
+        .iter()
+        .flatten()
+        .map(|arg| thaw_generic_arg(db, arg))
+        .collect::<Result<Vec<_>, _>>()?;
+    let target = TyId::foldl(db, TyId::adt(db, target.as_adt(db)), &args);
+    let goal = TraitInstId::new_simple(db, trait_, vec![target]).with_mode(db, mode);
     let request = GenerationRequest::new(db, opening, goal);
     if freeze_generation_request(db, request)? != *demand {
         return Err("requested identities changed while preparing unchanged source".into());

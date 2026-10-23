@@ -914,6 +914,8 @@ fn scoped_selection_name(demand: &common::generation::ScopedDeriveDemand) -> Str
         format!("{:?}", demand.trait_ref.range),
         demand.target.target_file.as_str().to_owned(),
         format!("{:?}", demand.target.target_range),
+        // Each instance of a generic target is its own implementation.
+        format!("{:?}", demand.target.args),
         format!("{:?}", demand.mode),
     ] {
         use std::fmt::Write;
