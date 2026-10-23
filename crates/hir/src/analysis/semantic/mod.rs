@@ -24,8 +24,9 @@ pub use instance::{
     RootSemanticInstanceError, SemanticEffectEnvInstantiationError, SemanticInstance,
     SemanticInstanceKey, TypedBodyTemplate, generated_callee, generated_callee_key,
     get_or_build_semantic_instance, identity_semantic_instance_key, instantiate_typed_body,
-    instantiated_effect_env, resolved_provider_binding_for_instance_effect,
-    root_semantic_instance_key, typed_body_template, validate_instantiated_effect_env_key,
+    instantiated_effect_env, resolve_semantic_const_ref,
+    resolved_provider_binding_for_instance_effect, root_semantic_instance_key, typed_body_template,
+    validate_instantiated_effect_env_key,
 };
 pub(crate) use instance::{
     provisional_provider_binding_for_instance_effect, provisional_provider_idx_for_requirement,
