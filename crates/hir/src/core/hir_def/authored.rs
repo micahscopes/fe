@@ -29,6 +29,9 @@ pub struct AuthoredScope<'db> {
 pub enum AuthoredLocator {
     /// The struct, enum or trait declared by the item node at this range.
     Item(TextRange),
+    /// The generic parameter at `index` of the implementation header written
+    /// at `item`.
+    GenericParam { item: TextRange, index: u16 },
     /// The scope a quotation was written in: its innermost enclosing block of
     /// an authored body, else its innermost enclosing `mod`, else the module.
     Producer {

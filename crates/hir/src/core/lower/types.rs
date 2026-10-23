@@ -541,10 +541,11 @@ impl<'db> TypeId<'db> {
             }
             FrozenTy::Array { elem, len } => TypeKind::Array(
                 Partial::Present(Self::thaw(ctxt, elem)),
-                Partial::Present(Body::lower_frozen_scalar(ctxt, len)),
+                Partial::Present(Body::thaw_const(ctxt, len)),
             ),
             FrozenTy::Ptr(pointee) => TypeKind::Ptr(Partial::Present(Self::thaw(ctxt, pointee))),
             FrozenTy::Never => TypeKind::Never,
+            FrozenTy::HeaderParam(index) => TypeKind::Path(ctxt.header_param_path(*index)),
         };
         Self::new(db, kind)
     }
@@ -568,11 +569,24 @@ impl<'db> GenericArgListId<'db> {
                 }),
                 FrozenGenericArg::Const(value) => {
                     GenericArg::Const(crate::hir_def::params::ConstGenericArg {
-                        value: Partial::Present(Body::lower_frozen_scalar(ctxt, value)),
+                        value: Partial::Present(Body::thaw_const(ctxt, value)),
                     })
                 }
             })
             .collect();
         Self::new(db, args, true)
+    }
+}
+
+impl<'db> Body<'db> {
+    fn thaw_const(ctxt: &mut FileLowerCtxt<'db>, frozen: &common::generation::FrozenConst) -> Self {
+        use common::generation::FrozenConst;
+        match frozen {
+            FrozenConst::Value(value) => Self::lower_frozen_scalar(ctxt, value),
+            FrozenConst::HeaderParam(index) => {
+                let path = ctxt.header_param_path(*index);
+                Self::lower_bound_path(ctxt, path)
+            }
+        }
     }
 }

@@ -49,6 +49,17 @@ impl<'db> Body<'db> {
         ctxt.build(None, expr, BodyKind::Anonymous)
     }
 
+    /// A body whose expression is `path`, already bound.
+    pub(super) fn lower_bound_path(
+        f_ctxt: &mut FileLowerCtxt<'db>,
+        path: Partial<PathId<'db>>,
+    ) -> Self {
+        let id = f_ctxt.joined_id(TrackedItemVariant::NamelessBody);
+        let mut ctxt = BodyCtxt::new(f_ctxt, id);
+        let expr = ctxt.push_expr(Expr::Path(path), HirOrigin::None);
+        ctxt.build(None, expr, BodyKind::Anonymous)
+    }
+
     /// A body whose expression is a frozen constant, `4 as usize`, as a
     /// scalar splice lowers it.
     pub(super) fn lower_frozen_scalar(

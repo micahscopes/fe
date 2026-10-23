@@ -1262,7 +1262,9 @@ impl<'db> ImplTrait<'db> {
                         "a derived implementation member must be a function, constant or type",
                     ),
                 };
+            let enclosing = ctxt.derive_header.replace(ast.syntax().text_range());
             super::generated::lower_derive_members(ctxt, &plan.code, &mut lower_member);
+            ctxt.derive_header = enclosing;
         }
 
         out_types.retain(|out_type: &AssocTyDef| {

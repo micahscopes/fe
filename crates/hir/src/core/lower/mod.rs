@@ -198,6 +198,22 @@ pub(crate) fn resolve_authored_scope<'db>(
                 })
                 .expect("validated authored declaration exists in unchanged source")
         }
+        AuthoredLocator::GenericParam { item, index } => {
+            let header = graph
+                .scopes
+                .keys()
+                .find_map(|scope| match *scope {
+                    ScopeId::Item(ItemKind::ImplTrait(header))
+                        if raw_origin(header.origin(db))
+                            .is_some_and(|ptr| ptr.text_range() == item) =>
+                    {
+                        Some(header)
+                    }
+                    _ => None,
+                })
+                .expect("the derive header being lowered is authored in its module");
+            ScopeId::GenericParam(ItemKind::ImplTrait(header), index)
+        }
     }
 }
 
@@ -351,6 +367,9 @@ pub(super) struct FileLowerCtxt<'db> {
     diagnostics: Vec<LowerDiagnostic>,
     next_quote_frame_id: usize,
     pub(super) quote_frames: Vec<generated::ActiveQuoteFrame<'db>>,
+    /// The explicit derive header whose members are being lowered: the only
+    /// binders a frozen type may name.
+    pub(super) derive_header: Option<parser::TextRange>,
 }
 
 /// An authored record named by a frozen reference: its reference, bound by
@@ -491,6 +510,7 @@ impl<'db> FileLowerCtxt<'db> {
             diagnostics: Vec::new(),
             next_quote_frame_id: 0,
             quote_frames: Vec::new(),
+            derive_header: None,
         }
     }
 
@@ -503,6 +523,7 @@ impl<'db> FileLowerCtxt<'db> {
             diagnostics: Vec::new(),
             next_quote_frame_id: 0,
             quote_frames: Vec::new(),
+            derive_header: None,
         }
     }
 
@@ -699,6 +720,56 @@ impl<'db> FileLowerCtxt<'db> {
     ) -> PathId<'db> {
         self.authored_record_at(&decl.file, decl.range)
             .path(self.db(), generic_args)
+    }
+
+    /// A path naming parameter `index` of the explicit derive header being
+    /// lowered, bound when it is resolved. Generated members resolve free
+    /// names in their producer, so a header binder is never named by spelling.
+    pub(super) fn header_param_path(&mut self, index: usize) -> Partial<PathId<'db>> {
+        let db = self.db();
+        let Some(header) = self.derive_header else {
+            self.record_generation_error(
+                parser::TextRange::empty(0.into()),
+                "a frozen type names a derive header parameter outside its header",
+            );
+            return Partial::Absent;
+        };
+        let name = top_mod_ast(db, self.top_mod())
+            .syntax()
+            .descendants()
+            .filter(|node| node.text_range() == header)
+            .find_map(ast::ImplTrait::cast)
+            .and_then(|header| header.generic_params())
+            .and_then(|params| params.into_iter().nth(index))
+            .and_then(|param| match param.kind() {
+                ast::GenericParamKind::Type(p) => p.name(),
+                ast::GenericParamKind::Const(p) => p.name(),
+                ast::GenericParamKind::Shape(p) => p.name(),
+            })
+            .map(|name| IdentId::new(db, name.text().to_string()));
+        let Some(name) = name else {
+            self.record_generation_error(
+                header,
+                "invalid derive header parameter in a frozen type",
+            );
+            return Partial::Absent;
+        };
+        let scope = AuthoredScope::new(
+            db,
+            self.top_mod(),
+            AuthoredLocator::GenericParam {
+                item: header,
+                index: index as u16,
+            },
+        );
+        Partial::Present(PathId::new(
+            db,
+            crate::hir_def::PathKind::BoundItem {
+                item: scope,
+                display: PathId::from_ident(db, name),
+            },
+            None,
+        ))
     }
 
     /// The record's lowered item, when it is declared in this module and was

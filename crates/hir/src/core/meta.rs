@@ -560,11 +560,11 @@ impl<'db> RecordField<'db> {
     }
 }
 
-/// Freeze a ground type of the authored view by declaration identity, for
-/// rebinding in the output view. Declarations cross as file and authored
-/// range, primitives by name and constants as scalars; no semantic identity
-/// of this database does.
-pub(crate) fn freeze_ground_ty<'db>(
+/// Freeze a type of the authored view by declaration identity, for rebinding
+/// in the output view. Declarations cross as file and authored range,
+/// primitives by name, constants as scalars and the derive header's own
+/// parameters by position; no semantic identity of this database does.
+pub(crate) fn freeze_ty<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: TyId<'db>,
 ) -> Result<common::generation::FrozenTy, &'static str> {
@@ -573,15 +573,17 @@ pub(crate) fn freeze_ground_ty<'db>(
         ty_def::{PrimTy, TyBase, TyData},
     };
     use common::generation::{FrozenGenericArg, FrozenTy};
-    if let TyData::Never = ty.data(db) {
-        return Ok(FrozenTy::Never);
+    match ty.data(db) {
+        TyData::Never => return Ok(FrozenTy::Never),
+        TyData::TyParam(param) => return header_param_index(db, param).map(FrozenTy::HeaderParam),
+        _ => {}
     }
     let (base, args) = ty.decompose_ty_app(db);
     let args = args
         .iter()
         .map(|arg| freeze_generic_arg(db, *arg))
         .collect::<Result<Vec<_>, _>>()?;
-    let unsupported = "a spliced type must be a record, primitive, tuple, array or pointer applied to ground arguments";
+    let unsupported = "a spliced type must be a record, primitive, tuple, array or pointer, applied to ground arguments or the derive header's parameters";
     let types = |args: Vec<FrozenGenericArg>| {
         args.into_iter()
             .map(|arg| match arg {
@@ -636,20 +638,39 @@ fn freeze_generic_arg<'db>(
         semantic::SemConstValue,
         ty::{const_ty::ConstTyData, ty_def::TyData},
     };
+    use common::generation::{FrozenConst, FrozenGenericArg};
     let TyData::ConstTy(constant) = arg.data(db) else {
-        return Ok(common::generation::FrozenGenericArg::Type(
-            freeze_ground_ty(db, arg)?,
-        ));
+        return Ok(FrozenGenericArg::Type(freeze_ty(db, arg)?));
     };
+    if let ConstTyData::TyParam(param, _) = constant.data(db) {
+        return Ok(FrozenGenericArg::Const(FrozenConst::HeaderParam(
+            header_param_index(db, param)?,
+        )));
+    }
     let ConstTyData::Value(value) = constant.evaluate(db, None).data(db) else {
         return Err("a spliced type's constant argument must be evaluated");
     };
     let SemConstValue::Scalar { ty, value } = value.value().value(db) else {
         return Err("a spliced type's constant argument must be a boolean or integer");
     };
-    Ok(common::generation::FrozenGenericArg::Const(
+    Ok(FrozenGenericArg::Const(FrozenConst::Value(
         ItemCode::freeze_scalar(db, *ty, value)?,
-    ))
+    )))
+}
+
+/// The position of a parameter declared by an authored implementation header,
+/// the only binders a frozen type may name: the request's own header.
+fn header_param_index<'db>(
+    db: &'db dyn HirAnalysisDb,
+    param: &crate::analysis::ty::ty_def::TyParam<'db>,
+) -> Result<usize, &'static str> {
+    use crate::hir_def::{ItemKind, scope_graph::ScopeId};
+    match param.scope(db) {
+        ScopeId::GenericParam(ItemKind::ImplTrait(_), index) if !param.is_implicit() => {
+            Ok(index as usize)
+        }
+        _ => Err("a spliced type may name only its derive header's own parameters"),
+    }
 }
 
 fn freeze_decl<'db>(
@@ -1153,7 +1174,7 @@ impl<'db> ItemCode<'db> {
                                 // A type written without the record's parameters keeps its
                                 // written form; one over them is the instantiated type.
                                 if field.ty(db) != authored_field.ty(db) {
-                                    return Ok(FrozenHoleValue::Type(freeze_ground_ty(
+                                    return Ok(FrozenHoleValue::Type(freeze_ty(
                                         db,
                                         crate::analysis::ty::normalize::normalize_ty(
                                             db,
