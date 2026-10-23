@@ -2214,3 +2214,40 @@ const fn make(_ record: Record) -> Code<Item> {
     );
     assert!(db.generation_inputs().functions(&db).is_empty());
 }
+
+#[test]
+fn generated_abi_size_has_independent_empty_two_word_and_nested_layouts() {
+    let (db, file) = input(include_str!("fixtures/four_clients_layout.fe"));
+    let output = prepare_file(&db, file).unwrap().unwrap();
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    let module = output.top_mod(output_file);
+    assert!(output.run_on_top_mod(module).is_empty());
+    let function = module
+        .all_funcs(&output)
+        .iter()
+        .find(|f| {
+            f.name(&output)
+                .to_opt()
+                .is_some_and(|name| name.data(&output) == "check_layout")
+        })
+        .unwrap();
+    let owner = BodyOwner::Func(*function, None);
+    let result = eval_body_owner_const(
+        &output,
+        owner,
+        GenericSubst::for_body_owner(&output, owner, vec![]),
+    );
+    let EvalOutcome::Ready(value) = result else {
+        panic!("{result:?}")
+    };
+    assert!(matches!(
+        value.value(&output),
+        SemConstValue::Scalar {
+            value: SemConstScalar::Bool(true),
+            ..
+        }
+    ));
+}

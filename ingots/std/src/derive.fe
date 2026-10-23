@@ -1,5 +1,5 @@
 use core::abi::AbiSize
-use core::meta::{Code, Expr, Field, Record, field, field_count, field_type}
+use core::meta::{Code, Expr, Field, Item, Record, field, field_count, field_type}
 
 /// One step of a fold over the fields of a record, written as code.
 ///
@@ -53,5 +53,35 @@ impl FieldStep for AbiIsDynamic {
     const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
         let ty = field_type(field)
         quote { ${acc} || ingot::derive::abi_is_dynamic<${ty}>() }
+    }
+}
+
+/// Sum of the fields' dynamic tail payload sizes on `self`.
+pub struct AbiPayloadSize {}
+impl FieldStep for AbiPayloadSize {
+    const fn unit() -> Code<Expr> {
+        quote { 0 }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote { ${acc} + core::abi::dynamic_payload_size<${ty}>(self.${field}) }
+    }
+}
+
+/// Generate ABI layout metadata and exact payload sizing for a record.
+/// Field prerequisites are checked on the complete generated implementation.
+pub const fn abi_size(_ record: Record) -> Code<Item> {
+    let head = fold_fields<AbiHeadSize>(record)
+    let dynamic = fold_fields<AbiIsDynamic>(record)
+    let payload = fold_fields<AbiPayloadSize>(record)
+    quote {
+        impl core::abi::AbiSize for ${record} {
+            const HEAD_SIZE: u256 = ${head}
+            const IS_DYNAMIC: bool = ${dynamic}
+
+            fn payload_size(self) -> u256 {
+                <Self as core::abi::AbiSize>::HEAD_SIZE + ${payload}
+            }
+        }
     }
 }
