@@ -140,6 +140,16 @@ fn word_class<'db>() -> RuntimeClass<'db> {
     })
 }
 
+fn address_word_class<'db>() -> ScalarClass<'db> {
+    ScalarClass {
+        repr: ScalarRepr::Int {
+            bits: 256,
+            signed: false,
+        },
+        role: ScalarRole::Plain,
+    }
+}
+
 struct Builder<'db> {
     db: &'db dyn MirDb,
     body: RuntimeBody<'db>,
@@ -184,27 +194,35 @@ impl<'db> Builder<'db> {
     }
     fn place(&mut self, bb: RBlockId, index: usize) -> RuntimePlace<'db> {
         let class = RuntimeClass::raw_addr(self.db, AddressSpace::Memory, word_class());
+        // `PtrOffsetBytes` is word-domain arithmetic: both operands and the result are 256-bit words.
+        let frame = self.expr(
+            bb,
+            RuntimeClass::Scalar(address_word_class()),
+            RExpr::Cast {
+                value: self.frame,
+                to: address_word_class(),
+            },
+        );
         let offset = self.expr(
             bb,
-            RuntimeClass::Scalar(ScalarClass {
-                repr: ScalarRepr::Int {
-                    bits: 256,
-                    signed: false,
-                },
-                role: ScalarRole::Plain,
-            }),
+            RuntimeClass::Scalar(address_word_class()),
             RExpr::ConstScalar(super::super::synthetic::uint_scalar(
                 256,
                 (index as u64) * 8,
             )),
         );
+        let word_addr = self.expr(
+            bb,
+            RuntimeClass::Scalar(address_word_class()),
+            RExpr::Builtin(RuntimeBuiltin::PtrOffsetBytes { ptr: frame, offset }),
+        );
         let addr = self.expr(
             bb,
             class,
-            RExpr::Builtin(RuntimeBuiltin::PtrOffsetBytes {
-                ptr: self.frame,
-                offset,
-            }),
+            RExpr::WordToRawAddr {
+                value: word_addr,
+                space: AddressSpace::Memory,
+            },
         );
         RuntimePlace {
             root: PlaceRoot::Ptr {
