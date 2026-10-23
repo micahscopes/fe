@@ -11,13 +11,76 @@ use rustc_hash::FxHashMap;
 use super::{NativeSuspensionCut, ScalarCapture, live_on_entry, prepare_native_scalar_cuts};
 use crate::{
     MirDb,
+    instance::{
+        RuntimeInstance, RuntimeInstanceKey, RuntimeInstanceSource, RuntimeSyntheticInstance,
+        get_or_build_runtime_instance,
+    },
     runtime::{
         EnumLayoutKey, EnumVariantLayout, LayoutId, LayoutKey, LowerError, RBlock, RBlockId, RExpr,
         RLocal, RLocalId, RStmt, RTerminator, RuntimeBody, RuntimeCarrier, RuntimeClass,
-        RuntimeLocalRoot, RuntimeParam, VariantId,
+        RuntimeLocalRoot, RuntimeParam, RuntimeSyntheticSpec, VariantId,
     },
     verify::verify_runtime_body,
 };
+
+/// A validated transform result shared by generated declarations and bodies.
+/// Segment zero is entry; the remaining segments follow the cut order.
+#[salsa::interned]
+#[derive(Debug)]
+pub struct NativeScalarTaskPlan<'db> {
+    #[returns(copy)]
+    pub source: RuntimeInstance<'db>,
+    #[returns(copy)]
+    pub step_layout: LayoutId<'db>,
+    pub segments: Vec<RuntimeBody<'db>>,
+}
+
+impl<'db> NativeScalarTaskPlan<'db> {
+    pub fn instances(self, db: &'db dyn MirDb) -> Vec<RuntimeInstance<'db>> {
+        self.segments(db)
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                let spec = RuntimeSyntheticSpec::NativeTaskSegment {
+                    plan: self,
+                    index: index as u16,
+                };
+                let synthetic = RuntimeSyntheticInstance::new(db, spec);
+                let params = body
+                    .signature
+                    .params
+                    .iter()
+                    .map(|param| param.class.clone())
+                    .collect();
+                get_or_build_runtime_instance(
+                    db,
+                    RuntimeInstanceKey::new(
+                        db,
+                        RuntimeInstanceSource::Synthetic(synthetic),
+                        params,
+                    ),
+                )
+            })
+            .collect()
+    }
+}
+
+pub fn plan_native_scalar_task<'db>(
+    db: &'db dyn MirDb,
+    source: RuntimeInstance<'db>,
+) -> Result<NativeScalarTaskPlan<'db>, LowerError> {
+    let composed = super::compose_native_scalar_task(db, source)?;
+    let segments = build_native_scalar_segments(db, &composed)?;
+    let bodies = std::iter::once(segments.entry)
+        .chain(segments.resumes)
+        .collect();
+    Ok(NativeScalarTaskPlan::new(
+        db,
+        source,
+        segments.step_layout,
+        bodies,
+    ))
+}
 
 /// The internal typed protocol is Complete(return value), or one variant per
 /// cut containing the consumed pending identity followed by scalar captures.

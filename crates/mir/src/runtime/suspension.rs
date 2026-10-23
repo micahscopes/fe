@@ -3,7 +3,10 @@
 //! composed with the caller. Projection yields remain ordinary MIR control.
 
 mod segments;
-pub use segments::{NativeScalarSegments, build_native_scalar_segments};
+pub use segments::{
+    NativeScalarSegments, NativeScalarTaskPlan, build_native_scalar_segments,
+    plan_native_scalar_task,
+};
 
 use std::collections::BTreeSet;
 

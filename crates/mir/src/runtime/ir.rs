@@ -925,6 +925,10 @@ pub enum RuntimeFunctionOwner<'db> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, SalsaValue)]
 pub enum RuntimeSyntheticSpec<'db> {
+    NativeTaskSegment {
+        plan: super::suspension::NativeScalarTaskPlan<'db>,
+        index: u16,
+    },
     MainRoot {
         callee: RuntimeInstance<'db>,
         entry_args: EntrySemanticArgsPlan<'db>,

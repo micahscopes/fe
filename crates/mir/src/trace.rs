@@ -946,7 +946,7 @@ fn collect_synthetic_context_hir_roots<'db>(
             roots.push(hir_root_expr_key(db, hir_body, &hir_owner_key));
         }
         RuntimeInstanceSource::Synthetic(synthetic) => {
-            for context in synthetic_context_instances(synthetic.spec(db).clone()) {
+            for context in synthetic_context_instances(db, synthetic.spec(db).clone()) {
                 collect_synthetic_context_hir_roots(
                     db,
                     context,
@@ -962,8 +962,12 @@ fn collect_synthetic_context_hir_roots<'db>(
     }
 }
 
-fn synthetic_context_instances<'db>(spec: RuntimeSyntheticSpec<'db>) -> Vec<RuntimeInstance<'db>> {
+fn synthetic_context_instances<'db>(
+    db: &'db dyn MirDb,
+    spec: RuntimeSyntheticSpec<'db>,
+) -> Vec<RuntimeInstance<'db>> {
     match spec {
+        RuntimeSyntheticSpec::NativeTaskSegment { plan, .. } => vec![plan.source(db)],
         RuntimeSyntheticSpec::MainRoot { callee, .. }
         | RuntimeSyntheticSpec::TestRoot { callee, .. }
         | RuntimeSyntheticSpec::ManualContractRoot { callee, .. } => vec![callee],

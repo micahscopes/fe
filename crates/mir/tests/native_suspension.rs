@@ -7,7 +7,7 @@ use fe_mir::{
         RExpr, RStmt, RuntimeClass,
         suspension::{
             ScalarCapture, build_native_scalar_segments, compose_native_scalar_task,
-            prepare_native_scalar_cuts,
+            plan_native_scalar_task, prepare_native_scalar_cuts,
         },
     },
 };
@@ -106,4 +106,27 @@ fn entry(_ native: own Native) -> u64 {
             RStmt::Assign { expr: RExpr::EnumMake { layout, .. }, .. } if *layout == segments.step_layout
         )));
     }
+    let plan = plan_native_scalar_task(&db, instance).expect("registered task plan");
+    let generated = plan.instances(&db);
+    assert_eq!(generated.len(), 2);
+    assert_ne!(generated[0], generated[1]);
+    for (index, generated) in generated.iter().enumerate() {
+        assert_ne!(*generated, instance);
+        let registered = generated.body(&db);
+        assert_eq!(registered.owner, *generated);
+        assert_eq!(registered.key, generated.key(&db));
+        assert_eq!(
+            registered.signature,
+            generated.interface_signature(&db).clone()
+        );
+        assert_eq!(registered.blocks, plan.segments(&db)[index].blocks);
+        assert_eq!(
+            registered.stmt_origins,
+            plan.segments(&db)[index].stmt_origins
+        );
+    }
+    assert_ne!(
+        fe_mir::runtime::runtime_instance_stable_key(&db, generated[0]),
+        fe_mir::runtime::runtime_instance_stable_key(&db, generated[1]),
+    );
 }

@@ -1248,6 +1248,7 @@ fn resolved_section_region<'db>(
         }
         RuntimeFunctionOwner::Synthetic(
             RuntimeSyntheticSpec::MainRoot { .. }
+            | RuntimeSyntheticSpec::NativeTaskSegment { .. }
             | RuntimeSyntheticSpec::TestRoot { .. }
             | RuntimeSyntheticSpec::ContractInitAbi { .. }
             | RuntimeSyntheticSpec::ContractRecvAbi { .. },
@@ -1366,6 +1367,7 @@ fn materialized_contracts_for_roots<'db>(
                 RuntimeSyntheticSpec::ContractInitRoot { contract, .. }
                 | RuntimeSyntheticSpec::ContractRuntimeRoot { contract, .. } => Some(*contract),
                 RuntimeSyntheticSpec::MainRoot { .. }
+                | RuntimeSyntheticSpec::NativeTaskSegment { .. }
                 | RuntimeSyntheticSpec::TestRoot { .. }
                 | RuntimeSyntheticSpec::ManualContractRoot { .. }
                 | RuntimeSyntheticSpec::ContractInitAbi { .. }
@@ -1998,6 +2000,10 @@ fn runtime_synthetic_spec_key<'db>(
 ) -> String {
     let instance_key = |instance| runtime_instance_key_in_mode(db, instance, mode);
     match spec {
+        RuntimeSyntheticSpec::NativeTaskSegment { plan, index } => format!(
+            "__synthetic:native_task:{}:{index}",
+            instance_key(plan.source(db))
+        ),
         RuntimeSyntheticSpec::MainRoot { callee, entry_args } => format!(
             "__synthetic:main_root:{}:{}",
             instance_key(callee),
@@ -2429,6 +2435,9 @@ fn symbol_base_for_runtime_instance<'db>(
 ) -> String {
     match spec {
         RuntimeSyntheticSpec::MainRoot { .. } => "main_root".to_string(),
+        RuntimeSyntheticSpec::NativeTaskSegment { index, .. } => {
+            format!("native_task_segment_{index}")
+        }
         RuntimeSyntheticSpec::TestRoot { name, .. } => {
             format!("test_root_{}", sanitize_symbol(name))
         }
