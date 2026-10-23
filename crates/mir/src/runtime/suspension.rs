@@ -9,15 +9,78 @@ use hir::analysis::{
     semantic::{SemOrigin, suspension::suspension_contract},
     ty::{corelib::native_suspension_primitive, ty_check::BodyOwner},
 };
+use rustc_hash::FxHashMap;
 
 use crate::{
     MirDb,
+    instance::{RuntimeInstance, runtime::runtime_instance_lowered_body},
     runtime::{
         LowerError, RBlock, RBlockId, RExpr, RLocalId, RStmt, RTerminator, RuntimeBody,
         RuntimeCarrier, RuntimeClass, RuntimeLocalRoot, ScalarClass,
     },
     verify::verify_runtime_body,
 };
+
+/// Compose nonrecursive suspension-capable calls before constructing frame
+/// requirements. Ordinary calls without that footprint retain their ABI.
+/// Recursive task calls need a dynamic frame chain and remain an explicit
+/// unsupported case of this first scalar transform.
+pub fn compose_native_scalar_task<'db>(
+    db: &'db dyn MirDb,
+    root: RuntimeInstance<'db>,
+) -> Result<RuntimeBody<'db>, LowerError> {
+    fn compose<'db>(
+        db: &'db dyn MirDb,
+        current: RuntimeInstance<'db>,
+        active: &mut Vec<RuntimeInstance<'db>>,
+        cache: &mut FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
+    ) -> Result<RuntimeBody<'db>, LowerError> {
+        if active.contains(&current) {
+            return Err(LowerError::Unsupported(
+                "recursive native task calls require a dynamic frame chain".into(),
+            ));
+        }
+        if let Some(body) = cache.get(&current) {
+            return Ok(body.clone());
+        }
+        active.push(current);
+        let mut body = runtime_instance_lowered_body(db, current)?.body(db).clone();
+        loop {
+            let next = body.blocks.iter().enumerate().find_map(|(block, data)| {
+                data.stmts.iter().enumerate().find_map(|(statement, stmt)| {
+                    let RStmt::Assign { expr: RExpr::Call { callee, .. }, .. } = stmt else { return None; };
+                    let semantic = callee.key(db).semantic(db)?;
+                    if matches!(semantic.key(db).owner(db), BodyOwner::Func(func, _) if native_suspension_primitive(db, func))
+                        || suspension_contract(db, semantic.key(db)).entries.is_empty()
+                    { return None; }
+                    Some((RBlockId::new(block), statement, *callee))
+                })
+            });
+            let Some((block, statement, callee)) = next else {
+                break;
+            };
+            if callee.is_external_declaration(db) {
+                return Err(LowerError::Unsupported(
+                    "a suspension-capable extern needs a native task adapter".into(),
+                ));
+            }
+            let callee_body = compose(db, callee, active, cache)?;
+            crate::runtime::lower::inline::inline_task_call(
+                &mut body,
+                block,
+                statement,
+                &callee_body,
+            )?;
+        }
+        verify_runtime_body(db, &db, &body).map_err(|error| {
+            LowerError::Unsupported(format!("invalid composed task MIR: {error:?}"))
+        })?;
+        active.pop();
+        cache.insert(current, body.clone());
+        Ok(body)
+    }
+    compose(db, root, &mut Vec::new(), &mut FxHashMap::default())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScalarCapture<'db> {
