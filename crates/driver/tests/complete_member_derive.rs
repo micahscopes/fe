@@ -26,12 +26,14 @@ fn prepare(source: &str) -> Result<DriverDataBase, String> {
         .workspace()
         .get(&output, &Url::parse(URL).unwrap())
         .unwrap();
-    let diagnostics = output.run_on_top_mod(output.top_mod(output_file));
-    assert!(
-        !diagnostics.has_errors(&output),
-        "{}",
-        diagnostics.format_diags(&output)
-    );
+    {
+        let diagnostics = output.run_on_top_mod(output.top_mod(output_file));
+        assert!(
+            !diagnostics.has_errors(&output),
+            "{}",
+            diagnostics.format_diags(&output)
+        );
+    }
     Ok(output)
 }
 
@@ -44,16 +46,18 @@ fn prepare_err(source: &str) -> String {
 
 fn eval(db: &DriverDataBase, name: &str) -> String {
     let file = db.workspace().get(db, &Url::parse(URL).unwrap()).unwrap();
-    let function = db
-        .top_mod(file)
+    // Module-level functions only: trait and impl methods share these names.
+    let module = db.top_mod(file);
+    let function = module
         .all_funcs(db)
         .iter()
         .copied()
         .find(|function| {
-            function
-                .name(db)
-                .to_opt()
-                .is_some_and(|ident| ident.data(db) == name)
+            function.scope().parent(db) == Some(module.scope())
+                && function
+                    .name(db)
+                    .to_opt()
+                    .is_some_and(|ident| ident.data(db) == name)
         })
         .unwrap_or_else(|| panic!("missing function `{name}`"));
     let owner = BodyOwner::Func(function, None);
@@ -66,7 +70,7 @@ fn eval(db: &DriverDataBase, name: &str) -> String {
         ..
     } = value.value(db)
     else {
-        panic!("`{name}` did not return an integer")
+        panic!("`{name}` did not return an integer: {:?}", value.value(db))
     };
     value.to_string()
 }
@@ -258,4 +262,43 @@ fn named_generated_outputs_need_and_agree_with_an_ordinary_implementation() {
         cause.contains("named implementation changes a type-readable associated constant"),
         "{cause}"
     );
+}
+
+/// A handwritten trait impl in a whole-item quotation takes constants, types
+/// and methods from a `${members}` hole, as an explicit header does.
+#[test]
+fn member_holes_in_quoted_impls_supply_types_and_constants() {
+    let source = r#"use core::meta::{Code, Item, Record, field_count}
+
+trait Shape {
+    const SIDES: usize
+    type Unit
+    const fn area() -> usize
+}
+
+const fn members(_ n: usize) -> Code<Item> {
+    quote {
+        const SIDES: usize = ${n}
+        type Unit = u256
+        const fn area() -> usize { Self::SIDES * Self::SIDES }
+    }
+}
+
+const fn shape(_ record: Record) -> Code<Item> {
+    let body = members(field_count(record))
+    quote { impl Shape for ${record} { ${body} } }
+}
+
+#[generate(shape)]
+struct Square { a: u8, b: u8, c: u8 }
+
+const fn area() -> usize { Square::area() }
+const fn unit() -> u256 {
+    let unit: <Square as Shape>::Unit = 9
+    unit
+}
+"#;
+    let output = prepare(source).unwrap();
+    assert_eq!(eval(&output, "area"), "9");
+    assert_eq!(eval(&output, "unit"), "9");
 }

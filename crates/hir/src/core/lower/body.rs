@@ -262,6 +262,7 @@ impl<'ctxt, 'db> BodyCtxt<'ctxt, 'db> {
             self.pats,
             self.f_ctxt.top_mod(),
             self.f_ctxt.lazy_func(),
+            self.f_ctxt.syntax_top_mod(),
             self.source_map,
             origin,
         );

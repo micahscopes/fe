@@ -48,6 +48,10 @@ pub struct Body<'db> {
     /// with its module.
     #[returns(copy)]
     pub(crate) lazy_func: Option<Func<'db>>,
+    /// The module whose syntax `source_map` and `origin` point into: `top_mod`
+    /// for authored bodies, the producer's module for generated ones.
+    #[returns(copy)]
+    pub syntax_top_mod: TopLevelMod<'db>,
 
     pub(crate) source_map: BodySourceMap,
     pub(crate) origin: HirOrigin<ast::Expr>,

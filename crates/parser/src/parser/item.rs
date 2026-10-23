@@ -129,10 +129,17 @@ impl super::Parse for ItemScope {
             parser.error(&error_msg);
         }
 
+        // A quoted `type` is an associated type member; where it is spliced
+        // decides whether a type member is allowed there.
         if at_quoted_item_root(parser)
-            && !matches!(parser.current_kind(), Some(FnKw | ConstKw | ImplKw))
+            && !matches!(
+                parser.current_kind(),
+                Some(FnKw | ConstKw | ImplKw | TypeKw)
+            )
         {
-            parser.error_msg_on_current_token("only functions, constants and impls can be quoted");
+            parser.error_msg_on_current_token(
+                "only functions, constants, types and impls can be quoted",
+            );
         }
 
         parser.expect(

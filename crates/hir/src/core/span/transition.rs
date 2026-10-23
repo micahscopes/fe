@@ -85,6 +85,7 @@ impl<'db> SpanTransitionChain<'db> {
             ChainRoot::Stmt(s) => s.body.top_mod(db),
             ChainRoot::Expr(e) => e.body.top_mod(db),
             ChainRoot::Pat(p) => p.body.top_mod(db),
+            ChainRoot::AssocMember(m) => m.owner.item().top_mod(db),
         }
     }
 
@@ -111,6 +112,7 @@ impl<'db> SpanTransitionChain<'db> {
             ChainRoot::Stmt(s) => s.body.scope(),
             ChainRoot::Expr(e) => e.body.scope(),
             ChainRoot::Pat(p) => p.body.scope(),
+            ChainRoot::AssocMember(m) => ScopeId::from_item(m.owner.item()),
         }
     }
 
@@ -139,6 +141,106 @@ pub(crate) enum ChainRoot<'db> {
     Stmt(StmtRoot<'db>),
     Expr(ExprRoot<'db>),
     Pat(PatRoot<'db>),
+    AssocMember(AssocMemberRoot<'db>),
+}
+
+/// An associated const or type of an implementation, by its index in the
+/// implementation's HIR member list.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Update)]
+pub(crate) struct AssocMemberRoot<'db> {
+    pub(crate) owner: AssocMemberOwner<'db>,
+    pub(crate) kind: AssocMemberKind,
+    pub(crate) idx: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Update)]
+pub(crate) enum AssocMemberOwner<'db> {
+    Impl(Impl<'db>),
+    ImplTrait(ImplTrait<'db>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Update)]
+pub(crate) enum AssocMemberKind {
+    Const,
+    Type,
+}
+
+impl<'db> AssocMemberOwner<'db> {
+    pub(crate) fn item(self) -> ItemKind<'db> {
+        match self {
+            Self::Impl(impl_) => impl_.into(),
+            Self::ImplTrait(impl_trait) => impl_trait.into(),
+        }
+    }
+}
+
+impl ChainInitiator for AssocMemberRoot<'_> {
+    /// A member spliced from a quotation is located where it was written; an
+    /// authored member is the matching member of its implementation's syntax,
+    /// counting only authored members.
+    fn init(&self, db: &dyn crate::SpannedHirDb) -> ResolvedOrigin {
+        let generated: Vec<_> = match (self.owner, self.kind) {
+            (AssocMemberOwner::Impl(impl_), AssocMemberKind::Const) => {
+                impl_.consts(db).iter().map(|c| c.generated).collect()
+            }
+            (AssocMemberOwner::ImplTrait(impl_trait), AssocMemberKind::Const) => {
+                impl_trait.consts(db).iter().map(|c| c.generated).collect()
+            }
+            (AssocMemberOwner::ImplTrait(impl_trait), AssocMemberKind::Type) => {
+                impl_trait.types(db).iter().map(|t| t.generated).collect()
+            }
+            (AssocMemberOwner::Impl(_), AssocMemberKind::Type) => Vec::new(),
+        };
+        if let Some(Some(syntax)) = generated.get(self.idx) {
+            let root = top_mod_ast(db, syntax.top_mod);
+            let kind = match syntax.node.try_to_node(root.syntax()) {
+                Some(node) => ResolvedOriginKind::Node(node),
+                None => ResolvedOriginKind::None,
+            };
+            return ResolvedOrigin::new(syntax.top_mod.file(db), kind);
+        }
+        let authored = self.idx
+            - generated[..self.idx.min(generated.len())]
+                .iter()
+                .filter(|syntax| syntax.is_some())
+                .count();
+        let (owner, kind) = (self.owner, self.kind);
+        let resolved = match owner {
+            AssocMemberOwner::Impl(impl_) => impl_.init(db),
+            AssocMemberOwner::ImplTrait(impl_trait) => impl_trait.init(db),
+        };
+        resolved.map(|node| {
+            let member = match (owner, kind) {
+                (AssocMemberOwner::Impl(_), AssocMemberKind::Const) => ast::Impl::cast(node)
+                    .and_then(|impl_| impl_.item_list())
+                    .and_then(|list| {
+                        list.into_iter()
+                            .filter_map(|item| match item.kind() {
+                                ast::ImplItemKind::Const(c) => Some(c.syntax().clone()),
+                                _ => None,
+                            })
+                            .nth(authored)
+                    }),
+                (AssocMemberOwner::ImplTrait(_), _) => ast::ImplTrait::cast(node)
+                    .and_then(|impl_trait| impl_trait.item_list())
+                    .and_then(|list| {
+                        list.into_iter()
+                            .filter_map(|item| match (item.kind(), kind) {
+                                (ast::TraitItemKind::Const(c), AssocMemberKind::Const) => {
+                                    Some(c.syntax().clone())
+                                }
+                                (ast::TraitItemKind::Type(t), AssocMemberKind::Type) => {
+                                    Some(t.syntax().clone())
+                                }
+                                _ => None,
+                            })
+                            .nth(authored)
+                    }),
+                (AssocMemberOwner::Impl(_), AssocMemberKind::Type) => None,
+            };
+            member.map(NodeOrToken::Node)
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +361,7 @@ impl ChainInitiator for ChainRoot<'_> {
             Self::Stmt(stmt) => stmt.init(db),
             Self::Expr(expr) => expr.init(db),
             Self::Pat(pat) => pat.init(db),
+            Self::AssocMember(member) => member.init(db),
         }
     }
 }
@@ -308,7 +411,8 @@ macro_rules! impl_chain_root {
         $(
         impl<'db> ChainInitiator for $ty {
             fn init(&self, db: &dyn crate::SpannedHirDb) -> ResolvedOrigin {
-                let top_mod = self.top_mod(db);
+                // A generated item's origin points into its producer's quote.
+                let top_mod = ScopeId::from_item((*self).into()).syntax_top_mod(db);
                 let origin = $fn(db, *self);
                 ResolvedOrigin::resolve(db, top_mod, origin)
             }

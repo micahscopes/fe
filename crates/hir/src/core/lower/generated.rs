@@ -169,6 +169,13 @@ fn lower_quoted_ast_item<'db>(
             );
             Some(ImplTrait::lower_ast(ctxt, impl_trait).into())
         }
+        ast::ItemKind::TypeAlias(_) => {
+            ctxt.record_generation_error(
+                item.syntax().text_range(),
+                "a quoted type is an associated type member; generated module type aliases are not supported",
+            );
+            None
+        }
         _ => {
             ctxt.record_generation_error(
                 item.syntax().text_range(),

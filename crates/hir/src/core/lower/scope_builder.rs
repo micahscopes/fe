@@ -400,6 +400,11 @@ impl<'db> ScopeGraphBuilder<'db> {
                 let ScopeId::Block(body, expression) = scope else {
                     return false;
                 };
+                // A producer is authored in the quote's module; generated
+                // bodies there point into other quotes.
+                if body.syntax_top_mod(self.db) != quote_top_mod {
+                    return false;
+                }
                 let crate::span::HirOrigin::Raw(ptr) =
                     body.source_map(self.db).expr_map.node_to_source(expression)
                 else {

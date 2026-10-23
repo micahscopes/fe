@@ -1279,12 +1279,13 @@ impl<'db> ItemCode<'db> {
                             Some(
                                 ast::ItemKind::Func(_)
                                     | ast::ItemKind::Const(_)
+                                    | ast::ItemKind::TypeAlias(_)
                                     | ast::ItemKind::Impl(_)
                                     | ast::ItemKind::ImplTrait(_)
                             )
                         ) {
                             return Err(
-                                "item quotation supports function, const, impl, and trait impl declarations",
+                                "item quotation supports function, const, type, impl, and trait impl declarations",
                             );
                         }
                     }
@@ -1316,12 +1317,13 @@ impl<'db> ItemCode<'db> {
                         Some(
                             ast::ItemKind::Func(_)
                                 | ast::ItemKind::Const(_)
+                                | ast::ItemKind::TypeAlias(_)
                                 | ast::ItemKind::Impl(_)
                                 | ast::ItemKind::ImplTrait(_)
                         )
                     ) {
                         return Err(
-                            "item quotation supports function, const, impl, and trait impl declarations",
+                            "item quotation supports function, const, type, impl, and trait impl declarations",
                         );
                     }
                 }
@@ -1786,8 +1788,23 @@ pub fn authored_derive_request<'db>(
             let HirOrigin::Raw(ptr) = implementation.origin(db) else {
                 return false;
             };
-            ptr.to_node(root.syntax()).syntax().text_range() == ast.syntax().text_range()
+            implementation.scope().syntax_top_mod(db) == module
+                && ptr.to_node(root.syntax()).syntax().text_range() == ast.syntax().text_range()
         })
+}
+
+/// The header syntax of an implementation, read from the module it was
+/// written in: a generated implementation is written in its producer's quote.
+fn impl_trait_syntax<'db>(
+    db: &'db dyn HirAnalysisDb,
+    implementation: crate::hir_def::ImplTrait<'db>,
+) -> Option<(crate::hir_def::TopLevelMod<'db>, ast::ImplTrait)> {
+    let HirOrigin::Raw(ptr) = implementation.origin(db) else {
+        return None;
+    };
+    let module = implementation.scope().syntax_top_mod(db);
+    let root = crate::core::lower::top_mod_ast(db, module);
+    Some((module, ptr.to_node(root.syntax())))
 }
 
 /// An explicit derive header `impl Tr for T with (P)`. Every member under it
@@ -1796,11 +1813,7 @@ pub(crate) fn is_derive_request(
     db: &dyn HirAnalysisDb,
     request: crate::hir_def::ImplTrait<'_>,
 ) -> bool {
-    let HirOrigin::Raw(ptr) = request.origin(db) else {
-        return false;
-    };
-    let root = crate::core::lower::top_mod_ast(db, request.top_mod(db));
-    ptr.to_node(root.syntax()).derive_provider().is_some()
+    impl_trait_syntax(db, request).is_some_and(|(_, ast)| ast.derive_provider().is_some())
 }
 
 /// A header-only request is not an implementation before its output plan exists.
@@ -1808,14 +1821,15 @@ pub(crate) fn is_unfulfilled_derive_request(
     db: &dyn HirAnalysisDb,
     request: crate::hir_def::ImplTrait<'_>,
 ) -> bool {
-    let HirOrigin::Raw(ptr) = request.origin(db) else {
+    let Some((module, ast)) = impl_trait_syntax(db, request) else {
         return false;
     };
-    let root = crate::core::lower::top_mod_ast(db, request.top_mod(db));
-    let ast = ptr.to_node(root.syntax());
+    // A plan only fulfils a header written in its target file; a quoted header
+    // has no authored identity to prepare against and stays unfulfilled.
     ast.derive_provider().is_some()
-        && !db.generation_inputs().requests(db).iter().any(|plan| {
-            plan.request_impl == Some(ast.syntax().text_range())
-                && Some(plan.target_file.clone()) == request.top_mod(db).file(db).url(db)
-        })
+        && !(module == request.top_mod(db)
+            && db.generation_inputs().requests(db).iter().any(|plan| {
+                plan.request_impl == Some(ast.syntax().text_range())
+                    && Some(plan.target_file.clone()) == module.file(db).url(db)
+            }))
 }

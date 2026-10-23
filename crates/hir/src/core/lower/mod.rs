@@ -342,6 +342,25 @@ impl<'db> FileLowerCtxt<'db> {
             .defer_quoted_item_origin(item, quote_top_mod, producer_module, producer_block);
     }
 
+    /// The module whose syntax is being lowered: the active quotation's, or
+    /// this file's outside generation.
+    pub(super) fn syntax_top_mod(&self) -> TopLevelMod<'db> {
+        self.quote_frames
+            .last()
+            .map_or_else(|| self.top_mod(), |frame| frame.quote_top_mod)
+    }
+
+    /// Where a member spliced from the active quotation was written.
+    pub(super) fn generated_member_syntax(
+        &self,
+        node: &parser::SyntaxNode,
+    ) -> crate::hir_def::GeneratedMemberSyntax<'db> {
+        crate::hir_def::GeneratedMemberSyntax {
+            top_mod: self.syntax_top_mod(),
+            node: parser::ast::SyntaxNodePtr::new(node),
+        }
+    }
+
     pub(super) fn current_quote_ingot(&self) -> Option<common::ingot::Ingot<'db>> {
         let frame = self.quote_frames.last()?;
         let db = self.db();

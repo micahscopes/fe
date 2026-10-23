@@ -2281,6 +2281,7 @@ where
             ChainRoot::StaticAssert(assert_) => assert_.top_mod(self.db),
             ChainRoot::Use(use_) => use_.top_mod(self.db),
             ChainRoot::Body(body) => body.top_mod(self.db),
+            ChainRoot::AssocMember(member) => member.owner.item().top_mod(self.db),
             ChainRoot::Stmt(_) | ChainRoot::Expr(_) | ChainRoot::Pat(_) => {
                 self.body().top_mod(self.db)
             }

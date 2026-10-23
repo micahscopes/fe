@@ -127,6 +127,31 @@ impl<'db> ScopeId<'db> {
         }
     }
 
+    /// The module whose syntax this scope was lowered from. A generated item
+    /// is published into its target module but written in its producer's
+    /// quotation, which is its lexical parent; everything else is in `top_mod`.
+    pub fn syntax_top_mod(self, db: &'db dyn HirDb) -> TopLevelMod<'db> {
+        let mut scope = self;
+        loop {
+            match scope {
+                ScopeId::Item(ItemKind::Body(body)) | ScopeId::Block(body, _) => {
+                    return body.syntax_top_mod(db);
+                }
+                ScopeId::Item(ItemKind::TopMod(top_mod)) => return top_mod,
+                _ => {}
+            }
+            if scope.data(db).publication_parent.is_some() {
+                return scope
+                    .lex_parent(db)
+                    .map_or_else(|| scope.top_mod(db), |producer| producer.top_mod(db));
+            }
+            match scope.parent(db) {
+                Some(parent) => scope = parent,
+                None => return scope.top_mod(db),
+            }
+        }
+    }
+
     /// Convert an item to a scope id.
     pub fn from_item(item: ItemKind<'db>) -> Self {
         Self::Item(item)

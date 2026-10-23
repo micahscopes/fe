@@ -1500,6 +1500,15 @@ impl<'db> ImplTrait<'db> {
     // Semantic `ty` lives in `crate::semantic`.
 }
 
+/// Where a member spliced into an implementation from a quotation was written:
+/// the quote's module and the member's node in it. Authored members have none
+/// and are located in their implementation's own syntax.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct GeneratedMemberSyntax<'db> {
+    pub top_mod: TopLevelMod<'db>,
+    pub node: parser::ast::SyntaxNodePtr,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct AssocTyDef<'db> {
     pub attributes: AttrListId<'db>,
@@ -1508,6 +1517,7 @@ pub struct AssocTyDef<'db> {
     /// Whether the item is written `shape Step = ..`, giving an associated
     /// shape, rather than `type`.
     pub is_shape: bool,
+    pub generated: Option<GeneratedMemberSyntax<'db>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
@@ -1519,6 +1529,7 @@ pub struct AssocConstDef<'db> {
     /// Only meaningful for consts in inherent `impl` blocks; consts in trait
     /// impls inherit their visibility from the trait.
     pub vis: Visibility,
+    pub generated: Option<GeneratedMemberSyntax<'db>>,
 }
 
 #[salsa::tracked]
