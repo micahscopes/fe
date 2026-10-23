@@ -1063,20 +1063,21 @@ async fn package_generation_shares_one_view_for_diagnostics_hover_and_goto() {
     let mut client = MockLspClient::start().await;
     client.initialize().await;
     let uri = |path: &str| Url::parse(&format!("file:///tmp/fe-lsp-package/{path}")).unwrap();
-    let lib_source = "use core::meta::{Code, Item, Record, field_count}\n\
-\n\
-pub trait Score {\n\
-    const fn score() -> usize\n\
-}\n\
-\n\
-pub const fn field_score(_ record: Record) -> Code<Item> {\n\
-    let n = field_count(record)\n\
-    quote {\n\
-        impl Score for ${record} {\n\
-            const fn score() -> usize { ${n} }\n\
-        }\n\
-    }\n\
-}\n";
+    let lib_source = r#"use core::meta::{Code, Item, Record, field_count}
+
+pub trait Score {
+    const fn score() -> usize
+}
+
+pub const fn field_score(_ record: Record) -> Code<Item> {
+    let n = field_count(record)
+    quote {
+        impl Score for ${record} {
+            const fn score() -> usize { ${n} }
+        }
+    }
+}
+"#;
     let model_source =
         "#[generate(lib::field_score)]\npub struct Pair {\n    pub a: u256,\n    pub b: u256,\n}\n";
     let app_source = "use ingot::model::Pair\nuse lib::Score\n\npub const fn total() -> usize {\n    Pair::score()\n}\n";
@@ -1172,6 +1173,7 @@ pub const fn field_score(_ record: Record) -> Code<Item> {\n\
         "    let n = field_count(record)\n",
         "    let zero: usize = 0\n    let n = field_count(record) / zero\n",
     );
+    assert_ne!(faulting, lib_source);
     client.clear_diagnostics();
     client.did_change(&lib, 2, &faulting);
     client.wait_for_text(&lib, &faulting).await;
