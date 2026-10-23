@@ -1437,6 +1437,46 @@ pub contract C { recv M { Answer {} -> u256 { generated() } } }
     }
 
     #[test]
+    fn standalone_harness_warnings_succeed_and_ordinary_errors_refuse() {
+        let ordinary = GENERATED_MEMORY_SOURCE
+            .replace("#[generate(make)]", "")
+            .replace(
+                "struct Marker {}",
+                "struct Marker {}\nfn generated() -> u256 { 42 }",
+            );
+        let warning = format!(
+            "{ordinary}\nstruct Cell {{ word: u256 }}\nimpl Cell {{ fn get_mut(mut self) -> mut u256 {{ mut self.word }} }}\nfn var_of_mut(_ cell: mut Cell) {{ var w = cell.get_mut()\n w += 1 }}\n"
+        );
+        let (db, url) = prepare_memory_source(&warning).expect("ordinary warning input");
+        assert!(db.generation_inputs().requests(&db).is_empty());
+        let file = db.workspace().get(&db, &url).unwrap();
+        let diagnostics = db.run_on_top_mod(db.top_mod(file));
+        assert!(!diagnostics.has_errors(&db));
+        assert!(diagnostics.format_diags(&db).contains("warning[8-0121]"));
+        FeContractHarness::compile("C", &warning)
+            .expect("warnings do not reject contract compilation");
+        compile_runtime_sonatina_from_source(&warning)
+            .expect("warnings do not reject runtime compilation");
+        let invalid = ordinary.replace(
+            "fn generated() -> u256 { 42 }",
+            "fn generated() -> u256 { true }",
+        );
+        for error in [
+            FeContractHarness::compile("C", &invalid)
+                .err()
+                .expect("ordinary contract type error"),
+            compile_runtime_sonatina_from_source(&invalid)
+                .err()
+                .expect("ordinary runtime type error"),
+        ] {
+            let HarnessError::CompilerDiagnostics(message) = error else {
+                panic!("{error:?}")
+            };
+            assert!(message.contains("type mismatch"), "{message}");
+        }
+    }
+
+    #[test]
     fn runtime_executes_osaka_clz() {
         // PUSH1 1, CLZ, PUSH0, MSTORE, PUSH1 32, PUSH0, RETURN
         let mut instance = RuntimeInstance::new("60011e5f5260205ff3").unwrap();
