@@ -360,6 +360,26 @@ impl MockLspClient {
             .await
     }
 
+    /// Request a rename.
+    pub async fn rename(
+        &mut self,
+        uri: &Url,
+        line: u32,
+        character: u32,
+        new_name: &str,
+    ) -> Result<Option<WorkspaceEdit>, async_lsp::Error> {
+        self.server
+            .rename(RenameParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    position: Position { line, character },
+                },
+                new_name: new_name.into(),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            })
+            .await
+    }
+
     /// Request completion.
     pub async fn completion(
         &mut self,
@@ -1114,6 +1134,37 @@ pub const fn field_score(_ record: Record) -> Code<Item> {\n\
         .expect("goto finds the authored record");
     assert_eq!(record.uri, uri("app/src/model.fe"));
     assert_eq!(record.range.start.line, 1);
+    // Renaming the record through the prepared view edits authored text only:
+    // its declaration and the two app references, never the provider's quote.
+    let rename = client
+        .rename(&app, 4, 5, "Couple")
+        .await
+        .expect("rename failed")
+        .expect("rename produces edits");
+    let mut edits = rename
+        .changes
+        .expect("rename edits by file")
+        .into_iter()
+        .map(|(file, edits)| {
+            let mut lines = edits
+                .into_iter()
+                .map(|edit| (edit.range.start.line, edit.new_text))
+                .collect::<Vec<_>>();
+            lines.sort();
+            (file, lines)
+        })
+        .collect::<Vec<_>>();
+    edits.sort();
+    assert_eq!(
+        edits,
+        vec![
+            (
+                app.clone(),
+                vec![(0, "Couple".to_string()), (4, "Couple".to_string())]
+            ),
+            (uri("app/src/model.fe"), vec![(1, "Couple".to_string())]),
+        ]
+    );
 
     // A provider fault in the dependency refuses the app's preparation and is
     // reported where it happens.
