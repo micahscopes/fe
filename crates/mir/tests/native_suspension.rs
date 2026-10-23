@@ -138,6 +138,22 @@ fn entry_loop(_ native: own Native) -> u64 {
     let plan = plan_native_scalar_task(&db, instance).expect("registered task plan");
     let generated = plan.instances(&db);
     assert_eq!(generated.len(), 2);
+    let package = fe_mir::runtime::build_native_task_runtime_package(&db, module, plan)
+        .expect("generated segment package");
+    assert!(
+        !package
+            .functions(&db)
+            .iter()
+            .any(|function| function.instance(&db) == instance)
+    );
+    for segment in &generated {
+        assert!(
+            package
+                .functions(&db)
+                .iter()
+                .any(|function| function.instance(&db) == *segment)
+        );
+    }
     assert_ne!(generated[0], generated[1]);
     for (index, generated) in generated.iter().enumerate() {
         assert_ne!(*generated, instance);

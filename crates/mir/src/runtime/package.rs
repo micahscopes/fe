@@ -597,6 +597,21 @@ pub fn build_native_executable_package<'db>(
     Ok(package)
 }
 
+/// Package every generated segment and its ordinary callees. The task's
+/// original entry is source context, not a callable root of this package.
+/// Native ABI adapters select and export the generated entry points later.
+pub fn build_native_task_runtime_package<'db>(
+    db: &'db dyn MirDb,
+    top_mod: TopLevelMod<'db>,
+    plan: super::suspension::NativeScalarTaskPlan<'db>,
+) -> Result<RuntimePackage<'db>, LowerError> {
+    let package = build_sectioned_package(db, top_mod, plan.instances(db), Vec::new(), None)?;
+    verify_runtime_package(db, package).map_err(|error| {
+        LowerError::Unsupported(format!("invalid native task package: {error:?}"))
+    })?;
+    Ok(package)
+}
+
 fn manual_contract_objects<'db>(
     db: &'db dyn MirDb,
     top_mod: TopLevelMod<'db>,
