@@ -958,6 +958,8 @@ impl super::Parse for ImplScope {
             )? {
                 parser.bump();
             }
+            // A request has no body; its requirements follow the provider.
+            parse_where_clause_opt(parser, ItemBlock::Absent)?;
             return Ok(());
         }
         parser.expect_and_pop_recovery_stack()?;

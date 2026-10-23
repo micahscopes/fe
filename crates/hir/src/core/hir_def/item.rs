@@ -751,6 +751,12 @@ impl<'db> Func<'db> {
         self.modifiers(db).is_const
     }
 
+    /// Whether the function declares binders of its own, apart from those of
+    /// its enclosing implementation or trait.
+    pub fn declares_generic_params(self, db: &'db dyn HirDb) -> bool {
+        !self.generic_params(db).data(db).is_empty()
+    }
+
     pub fn is_must_use(self, db: &'db dyn HirDb) -> bool {
         self.attributes(db).is_must_use(db)
     }

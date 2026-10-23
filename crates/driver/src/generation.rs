@@ -1030,9 +1030,10 @@ fn evaluate_provider_instance<'db>(
         range,
         cause,
     };
-    if !provider.is_const(db)
-        || provider.body(db).is_none()
-        || !CallableDef::Func(provider).params(db).is_empty()
+    // The function itself takes no binders; those of its implementation, as in
+    // `impl<const K: u256> Derive<G> for Scaled<K>`, are fixed by the ground
+    // provider application the instance was finalized for.
+    if !provider.is_const(db) || provider.body(db).is_none() || provider.declares_generic_params(db)
     {
         return Err(error(
             range,

@@ -245,13 +245,35 @@ impl<'db> RecordInput<'db> {
         ty: TyId<'db>,
         requesting_scope: crate::hir_def::scope_graph::ScopeId<'db>,
     ) -> Result<Self, RecordInputError> {
+        if !crate::analysis::ty::const_ty::ty_is_fully_ground(db, ty) {
+            return Err(RecordInputError::NotConcrete);
+        }
+        Self::issue_from(db, ty, requesting_scope)
+    }
+
+    /// Issue a view of the target of an explicit derive header that declares
+    /// binders: ground except for those binders, whose fields have the
+    /// header's parameters as their types. The header is the requesting scope.
+    pub fn for_header_type(
+        db: &'db dyn HirAnalysisDb,
+        ty: TyId<'db>,
+        header: crate::hir_def::ImplTrait<'db>,
+    ) -> Result<Self, RecordInputError> {
+        if !ground_over_header(db, ty, header) {
+            return Err(RecordInputError::NotConcrete);
+        }
+        Self::issue_from(db, ty, header.scope())
+    }
+
+    fn issue_from(
+        db: &'db dyn HirAnalysisDb,
+        ty: TyId<'db>,
+        requesting_scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    ) -> Result<Self, RecordInputError> {
         use crate::{
             analysis::name_resolution::is_scope_visible_from,
             hir_def::{EnumVariant, FieldParent, scope_graph::ScopeId},
         };
-        if !crate::analysis::ty::const_ty::ty_is_fully_ground(db, ty) {
-            return Err(RecordInputError::NotConcrete);
-        }
         // Authorize raw declaration members before instantiating their types.
         // Hidden field metadata may itself require compile-time evaluation.
         let owner = Self::authored_owner(db, ty)?;
@@ -557,6 +579,34 @@ impl<'db> RecordField<'db> {
             record: self.record.freeze(db)?,
             index: self.index,
         })
+    }
+}
+
+/// Whether `ty` is ground except for parameters `header` itself declares.
+pub(crate) fn ground_over_header<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+    header: crate::hir_def::ImplTrait<'db>,
+) -> bool {
+    use crate::analysis::ty::{const_ty::ConstTyData, ty_def::TyData};
+    use crate::hir_def::{ItemKind, scope_graph::ScopeId};
+    let declared = |param: &crate::analysis::ty::ty_def::TyParam<'db>| {
+        !param.is_implicit()
+            && matches!(
+                param.scope(db),
+                ScopeId::GenericParam(ItemKind::ImplTrait(owner), _) if owner == header
+            )
+    };
+    match ty.data(db) {
+        TyData::TyParam(param) => declared(param),
+        TyData::TyApp(abs, arg) => {
+            ground_over_header(db, *abs, header) && ground_over_header(db, *arg, header)
+        }
+        TyData::ConstTy(constant) => match constant.data(db) {
+            ConstTyData::TyParam(param, _) => declared(param),
+            _ => crate::analysis::ty::const_ty::ty_is_fully_ground(db, ty),
+        },
+        _ => crate::analysis::ty::const_ty::ty_is_fully_ground(db, ty),
     }
 }
 
@@ -1547,12 +1597,8 @@ pub fn native_derive_provider<'db>(
     ),
     NativeDeriveProviderError<'db>,
 > {
-    if !request.impl_params(db).is_empty() || !request.where_clause(db).predicates(db).is_empty() {
-        return Err(
-            "bounded native derive requires a concrete header without binders or where conditions"
-                .into(),
-        );
-    }
+    // A header may declare binders and requirements, as a handwritten one
+    // does; its target is then admitted under the header's own premises.
     let goal = request
         .candidate_trait_inst_result(db)
         .map_err(|_| "cannot resolve requested trait and target")?;
@@ -1567,6 +1613,7 @@ pub fn native_derive_provider<'db>(
         provider_ty,
         request.into(),
         request.scope(),
+        Some(request),
         (request.span().ty().into(), request.span().into()),
     )
 }
@@ -1579,6 +1626,7 @@ fn finalized_derive_provider<'db>(
     provider_ty: TyId<'db>,
     origin: crate::hir_def::ItemKind<'db>,
     scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    header: Option<crate::hir_def::ImplTrait<'db>>,
     spans: (crate::span::DynLazySpan<'db>, crate::span::DynLazySpan<'db>),
 ) -> Result<
     (
@@ -1605,22 +1653,35 @@ fn finalized_derive_provider<'db>(
     if goal.def(db).ingot(db) != scope.top_mod(db).ingot(db) {
         return Err("library/canonical goal establishment is pending the permits owner API".into());
     }
-    let input =
-        RecordInput::for_authored_type_from(db, goal.args(db)[0], scope).map_err(|cause| {
-            match cause {
-            RecordInputError::InvisibleField => {
-                "native derive requires every target field to be visible from the requesting scope"
-                    .to_string()
-            }
-            _ => format!("native derive requires a concrete authored record: {cause:?}"),
+    let target = goal.args(db)[0];
+    // A target over the header's own binders is issued and admitted under
+    // the header's premises; every other target must be ground.
+    let header = header.filter(|_| !crate::analysis::ty::const_ty::ty_is_fully_ground(db, target));
+    let input = match header {
+        Some(header) => RecordInput::for_header_type(db, target, header),
+        None => RecordInput::for_authored_type_from(db, target, scope),
+    }
+    .map_err(|cause| match cause {
+        RecordInputError::InvisibleField => {
+            "native derive requires every target field to be visible from the requesting scope"
+                .to_string()
         }
-        })?;
-    crate::analysis::ty::ty_check::admit_ground_type_application(
-        db,
-        input.ty(),
-        origin,
-        spans.0.clone(),
-    )
+        _ => format!("native derive requires a concrete authored record: {cause:?}"),
+    })?;
+    match header {
+        Some(header) => crate::analysis::ty::ty_check::admit_header_type_application(
+            db,
+            input.ty(),
+            header,
+            spans.0.clone(),
+        ),
+        None => crate::analysis::ty::ty_check::admit_ground_type_application(
+            db,
+            input.ty(),
+            origin,
+            spans.0.clone(),
+        ),
+    }
     .map_err(NativeDeriveProviderError::Target)?;
     if provider_ty.has_param(db) || provider_ty.has_invalid(db) || !provider_ty.is_star_kind(db) {
         return Err("native derive requires a concrete provider type".into());
@@ -1928,6 +1989,7 @@ pub fn scoped_derive_provider<'db>(
         opening.provider_ty(db),
         origin,
         opening.scope(db),
+        None,
         (span.clone(), span),
     )
 }
