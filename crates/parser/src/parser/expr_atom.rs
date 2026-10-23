@@ -715,6 +715,12 @@ impl super::Parse for QuoteItemListScope {
             }
             if parser.current_kind() == Some(SyntaxKind::Dollar) {
                 parser.parse(QuoteHoleScope::default())?;
+            } else if parser.is_ident("shape")
+                && parser.peek_n_non_trivia(2).as_slice() == [SyntaxKind::Ident, SyntaxKind::Ident]
+            {
+                // An associated shape member, `shape Step = (own u256, ref T)`: it
+                // has no module item form, so only a member splice can lower it.
+                parser.parse(super::item::TraitShapeItemScope::default())?;
             } else {
                 parser.parse(ItemScope::default())?;
             }

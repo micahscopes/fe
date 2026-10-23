@@ -858,6 +858,14 @@ pub(crate) fn quote_item_declarations(
     quote: &ast::QuoteExpr,
 ) -> Result<Vec<ast::Item>, &'static str> {
     if let Some(items) = quote.item_list() {
+        // A shape is a member, never one of these declarations: not dropped.
+        if items
+            .syntax()
+            .children()
+            .any(|child| ast::TraitShapeItem::can_cast(child.kind()))
+        {
+            return Err("a quoted shape is an associated shape member of an implementation");
+        }
         return Ok(items.into_iter().collect());
     }
     if let Some(block) = quote.body() {

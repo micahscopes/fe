@@ -227,6 +227,11 @@ pub(super) fn lower_generated_item_code<'db>(ctxt: &mut FileLowerCtxt<'db>, code
                         if let Some(lowered) = lower_quoted_ast_item(ctxt, item) {
                             ctxt.builder.set_quoted_item_origin(lowered, producer);
                         }
+                    } else if ast::TraitShapeItem::can_cast(child.kind()) {
+                        ctxt.record_generation_error(
+                            child.text_range(),
+                            "a quoted shape is an associated shape member; modules have no shape items",
+                        );
                     } else if let Some(hole) = ast::QuoteHole::cast(child) {
                         if let Some(FrozenHoleValue::Code(nested)) =
                             ctxt.current_hole(hole.syntax().text_range())
@@ -443,6 +448,13 @@ fn lower_scoped_derive<'db>(
         .defer_quoted_item_origin(implementation.into(), producer);
 }
 
+/// A member written in a member quotation: an item, or an associated shape,
+/// which has no module item form.
+pub(super) enum QuotedMember {
+    Item(ast::Item),
+    Shape(ast::TraitShapeItem),
+}
+
 /// Lower member code into the already-entered destination declaration, in
 /// order. Each template resolves its free names in its own producer; nested
 /// `Code<Item>` holes splice their members in place; any other block statement
@@ -450,7 +462,7 @@ fn lower_scoped_derive<'db>(
 fn lower_member_code<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
     value: &FrozenCode,
-    lower: &mut dyn FnMut(&mut FileLowerCtxt<'db>, ast::Item),
+    lower: &mut dyn FnMut(&mut FileLowerCtxt<'db>, QuotedMember),
 ) {
     match value {
         FrozenCode::Empty {
@@ -477,7 +489,9 @@ fn lower_member_code<'db>(
             if let Some(items) = quote.item_list() {
                 for child in items.syntax().children() {
                     if let Some(item) = ast::Item::cast(child.clone()) {
-                        lower(ctxt, item);
+                        lower(ctxt, QuotedMember::Item(item));
+                    } else if let Some(shape) = ast::TraitShapeItem::cast(child.clone()) {
+                        lower(ctxt, QuotedMember::Shape(shape));
                     } else if let Some(hole) = ast::QuoteHole::cast(child) {
                         lower_member_hole(ctxt, hole, lower);
                     }
@@ -485,7 +499,7 @@ fn lower_member_code<'db>(
             } else if let Some(block) = quote.body() {
                 for child in block.syntax().children() {
                     if let Some(item) = ast::Item::cast(child.clone()) {
-                        lower(ctxt, item);
+                        lower(ctxt, QuotedMember::Item(item));
                     } else if let Some(stmt) = ast::Stmt::cast(child)
                         && let ast::StmtKind::Expr(expr) = stmt.kind()
                         && let Some(expr) = expr.expr()
@@ -520,7 +534,7 @@ fn lower_member_code<'db>(
 pub(super) fn lower_derive_members<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
     code: &FrozenCode,
-    lower: &mut dyn FnMut(&mut FileLowerCtxt<'db>, ast::Item),
+    lower: &mut dyn FnMut(&mut FileLowerCtxt<'db>, QuotedMember),
 ) {
     if !matches!(
         code,
@@ -545,7 +559,7 @@ pub(super) fn lower_derive_members<'db>(
 pub(super) fn lower_member_hole<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
     hole: ast::QuoteHole,
-    lower: &mut dyn FnMut(&mut FileLowerCtxt<'db>, ast::Item),
+    lower: &mut dyn FnMut(&mut FileLowerCtxt<'db>, QuotedMember),
 ) {
     if let Some(FrozenHoleValue::Code(value)) = ctxt.current_hole(hole.syntax().text_range()) {
         lower_member_code(ctxt, &value, lower);
