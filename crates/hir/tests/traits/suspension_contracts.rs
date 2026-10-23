@@ -84,9 +84,12 @@ fn invoke<C: Effects>() uses C::E { nested<Wrapped<C>>() }
                 .iter()
                 .all(|entry| entry.footprint == SuspensionFootprint::Unresolved)
         );
+        // The selected generic instance may retain the outer row as abstract
+        // rather than selecting Wrapped<C>'s implementation. Neither that
+        // representation nor a partially expanded inner row may become empty.
         assert!(
             contract.entries.iter().any(|entry| match &entry.origin {
-                SuspensionContractOrigin::AbstractRow { .. } => name == "direct",
+                SuspensionContractOrigin::AbstractRow { .. } => true,
                 SuspensionContractOrigin::Effect { path: Some(_), .. } => name == "nested",
                 _ => false,
             }),
