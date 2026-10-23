@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use common::ingot::IngotKind;
 use driver::DriverDataBase;
@@ -14,20 +14,15 @@ use hir::{
             abi_ty::{self, AbiComponent, AbiTypeDesc, ParsedFunctionSignature},
             adt_def::AdtRef,
             assoc_const::AssocConstUse,
-            binder::Binder,
             corelib::{RuntimeBuiltinFuncKind, runtime_builtin_func_kind},
             evidence::UseEvidence,
-            normalize::normalize_from_assumptions,
             trait_def::TraitInstId,
-            trait_resolution::{PredicateListId, TraitSolveCx},
-            ty_check::{BodyOwner, ConstRef, check_body},
-            ty_def::{BorrowKind, PrimTy, TyBase, TyData, TyId},
+            trait_resolution::PredicateListId,
+            ty_check::{BodyOwner, ConstRef},
+            ty_def::{PrimTy, TyBase, TyData, TyId},
         },
     },
-    hir_def::{
-        FieldDefListId, Func, GenericParamOwner, IdentId, PathId, Struct, TopLevelMod, Trait,
-        scope_graph::ScopeId,
-    },
+    hir_def::{FieldDefListId, IdentId, PathId, Struct, TopLevelMod, Trait, scope_graph::ScopeId},
 };
 use serde::Serialize;
 use tiny_keccak::{Hasher, Keccak};
@@ -158,11 +153,14 @@ pub fn generate_contract_abi(
         }
     }
 
-    for struct_ in collect_contract_event_structs(db, contract) {
+    // Error discovery admits the contract's call graph and checks each
+    // reachable selector before any event or error entry is emitted.
+    let error_types = collect_contract_error_types(db, contract)?;
+    for struct_ in collect_contract_event_structs(db, contract)? {
         entries.push(event_struct_to_abi_entry(db, struct_)?);
     }
 
-    for error_ty in collect_contract_error_types(db, contract)? {
+    for error_ty in error_types {
         let entry = error_type_to_abi_entry(db, error_ty)?;
         // Solidity's built-in errors are implicit. Declaring them as custom
         // errors makes consumers such as ethers reject the entire ABI.
@@ -332,6 +330,31 @@ fn error_type_to_abi_entry(db: &DriverDataBase, ty: TyId<'_>) -> Result<AbiEntry
     })
 }
 
+/// The instances execution enters a contract through: its init and each
+/// receive arm.
+fn contract_root_instances<'db>(
+    db: &'db DriverDataBase,
+    contract: hir::hir_def::Contract<'db>,
+) -> Result<Vec<SemanticInstanceKey<'db>>, String> {
+    let mut owners = Vec::new();
+    if contract.init(db).is_some() {
+        owners.push(BodyOwner::ContractInit { contract });
+    }
+    for recv in contract.recv_views(db) {
+        for arm in recv.arms(db) {
+            owners.push(BodyOwner::ContractRecvArm {
+                contract,
+                recv_idx: recv.index(db),
+                arm_idx: arm.index(db),
+            });
+        }
+    }
+    owners
+        .into_iter()
+        .map(|owner| root_semantic_instance_key(db, owner).map_err(|error| format!("{error:?}")))
+        .collect()
+}
+
 /// Error reachability follows the same applied instances and proof transport
 /// used by execution. The complete type remains attached to its field layout.
 fn collect_contract_error_types<'db>(
@@ -349,26 +372,8 @@ fn collect_contract_error_types<'db>(
         "core::error::ErrorVariant",
     );
     let sol_ty = resolve_sol_abi_ty(db, contract.scope())?;
-    let mut owners = Vec::new();
-    if contract.init(db).is_some() {
-        owners.push(BodyOwner::ContractInit { contract });
-    }
-    for recv in contract.recv_views(db) {
-        for arm in recv.arms(db) {
-            owners.push(BodyOwner::ContractRecvArm {
-                contract,
-                recv_idx: recv.index(db),
-                arm_idx: arm.index(db),
-            });
-        }
-    }
-    let mut pending = owners
-        .into_iter()
-        .map(|owner| {
-            root_semantic_instance_key(db, owner)
-                .map_err(|error| format!("cannot prepare error ABI reachability: {error:?}"))
-        })
-        .collect::<Result<Vec<SemanticInstanceKey<'db>>, String>>()?;
+    let mut pending = contract_root_instances(db, contract)
+        .map_err(|error| format!("cannot prepare error ABI reachability: {error}"))?;
     let mut visited = HashSet::new();
     let mut seen = HashSet::new();
     let mut errors = Vec::new();
@@ -519,144 +524,87 @@ fn collect_contract_error_types<'db>(
     Ok(errors)
 }
 
+/// Event reachability follows the admitted instance graph execution uses, as
+/// error reachability does, so instance identity and the shared admission
+/// limits bound it. Each body contributes its events in expression order,
+/// before the instances its calls at that expression reach.
 fn collect_contract_event_structs<'db>(
     db: &'db DriverDataBase,
     contract: hir::hir_def::Contract<'db>,
-) -> Vec<Struct<'db>> {
+) -> Result<Vec<Struct<'db>>, String> {
     let mut events = Vec::new();
     let mut seen = HashSet::new();
-    let mut visited_funcs = HashSet::new();
+    let mut visited = HashSet::new();
     let emit_traits = resolve_event_emit_traits(db, contract.scope());
-
-    if contract.init(db).is_some() {
-        let (_, typed_body) = hir::analysis::ty::ty_check::check_contract_init_body(db, contract);
-        collect_typed_body_event_structs(
+    let roots = contract_root_instances(db, contract)
+        .map_err(|error| format!("cannot prepare event ABI reachability: {error}"))?;
+    for root in roots {
+        collect_instance_event_structs(
             db,
-            typed_body,
+            root,
             &emit_traits,
             &mut events,
             &mut seen,
-            &mut visited_funcs,
-        );
+            &mut visited,
+        )?;
     }
-
-    for recv in contract.recv_views(db) {
-        for arm in recv.arms(db) {
-            let (_, typed_body) = hir::analysis::ty::ty_check::check_contract_recv_arm_body(
-                db,
-                contract,
-                recv.index(db),
-                arm.index(db),
-            );
-            collect_typed_body_event_structs(
-                db,
-                typed_body,
-                &emit_traits,
-                &mut events,
-                &mut seen,
-                &mut visited_funcs,
-            );
-        }
-    }
-
-    events
+    Ok(events)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn collect_typed_body_event_structs<'db>(
+fn collect_instance_event_structs<'db>(
     db: &'db DriverDataBase,
-    typed_body: &hir::analysis::ty::ty_check::TypedBody<'db>,
+    key: SemanticInstanceKey<'db>,
     emit_traits: &EventEmitTraits<'db>,
     out: &mut Vec<Struct<'db>>,
     seen: &mut HashSet<Struct<'db>>,
-    visited_funcs: &mut HashSet<VisitedFuncBody<'db>>,
-) {
-    let Some(body) = typed_body.body() else {
-        return;
-    };
-
-    for (expr_id, partial_expr) in body.exprs(db).iter() {
-        let hir::hir_def::Partial::Present(_) = partial_expr else {
+    visited: &mut HashSet<SemanticInstanceKey<'db>>,
+) -> Result<(), String> {
+    if !visited.insert(key) {
+        return Ok(());
+    }
+    let admitted = SemanticInstance::new(db, key)
+        .admitted_body(db)
+        .map_err(|error| format!("cannot admit event ABI call graph: {error:?}"))?;
+    let mut expression_callees: HashMap<hir::hir_def::ExprId, Vec<SemanticInstanceKey<'db>>> =
+        HashMap::new();
+    let mut protocol_callees = Vec::new();
+    for stmt in admitted.blocks.iter().flat_map(|block| &block.stmts) {
+        let SStmtKind::Assign {
+            expr: SExpr::Call {
+                call_site, callee, ..
+            },
+            ..
+        } = &stmt.kind
+        else {
             continue;
         };
-        if let Some(struct_) = emitted_event_struct(db, typed_body, body, expr_id, emit_traits) {
-            push_event_struct(db, out, seen, struct_);
+        match call_site {
+            CallSiteId::Expr(expr) => expression_callees
+                .entry(*expr)
+                .or_default()
+                .push(callee.key),
+            CallSiteId::ForLoop(..) => protocol_callees.push(callee.key),
         }
-
-        // Operators also have semantic callees, even without call syntax.
-        if let Some(callable) = typed_body.callable_expr(expr_id)
-            && let hir::hir_def::CallableDef::Func(func) = callable.callable_def
-        {
-            let mut target = VisitedFuncBody::from_callable(func, callable);
-            if let Some(method) = callable.selected_method(
-                db,
-                TraitSolveCx::new(db, body.scope()).with_assumptions(typed_body.assumptions()),
-            ) && let Some(impl_func) = method.body()
-                && let Ok(body_args) = method.complete_body_args(db, callable.generic_args())
-            {
-                target.func = impl_func;
-                target.generic_args = body_args.into_values();
-            }
-            // The body the call runs: a `mut?` function's at the call's mode.
-            let owner = BodyOwner::func_at(db, target.func, callable.mode());
-            target.mode = owner.mode();
-            if target.func.body(db).is_none() || !visited_funcs.insert(target.clone()) {
+    }
+    let typed_body = key.typed_body(db);
+    if let Some(body) = typed_body.body() {
+        for (expr_id, partial_expr) in body.exprs(db).iter() {
+            let hir::hir_def::Partial::Present(_) = partial_expr else {
                 continue;
+            };
+            if let Some(struct_) = emitted_event_struct(db, typed_body, body, expr_id, emit_traits)
+            {
+                push_event_struct(db, out, seen, struct_);
             }
-            let (_, func_typed_body) = check_body(db, owner);
-            let func_typed_body =
-                instantiate_callable_typed_body(db, func_typed_body.clone(), &target);
-            collect_typed_body_event_structs(
-                db,
-                &func_typed_body,
-                emit_traits,
-                out,
-                seen,
-                visited_funcs,
-            );
+            for &callee in expression_callees.get(&expr_id).into_iter().flatten() {
+                collect_instance_event_structs(db, callee, emit_traits, out, seen, visited)?;
+            }
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct VisitedFuncBody<'db> {
-    func: Func<'db>,
-    /// The mode of the body of `func`, a `mut?` function, the call runs.
-    mode: Option<BorrowKind>,
-    generic_args: Vec<TyId<'db>>,
-    trait_inst: Option<TraitInstId<'db>>,
-}
-
-impl<'db> VisitedFuncBody<'db> {
-    fn from_callable(
-        func: Func<'db>,
-        callable: &hir::analysis::ty::ty_check::Callable<'db>,
-    ) -> Self {
-        Self {
-            func,
-            mode: callable.mode(),
-            generic_args: callable.generic_args().to_vec(),
-            trait_inst: callable.trait_inst(),
-        }
+    for callee in protocol_callees {
+        collect_instance_event_structs(db, callee, emit_traits, out, seen, visited)?;
     }
-}
-
-fn instantiate_callable_typed_body<'db>(
-    db: &'db DriverDataBase,
-    typed_body: hir::analysis::ty::ty_check::TypedBody<'db>,
-    target: &VisitedFuncBody<'db>,
-) -> hir::analysis::ty::ty_check::TypedBody<'db> {
-    let mut typed_body = Binder::bind(GenericParamOwner::Func(target.func), typed_body)
-        .instantiate(db, &target.generic_args);
-    if let Some(trait_inst) = target.trait_inst {
-        typed_body = normalize_from_assumptions(
-            db,
-            typed_body,
-            target.func.scope(),
-            PredicateListId::new(db, vec![trait_inst]),
-        );
-    }
-    typed_body
+    Ok(())
 }
 
 struct EventEmitTraits<'db> {
