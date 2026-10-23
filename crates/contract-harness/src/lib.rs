@@ -1384,6 +1384,58 @@ pub fn bytes_to_string(bytes: &[u8]) -> Result<String, HarnessError> {
 mod tests {
     use super::*;
 
+    const GENERATED_MEMORY_SOURCE: &str = r#"
+use core::meta::{Code, Item, Record}
+use std::abi::sol
+const fn make(_ record: Record) -> Code<Item> {
+    quote { fn generated() -> u256 { 42 } }
+}
+#[generate(make)]
+struct Marker {}
+msg M {
+    #[selector = sol("answer()")]
+    Answer {} -> u256
+}
+pub contract C { recv M { Answer {} -> u256 { generated() } } }
+"#;
+
+    #[test]
+    fn standalone_harness_entrypoints_consume_the_same_prepared_view() {
+        let harness = FeContractHarness::compile("C", GENERATED_MEMORY_SOURCE)
+            .expect("prepare contract source");
+        let runtime = compile_runtime_sonatina_from_source(GENERATED_MEMORY_SOURCE)
+            .expect("prepare runtime source");
+        assert_eq!(harness.contract.runtime_bytecode, runtime);
+        let mut instance = harness
+            .deploy_instance()
+            .expect("deploy generated helper contract");
+        let result = instance
+            .call_function("answer()", &[], ExecutionOptions::default())
+            .expect("run generated helper");
+        assert_eq!(U256::from_be_slice(&result.return_data), U256::from(42u64));
+    }
+
+    #[test]
+    fn standalone_harness_preparation_preserves_provider_faults() {
+        let source = GENERATED_MEMORY_SOURCE.replace(
+            "quote { fn generated() -> u256 { 42 } }",
+            "let zero: u256 = 0\nlet n = 1 / zero\nquote { fn generated() -> u256 { ${n} } }",
+        );
+        for error in [
+            FeContractHarness::compile("C", &source)
+                .err()
+                .expect("contract provider fault"),
+            compile_runtime_sonatina_from_source(&source)
+                .err()
+                .expect("runtime provider fault"),
+        ] {
+            let HarnessError::CompilerDiagnostics(message) = error else {
+                panic!("{error:?}")
+            };
+            assert!(message.contains("division by zero"), "{message}");
+        }
+    }
+
     #[test]
     fn runtime_executes_osaka_clz() {
         // PUSH1 1, CLZ, PUSH0, MSTORE, PUSH1 32, PUSH0, RETURN
