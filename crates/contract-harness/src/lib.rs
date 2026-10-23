@@ -1198,6 +1198,22 @@ pub struct FeContractHarness {
     contract: ContractBytecode,
 }
 
+/// Prepare standalone memory input through the driver's shared immutable
+/// boundary before any diagnostics or backend consumes the program.
+fn prepare_memory_source(source: &str) -> Result<(DriverDataBase, Url), HarnessError> {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse(MEMORY_SOURCE_URL).expect("static URL is valid");
+    let file = db
+        .workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let db = match driver::generation::prepare_file(&db, file) {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) => db,
+        Err(error) => return Err(HarnessError::CompilerDiagnostics(error.to_string())),
+    };
+    Ok((db, url))
+}
+
 impl FeContractHarness {
     /// Convenience helper that uses default [`CompileOptions`].
     pub fn compile(contract_name: &str, source: &str) -> Result<Self, HarnessError> {
@@ -1210,17 +1226,14 @@ impl FeContractHarness {
         source: &str,
         options: CompileOptions,
     ) -> Result<Self, HarnessError> {
-        let mut db = DriverDataBase::default();
-        let url = Url::parse(MEMORY_SOURCE_URL).expect("static URL is valid");
-        db.workspace()
-            .touch(&mut db, url.clone(), Some(source.to_string()));
+        let (db, url) = prepare_memory_source(source)?;
         let file = db
             .workspace()
             .get(&db, &url)
             .expect("file should exist in workspace");
         let top_mod = db.top_mod(file);
         let diags = db.run_on_top_mod(top_mod);
-        if !diags.is_empty() {
+        if diags.has_errors(&db) {
             return Err(HarnessError::CompilerDiagnostics(diags.format_diags(&db)));
         }
         let bytecode =
@@ -1299,17 +1312,14 @@ impl FeContractHarness {
 
 /// Compiles the provided Fe source to Sonatina-generated runtime bytecode (hex-encoded).
 pub fn compile_runtime_sonatina_from_source(source: &str) -> Result<String, HarnessError> {
-    let mut db = DriverDataBase::default();
-    let url = Url::parse(MEMORY_SOURCE_URL).expect("static URL is valid");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let (db, url) = prepare_memory_source(source)?;
     let file = db
         .workspace()
         .get(&db, &url)
         .expect("file should exist in workspace");
     let top_mod = db.top_mod(file);
     let diags = db.run_on_top_mod(top_mod);
-    if !diags.is_empty() {
+    if diags.has_errors(&db) {
         return Err(HarnessError::CompilerDiagnostics(diags.format_diags(&db)));
     }
 
