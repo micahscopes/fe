@@ -286,6 +286,7 @@ pub(crate) enum NumericExternIntrinsic {
 #[derive(Clone, Copy)]
 pub(crate) enum CtfeExternIntrinsic {
     MetaFieldCount,
+    MetaRecordName,
     MetaField,
     MetaFieldType,
     MetaBinders,
@@ -325,6 +326,8 @@ pub(crate) fn ctfe_extern_intrinsic_kind<'db>(
     }
     if lib_func_matches(db, func, "core::meta::field_count") {
         Some(CtfeExternIntrinsic::MetaFieldCount)
+    } else if lib_func_matches(db, func, "core::meta::record_name") {
+        Some(CtfeExternIntrinsic::MetaRecordName)
     } else if lib_func_matches(db, func, "core::meta::field") {
         Some(CtfeExternIntrinsic::MetaField)
     } else if lib_func_matches(db, func, "core::meta::field_type") {

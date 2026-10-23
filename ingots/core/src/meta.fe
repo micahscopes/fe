@@ -52,6 +52,10 @@ extern {
     /// Select a variant payload in declaration order. It uses the same field
     /// operations as a struct and retains its enum owner and variant index.
     pub const fn variant(_ record: Record, _ index: usize) -> Record
+    /// Exact authored declaration name, or the selected enum variant's name,
+    /// as concatenated UTF-8 string fragments for hashing/signature builders.
+    /// It describes the nominal declaration, independent of applied arguments.
+    pub const fn record_name(_ record: Record) -> Code<Expr>
     /// Reflection accepts only compiler-issued struct inputs or selected enum
     /// payloads. Whole enums reject until a payload is selected.
     pub const fn field_count(_ record: Record) -> usize

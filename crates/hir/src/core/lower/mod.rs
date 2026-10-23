@@ -55,7 +55,7 @@ mod use_tree;
 
 // Signature names can exceed the supported inline-string width. Hashing accepts
 // tuples of fragments, so split names without changing their concatenated bytes.
-fn signature_name_chunks(name: &str) -> Vec<&str> {
+pub(crate) fn signature_name_chunks(name: &str) -> Vec<&str> {
     let mut chunks = Vec::new();
     let mut start = 0;
     for (offset, ch) in name.char_indices() {
