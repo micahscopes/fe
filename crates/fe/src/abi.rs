@@ -2389,7 +2389,11 @@ pub contract C { recv M { Run {} -> u256 { recur(1 as u256, 0) } } }
         ];
         for (fields, value, head, is_dynamic, handwritten_encode, expected) in cases {
             let record = format!("struct Payload {{ {fields} }}");
-            let handwritten_size = if is_dynamic { "128" } else { "Self::HEAD_SIZE" };
+            let handwritten_size = if is_dynamic {
+                "Self::HEAD_SIZE + self.bytes.payload_size()"
+            } else {
+                "Self::HEAD_SIZE"
+            };
             let manual = format!(
                 r#"
 {record}
