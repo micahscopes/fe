@@ -509,6 +509,9 @@ pub fn mentions_mode<'db>(db: &'db dyn HirAnalysisDb, ty: HirTyId<'db>) -> bool 
                 })
             })
         }),
+        TypeKind::AuthoredField(field) => {
+            field.bound_type(db).is_some_and(|ty| mentions_mode(db, ty))
+        }
         TypeKind::Primitive(_) | TypeKind::Never => false,
     }
 }

@@ -28,6 +28,10 @@ pub struct ScopeGraph<'db> {
     pub scopes: IndexMap<ScopeId<'db>, Scope<'db>>,
     /// The all unresolved uses in the graph, this is used in name resolution.
     pub unresolved_uses: FxHashSet<Use<'db>>,
+    /// Generated items whose lexical parent is a producer scope in another
+    /// module. Lowering records them; the module's linked graph adds each as
+    /// the item's lexical edge, so lowering never reads the other module.
+    pub foreign_origins: Vec<(ScopeId<'db>, super::AuthoredScope<'db>)>,
 }
 
 impl<'db> ScopeGraph<'db> {

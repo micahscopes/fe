@@ -1,11 +1,8 @@
 use parser::ast::{self, prelude::*};
 
-use super::body::BodyCtxt;
+use super::{AuthoredFields, body::BodyCtxt};
 use crate::{
-    hir_def::{
-        GenericArgListId, IdentId, ItemKind, LitKind, Partial, PathId, PathKind, VariantKind,
-        pat::*, scope_graph::ScopeId,
-    },
+    hir_def::{GenericArgListId, IdentId, LitKind, Partial, PathId, PathKind, pat::*},
     span::HirOrigin,
 };
 
@@ -171,125 +168,66 @@ impl<'db> Pat<'db> {
                 }
                 ctxt.active_binder_groups.push((record.clone(), *group));
                 let db = ctxt.f_ctxt.db();
+                let authored = ctxt.f_ctxt.authored_record(record);
+                let binder = |ctxt: &mut BodyCtxt<'_, 'db>, field_idx: usize| {
+                    let ident = IdentId::new(db, format!("\0binder_{group}_{field_idx}"));
+                    let path = Partial::Present(PathId::from_ident(db, ident));
+                    ctxt.push_pat(
+                        Pat::Path(path, BindingMarker::Plain),
+                        HirOrigin::raw(origin_ast),
+                    )
+                };
+                let record_pat =
+                    |ctxt: &mut BodyCtxt<'_, 'db>,
+                     path: Partial<PathId<'db>>,
+                     names: Vec<Partial<IdentId<'db>>>| {
+                        let fields = names
+                            .into_iter()
+                            .enumerate()
+                            .map(|(field_idx, label)| RecordPatField {
+                                label,
+                                pat: binder(ctxt, field_idx),
+                            })
+                            .collect();
+                        ctxt.push_pat(Pat::Record(path, fields), HirOrigin::raw(origin_ast))
+                    };
+                let record_path = authored.path(db, GenericArgListId::none(db));
                 match (
-                    ctxt.f_ctxt.resolve_record_item(record),
+                    authored.fields(db, record.variant_index),
                     record.variant_index,
                 ) {
-                    (ItemKind::Enum(enum_), Some(variant_idx)) => {
-                        let variant_def = &enum_.variants_list(db).data(db)[variant_idx];
-                        let enum_display = PathId::new(
-                            db,
-                            PathKind::Ident {
-                                ident: enum_.name(db),
-                                generic_args: GenericArgListId::none(db),
-                            },
-                            None,
-                        );
-                        let enum_path = PathId::new(
-                            db,
-                            PathKind::BoundItem {
-                                item: ScopeId::Item(ItemKind::Enum(enum_)),
-                                display: enum_display,
-                            },
-                            None,
-                        );
+                    (Some(fields), Some(variant_idx)) => {
+                        let variant_name = authored
+                            .variant(variant_idx)
+                            .and_then(|variant| variant.name())
+                            .map(|name| IdentId::new(db, name.text().to_string()))
+                            .into();
                         let variant_path = Partial::Present(PathId::new(
                             db,
                             PathKind::Ident {
-                                ident: variant_def.name,
+                                ident: variant_name,
                                 generic_args: GenericArgListId::none(db),
                             },
-                            Some(enum_path),
+                            Some(record_path),
                         ));
-                        match &variant_def.kind {
-                            VariantKind::Unit => ctxt.push_pat(
+                        match fields {
+                            AuthoredFields::Unit => ctxt.push_pat(
                                 Pat::Path(variant_path, BindingMarker::Plain),
                                 HirOrigin::raw(origin_ast),
                             ),
-                            VariantKind::Tuple(tuple_id) => {
-                                let elems = (0..tuple_id.data(db).len())
-                                    .map(|field_idx| {
-                                        let ident = IdentId::new(
-                                            db,
-                                            format!("\0binder_{group}_{field_idx}"),
-                                        );
-                                        let path = Partial::Present(PathId::from_ident(db, ident));
-                                        ctxt.push_pat(
-                                            Pat::Path(path, BindingMarker::Plain),
-                                            HirOrigin::raw(origin_ast),
-                                        )
-                                    })
-                                    .collect();
+                            AuthoredFields::Tuple(len) => {
+                                let elems =
+                                    (0..len).map(|field_idx| binder(ctxt, field_idx)).collect();
                                 ctxt.push_pat(
                                     Pat::PathTuple(variant_path, elems),
                                     HirOrigin::raw(origin_ast),
                                 )
                             }
-                            VariantKind::Record(fields_id) => {
-                                let fields = fields_id
-                                    .data(db)
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(field_idx, field_def)| {
-                                        let ident = IdentId::new(
-                                            db,
-                                            format!("\0binder_{group}_{field_idx}"),
-                                        );
-                                        let path = Partial::Present(PathId::from_ident(db, ident));
-                                        let pat = ctxt.push_pat(
-                                            Pat::Path(path, BindingMarker::Plain),
-                                            HirOrigin::raw(origin_ast),
-                                        );
-                                        RecordPatField {
-                                            label: field_def.name,
-                                            pat,
-                                        }
-                                    })
-                                    .collect();
-                                ctxt.push_pat(
-                                    Pat::Record(variant_path, fields),
-                                    HirOrigin::raw(origin_ast),
-                                )
-                            }
+                            AuthoredFields::Named(names) => record_pat(ctxt, variant_path, names),
                         }
                     }
-                    (ItemKind::Struct(struct_), None) => {
-                        let struct_display = PathId::new(
-                            db,
-                            PathKind::Ident {
-                                ident: struct_.name(db),
-                                generic_args: GenericArgListId::none(db),
-                            },
-                            None,
-                        );
-                        let struct_path = Partial::Present(PathId::new(
-                            db,
-                            PathKind::BoundItem {
-                                item: ScopeId::Item(ItemKind::Struct(struct_)),
-                                display: struct_display,
-                            },
-                            None,
-                        ));
-                        let fields = struct_
-                            .fields(db)
-                            .data(db)
-                            .iter()
-                            .enumerate()
-                            .map(|(field_idx, field_def)| {
-                                let ident =
-                                    IdentId::new(db, format!("\0binder_{group}_{field_idx}"));
-                                let path = Partial::Present(PathId::from_ident(db, ident));
-                                let pat = ctxt.push_pat(
-                                    Pat::Path(path, BindingMarker::Plain),
-                                    HirOrigin::raw(origin_ast),
-                                );
-                                RecordPatField {
-                                    label: field_def.name,
-                                    pat,
-                                }
-                            })
-                            .collect();
-                        ctxt.push_pat(Pat::Record(struct_path, fields), HirOrigin::raw(origin_ast))
+                    (Some(AuthoredFields::Named(names)), None) => {
+                        record_pat(ctxt, Partial::Present(record_path), names)
                     }
                     _ => {
                         ctxt.f_ctxt.record_generation_error(

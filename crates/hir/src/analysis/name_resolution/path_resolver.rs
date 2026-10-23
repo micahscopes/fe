@@ -556,6 +556,7 @@ pub(crate) fn resolve_type_path_definition<'db>(
     for segment_idx in 0..path.len(db) {
         let segment = path.segment(db, segment_idx)?;
         if let PathKind::BoundItem { item, .. } = segment.kind(db) {
+            let item = item.resolve(db);
             if segment_idx + 1 == path.len(db) {
                 return Some(NameResKind::Scope(item));
             }
@@ -1267,6 +1268,8 @@ fn find_written_path<'db, R>(
             })
         }
         TypeKind::Primitive(_) | TypeKind::Never => None,
+        // A spliced field type is written in its record, not here.
+        TypeKind::AuthoredField(_) => None,
     }
 }
 
@@ -1416,7 +1419,7 @@ where
 {
     if let PathKind::BoundItem { item, .. } = path.kind(db) {
         let declaration = NameRes {
-            kind: NameResKind::Scope(item),
+            kind: NameResKind::Scope(item.resolve(db)),
             domain: NameDomain::TYPE | NameDomain::VALUE,
             derivation: super::NameDerivation::Def,
         };
