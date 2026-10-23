@@ -118,7 +118,11 @@ fn quoted_item_whitelist_does_not_restrict_ordinary_local_declarations() {
     assert!(
         errors.iter().any(|error| error
             .msg()
-            .contains("only functions, constants and impls can be quoted")),
+            .contains("only functions, constants, types and impls can be quoted")),
         "{errors:?}"
     );
+    // An associated type member is quotable; its destination admits it.
+    let member_type = "const fn make() { quote { type Unit = u256\n const fn f() {} } }";
+    let (_, errors) = parse_source_file(member_type, RecoveryMode::NoRecover);
+    assert!(errors.is_empty(), "{errors:?}");
 }

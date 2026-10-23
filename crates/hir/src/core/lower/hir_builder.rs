@@ -319,6 +319,7 @@ where
             attributes: self.empty_attrs(),
             name: Partial::Present(self.ident(name)),
             type_ref,
+            generated: None,
         }
     }
 

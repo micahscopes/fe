@@ -406,6 +406,44 @@ impl TraitConstItem {
 }
 
 ast_node! {
+    /// An associated constant as written: a `const` in a trait or impl body,
+    /// or a quoted `const` lowered as an impl member.
+    pub struct AssocConstSyntax,
+    SK::TraitConstItem | SK::Const,
+}
+impl super::AttrListOwner for AssocConstSyntax {}
+impl AssocConstSyntax {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        support::token(self.syntax(), SK::Ident)
+    }
+
+    pub fn ty(&self) -> Option<super::Type> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
+    /// An associated type as written: a `type` in a trait or impl body, or a
+    /// quoted `type` alias lowered as an impl member.
+    pub struct AssocTypeSyntax,
+    SK::TraitTypeItem | SK::TypeAlias,
+}
+impl super::AttrListOwner for AssocTypeSyntax {}
+impl AssocTypeSyntax {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        support::token(self.syntax(), SK::Ident)
+    }
+
+    pub fn ty(&self) -> Option<super::Type> {
+        support::child(self.syntax())
+    }
+
+    pub fn bounds(&self) -> Option<TypeBoundList> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
     /// `uses E` in a trait definition, optionally with a default row, or
     /// `uses E = (store: mut Store)` in a trait implementation.
     pub struct TraitUsesItem,

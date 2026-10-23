@@ -1107,6 +1107,7 @@ impl<'db> ImplTrait<'db> {
                     attributes: AttrListId::new(db, Vec::new()),
                     name: binding.name,
                     type_ref: binding.ty,
+                    generated: None,
                 }),
                 _ => None,
             }));
@@ -1125,22 +1126,27 @@ impl<'db> ImplTrait<'db> {
             for child in item_list.syntax().children() {
                 let Some(impl_item) = ast::TraitItem::cast(child.clone()) else {
                     if let Some(hole) = ast::QuoteHole::cast(child) {
-                        super::generated::lower_member_hole(
-                            ctxt,
-                            hole,
-                            &mut |ctxt, item| match item.kind() {
+                        super::generated::lower_member_hole(ctxt, hole, &mut |ctxt, item| {
+                            match item.kind() {
                                 Some(ast::ItemKind::Func(func)) => {
                                     Func::lower_ast(ctxt, func);
                                 }
                                 Some(ast::ItemKind::Const(c)) => {
                                     consts.push(AssocConstDef::lower_quoted_const(ctxt, c));
                                 }
+                                Some(ast::ItemKind::TypeAlias(alias)) => {
+                                    if let Some(defined) =
+                                        AssocTyDef::lower_quoted_alias(ctxt, alias)
+                                    {
+                                        types.push(defined);
+                                    }
+                                }
                                 _ => ctxt.record_generation_error(
                                     item.syntax().text_range(),
-                                    "impl member quotation requires functions or constants",
+                                    "trait impl member quotation requires functions, constants or types",
                                 ),
-                            },
-                        );
+                            }
+                        });
                     }
                     continue;
                 };
@@ -1271,6 +1277,7 @@ impl<'db> AssocTyDef<'db> {
             attributes: AttrListId::lower_ast_opt(ctxt, ast.attr_list()),
             name: IdentId::lower_token_partial(ctxt, ast.alias()),
             type_ref: TypeId::lower_ast_partial(ctxt, ast.ty()),
+            generated: Some(ctxt.generated_member_syntax(ast.syntax())),
         })
     }
 
@@ -1280,6 +1287,7 @@ impl<'db> AssocTyDef<'db> {
             attributes,
             name: IdentId::lower_token_partial(ctxt, ast.name()),
             type_ref: TypeId::lower_ast_partial(ctxt, ast.ty()),
+            generated: None,
         }
     }
 }
@@ -1340,6 +1348,7 @@ impl<'db> AssocConstDef<'db> {
             ty,
             value,
             vis: super::lower_visibility(&ast),
+            generated: Some(ctxt.generated_member_syntax(ast.syntax())),
         }
     }
 
@@ -1357,6 +1366,7 @@ impl<'db> AssocConstDef<'db> {
             ty: TypeId::lower_ast_partial(ctxt, ast.ty()),
             value,
             vis: super::lower_visibility(&ast),
+            generated: None,
         }
     }
 }

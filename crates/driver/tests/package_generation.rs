@@ -62,7 +62,7 @@ fn eval(db: &DriverDataBase, path: &str, name: &str) -> String {
         ..
     } = value.value(db)
     else {
-        panic!("`{name}` did not return an integer")
+        panic!("`{name}` did not return an integer: {:?}", value.value(db))
     };
     value.to_string()
 }
@@ -131,7 +131,7 @@ fn same_ingot_files() -> Vec<(&'static str, String)> {
     ]
 }
 
-fn borrow(files: &[(&'static str, String)]) -> Vec<(&'static str, &str)> {
+fn borrow<'a>(files: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
     files
         .iter()
         .map(|(path, text)| (*path, text.as_str()))
@@ -242,6 +242,44 @@ pub const fn direct() -> usize {
     Unit::score()
 }
 "#;
+
+/// An error inside generated code is reported where that code was written,
+/// the dependency's quotation, not at an unrelated place in the target file.
+#[test]
+fn errors_in_code_generated_from_a_dependency_point_into_its_quote() {
+    let mistyped = LIB_GENERATE.replace(
+        "const fn score() -> usize { ${n} }",
+        "const fn score() -> usize { true }",
+    );
+    assert_ne!(mistyped, LIB_GENERATE);
+    let files = [
+        ("lib/fe.toml", LIB_TOML),
+        ("lib/src/lib.fe", mistyped.as_str()),
+        ("app/fe.toml", APP_WITH_LIB_TOML),
+        ("app/src/model.fe", APP_GENERATE_MODEL),
+        ("app/src/lib.fe", APP_GENERATE_LIB),
+    ];
+    let db = project(&files);
+    let prepared = prepare(&db, "app/");
+    let errors = ingot_errors(&prepared, "app/");
+    // Paths render relative to their ingot; the quoted line in the snippet is
+    // read from the file the span resolved into, which only `lib` contains.
+    let quote_line = mistyped
+        .lines()
+        .position(|line| line.contains("{ true }"))
+        .unwrap()
+        + 1;
+    assert!(errors.contains("type mismatch"), "{errors}");
+    assert!(
+        errors.contains(&format!("src/lib.fe:{quote_line}:")),
+        "expected line {quote_line}: {errors}"
+    );
+    assert!(
+        errors.contains("const fn score() -> usize { true }"),
+        "{errors}"
+    );
+    assert!(!errors.contains("src/model.fe"), "{errors}");
+}
 
 #[test]
 fn a_dependency_s_own_generation_is_prepared_with_the_app() {

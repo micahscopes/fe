@@ -41,6 +41,9 @@ pub struct Body<'db> {
     #[return_ref]
     pub pats: NodeStore<PatId, Partial<Pat<'db>>>,
     pub top_mod: TopLevelMod<'db>,
+    /// The module whose syntax `source_map` and `origin` point into: `top_mod`
+    /// for authored bodies, the producer's module for generated ones.
+    pub syntax_top_mod: TopLevelMod<'db>,
 
     #[return_ref]
     pub(crate) source_map: BodySourceMap,
