@@ -8,6 +8,7 @@ pub mod place;
 pub mod pretty;
 pub(crate) mod root_effects;
 pub mod stable_key;
+pub mod suspension;
 pub(crate) mod synthetic;
 
 pub use ir::*;
