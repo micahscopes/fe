@@ -2,7 +2,9 @@
 //! operation is a cut; a capability call must first have its continuation
 //! composed with the caller. Projection yields remain ordinary MIR control.
 
+mod abi;
 mod segments;
+pub use abi::{NativeScalarAbiPlan, plan_native_scalar_abi};
 pub use segments::{
     NativeScalarSegments, NativeScalarTaskPlan, build_native_scalar_segments,
     plan_native_scalar_task,
