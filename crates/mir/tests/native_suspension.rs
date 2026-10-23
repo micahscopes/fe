@@ -59,6 +59,19 @@ fn entry_twice(_ native: own Native) -> u64 {
         TaskOutcome::Cancelled => 0
     }
 }
+fn entry_loop(_ native: own Native) -> u64 {
+    var cap = native
+    var total: u64 = 5
+    while total < 20 {
+        let pending = unsafe { fixture_pending() }
+        total = match hop(mut cap, pending) {
+            TaskOutcome::Success(value) => total + value
+            TaskOutcome::Failure(error) => error
+            TaskOutcome::Cancelled => 20
+        }
+    }
+    total
+}
 "#
             .into(),
         ),
@@ -173,4 +186,37 @@ fn entry_twice(_ native: own Native) -> u64 {
                 .is_empty()
         );
     }
+    let loop_func = module
+        .all_funcs(&db)
+        .iter()
+        .copied()
+        .find(|func| {
+            func.name(&db)
+                .to_opt()
+                .is_some_and(|name| name.data(&db) == "entry_loop")
+        })
+        .unwrap();
+    let semantic = SemanticInstance::new(
+        &db,
+        root_semantic_instance_key(&db, BodyOwner::Func(loop_func, None)).unwrap(),
+    );
+    let loop_instance = get_or_build_runtime_instance(
+        &db,
+        RuntimeInstanceKey::new(&db, RuntimeInstanceSource::Semantic(semantic), vec![]),
+    );
+    let loop_plan = plan_native_scalar_task(&db, loop_instance).expect("loop-carried scalar cut");
+    assert_eq!(loop_plan.segments(&db).len(), 2);
+    // The resume suffix must retain the loop backedge and reach the same cut
+    // again, rather than treating the cut's block as permanently skipped.
+    let resume = &loop_plan.segments(&db)[1];
+    assert!(
+        resume
+            .blocks
+            .iter()
+            .flat_map(|block| &block.stmts)
+            .any(|stmt| matches!(stmt,
+                RStmt::Assign { expr: RExpr::EnumMake { layout, variant, .. }, .. }
+                    if *layout == loop_plan.step_layout(&db) && variant.index == 1
+            ))
+    );
 }
