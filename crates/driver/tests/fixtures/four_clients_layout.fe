@@ -1,0 +1,25 @@
+use core::abi::AbiSize
+use std::derive::abi_size
+
+#[generate(abi_size)]
+struct Empty {}
+#[generate(abi_size)]
+struct TwoWords { first: u256, second: u256 }
+#[generate(abi_size)]
+struct Nested { child: TwoWords, third: u256 }
+
+struct HandwrittenTwoWords { first: u256, second: u256 }
+impl AbiSize for HandwrittenTwoWords {
+    const HEAD_SIZE: u256 = 64
+    const IS_DYNAMIC: bool = false
+}
+
+const fn check_layout() -> bool {
+    <Empty as AbiSize>::HEAD_SIZE == 0
+        && !<Empty as AbiSize>::IS_DYNAMIC
+        && <TwoWords as AbiSize>::HEAD_SIZE == 64
+        && !<TwoWords as AbiSize>::IS_DYNAMIC
+        && <HandwrittenTwoWords as AbiSize>::HEAD_SIZE == 64
+        && <Nested as AbiSize>::HEAD_SIZE == 96
+        && !<Nested as AbiSize>::IS_DYNAMIC
+}
