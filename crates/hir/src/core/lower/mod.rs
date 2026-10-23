@@ -325,6 +325,23 @@ impl<'db> FileLowerCtxt<'db> {
             .map(|(_, value)| value.clone())
     }
 
+    /// Mark an item generated into an authored declaration as generated, like
+    /// every other generated item: its quote's producer is its lexical origin
+    /// and the enclosing declaration its publication parent.
+    pub(super) fn defer_generated_member_origin(&mut self, item: ItemKind<'db>) {
+        let frame = self
+            .quote_frames
+            .last()
+            .expect("a generated member is lowered inside its quote");
+        let (quote_top_mod, producer_module, producer_block) = (
+            frame.quote_top_mod,
+            frame.producer_module,
+            frame.producer_block,
+        );
+        self.builder
+            .defer_quoted_item_origin(item, quote_top_mod, producer_module, producer_block);
+    }
+
     pub(super) fn current_quote_ingot(&self) -> Option<common::ingot::Ingot<'db>> {
         let frame = self.quote_frames.last()?;
         let db = self.db();
@@ -379,6 +396,8 @@ impl<'db> FileLowerCtxt<'db> {
                 quote_top_mod,
                 quote_range,
                 producer_scope,
+                producer_module,
+                producer_block,
                 is_sub_quote,
                 is_member_quote: false,
                 open_names,

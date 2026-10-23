@@ -17,6 +17,9 @@ pub(crate) struct ActiveQuoteFrame<'db> {
     pub(super) quote_top_mod: TopLevelMod<'db>,
     pub(super) quote_range: parser::TextRange,
     pub(super) producer_scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    /// The authored ranges `producer_scope` was resolved from.
+    pub(super) producer_module: Option<parser::TextRange>,
+    pub(super) producer_block: Option<parser::TextRange>,
     pub(super) is_sub_quote: bool,
     /// Members keep their public/local binder names but resolve free names in
     /// the spliced template's producer, not the containing quote's producer.
@@ -70,6 +73,8 @@ pub(super) fn append_functions<'db>(ctxt: &mut FileLowerCtxt<'db>) {
             quote_top_mod: top_mod,
             quote_range: plan.quote_range,
             producer_scope,
+            producer_module: plan.producer_module,
+            producer_block: plan.producer_block,
             is_sub_quote: false,
             is_member_quote: false,
             open_names,

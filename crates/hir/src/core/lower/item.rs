@@ -1231,7 +1231,8 @@ impl<'db> ImplTrait<'db> {
                             func.sig().name().map(|name| name.text().to_string()),
                             true,
                         );
-                        Func::lower_ast(ctxt, func);
+                        let generated = Func::lower_ast(ctxt, func);
+                        ctxt.defer_generated_member_origin(generated.into());
                     }
                     Some(ast::ItemKind::Const(c)) => {
                         consts.push(AssocConstDef::lower_quoted_const(ctxt, c));

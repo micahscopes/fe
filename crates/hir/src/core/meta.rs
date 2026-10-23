@@ -1790,6 +1790,19 @@ pub fn authored_derive_request<'db>(
         })
 }
 
+/// An explicit derive header `impl Tr for T with (P)`. Every member under it
+/// is generated from the provider's quotations, not authored here.
+pub(crate) fn is_derive_request(
+    db: &dyn HirAnalysisDb,
+    request: crate::hir_def::ImplTrait<'_>,
+) -> bool {
+    let HirOrigin::Raw(ptr) = request.origin(db) else {
+        return false;
+    };
+    let root = crate::core::lower::top_mod_ast(db, request.top_mod(db));
+    ptr.to_node(root.syntax()).derive_provider().is_some()
+}
+
 /// A header-only request is not an implementation before its output plan exists.
 pub(crate) fn is_unfulfilled_derive_request(
     db: &dyn HirAnalysisDb,
