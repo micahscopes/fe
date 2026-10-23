@@ -495,15 +495,7 @@ fn forked_inputs_keep_trust_roots_removals_and_settings() {
     );
 }
 
-/// Two files that derive with each other's providers. Lowering one file's
-/// output reads the other file's producer scope, which currently requires the
-/// other file's lowered scope graph (`resolve_producer_scope`). Predicted to
-/// fail with a query cycle until producer scopes are resolved lazily
-/// (SIX-AREA-PLAN step A4). Expected once fixed: both totals are 1.
-#[test]
-#[ignore = "A4: cross-file producer scopes form a lowering cycle (predicted, unexecuted)"]
-fn mutually_deriving_files_prepare_without_a_cycle() {
-    let first = r#"use core::derive::Derive
+const MUTUAL_FIRST: &str = r#"use core::derive::Derive
 use core::meta::{Code, Item, Record, field_count}
 use ingot::score::Score
 use ingot::second::SecondProvider
@@ -519,7 +511,7 @@ pub struct Left { pub only: u8 }
 impl Score for Left with (SecondProvider)
 pub const fn left_total() -> usize { Left::score() }
 "#;
-    let second = r#"use core::derive::Derive
+const MUTUAL_SECOND: &str = r#"use core::derive::Derive
 use core::meta::{Code, Item, Record, field_count}
 use ingot::score::Score
 use ingot::first::FirstProvider
@@ -535,13 +527,48 @@ pub struct Right { pub only: u8 }
 impl Score for Right with (FirstProvider)
 pub const fn right_total() -> usize { Right::score() }
 "#;
-    let files = [
+
+/// Two files that derive with each other's providers: lowering each file's
+/// output reads the other file's declarations.
+fn mutual_files() -> [(&'static str, &'static str); 5] {
+    [
         ("app/fe.toml", APP_TOML),
         ("app/src/lib.fe", ""),
         ("app/src/score.fe", SCORE),
-        ("app/src/first.fe", first),
-        ("app/src/second.fe", second),
-    ];
+        ("app/src/first.fe", MUTUAL_FIRST),
+        ("app/src/second.fe", MUTUAL_SECOND),
+    ]
+}
+
+/// Executed at `4e49f5f54`: lowering recursed (salsa cycle in
+/// `scope_graph_impl`). Mutual generation is now refused before publication,
+/// with a diagnostic instead of a crash.
+#[test]
+fn mutually_deriving_files_are_refused_before_lowering() {
+    let files = mutual_files();
+    let db = project(&files);
+    let error = prepare_ingots(&db, &[url("app/")])
+        .err()
+        .expect("mutual generation is refused");
+    assert!(
+        error
+            .cause
+            .contains("mutual generation between modules is not supported yet"),
+        "{error}"
+    );
+    assert!(
+        error.cause.contains("app/src/first.fe") && error.cause.contains("app/src/second.fe"),
+        "{error}"
+    );
+    assert_authored_unchanged(&db, &files);
+}
+
+/// The destination: lowering authored declarations apart from generated
+/// output (SIX-AREA-PLAN A4) lets both files prepare. Not done; refused today.
+#[test]
+#[ignore = "A4: needs authored declarations lowered apart from generated output"]
+fn mutually_deriving_files_prepare_without_a_cycle() {
+    let files = mutual_files();
     let db = project(&files);
     let prepared = prepare(&db, "app/");
     assert_eq!(eval(&prepared, "app/src/first.fe", "left_total"), "1");

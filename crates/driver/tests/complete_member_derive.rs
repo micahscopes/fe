@@ -302,3 +302,64 @@ const fn unit() -> u256 {
     assert_eq!(eval(&output, "area"), "9");
     assert_eq!(eval(&output, "unit"), "9");
 }
+
+/// A header written in the record's own module sees its private fields; the
+/// same request from outside that module is refused before the provider runs
+/// (requester-side visibility). Nested headers take every member like root
+/// ones and are reachable from anywhere the trait is.
+#[test]
+fn explicit_derive_headers_in_nested_modules_take_their_members() {
+    let source = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record, field_count}
+
+trait Score {
+    const BASE: usize
+    const fn score() -> usize
+}
+
+struct Counter {}
+
+impl Derive<Score> for Counter {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n = field_count(record)
+        quote {
+            const BASE: usize = 10
+            const fn score() -> usize { Self::BASE + ${n} }
+        }
+    }
+}
+
+mod owner {
+    use super::{Counter, Score}
+
+    pub struct Secret { hidden: u256, kept: bool }
+
+    impl Score for Secret with (Counter)
+
+    pub const fn inside() -> usize { Secret::score() }
+}
+
+const fn inside() -> usize { owner::inside() }
+const fn outside() -> usize { owner::Secret::score() }
+"#;
+    let output = prepare(source).unwrap();
+    assert_eq!(eval(&output, "inside"), "12");
+    assert_eq!(eval(&output, "outside"), "12");
+
+    // Requester side: the same header at the root cannot observe `hidden`.
+    let requester = source
+        .replace("    impl Score for Secret with (Counter)\n", "")
+        .replace(
+            "const fn inside() -> usize { owner::inside() }\n",
+            "impl Score for owner::Secret with (Counter)\n",
+        )
+        .replace(
+            "    pub const fn inside() -> usize { Secret::score() }\n",
+            "",
+        );
+    let cause = prepare_err(&requester);
+    assert!(
+        cause.contains("every target field to be visible from the requesting scope"),
+        "{cause}"
+    );
+}
