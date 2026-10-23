@@ -1,1 +1,1 @@
-Generate functions from compile-time Fe templates that inspect struct fields. Generated names retain their defining scope, and standalone editor checks use the same generated view as command-line checks.
+Generate functions from compile-time Fe templates that inspect struct fields. Generated names retain their defining scope. A package and its dependencies are prepared as one generated program, which `fe check`, `fe build`, `fe test` and the editor all use.
