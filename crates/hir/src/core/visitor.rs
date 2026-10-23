@@ -2066,7 +2066,7 @@ pub fn walk_type<'db, V>(
         ),
 
         // A spliced field type is written, and visited, in its record.
-        TypeKind::Primitive(_) | TypeKind::Never | TypeKind::AuthoredField(_) => {}
+        TypeKind::Primitive(..) | TypeKind::Never | TypeKind::AuthoredField(_) => {}
     }
 }
 

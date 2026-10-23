@@ -363,3 +363,109 @@ const fn outside() -> usize { owner::Secret::score() }
         "{cause}"
     );
 }
+
+/// Explicit headers over instances of generic records. A field-type splice is
+/// the field's type in that instance: `T` is `u8` in `Envelope<u8>` and
+/// `u256` in `Envelope<u256>`, `Pair<u8>` in `Nest<u8>`, `[u8; 4]` in
+/// `Buf<4>`, and the payload of `Choice<u256>`'s first variant is `u256`.
+/// Expected values are the widths written in the `Bits` impls.
+const INSTANCES: &str = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record, field, field_type, variant}
+
+trait Bits { const BITS: u256 }
+impl Bits for u8 { const BITS: u256 = 8 }
+impl Bits for u256 { const BITS: u256 = 256 }
+impl<T: Bits> Bits for Pair<T> { const BITS: u256 = 2 * <T as Bits>::BITS }
+impl<const N: usize> Bits for [u8; N] { const BITS: u256 = 8 * (N as u256) }
+
+trait Report { const fn payload_bits() -> u256 }
+
+struct Envelope<T> { value: T }
+struct Pair<T> { a: T, b: T }
+struct Nest<T> { inner: Pair<T> }
+struct Buf<const N: usize> { data: [u8; N] }
+enum Choice<T> { Some(T), Empty }
+
+struct FirstField {}
+impl Derive<Report> for FirstField {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let ty = field_type(field(record, 0))
+        quote { const fn payload_bits() -> u256 { <${ty} as Bits>::BITS } }
+    }
+}
+
+struct FirstPayload {}
+impl Derive<Report> for FirstPayload {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let ty = field_type(field(variant(record, 0), 0))
+        quote { const fn payload_bits() -> u256 { <${ty} as Bits>::BITS } }
+    }
+}
+
+impl Report for Envelope<u8> with (FirstField)
+impl Report for Envelope<u256> with (FirstField)
+impl Report for Nest<u8> with (FirstField)
+impl Report for Buf<4> with (FirstField)
+impl Report for Choice<u256> with (FirstPayload)
+
+const fn narrow() -> u256 { <Envelope<u8> as Report>::payload_bits() }
+const fn wide() -> u256 { <Envelope<u256> as Report>::payload_bits() }
+const fn nested() -> u256 { <Nest<u8> as Report>::payload_bits() }
+const fn buffer() -> u256 { <Buf<4> as Report>::payload_bits() }
+const fn payload() -> u256 { <Choice<u256> as Report>::payload_bits() }
+"#;
+
+#[test]
+fn explicit_derive_over_generic_record_instances_keeps_their_arguments() {
+    let output = prepare(INSTANCES).unwrap();
+    assert_eq!(eval(&output, "narrow"), "8");
+    assert_eq!(eval(&output, "wide"), "256");
+    assert_eq!(eval(&output, "nested"), "16");
+    assert_eq!(eval(&output, "buffer"), "32");
+    assert_eq!(eval(&output, "payload"), "256");
+}
+
+/// The instance's arguments reach ordinary checking of the generated body:
+/// an argument without the `Bits` the body needs is the ordinary unmet bound,
+/// reported for that instance only.
+#[test]
+fn an_instance_argument_without_the_needed_bound_is_an_ordinary_error() {
+    let source = INSTANCES.replace(
+        "impl Report for Envelope<u256> with (FirstField)\n",
+        "impl Report for Envelope<u256> with (FirstField)\nstruct Opaque {}\nimpl Report for Envelope<Opaque> with (FirstField)\n",
+    );
+    assert_ne!(source, INSTANCES);
+    let cause = prepare_err(&source);
+    assert!(cause.contains("Bits"), "{cause}");
+    assert!(cause.contains("Opaque"), "{cause}");
+}
+
+/// A provider applied to arguments is evaluated at that application: the
+/// constant `K` of `Scaled<10>` is 10 in its quote.
+#[test]
+fn a_provider_applied_to_arguments_evaluates_at_that_application() {
+    let source = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+
+trait Report { const fn payload_bits() -> u256 }
+
+struct Scaled<const K: u256> {}
+impl<const K: u256> Derive<Report> for Scaled<K> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let k = K
+        quote { const fn payload_bits() -> u256 { ${k} } }
+    }
+}
+
+struct Plain { x: u8 }
+struct Other { y: u8 }
+impl Report for Plain with (Scaled<10>)
+impl Report for Other with (Scaled<20>)
+
+const fn ten() -> u256 { Plain::payload_bits() }
+const fn twenty() -> u256 { Other::payload_bits() }
+"#;
+    let output = prepare(source).unwrap();
+    assert_eq!(eval(&output, "ten"), "10");
+    assert_eq!(eval(&output, "twenty"), "20");
+}

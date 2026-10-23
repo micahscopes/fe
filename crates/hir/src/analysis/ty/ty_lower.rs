@@ -97,8 +97,11 @@ fn lower_hir_ty_impl<'db>(
             TyId::app(db, array, len_ty)
         }
 
-        HirTyKind::Primitive(primitive) => {
-            TyId::new(db, TyData::TyBase(super::ty_def::TyBase::from(*primitive)))
+        HirTyKind::Primitive(primitive, args) => {
+            let base = TyId::new(db, TyData::TyBase(super::ty_def::TyBase::from(*primitive)));
+            // Arguments of a frozen ground type, valid by construction.
+            let args = lower_generic_arg_list(db, *args, scope, assumptions, lowering_cx);
+            TyId::foldl(db, base, &args)
         }
         HirTyKind::Never => TyId::never(db),
         HirTyKind::AuthoredField(field) => match field.bound_type(db) {

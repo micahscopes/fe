@@ -50,7 +50,10 @@ impl<'db> Expr<'db> {
                         .expect("validated frozen integer primitive");
                         let ty = TypeId::new(
                             ctxt.f_ctxt.db(),
-                            crate::hir_def::TypeKind::Primitive(primitive),
+                            crate::hir_def::TypeKind::Primitive(
+                                primitive,
+                                crate::hir_def::GenericArgListId::none(ctxt.f_ctxt.db()),
+                            ),
                         );
                         Self::Cast(value, crate::hir_def::Partial::Present(ty))
                     }

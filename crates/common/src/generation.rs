@@ -75,6 +75,47 @@ pub struct FrozenRecordRef {
     pub target_file: Url,
     pub target_range: TextRange,
     pub variant_index: Option<usize>,
+    /// The record's actual arguments, or `None` for the record over its own
+    /// parameters, which a generated item then declares.
+    pub args: Option<Vec<FrozenGenericArg>>,
+}
+
+/// An authored type declaration, by its file and syntax range.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FrozenDeclRef {
+    pub file: Url,
+    pub range: TextRange,
+}
+
+/// A ground type of the authored view, by declaration identity: the actual
+/// type and constant arguments of a reflected record or field, rebound by the
+/// same declarations in the output view.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FrozenTy {
+    /// An authored struct or enum applied to its arguments.
+    Declared {
+        decl: FrozenDeclRef,
+        args: Vec<FrozenGenericArg>,
+    },
+    /// A builtin type by its name, such as `u8` or `String`, applied to its
+    /// arguments.
+    Primitive {
+        name: String,
+        args: Vec<FrozenGenericArg>,
+    },
+    Tuple(Vec<FrozenTy>),
+    Array {
+        elem: Box<FrozenTy>,
+        len: FrozenScalar,
+    },
+    Ptr(Box<FrozenTy>),
+    Never,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FrozenGenericArg {
+    Type(FrozenTy),
+    Const(FrozenScalar),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -88,7 +129,11 @@ pub enum FrozenHoleValue {
     Scalar(FrozenScalar),
     Record(FrozenRecordRef),
     Field(FrozenFieldRef),
+    /// A field's declared type, over the record's own parameters.
     FieldType(FrozenFieldRef),
+    /// A ground type: the instantiated type of a field of a record with
+    /// actual arguments.
+    Type(FrozenTy),
     Code(FrozenCode),
 }
 

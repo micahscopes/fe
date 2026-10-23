@@ -1871,8 +1871,14 @@ struct Box<T> { value: T }
     );
 }
 
+/// Until frozen requests carried type arguments, both splices below were
+/// refused ("... from instantiated generic records are not supported yet"),
+/// because the generated type would have lost `Box<u256>`'s argument. The
+/// record's actual arguments now cross into the output view, so `${ty}` is
+/// `u256` and `${record}` is `Box<u256>`. The `u8` instance discriminates: a
+/// lost argument would accept 300 there.
 #[test]
-fn instantiated_generic_field_type_splice_refuses_without_losing_scalar_reflection() {
+fn instantiated_generic_field_type_and_record_splices_keep_their_actual_arguments() {
     let source = r#"use core::derive::Derive
 use core::meta::{Code, Item, Record, field, field_count, field_type}
 trait Value { const fn value() -> u256 }
@@ -1881,33 +1887,75 @@ struct Provider {}
 impl Derive<Value> for Provider {
     const fn derive(_ record: Record) -> Code<Item> {
         let ty = field_type(field(record, 0))
-        quote { const fn value() -> ${ty} { 7 } }
+        quote { const fn value() -> u256 { let v: ${ty} = 300
+            v as u256 } }
     }
 }
 impl Value for Box<u256> with (Provider)
 const fn observe() -> u256 { <Box<u256> as Value>::value() }
 "#;
-    let (db, file) = input(source);
+    let eval_observe = |source: &str| {
+        let (db, file) = input(source);
+        let output = prepare_file(&db, file)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .expect("a prepared view");
+        let output_file = output
+            .workspace()
+            .get(&output, &file.url(&db).unwrap())
+            .unwrap();
+        let function = output
+            .top_mod(output_file)
+            .all_funcs(&output)
+            .iter()
+            .copied()
+            .find(|function| {
+                function
+                    .name(&output)
+                    .to_opt()
+                    .is_some_and(|name| name.data(&output) == "observe")
+            })
+            .expect("observe");
+        let owner = BodyOwner::Func(function, None);
+        let result = eval_body_owner_const(
+            &output,
+            owner,
+            GenericSubst::for_body_owner(&output, owner, vec![]),
+        );
+        let EvalOutcome::Ready(value) = result else {
+            panic!("{result:?}")
+        };
+        let SemConstValue::Scalar {
+            value: SemConstScalar::Int { value },
+            ..
+        } = value.value(&output)
+        else {
+            panic!("{:?}", value.value(&output))
+        };
+        value.to_string()
+    };
+    assert_eq!(eval_observe(source), "300");
+
+    let narrow = source.replace("Box<u256>", "Box<u8>");
+    let (db, file) = input(&narrow);
     let error = prepare_file(&db, file)
         .err()
-        .expect("instantiated type arguments must not be discarded");
+        .expect("300 is out of range for the actual argument u8");
     assert!(
-        error
-            .cause
-            .contains("field type splices from instantiated generic records are not supported yet"),
+        error.cause.contains("generated output admission failed"),
         "{error}"
     );
 
-    let record_splice = source.replace("-> ${ty} { 7 }", "-> ${record} { 7 }");
-    let (db, file) = input(&record_splice);
-    let error = prepare_file(&db, file)
-        .err()
-        .expect("record splice must not lose concrete target arguments");
+    let record_splice = source.replace(
+        "let v: ${ty} = 300\n            v as u256",
+        "let b: ${record} = Box { value: 300 }\n            b.value as u256",
+    );
+    assert_ne!(record_splice, source);
+    assert_eq!(eval_observe(&record_splice), "300");
+    let narrow = record_splice.replace("Box<u256>", "Box<u8>");
+    let (db, file) = input(&narrow);
     assert!(
-        error
-            .cause
-            .contains("record splices from instantiated generic records are not supported yet"),
-        "{error}"
+        prepare_file(&db, file).is_err(),
+        "`Box<u8>` must not accept a 300 field"
     );
 
     let scalar = source
@@ -1915,15 +1963,8 @@ const fn observe() -> u256 { <Box<u256> as Value>::value() }
             "let ty = field_type(field(record, 0))",
             "let n = field_count(record)",
         )
-        .replace("-> ${ty} { 7 }", "-> u256 { ${n} as u256 }");
-    let fixed_field = source.replace(
-        "struct Box<T> { value: T }",
-        "struct Box<T> { value: u256 }",
-    );
-    for positive in [scalar, fixed_field] {
-        let (db, file) = input(&positive);
-        assert!(prepare_file(&db, file).unwrap().is_some());
-    }
+        .replace("let v: ${ty} = 300", "let v: u256 = ${n} as u256");
+    assert_eq!(eval_observe(&scalar), "1");
 }
 
 #[test]

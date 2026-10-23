@@ -13,7 +13,20 @@ impl<'db> TypeId<'db> {
             ast::TypeKind::QuoteHole(hole) => {
                 let db = ctxt.db();
                 match ctxt.current_hole(hole.syntax().text_range()) {
+                    Some(common::generation::FrozenHoleValue::Record(record_ref))
+                        if let Some(args) = &record_ref.args =>
+                    {
+                        // The record's actual arguments.
+                        let record = ctxt.authored_record(&record_ref);
+                        let generic_args = GenericArgListId::thaw(ctxt, args);
+                        TypeKind::Path(Partial::Present(record.path(db, generic_args)))
+                    }
+                    Some(common::generation::FrozenHoleValue::Type(frozen)) => {
+                        return TypeId::thaw(ctxt, &frozen);
+                    }
                     Some(common::generation::FrozenHoleValue::Record(record_ref)) => {
+                        // The record over its own parameters, which the generated
+                        // item declares.
                         let record = ctxt.authored_record(&record_ref);
                         let params: Vec<_> = record
                             .generic_params()
@@ -419,7 +432,10 @@ fn bind_type_to_scope_with_params<'db>(
                 .into(),
             *len,
         ),
-        TypeKind::Primitive(p) => TypeKind::Primitive(*p),
+        TypeKind::Primitive(p, args) => TypeKind::Primitive(
+            *p,
+            bind_generic_arg_list_to_scope(db, *args, scope, param_names),
+        ),
         TypeKind::Never => TypeKind::Never,
         // Already bound in its record's declaration.
         TypeKind::AuthoredField(field) => TypeKind::AuthoredField(*field),
@@ -493,5 +509,70 @@ pub(super) fn bind_where_predicate_to_scope<'db>(
                 .collect(),
         }),
         WhereClausePredicate::Const(body) => WhereClausePredicate::Const(body),
+    }
+}
+
+impl<'db> TypeId<'db> {
+    /// A ground type frozen in the authored view, rebound in this view by the
+    /// same declarations: never by name lookup at the place it is spliced.
+    pub(super) fn thaw(
+        ctxt: &mut FileLowerCtxt<'db>,
+        frozen: &common::generation::FrozenTy,
+    ) -> Self {
+        use common::generation::FrozenTy;
+        let db = ctxt.db();
+        let kind = match frozen {
+            FrozenTy::Declared { decl, args } => {
+                let args = GenericArgListId::thaw(ctxt, args);
+                TypeKind::Path(Partial::Present(ctxt.authored_decl_path(decl, args)))
+            }
+            FrozenTy::Primitive { name, args } => {
+                let primitive =
+                    crate::hir_def::prim_ty::PrimTy::from_name(db, IdentId::new(db, name.clone()))
+                        .expect("validated frozen primitive");
+                TypeKind::Primitive(primitive, GenericArgListId::thaw(ctxt, args))
+            }
+            FrozenTy::Tuple(elems) => {
+                let elems = elems
+                    .iter()
+                    .map(|elem| Partial::Present(Self::thaw(ctxt, elem)))
+                    .collect();
+                TypeKind::Tuple(TupleTypeId::new(db, elems))
+            }
+            FrozenTy::Array { elem, len } => TypeKind::Array(
+                Partial::Present(Self::thaw(ctxt, elem)),
+                Partial::Present(Body::lower_frozen_scalar(ctxt, len)),
+            ),
+            FrozenTy::Ptr(pointee) => TypeKind::Ptr(Partial::Present(Self::thaw(ctxt, pointee))),
+            FrozenTy::Never => TypeKind::Never,
+        };
+        Self::new(db, kind)
+    }
+}
+
+impl<'db> GenericArgListId<'db> {
+    pub(super) fn thaw(
+        ctxt: &mut FileLowerCtxt<'db>,
+        args: &[common::generation::FrozenGenericArg],
+    ) -> Self {
+        use common::generation::FrozenGenericArg;
+        let db = ctxt.db();
+        if args.is_empty() {
+            return Self::none(db);
+        }
+        let args = args
+            .iter()
+            .map(|arg| match arg {
+                FrozenGenericArg::Type(ty) => GenericArg::Type(TypeGenericArg {
+                    ty: Partial::Present(TypeId::thaw(ctxt, ty)),
+                }),
+                FrozenGenericArg::Const(value) => {
+                    GenericArg::Const(crate::hir_def::params::ConstGenericArg {
+                        value: Partial::Present(Body::lower_frozen_scalar(ctxt, value)),
+                    })
+                }
+            })
+            .collect();
+        Self::new(db, args, true)
     }
 }
