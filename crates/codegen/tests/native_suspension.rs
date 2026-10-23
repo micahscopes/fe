@@ -147,12 +147,18 @@ fn execute(name: &str, source: &str, checks: &str, invalid_tag: bool) {
 use runtime::{{NativeCode,Task,Delivery,Progress,Ticket,Error}};
 use std::{{rc::Rc,cell::Cell}};
 unsafe extern "C" {{ {declarations} }}
-thread_local! {{ static PROBE: Cell<Option<(*const Task<()>,Ticket)>> = const {{ Cell::new(None) }}; }}
+#[derive(Clone,Copy)] enum Probe {{ Queue(*const Task<()>,Ticket), Cancel(*const Task<()>) }}
+thread_local! {{ static PROBE: Cell<Option<Probe>> = const {{ Cell::new(None) }}; }}
 #[unsafe(no_mangle)] extern "C" fn native_task_probe()->u64 {{
-    if let Some((task,ticket))=PROBE.get() {{
-        let task=unsafe{{&*task}};
-        assert_eq!(task.deliver(ticket,Delivery::Success(9)),Ok(()));
-        assert_eq!(task.poll(),Err(Error::Reentrant));
+    if let Some(probe)=PROBE.get() {{
+        match probe {{
+            Probe::Queue(task,ticket)=>{{
+                let task=unsafe{{&*task}};
+                assert_eq!(task.deliver(ticket,Delivery::Success(9)),Ok(()));
+                assert_eq!(task.poll(),Err(Error::Reentrant));
+            }}
+            Probe::Cancel(task)=>{{ assert!(unsafe{{&*task}}.cancel()); }}
+        }}
         PROBE.set(None);
     }}
     0
@@ -171,6 +177,14 @@ fn main() {{
     }}
     assert!(matches!(unsafe{{NativeCode::new(vec![],0,())}},Err(Error::InvalidArtifact)));
     assert_eq!(Delivery::from_wire(99,0),Err(Error::InvalidDelivery));
+    struct Guard(Rc<Cell<usize>>);
+    impl Drop for Guard {{ fn drop(&mut self) {{ self.0.set(self.0.get()+1); }} }}
+    let released=Rc::new(Cell::new(0));
+    let held_code=Rc::new(unsafe{{NativeCode::new(entries.clone(),{words},Guard(released.clone()))}}.unwrap());
+    let held=Task::new(held_code.clone()).unwrap();
+    drop(held_code); assert_eq!(released.get(),0);
+    assert!(matches!(held.poll(),Ok(Progress::Suspended(_))));
+    drop(held); assert_eq!(released.get(),1);
     let code=Rc::new(unsafe{{NativeCode::new(entries,{words},())}}.unwrap());
     {checks}
 }}
@@ -236,9 +250,13 @@ let cancel=Task::new(code.clone()).unwrap(); let c=waiting(&cancel);
 cancel.deliver(c,Delivery::Success(9)).unwrap(); assert!(cancel.cancel());
 done(&cancel,0,true); assert!(!cancel.cancel());
 let target=Task::new(code.clone()).unwrap(); let t=waiting(&target);
-PROBE.set(Some((&target,t)));
+PROBE.set(Some(Probe::Queue(&target,t)));
 let trigger=Task::new(code.clone()).unwrap(); let _=waiting(&trigger);
 assert!(PROBE.get().is_none()); done(&target,14,false);
+let running_cancel=Task::new(code.clone()).unwrap();
+PROBE.set(Some(Probe::Cancel(&running_cancel)));
+assert_eq!(running_cancel.poll(),Ok(Progress::Cancelling));
+assert!(running_cancel.retains_frame()); done(&running_cancel,0,true);
 "#,
         true,
     );
