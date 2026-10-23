@@ -59,6 +59,82 @@ pub(crate) fn inline_projections<'db>(
     Ok(())
 }
 
+/// Compose an ordinary call's continuation with its caller for native task
+/// lowering. Projection sessions use their separate ramp/slide operation.
+pub(crate) fn inline_task_call<'db>(
+    body: &mut RuntimeBody<'db>,
+    block: RBlockId,
+    statement: usize,
+    callee: &RuntimeBody<'db>,
+) -> Result<(), LowerError> {
+    let RStmt::Assign {
+        dst,
+        expr: RExpr::Call { args, .. },
+    } = body.blocks[block.index()].stmts[statement].clone()
+    else {
+        return Err(LowerError::Unsupported(
+            "task composition requires an ordinary call".into(),
+        ));
+    };
+    if args.len() != callee.signature.params.len()
+        || callee
+            .blocks
+            .iter()
+            .any(|block| matches!(block.terminator, RTerminator::Yield { .. }))
+    {
+        return Err(LowerError::Unsupported(
+            "task composition requires a matching ordinary signature".into(),
+        ));
+    }
+    let splice = Splice {
+        callee,
+        locals: body.locals.len() as u32,
+        bindings: body.provider_bindings.len() as u32,
+        origin: body.stmt_origins[block.index()][statement],
+    };
+    body.locals.extend(callee.locals.iter().cloned());
+    body.provider_bindings
+        .extend(callee.provider_bindings.iter().cloned().map(|mut binding| {
+            binding.value = splice.local(binding.value);
+            binding
+        }));
+    let after = split_block(body, block, statement);
+    for (param, arg) in callee.signature.params.iter().zip(args) {
+        push_stmt(
+            body,
+            block,
+            splice.origin,
+            RStmt::Assign {
+                dst: splice.local(param.local),
+                expr: RExpr::Use(arg),
+            },
+        );
+    }
+    let copies = splice.copy(body, |stmts, terminator| {
+        if let RTerminator::Return(Some(value)) = terminator {
+            stmts.push(RStmt::Assign {
+                dst,
+                expr: RExpr::Use(*value),
+            });
+        }
+        RTerminator::Goto(after)
+    });
+    for (index, copied) in copies.iter().enumerate() {
+        // Preserve definition origins for copied operations. The synthesized
+        // return assignment belongs to the callee's return site.
+        let mut origins = callee.stmt_origins[index].clone();
+        origins.resize(
+            body.blocks[copied.index()].stmts.len(),
+            callee.terminator_origins[index],
+        );
+        body.stmt_origins[copied.index()] = origins;
+        body.terminator_origins[copied.index()] = callee.terminator_origins[index];
+    }
+    body.blocks[block.index()].terminator = RTerminator::Goto(copies[0]);
+    prune_unreachable_blocks(body);
+    Ok(())
+}
+
 /// Replaces the call at `stmt` of `block`, which assigns the session `dst`,
 /// with the callee's ramp, and each `End` of the session with its slide.
 fn inline_session<'db>(
