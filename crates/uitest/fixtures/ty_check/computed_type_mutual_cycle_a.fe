@@ -1,0 +1,20 @@
+// Two computed types whose payloads each ask for the size of the other. The
+// same items in the other declaration order are in
+// computed_type_mutual_cycle_b.fe; both report the same errors.
+struct Cell<const N: u256> {}
+const fn size_beta() -> u256 { core::size_of<Beta<0>>() }
+const fn size_alpha() -> u256 { core::size_of<Alpha<0>>() }
+recursive type fn Alpha<const N: usize>() -> (*) {
+    match N {
+        0 => Cell<{size_beta()}>
+        _ => Alpha<{N - 1}>
+    }
+}
+recursive type fn Beta<const N: usize>() -> (*) {
+    match N {
+        0 => Cell<{size_alpha()}>
+        _ => Beta<{N - 1}>
+    }
+}
+fn use_alpha(x: own Alpha<0>) {}
+fn use_beta(x: own Beta<0>) {}

@@ -1,0 +1,29 @@
+// Unfolding shares the normalization limits: 64 nested steps, and 65,536
+// type nodes written out.
+struct Node<T> {}
+struct Pair<A, B> {}
+recursive type fn Chain<const N: usize>() -> (*) {
+    match N {
+        0 => bool
+        _ => Node<Chain<{N - 1}>>
+    }
+}
+// Each step doubles the type written out.
+recursive type fn Bush<const N: usize>() -> (*) {
+    match N {
+        0 => bool
+        _ => Pair<Bush<{N - 1}>, Bush<{N - 1}>>
+    }
+}
+recursive type fn Halve<const N: usize>() -> (*) {
+    match N {
+        0 => bool
+        _ => Node<Halve<{N / 2}>>
+    }
+}
+fn chain_deepest(x: own Chain<63>) {}
+fn chain_too_deep(x: own Chain<64>) {}
+fn bush_small(x: own Bush<8>) {}
+fn bush_too_large(x: own Bush<40>) {}
+fn halve_large_subject(x: own Halve<1000000000000>) {}
+fn chain_in_call() -> u256 { core::size_of<Chain<100>>() }

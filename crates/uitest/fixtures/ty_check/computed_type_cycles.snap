@@ -1,0 +1,55 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/computed_type_cycles.fe
+---
+error[3-0073]: recursive constant definition
+   ┌─ computed_type_cycles.fe:19:23
+   │
+ 7 │ const fn own_size() -> u256 { core::size_of<Selfish<1>>() }
+   │                               --------------------------- this constant requires its own value
+   ·
+19 │ const SELFISH: u256 = own_size()
+   │                       ^^^^^^^^^^ while evaluating this
+
+error[3-0079]: computed type depends on itself
+  ┌─ computed_type_cycles.fe:7:45
+  │
+7 │ const fn own_size() -> u256 { core::size_of<Selfish<1>>() }
+  │                                             ^^^^^^^^^^ computing this type requires its own result
+
+error[3-0079]: computed type depends on itself
+   ┌─ computed_type_cycles.fe:14:29
+   │
+14 │ fn selfish_signature(x: own Selfish<1>) {}
+   │                             ^^^^^^^^^^ computing this type requires its own result
+
+error[3-0079]: computed type depends on itself
+   ┌─ computed_type_cycles.fe:16:12
+   │
+16 │     let _: Selfish<1> = Cell<1> {}
+   │            ^^^^^^^^^^ computing this type requires its own result
+
+error[3-0079]: computed type depends on itself
+   ┌─ computed_type_cycles.fe:18:47
+   │
+18 │ fn selfish_call_arg() -> u256 { core::size_of<Selfish<0>>() }
+   │                                               ^^^^^^^^^^ computing this type requires its own result
+
+error[3-0079]: computed type depends on itself
+   ┌─ computed_type_cycles.fe:22:46
+   │
+22 │ const fn deep_size() -> u256 { core::size_of<Deep<1>>() }
+   │                                              ^^^^^^^ computing this type requires its own result
+
+error[3-0079]: computed type depends on itself
+   ┌─ computed_type_cycles.fe:31:12
+   │
+31 │     let _: Deep<1> = Cell<1> {}
+   │            ^^^^^^^ computing this type requires its own result
+
+error[3-0079]: computed type depends on itself
+   ┌─ computed_type_cycles.fe:44:16
+   │
+44 │ fn back(x: own Back<2>) {}
+   │                ^^^^^^^ computing this type requires its own result

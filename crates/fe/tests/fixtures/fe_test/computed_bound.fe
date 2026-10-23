@@ -1,0 +1,69 @@
+// A generic function states the bound it needs on a computed type; callers
+// at concrete sizes satisfy it through the type the application computes.
+pub struct Par {}
+pub struct Pair {}
+pub struct Comp<A, B> {}
+trait Reduce { fn leaves() -> usize }
+impl Reduce for Par { fn leaves() -> usize { 1 } }
+impl Reduce for Pair { fn leaves() -> usize { 2 } }
+impl<A: Reduce, B: Reduce> Reduce for Comp<A, B> {
+    fn leaves() -> usize { A::leaves() * B::leaves() }
+}
+recursive type fn RPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RPow<F, {N - 1}>, F>
+    }
+}
+fn count<F, const N: usize>() -> usize where RPow<F, N>: Reduce {
+    <RPow<F, N> as Reduce>::leaves()
+}
+type Ground0 = Par
+type Ground1 = Comp<Ground0, Pair>
+type Ground2 = Comp<Ground1, Pair>
+type Ground3 = Comp<Ground2, Pair>
+type Ground4 = Comp<Ground3, Pair>
+type Ground5 = Comp<Ground4, Pair>
+type Ground6 = Comp<Ground5, Pair>
+type Ground7 = Comp<Ground6, Pair>
+type Ground8 = Comp<Ground7, Pair>
+
+#[test]
+fn computed_bound_matches_ground_shapes() {
+    assert!(count<Pair, 0>() == <Ground0 as Reduce>::leaves())
+    assert!(count<Pair, 1>() == <Ground1 as Reduce>::leaves())
+    assert!(count<Pair, 2>() == <Ground2 as Reduce>::leaves())
+    assert!(count<Pair, 3>() == <Ground3 as Reduce>::leaves())
+    assert!(count<Pair, 4>() == <Ground4 as Reduce>::leaves())
+    assert!(count<Pair, 5>() == <Ground5 as Reduce>::leaves())
+    assert!(count<Pair, 6>() == <Ground6 as Reduce>::leaves())
+    assert!(count<Pair, 7>() == <Ground7 as Reduce>::leaves())
+    assert!(count<Pair, 8>() == <Ground8 as Reduce>::leaves())
+    assert!(count<Pair, 8>() == 256)
+    assert!(count<Par, 5>() == 1)
+}
+
+// A value of a computed type with a symbolic size, used through a bound.
+pub struct Leaf { pub v: u256 }
+pub struct Node<A> { pub l: A, pub r: A }
+recursive type fn VTree<const N: usize>() -> (*) {
+    match N {
+        0 => Leaf
+        _ => Node<VTree<{N - 1}>>
+    }
+}
+trait Sum { fn sum(self) -> u256 }
+impl Sum for Leaf { fn sum(self) -> u256 { self.v } }
+impl<A: Sum> Sum for Node<A> { fn sum(self) -> u256 { self.l.sum() + self.r.sum() } }
+fn total<const N: usize>(_ x: own VTree<N>) -> u256 where VTree<N>: Sum { x.sum() }
+
+#[test]
+fn computed_value_through_bound() {
+    let small: VTree<1> = Node { l: Leaf { v: 1 }, r: Leaf { v: 2 } }
+    assert!(total<1>(small) == 3)
+    let big: VTree<2> = Node {
+        l: Node { l: Leaf { v: 1 }, r: Leaf { v: 2 } },
+        r: Node { l: Leaf { v: 3 }, r: Leaf { v: 4 } },
+    }
+    assert!(total<2>(big) == 10)
+}

@@ -1,0 +1,22 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/computed_type_limits.fe
+---
+error[3-0058]: type normalization limit exceeded
+   ┌─ computed_type_limits.fe:25:26
+   │
+25 │ fn chain_too_deep(x: own Chain<64>) {}
+   │                          ^^^^^^^^^ the types here cannot be resolved within the limit
+
+error[3-0058]: type normalization limit exceeded
+   ┌─ computed_type_limits.fe:27:26
+   │
+27 │ fn bush_too_large(x: own Bush<40>) {}
+   │                          ^^^^^^^^ the types here cannot be resolved within the limit
+
+error[3-0058]: type normalization limit exceeded
+   ┌─ computed_type_limits.fe:29:44
+   │
+29 │ fn chain_in_call() -> u256 { core::size_of<Chain<100>>() }
+   │                                            ^^^^^^^^^^ the types here cannot be resolved within the limit
