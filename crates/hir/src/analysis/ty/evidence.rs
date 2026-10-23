@@ -687,7 +687,7 @@ impl<'db> TyVisitable<'db> for EvidenceId<'db> {
 
 /// Whether `goal` names no parameter or inference variable. A supplied
 /// dictionary can still distinguish two proofs of such a concrete goal.
-fn is_closed_goal<'db>(db: &'db dyn HirAnalysisDb, goal: TraitInstId<'db>) -> bool {
+pub(crate) fn is_closed_goal<'db>(db: &'db dyn HirAnalysisDb, goal: TraitInstId<'db>) -> bool {
     !collect_flags(db, goal).intersects(TyFlags::HAS_PARAM | TyFlags::HAS_VAR)
 }
 

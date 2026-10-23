@@ -393,13 +393,14 @@ fn collect_contract_error_types<'db>(
                     expr:
                         SExpr::Call {
                             call_site: CallSiteId::Expr(expr),
+                            callee,
                             ..
                         },
                     ..
-                } => Some(*expr),
+                } => Some((*expr, callee.key)),
                 _ => None,
             });
-        for expr in expression_calls {
+        for (expr, callee) in expression_calls {
             let partial = expr.data(db, body);
             let hir::hir_def::Partial::Present(hir::hir_def::Expr::Call(_, args)) = partial else {
                 continue;
@@ -437,12 +438,17 @@ fn collect_contract_error_types<'db>(
                 let error_trait =
                     error_trait.ok_or("missing canonical ErrorVariant declaration")?;
                 let goal = TraitInstId::new_simple(db, error_trait, vec![ty, sol_ty]);
-                let proved = callable.proved_bound(db, goal).ok_or_else(|| {
-                    format!(
-                        "missing declaration-owned checked ErrorVariant proof for `{}`",
-                        ty.pretty_print(db)
-                    )
-                })?;
+                // The callee instance answers a closed slot the call does not
+                // transport; its normalization scope gives that proof's ingot.
+                let instance_scope = callee.impl_env(db).normalization_scope(db);
+                let proved = callable
+                    .proved_bound(db, instance_scope, goal)
+                    .ok_or_else(|| {
+                        format!(
+                            "missing declaration-owned checked ErrorVariant proof for `{}`",
+                            ty.pretty_print(db)
+                        )
+                    })?;
                 if !proved.proof.is_closed(db) || proved.proof.answering(db, goal).is_none() {
                     return Err(format!(
                         "error ABI requires a closed checked ErrorVariant proof for `{}`",
