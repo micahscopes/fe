@@ -26,7 +26,7 @@ use crate::analysis::{
         evidence::{
             BoundEvidence, BoundOwner, BoundSchemaId, EvidenceId, EvidenceList, ProofOutcome,
             ProvedGoal, RowEvidence, UseEvidence, declared_bound_evidence_with_pending,
-            instantiated_selection, prove_outcome,
+            instantiated_selection, is_closed_goal, prove, prove_outcome,
         },
         fold::{TyFoldable, TyFolder},
         generic_defaults::{DefaultApplication, GenericArgError},
@@ -535,12 +535,20 @@ impl<'db> Callable<'db> {
         self.use_evidence.bound_proofs()
     }
 
-    /// The recorded proof of an exact applied callee bound. Declaration-owned
-    /// slots are matched after substitution; this operation never proves or
-    /// selects an implementation when the recorded proof is unavailable.
+    /// The proof of an exact applied callee bound that the callee's instance
+    /// runs with. Declaration-owned slots are matched after substitution.
+    ///
+    /// A slot keeps the proof this call supplies, with one exception that
+    /// `instance_evidence` defines: a closed goal without a closed supplied
+    /// proof has the closed goal's shared proof. The checker does not
+    /// transport such a proof when no lexical choice or caller dictionary
+    /// affects it, and the instance proves it with the ingot of
+    /// `instance_scope`, its normalization scope. Any other slot without a
+    /// supplied proof has none; nothing is selected for it.
     pub fn proved_bound(
         &self,
         db: &'db dyn HirAnalysisDb,
+        instance_scope: crate::hir_def::scope_graph::ScopeId<'db>,
         goal: TraitInstId<'db>,
     ) -> Option<ProvedGoal<'db>> {
         let CallableDef::Func(func) = self.callable_def else {
@@ -562,13 +570,21 @@ impl<'db> Callable<'db> {
             .enumerate()
             .find_map(|(index, &declared)| {
                 let applied = substitute_complete(db, declared, &subst).ok()?;
-                (applied == goal)
-                    .then(|| bound.entries.get(db, index))
-                    .flatten()
-                    .map(|proof| ProvedGoal {
-                        goal: applied,
-                        proof,
-                    })
+                if applied != goal {
+                    return None;
+                }
+                let supplied = bound.entries.get(db, index);
+                let proof = if is_closed_goal(db, applied)
+                    && !supplied.is_some_and(|proof| proof.is_closed(db))
+                {
+                    prove(db, TraitSolveCx::new(db, instance_scope), applied)
+                } else {
+                    supplied
+                }?;
+                Some(ProvedGoal {
+                    goal: applied,
+                    proof,
+                })
             })
     }
 
@@ -1517,13 +1533,15 @@ mod checked_bound_consumer_tests {
             "trait Mark {}\nimpl Mark for u256 {}\nimpl Mark for bool {}\n\
              fn sink<T: Mark, U: Mark>(_ first: T, _ second: U) {}\n\
              fn caller() { let n: u256 = 1\nsink(n, true) }\n\
-             fn collapsed() { let n: u256 = 1\nsink(n, n) }",
+             fn generic<T: Mark>(_ x: T) { sink(x, true) }\n\
+             fn collapsed<T: Mark>(_ x: T) { sink(x, x) }",
         );
         let (module, _) = db.top_mod(file);
         db.assert_no_diags(module);
         let sink = find_func(&db, module, "sink");
-        for caller_name in ["caller", "collapsed"] {
+        for caller_name in ["caller", "generic", "collapsed"] {
             let caller = find_func(&db, module, caller_name);
+            let scope = caller.scope();
             let (_, typed) = super::super::check_body(&db, BodyOwner::Func(caller, None));
             let body = typed.body().unwrap();
             let callable = body
@@ -1550,8 +1568,9 @@ mod checked_bound_consumer_tests {
             assert!(
                 goals
                     .iter()
-                    .all(|&goal| callable.proved_bound(&db, goal).is_some())
+                    .all(|&goal| callable.proved_bound(&db, scope, goal).is_some())
             );
+            let shared = |goal| prove(&db, TraitSolveCx::new(&db, scope), goal);
 
             let mut wrong_owner = callable.clone();
             wrong_owner.use_evidence.bounds.as_mut().unwrap().schema = BoundSchemaId::new(
@@ -1559,7 +1578,7 @@ mod checked_bound_consumer_tests {
                 BoundOwner::Body(BodyOwner::Func(caller, None)),
                 bound.schema.slots(&db),
             );
-            assert!(wrong_owner.proved_bound(&db, goals[0]).is_none());
+            assert!(wrong_owner.proved_bound(&db, scope, goals[0]).is_none());
 
             let mut wrong_schema = callable.clone();
             wrong_schema.use_evidence.bounds.as_mut().unwrap().schema = BoundSchemaId::new(
@@ -1567,22 +1586,49 @@ mod checked_bound_consumer_tests {
                 bound.schema.owner(&db),
                 crate::analysis::ty::trait_resolution::PredicateListId::empty_list(&db),
             );
-            assert!(wrong_schema.proved_bound(&db, goals[0]).is_none());
+            assert!(wrong_schema.proved_bound(&db, scope, goals[0]).is_none());
 
             let mut missing = callable.clone();
             missing.use_evidence.bounds.as_mut().unwrap().entries = EvidenceList::none(&db);
-            assert!(missing.proved_bound(&db, goals[0]).is_none());
-
-            if caller_name == "collapsed" {
-                assert_eq!(goals[0], goals[1]);
-                // Applied equality must not renumber the declaration's slots:
-                // the second slot remains available when the first is absent.
-                let second = bound.entries.get(&db, 1).unwrap();
-                missing.use_evidence.bounds.as_mut().unwrap().entries =
-                    EvidenceList::of(&db, vec![None, Some(second)]);
-                assert_eq!(missing.proved_bound(&db, goals[0]).unwrap().proof, second);
-            } else {
-                assert_ne!(goals[0], goals[1]);
+            match caller_name {
+                "caller" => {
+                    // Closed goals are not transported; the instance proves
+                    // them, so their proof does not depend on the entries.
+                    assert!(bound.entries.get(&db, 0).is_none());
+                    assert!(bound.entries.get(&db, 1).is_none());
+                    for &goal in &goals {
+                        let proved = missing.proved_bound(&db, scope, goal).unwrap();
+                        assert_eq!(Some(proved.proof), shared(goal));
+                        assert!(proved.proof.answering(&db, goal).is_some());
+                    }
+                }
+                "generic" => {
+                    // The caller's dictionary is transported and never
+                    // replaced by a fresh selection when it is missing.
+                    assert_ne!(goals[0], goals[1]);
+                    assert_eq!(
+                        callable.proved_bound(&db, scope, goals[0]).unwrap().proof,
+                        bound.entries.get(&db, 0).unwrap()
+                    );
+                    assert!(missing.proved_bound(&db, scope, goals[0]).is_none());
+                    assert_eq!(
+                        Some(missing.proved_bound(&db, scope, goals[1]).unwrap().proof),
+                        shared(goals[1])
+                    );
+                }
+                _ => {
+                    assert_eq!(goals[0], goals[1]);
+                    assert!(missing.proved_bound(&db, scope, goals[0]).is_none());
+                    // Applied equality must not renumber the declaration's slots:
+                    // the second slot remains available when the first is absent.
+                    let second = bound.entries.get(&db, 1).unwrap();
+                    missing.use_evidence.bounds.as_mut().unwrap().entries =
+                        EvidenceList::of(&db, vec![None, Some(second)]);
+                    assert_eq!(
+                        missing.proved_bound(&db, scope, goals[0]).unwrap().proof,
+                        second
+                    );
+                }
             }
         }
     }
