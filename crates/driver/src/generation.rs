@@ -1003,7 +1003,7 @@ fn refuse_mutual_generation(
         entry.extend(named.into_iter().filter(|url| *url != &request.target_file));
     }
     // A module that reads another module which (transitively) reads it back.
-    for (&start, _) in &reads {
+    for &start in reads.keys() {
         let mut stack = vec![start];
         let mut seen = std::collections::BTreeSet::new();
         while let Some(module) = stack.pop() {

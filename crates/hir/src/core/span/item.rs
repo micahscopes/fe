@@ -292,10 +292,11 @@ impl<'db> LazyImplSpan<'db> {
     /// The `idx`th associated const of the implementation's HIR, including
     /// members spliced from quotations.
     pub fn associated_const(self, idx: usize) -> LazyTraitConstSpan<'db> {
-        use crate::span::transition::{AssocMemberKind, AssocMemberOwner};
-        match assoc_member_root(&self.0, AssocMemberKind::Const, idx, |root| match root {
-            ChainRoot::Impl(impl_) => Some(AssocMemberOwner::Impl(impl_)),
-            ChainRoot::ItemKind(ItemKind::Impl(impl_)) => Some(AssocMemberOwner::Impl(impl_)),
+        use crate::span::transition::AssocMemberRoot;
+        match assoc_member_root(&self.0, idx, |root, idx| match root {
+            ChainRoot::Impl(impl_) | ChainRoot::ItemKind(ItemKind::Impl(impl_)) => {
+                Some(AssocMemberRoot::InherentConst(impl_, idx))
+            }
             _ => None,
         }) {
             Some(chain) => LazyTraitConstSpan(chain),
@@ -308,18 +309,16 @@ impl<'db> LazyImplSpan<'db> {
 /// of its implementation.
 fn assoc_member_root<'db>(
     chain: &crate::span::transition::SpanTransitionChain<'db>,
-    kind: crate::span::transition::AssocMemberKind,
     idx: usize,
-    owner: impl FnOnce(ChainRoot<'db>) -> Option<crate::span::transition::AssocMemberOwner<'db>>,
+    member: impl FnOnce(ChainRoot<'db>, u16) -> Option<crate::span::transition::AssocMemberRoot<'db>>,
 ) -> Option<crate::span::transition::SpanTransitionChain<'db>> {
-    use crate::span::transition::{AssocMemberRoot, SpanTransitionChain};
     if chain.len() != 0 {
         return None;
     }
-    let owner = owner(chain.root)?;
-    Some(SpanTransitionChain::new(ChainRoot::AssocMember(
-        AssocMemberRoot { owner, kind, idx },
-    )))
+    let member = member(chain.root, u16::try_from(idx).ok()?)?;
+    Some(crate::span::transition::SpanTransitionChain::new(
+        ChainRoot::AssocMember(member),
+    ))
 }
 
 define_lazy_span_node!(LazyImplItemListSpan, ast::ImplItemList,);
@@ -636,8 +635,10 @@ impl<'db> LazyImplTraitSpan<'db> {
     /// The `idx`th associated type of the implementation's HIR, including
     /// members spliced from quotations.
     pub fn associated_type(self, idx: usize) -> LazyTraitTypeSpan<'db> {
-        use crate::span::transition::AssocMemberKind;
-        match assoc_member_root(&self.0, AssocMemberKind::Type, idx, impl_trait_owner) {
+        use crate::span::transition::AssocMemberRoot;
+        match assoc_member_root(&self.0, idx, |root, idx| {
+            impl_trait_root(root).map(|impl_trait| AssocMemberRoot::TraitType(impl_trait, idx))
+        }) {
             Some(chain) => LazyTraitTypeSpan(chain),
             None => self.item_list().assoc_type(idx),
         }
@@ -646,19 +647,20 @@ impl<'db> LazyImplTraitSpan<'db> {
     /// The `idx`th associated const of the implementation's HIR, including
     /// members spliced from quotations.
     pub fn associated_const(self, idx: usize) -> LazyTraitConstSpan<'db> {
-        use crate::span::transition::AssocMemberKind;
-        match assoc_member_root(&self.0, AssocMemberKind::Const, idx, impl_trait_owner) {
+        use crate::span::transition::AssocMemberRoot;
+        match assoc_member_root(&self.0, idx, |root, idx| {
+            impl_trait_root(root).map(|impl_trait| AssocMemberRoot::TraitConst(impl_trait, idx))
+        }) {
             Some(chain) => LazyTraitConstSpan(chain),
             None => self.item_list().assoc_const(idx),
         }
     }
 }
 
-fn impl_trait_owner(root: ChainRoot<'_>) -> Option<crate::span::transition::AssocMemberOwner<'_>> {
-    use crate::span::transition::AssocMemberOwner;
+fn impl_trait_root(root: ChainRoot<'_>) -> Option<ImplTrait<'_>> {
     match root {
         ChainRoot::ImplTrait(impl_trait) | ChainRoot::ItemKind(ItemKind::ImplTrait(impl_trait)) => {
-            Some(AssocMemberOwner::ImplTrait(impl_trait))
+            Some(impl_trait)
         }
         _ => None,
     }

@@ -85,7 +85,7 @@ impl<'db> SpanTransitionChain<'db> {
             ChainRoot::Stmt(s) => s.body.top_mod(db),
             ChainRoot::Expr(e) => e.body.top_mod(db),
             ChainRoot::Pat(p) => p.body.top_mod(db),
-            ChainRoot::AssocMember(m) => m.owner.item().top_mod(db),
+            ChainRoot::AssocMember(m) => m.item().top_mod(db),
         }
     }
 
@@ -112,7 +112,7 @@ impl<'db> SpanTransitionChain<'db> {
             ChainRoot::Stmt(s) => s.body.scope(),
             ChainRoot::Expr(e) => e.body.scope(),
             ChainRoot::Pat(p) => p.body.scope(),
-            ChainRoot::AssocMember(m) => ScopeId::from_item(m.owner.item()),
+            ChainRoot::AssocMember(m) => ScopeId::from_item(m.item()),
         }
     }
 
@@ -145,31 +145,20 @@ pub(crate) enum ChainRoot<'db> {
 }
 
 /// An associated const or type of an implementation, by its index in the
-/// implementation's HIR member list.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Update)]
-pub(crate) struct AssocMemberRoot<'db> {
-    pub(crate) owner: AssocMemberOwner<'db>,
-    pub(crate) kind: AssocMemberKind,
-    pub(crate) idx: usize,
+/// implementation's HIR member list. Kept as small as the other roots: every
+/// lazy span, and so every diagnostic, carries one.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, SalsaValue)]
+pub(crate) enum AssocMemberRoot<'db> {
+    InherentConst(Impl<'db>, u16),
+    TraitConst(ImplTrait<'db>, u16),
+    TraitType(ImplTrait<'db>, u16),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Update)]
-pub(crate) enum AssocMemberOwner<'db> {
-    Impl(Impl<'db>),
-    ImplTrait(ImplTrait<'db>),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Update)]
-pub(crate) enum AssocMemberKind {
-    Const,
-    Type,
-}
-
-impl<'db> AssocMemberOwner<'db> {
+impl<'db> AssocMemberRoot<'db> {
     pub(crate) fn item(self) -> ItemKind<'db> {
         match self {
-            Self::Impl(impl_) => impl_.into(),
-            Self::ImplTrait(impl_trait) => impl_trait.into(),
+            Self::InherentConst(impl_, _) => impl_.into(),
+            Self::TraitConst(impl_trait, _) | Self::TraitType(impl_trait, _) => impl_trait.into(),
         }
     }
 }
@@ -179,19 +168,21 @@ impl ChainInitiator for AssocMemberRoot<'_> {
     /// authored member is the matching member of its implementation's syntax,
     /// counting only authored members.
     fn init(&self, db: &dyn crate::SpannedHirDb) -> ResolvedOrigin {
-        let generated: Vec<_> = match (self.owner, self.kind) {
-            (AssocMemberOwner::Impl(impl_), AssocMemberKind::Const) => {
-                impl_.consts(db).iter().map(|c| c.generated).collect()
+        let (generated, idx): (Vec<_>, _) = match *self {
+            Self::InherentConst(impl_, idx) => {
+                (impl_.consts(db).iter().map(|c| c.generated).collect(), idx)
             }
-            (AssocMemberOwner::ImplTrait(impl_trait), AssocMemberKind::Const) => {
-                impl_trait.consts(db).iter().map(|c| c.generated).collect()
-            }
-            (AssocMemberOwner::ImplTrait(impl_trait), AssocMemberKind::Type) => {
-                impl_trait.types(db).iter().map(|t| t.generated).collect()
-            }
-            (AssocMemberOwner::Impl(_), AssocMemberKind::Type) => Vec::new(),
+            Self::TraitConst(impl_trait, idx) => (
+                impl_trait.consts(db).iter().map(|c| c.generated).collect(),
+                idx,
+            ),
+            Self::TraitType(impl_trait, idx) => (
+                impl_trait.types(db).iter().map(|t| t.generated).collect(),
+                idx,
+            ),
         };
-        if let Some(Some(syntax)) = generated.get(self.idx) {
+        let idx = usize::from(idx);
+        if let Some(Some(syntax)) = generated.get(idx) {
             let root = top_mod_ast(db, syntax.top_mod);
             let kind = match syntax.node.try_to_node(root.syntax()) {
                 Some(node) => ResolvedOriginKind::Node(node),
@@ -199,19 +190,19 @@ impl ChainInitiator for AssocMemberRoot<'_> {
             };
             return ResolvedOrigin::new(syntax.top_mod.file(db), kind);
         }
-        let authored = self.idx
-            - generated[..self.idx.min(generated.len())]
+        let authored = idx
+            - generated[..idx.min(generated.len())]
                 .iter()
                 .filter(|syntax| syntax.is_some())
                 .count();
-        let (owner, kind) = (self.owner, self.kind);
-        let resolved = match owner {
-            AssocMemberOwner::Impl(impl_) => impl_.init(db),
-            AssocMemberOwner::ImplTrait(impl_trait) => impl_trait.init(db),
+        let root = *self;
+        let resolved = match root {
+            Self::InherentConst(impl_, _) => impl_.init(db),
+            Self::TraitConst(impl_trait, _) | Self::TraitType(impl_trait, _) => impl_trait.init(db),
         };
         resolved.map(|node| {
-            let member = match (owner, kind) {
-                (AssocMemberOwner::Impl(_), AssocMemberKind::Const) => ast::Impl::cast(node)
+            let member = match root {
+                Self::InherentConst(..) => ast::Impl::cast(node)
                     .and_then(|impl_| impl_.item_list())
                     .and_then(|list| {
                         list.into_iter()
@@ -221,22 +212,28 @@ impl ChainInitiator for AssocMemberRoot<'_> {
                             })
                             .nth(authored)
                     }),
-                (AssocMemberOwner::ImplTrait(_), _) => ast::ImplTrait::cast(node)
-                    .and_then(|impl_trait| impl_trait.item_list())
-                    .and_then(|list| {
-                        list.into_iter()
-                            .filter_map(|item| match (item.kind(), kind) {
-                                (ast::TraitItemKind::Const(c), AssocMemberKind::Const) => {
-                                    Some(c.syntax().clone())
-                                }
-                                (ast::TraitItemKind::Type(t), AssocMemberKind::Type) => {
-                                    Some(t.syntax().clone())
-                                }
-                                _ => None,
-                            })
-                            .nth(authored)
-                    }),
-                (AssocMemberOwner::Impl(_), AssocMemberKind::Type) => None,
+                Self::TraitConst(..) | Self::TraitType(..) => {
+                    let types = matches!(root, Self::TraitType(..));
+                    ast::ImplTrait::cast(node)
+                        .and_then(|impl_trait| impl_trait.item_list())
+                        .and_then(|list| {
+                            list.into_iter()
+                                .filter_map(|item| match item.kind() {
+                                    ast::TraitItemKind::Const(c) if !types => {
+                                        Some(c.syntax().clone())
+                                    }
+                                    // Associated types and shapes, in order.
+                                    ast::TraitItemKind::Type(t) if types => {
+                                        Some(t.syntax().clone())
+                                    }
+                                    ast::TraitItemKind::Shape(s) if types => {
+                                        Some(s.syntax().clone())
+                                    }
+                                    _ => None,
+                                })
+                                .nth(authored)
+                        })
+                }
             };
             member.map(NodeOrToken::Node)
         })
