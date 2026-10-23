@@ -204,7 +204,7 @@ pub fn prepare_file(
     if found.requests.is_empty() && !found.has_scoped_opening {
         return Err(error(
             parser::TextRange::empty(0.into()),
-            "generation request requires an authored concrete root record".into(),
+            "generation request requires an authored concrete record in a module".into(),
         ));
     }
     admit_requests(
@@ -377,7 +377,26 @@ fn file_requests(
     let module = db.top_mod(file);
     let mut requests = Vec::new();
     let mut consumed = std::collections::HashSet::new();
-    for item in root.items().into_iter().flatten() {
+    // Records in any module's item list; those in function bodies and quotes
+    // are refused below.
+    let records = root
+        .syntax()
+        .descendants()
+        .filter_map(ast::Item::cast)
+        .filter(|item| {
+            !item.syntax().ancestors().skip(1).any(|node| {
+                ast::BlockExpr::can_cast(node.kind()) || ast::QuoteExpr::can_cast(node.kind())
+            })
+        });
+    for item in records {
+        // The output joins the record's module, and the request resolves
+        // its provider there.
+        let publication = item
+            .syntax()
+            .ancestors()
+            .skip(1)
+            .find_map(ast::Mod::cast)
+            .map(|module| module.syntax().text_range());
         let attributes = match item.kind() {
             Some(ast::ItemKind::Struct(record)) => record.attr_list(),
             Some(ast::ItemKind::Enum(enum_)) => enum_.attr_list(),
@@ -412,10 +431,15 @@ fn file_requests(
                 })
             }).collect::<Result<Vec<_>, _>>()?;
             let segments = segments.iter().map(String::as_str).collect::<Vec<_>>();
+            let request_scope = match publication {
+                None => module.scope(),
+                Some(range) => hir::core::meta::authored_mod_scope(db, module, range)
+                    .ok_or_else(|| error(range, "cannot recover the record's module".into()))?,
+            };
             let resolved = hir::analysis::name_resolution::resolve_path(
                 db,
                 hir::hir_def::PathId::from_segments(db, &segments),
-                module.scope(),
+                request_scope,
                 hir::analysis::ty::trait_resolution::PredicateListId::empty_list(db),
                 true,
             )
@@ -439,7 +463,7 @@ fn file_requests(
             if !hir::analysis::name_resolution::is_scope_visible_from(
                 db,
                 provider.scope(),
-                module.scope(),
+                request_scope,
             ) {
                 return Err(error(
                     range,
@@ -487,7 +511,9 @@ fn file_requests(
                     )
                 })?;
             }
-            requests.push(evaluate_provider(db, file, provider, input, range)?);
+            let mut request = evaluate_provider(db, file, provider, input, range)?;
+            request.publication = publication;
+            requests.push(request);
         }
     }
     for request_ast in root.syntax().descendants().filter_map(ast::ImplTrait::cast) {

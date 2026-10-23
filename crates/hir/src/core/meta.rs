@@ -1269,6 +1269,7 @@ impl<'db> ItemCode<'db> {
                 .url(db)
                 .ok_or("generation target has no source URL")?,
             request_impl: None,
+            publication: None,
             code: self.freeze(db)?,
         })
     }
@@ -2158,6 +2159,23 @@ pub fn scoped_derive_provider<'db>(
 }
 
 /// Recover the exact authored header, never a first-by-name implementation.
+/// The scope of the authored `mod` written at `range` in `module`.
+pub fn authored_mod_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    module: crate::hir_def::TopLevelMod<'db>,
+    range: parser::TextRange,
+) -> Option<crate::hir_def::scope_graph::ScopeId<'db>> {
+    module
+        .all_mods(db)
+        .iter()
+        .copied()
+        .find(|mod_| {
+            matches!(mod_.origin(db), HirOrigin::Raw(pointer)
+                if pointer.syntax_node_ptr().text_range() == range)
+        })
+        .map(|mod_| mod_.scope())
+}
+
 pub fn authored_derive_request<'db>(
     db: &'db dyn HirAnalysisDb,
     module: crate::hir_def::TopLevelMod<'db>,

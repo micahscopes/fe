@@ -516,6 +516,7 @@ impl<'db> Mod<'db> {
         if let Some(items) = ast.items() {
             lower_module_items(ctxt, items);
         }
+        super::generated::append_module_output(ctxt, Some(ast.syntax().text_range()));
 
         let origin = HirOrigin::raw(&ast);
         let mod_ = Self::new(ctxt.db(), id, name, attributes, vis, ctxt.top_mod(), origin);

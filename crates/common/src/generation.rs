@@ -185,6 +185,9 @@ pub struct FrozenGenerationRequest {
     pub scoped_impl: Option<FrozenScopedImpl>,
     /// Authored derive header receiving this generated method.
     pub request_impl: Option<TextRange>,
+    /// The authored `mod` whose items a whole-item output joins, as its
+    /// record does; `None` for the file's root module.
+    pub publication: Option<TextRange>,
     pub code: FrozenCode,
 }
 

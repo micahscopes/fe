@@ -112,11 +112,29 @@ pub(super) fn append_functions<'db>(ctxt: &mut FileLowerCtxt<'db>) {
             .set_quoted_item_origin(generated.into(), producer);
     }
 
+    append_module_output(ctxt, None);
+}
+
+/// Lower the whole-item outputs that join the module being lowered: the file's
+/// root for `None`, else the `mod` written at that range. Each is published
+/// where its record is declared, after that module's authored items.
+pub(super) fn append_module_output<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    publication: Option<parser::TextRange>,
+) {
+    let db = ctxt.db();
+    let Some(url) = ctxt.top_mod().file(db).url(db) else {
+        return;
+    };
     let requests = db
         .generation_inputs()
         .requests(db)
         .iter()
-        .filter(|request| request.target_file == url && request.request_impl.is_none())
+        .filter(|request| {
+            request.target_file == url
+                && request.request_impl.is_none()
+                && request.publication == publication
+        })
         .cloned()
         .collect::<Vec<_>>();
     for request in requests {

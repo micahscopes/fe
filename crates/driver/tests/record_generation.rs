@@ -1572,12 +1572,17 @@ struct Pair {
         oob_err.cause
     );
 
+    // A record in a nested module was refused ("generation request requires an
+    // authored concrete root record") while whole-item output could only join
+    // the file's root. It now joins the record's own module, and the request
+    // resolves its provider there.
     let submod_source = r#"
-use core::meta::{Code, Item, Record}
+use core::meta::{Code, Item, Record, field_count}
 
 pub const fn make(_ r: Record) -> Code<Item> {
+    let n = field_count(r)
     quote {
-        fn generated() -> usize { 1 }
+        pub const fn generated() -> usize { ${n} }
     }
 }
 
@@ -1585,19 +1590,38 @@ mod nested {
     #[generate(super::make)]
     pub struct Inner {
         pub x: u256,
+        pub y: u256,
     }
 }
+
+const fn probe() -> usize { nested::generated() }
 "#;
     let (db, file) = input(submod_source);
-    let submod_err = prepare_file(&db, file)
-        .err()
-        .expect("submodule #[generate] must refuse");
+    let output = prepare_file(&db, file)
+        .unwrap_or_else(|error| panic!("{error}"))
+        .expect("a prepared view");
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    assert_generated_integer(&output, output_file, "probe", "2");
+    // The output is a member of `nested`, not of the root.
+    let at_root = submod_source.replace("nested::generated()", "generated()");
+    let (db, file) = input(&at_root);
     assert!(
-        submod_err
-            .cause
-            .contains("generation request requires an authored concrete root record"),
-        "{}",
-        submod_err.cause
+        prepare_file(&db, file).is_err(),
+        "`generated` is not a root item"
+    );
+
+    // A record declared in a function body has no module to join.
+    let in_body = submod_source.replace(
+        "const fn probe() -> usize { nested::generated() }",
+        "fn local() {\n    #[generate(make)]\n    struct Local { x: u256 }\n}",
+    );
+    let (db, file) = input(&in_body);
+    assert!(
+        prepare_file(&db, file).is_err(),
+        "a body-local #[generate] must refuse, never be ignored"
     );
 }
 
