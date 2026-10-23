@@ -1438,6 +1438,9 @@ pub struct ImplTraitModifiers<'db> {
     pub selection_name: Option<IdentId<'db>>,
     /// `pub impl T for S as N`: the name's visibility, private by default.
     pub vis: Visibility,
+    /// `impl T for S with (P)`: the provider of an explicit derive request,
+    /// as written, with its arguments.
+    pub derive_provider: Option<PathId<'db>>,
 }
 
 impl<'db> ImplTrait<'db> {
@@ -1454,6 +1457,12 @@ impl<'db> ImplTrait<'db> {
     /// The visibility of a named implementation's name.
     pub fn vis(self, db: &'db dyn HirDb) -> Visibility {
         self.modifiers(db).vis
+    }
+
+    /// The provider path of an explicit derive request, `P` in
+    /// `impl T for S with (P)`.
+    pub fn derive_provider(self, db: &'db dyn HirDb) -> Option<PathId<'db>> {
+        self.modifiers(db).derive_provider
     }
 
     pub fn span(self) -> LazyImplTraitSpan<'db> {
