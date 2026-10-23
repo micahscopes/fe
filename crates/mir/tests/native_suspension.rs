@@ -3,7 +3,13 @@ use driver::DriverDataBase;
 use fe_mir::{
     RuntimeInstanceKey,
     instance::{RuntimeInstanceSource, get_or_build_runtime_instance},
-    runtime::suspension::{ScalarCapture, compose_native_scalar_task, prepare_native_scalar_cuts},
+    runtime::{
+        RExpr, RStmt, RuntimeClass,
+        suspension::{
+            ScalarCapture, build_native_scalar_segments, compose_native_scalar_task,
+            prepare_native_scalar_cuts,
+        },
+    },
 };
 use hir::analysis::{
     semantic::{get_or_build_semantic_instance, root_semantic_instance_key},
@@ -79,4 +85,25 @@ fn entry(_ native: own Native) -> u64 {
         cut.origin,
         body.stmt_origins[cut.block.as_u32() as usize][cut.statement]
     );
+    let segments = build_native_scalar_segments(&db, &body).expect("typed entry and resume");
+    assert_eq!(segments.resumes.len(), 1);
+    let resume = &segments.resumes[0];
+    assert_eq!(resume.signature.params.len(), cut.captures.len() + 1);
+    assert_eq!(resume.signature.params.last().unwrap().local, cut.outcome);
+    assert_eq!(segments.entry.signature.params, body.signature.params);
+    for segment in std::iter::once(&segments.entry).chain(&segments.resumes) {
+        assert_eq!(
+            segment.signature.ret,
+            Some(RuntimeClass::AggregateValue {
+                layout: segments.step_layout
+            })
+        );
+        assert!(
+            prepare_native_scalar_cuts(&db, segment).unwrap().is_empty(),
+            "segments cannot leave raw cuts behind"
+        );
+        assert!(segment.blocks.iter().flat_map(|block| &block.stmts).any(|stmt| matches!(stmt,
+            RStmt::Assign { expr: RExpr::EnumMake { layout, .. }, .. } if *layout == segments.step_layout
+        )));
+    }
 }
