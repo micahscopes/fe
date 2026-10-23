@@ -2411,7 +2411,7 @@ impl Encode<Sol> for Payload {{
                 manual,
             ] {
                 let source =
-                    include_str!("../../driver/tests/fixtures/four_clients_runtime_payload.fe")
+                    include_str!("../../driver/tests/fixtures/four_clients_runtime_payload.fe.in")
                         .replace("DECLARATION", &declaration)
                         .replace("VALUE", value);
                 let harness =
