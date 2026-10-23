@@ -1433,11 +1433,10 @@ fn finalized_derive_provider<'db>(
         trait_resolution::PredicateListId,
         ty_def::{TyBase, TyData},
     };
-    if goal.args(db).len() != 1
-        || !goal.assoc_type_bindings(db).is_empty()
-        || !goal.def(db).types(db).is_empty()
-        || !goal.def(db).consts(db).is_empty()
-    {
+    // Associated items are supplied as members and admitted by ordinary impl
+    // conformance. Scoped requests reach here only after
+    // `freeze_generation_request`, which still refuses them.
+    if goal.args(db).len() != 1 || !goal.assoc_type_bindings(db).is_empty() {
         return Err(
             "bounded native derive requires an unparameterized goal without associated equalities"
                 .into(),

@@ -1206,13 +1206,9 @@ impl<'db> ImplTrait<'db> {
             }
         }
 
-        out_types.retain(|out_type: &AssocTyDef| {
-            !types.iter().any(|defined| defined.name == out_type.name)
-        });
-
-        types.extend(out_types);
-
-        // The authored header owns generated methods and ordinary impl identity.
+        // The authored header owns ordinary impl identity; its provider
+        // supplies every member, admitted by the same conformance checks as a
+        // handwritten body.
         let db = ctxt.db();
         let file_url = ctxt.top_mod().file(db).url(db);
         let plan = db
@@ -1225,8 +1221,38 @@ impl<'db> ImplTrait<'db> {
             })
             .cloned();
         if let Some(plan) = plan {
-            super::generated::lower_derive_method(ctxt, &plan.code);
+            let mut lower_member =
+                |ctxt: &mut FileLowerCtxt<'db>, item: ast::Item| match item.kind() {
+                    Some(ast::ItemKind::Func(func)) => {
+                        validate_func_attrs(
+                            ctxt,
+                            func.attr_list(),
+                            "fn",
+                            func.sig().name().map(|name| name.text().to_string()),
+                            true,
+                        );
+                        Func::lower_ast(ctxt, func);
+                    }
+                    Some(ast::ItemKind::Const(c)) => {
+                        consts.push(AssocConstDef::lower_quoted_const(ctxt, c));
+                    }
+                    Some(ast::ItemKind::TypeAlias(alias)) => {
+                        if let Some(defined) = AssocTyDef::lower_quoted_alias(ctxt, alias) {
+                            types.push(defined);
+                        }
+                    }
+                    _ => ctxt.record_generation_error(
+                        item.syntax().text_range(),
+                        "a derived implementation member must be a function, constant or type",
+                    ),
+                };
+            super::generated::lower_derive_members(ctxt, &plan.code, &mut lower_member);
         }
+
+        out_types.retain(|out_type: &AssocTyDef| {
+            !types.iter().any(|defined| defined.name == out_type.name)
+        });
+        types.extend(out_types);
 
         let impl_trait = Self::new(
             ctxt.db(),
@@ -1252,6 +1278,30 @@ impl<'db> ImplTrait<'db> {
 }
 
 impl<'db> AssocTyDef<'db> {
+    /// A generated `type Name = Ty` member. Generic associated types are
+    /// deferred, so a parameterized alias is reported, not lowered.
+    fn lower_quoted_alias(ctxt: &mut FileLowerCtxt<'db>, ast: ast::TypeAlias) -> Option<Self> {
+        if ast.generic_params().is_some() {
+            ctxt.record_generation_error(
+                ast.syntax().text_range(),
+                "a generated associated type cannot take generic parameters",
+            );
+            return None;
+        }
+        validate_unsupported_item_attrs(
+            ctxt,
+            ast.attr_list(),
+            "type",
+            ast.alias().map(|name| name.text().to_string()),
+        );
+        Some(AssocTyDef {
+            attributes: AttrListId::lower_ast_opt(ctxt, ast.attr_list()),
+            name: IdentId::lower_token_partial(ctxt, ast.alias()),
+            type_ref: TypeId::lower_ast_partial(ctxt, ast.ty()),
+            is_shape: false,
+        })
+    }
+
     fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::TraitTypeItem) -> Self {
         let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
         AssocTyDef {

@@ -423,6 +423,103 @@ fn lower_scoped_derive<'db>(
     );
 }
 
+/// Lower member code into the already-entered destination declaration, in
+/// order. Each template resolves its free names in its own producer; nested
+/// `Code<Item>` holes splice their members in place; any other block statement
+/// is reported rather than dropped.
+fn lower_member_code<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    value: &FrozenCode,
+    lower: &mut dyn FnMut(&mut FileLowerCtxt<'db>, ast::Item),
+) {
+    match value {
+        FrozenCode::Empty {
+            kind: FrozenCodeKind::Item,
+        } => {}
+        FrozenCode::Template {
+            kind: FrozenCodeKind::Item,
+            quote_file,
+            quote_range,
+            producer_module,
+            producer_block,
+            holes,
+        } => {
+            let (quote, mut frame) = ctxt.resolve_quote_template(
+                quote_file,
+                *quote_range,
+                *producer_module,
+                *producer_block,
+                false,
+                holes.clone(),
+            );
+            frame.is_member_quote = true;
+            ctxt.quote_frames.push(frame);
+            if let Some(items) = quote.item_list() {
+                for child in items.syntax().children() {
+                    if let Some(item) = ast::Item::cast(child.clone()) {
+                        lower(ctxt, item);
+                    } else if let Some(hole) = ast::QuoteHole::cast(child) {
+                        lower_member_hole(ctxt, hole, lower);
+                    }
+                }
+            } else if let Some(block) = quote.body() {
+                for child in block.syntax().children() {
+                    if let Some(item) = ast::Item::cast(child.clone()) {
+                        lower(ctxt, item);
+                    } else if let Some(stmt) = ast::Stmt::cast(child)
+                        && let ast::StmtKind::Expr(expr) = stmt.kind()
+                        && let Some(expr) = expr.expr()
+                        && let ast::ExprKind::QuoteHole(hole) = expr.kind()
+                        && let Some(FrozenHoleValue::Code(nested)) =
+                            ctxt.current_hole(hole.syntax().text_range())
+                    {
+                        lower_member_code(ctxt, &nested, lower);
+                    } else {
+                        ctxt.record_generation_error(
+                            *quote_range,
+                            "member quotation requires function or constant declarations",
+                        );
+                    }
+                }
+            }
+            ctxt.pop_quote_frame();
+        }
+        _ => ctxt.record_generation_error(
+            ctxt.quote_frames
+                .last()
+                .map_or_else(|| parser::TextRange::empty(0.into()), |f| f.quote_range),
+            "member quotation requires Code<Item>",
+        ),
+    }
+}
+
+/// Lower an explicit derive's complete output as members of its authored
+/// header. The header owns the implementation's identity, binders and
+/// requirements; the provider supplies every member, which ordinary impl
+/// conformance then admits or rejects as a whole, as for a handwritten impl.
+pub(super) fn lower_derive_members<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    code: &FrozenCode,
+    lower: &mut dyn FnMut(&mut FileLowerCtxt<'db>, ast::Item),
+) {
+    if !matches!(
+        code,
+        FrozenCode::Template {
+            kind: FrozenCodeKind::Item,
+            ..
+        } | FrozenCode::Empty {
+            kind: FrozenCodeKind::Item
+        }
+    ) {
+        ctxt.record_generation_error(
+            parser::TextRange::empty(0.into()),
+            "a derived implementation requires Code<Item> members",
+        );
+        return;
+    }
+    lower_member_code(ctxt, code, lower);
+}
+
 /// Copy members into the already-entered destination declaration. A nested
 /// template owns its source/hole frame, but never changes the destination scope.
 pub(super) fn lower_member_hole<'db>(
@@ -430,73 +527,8 @@ pub(super) fn lower_member_hole<'db>(
     hole: ast::QuoteHole,
     lower: &mut dyn FnMut(&mut FileLowerCtxt<'db>, ast::Item),
 ) {
-    fn code<'db>(
-        ctxt: &mut FileLowerCtxt<'db>,
-        value: &FrozenCode,
-        lower: &mut dyn FnMut(&mut FileLowerCtxt<'db>, ast::Item),
-    ) {
-        match value {
-            FrozenCode::Empty {
-                kind: FrozenCodeKind::Item,
-            } => {}
-            FrozenCode::Template {
-                kind: FrozenCodeKind::Item,
-                quote_file,
-                quote_range,
-                producer_module,
-                producer_block,
-                holes,
-            } => {
-                let (quote, mut frame) = ctxt.resolve_quote_template(
-                    quote_file,
-                    *quote_range,
-                    *producer_module,
-                    *producer_block,
-                    false,
-                    holes.clone(),
-                );
-                frame.is_member_quote = true;
-                ctxt.quote_frames.push(frame);
-                if let Some(items) = quote.item_list() {
-                    for child in items.syntax().children() {
-                        if let Some(item) = ast::Item::cast(child.clone()) {
-                            lower(ctxt, item);
-                        } else if let Some(hole) = ast::QuoteHole::cast(child) {
-                            lower_member_hole(ctxt, hole, lower);
-                        }
-                    }
-                } else if let Some(block) = quote.body() {
-                    for child in block.syntax().children() {
-                        if let Some(item) = ast::Item::cast(child.clone()) {
-                            lower(ctxt, item);
-                        } else if let Some(stmt) = ast::Stmt::cast(child)
-                            && let ast::StmtKind::Expr(expr) = stmt.kind()
-                            && let Some(expr) = expr.expr()
-                            && let ast::ExprKind::QuoteHole(hole) = expr.kind()
-                            && let Some(FrozenHoleValue::Code(nested)) =
-                                ctxt.current_hole(hole.syntax().text_range())
-                        {
-                            code(ctxt, &nested, lower);
-                        } else {
-                            ctxt.record_generation_error(
-                                *quote_range,
-                                "member quotation requires function or constant declarations",
-                            );
-                        }
-                    }
-                }
-                ctxt.pop_quote_frame();
-            }
-            _ => ctxt.record_generation_error(
-                ctxt.quote_frames
-                    .last()
-                    .map_or_else(|| parser::TextRange::empty(0.into()), |f| f.quote_range),
-                "member quotation requires Code<Item>",
-            ),
-        }
-    }
     if let Some(FrozenHoleValue::Code(value)) = ctxt.current_hole(hole.syntax().text_range()) {
-        code(ctxt, &value, lower);
+        lower_member_code(ctxt, &value, lower);
     } else {
         ctxt.record_generation_error(
             hole.syntax().text_range(),
