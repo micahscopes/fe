@@ -2252,17 +2252,14 @@ pub fn authored_derive_request<'db>(
     module: crate::hir_def::TopLevelMod<'db>,
     ast: &ast::ImplTrait,
 ) -> Option<crate::hir_def::ImplTrait<'db>> {
-    let root = crate::core::lower::top_mod_ast(db, module);
     module
         .all_impl_traits(db)
         .iter()
         .copied()
         .find(|implementation| {
-            let HirOrigin::Raw(ptr) = implementation.origin(db) else {
-                return false;
-            };
-            implementation.scope().syntax_top_mod(db) == module
-                && ptr.to_node(root.syntax()).syntax().text_range() == ast.syntax().text_range()
+            impl_trait_syntax(db, *implementation).is_some_and(|(written_in, syntax)| {
+                written_in == module && syntax.syntax().text_range() == ast.syntax().text_range()
+            })
         })
 }
 
