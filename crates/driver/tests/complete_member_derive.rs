@@ -639,3 +639,22 @@ struct One { x: u256 }
         "{cause}"
     );
 }
+
+/// Declaration order in one file does not matter: the header may come before
+/// its record and its provider. Lowering names both by authored reference, so
+/// nothing waits for them to be lowered first.
+#[test]
+fn a_header_may_precede_its_record_and_provider() {
+    let header = "impl Shape for Square with (StableShape)\n";
+    assert!(SHAPE.contains(header));
+    let reordered = SHAPE.replace(header, "").replacen(
+        "trait Shape {",
+        &format!("{header}\ntrait Shape {{"),
+        1,
+    );
+    assert_ne!(reordered, SHAPE);
+    let output = prepare(&reordered).unwrap();
+    assert_eq!(eval(&output, "sides"), "3");
+    assert_eq!(eval(&output, "area"), "9");
+    assert_eq!(eval(&output, "rows"), "21");
+}
