@@ -67,6 +67,8 @@ pub enum SemanticAccessCheckResult<'db> {
     Ok {
         warnings: Vec<SemanticDiagnosticId<'db>>,
         spaces: Vec<Option<AddressSpace>>,
+        /// Obligations retained by a generic body, never runtime admission.
+        deferred_suspension: Vec<SemanticDiagnosticId<'db>>,
     },
     Blocked(BlockedSemanticBody<'db>),
     Err(SemanticDiagnosticId<'db>),
@@ -166,12 +168,18 @@ fn body_check<'db>(
         ) => return SemanticAccessCheckResult::Err(SemanticDiagnosticId::new(db, diag)),
     };
     match check::check_body(db, instance, &artifacts.body) {
-        Ok((warnings, spaces)) => SemanticAccessCheckResult::Ok {
-            warnings: warnings
+        Ok(checked) => SemanticAccessCheckResult::Ok {
+            warnings: checked
+                .warnings
                 .into_iter()
                 .map(|diag| SemanticDiagnosticId::new(db, diag))
                 .collect(),
-            spaces,
+            spaces: checked.spaces,
+            deferred_suspension: checked
+                .deferred_suspension
+                .into_iter()
+                .map(|diag| SemanticDiagnosticId::new(db, diag))
+                .collect(),
         },
         Err(diag) => SemanticAccessCheckResult::Err(SemanticDiagnosticId::new(db, diag)),
     }
@@ -185,6 +193,7 @@ fn body_check_cycle_initial<'db>(
     SemanticAccessCheckResult::Ok {
         warnings: Vec::new(),
         spaces: Vec::new(),
+        deferred_suspension: Vec::new(),
     }
 }
 
@@ -201,6 +210,25 @@ pub fn check_semantic_accesses<'db>(
             Err(SemanticAnalysisError::Diagnostic(diag.to_complete(db)))
         }
     }
+}
+
+/// Runtime lowering requires a concrete discharge of every retained custody
+/// and suspension-footprint obligation. Generic source checking alone is not
+/// an executable admission receipt.
+pub fn check_runtime_semantic_accesses<'db>(
+    db: &'db dyn SpannedHirAnalysisDb,
+    instance: SemanticInstance<'db>,
+) -> Result<(), SemanticAnalysisError<'db>> {
+    check_semantic_accesses(db, instance)?;
+    if let SemanticAccessCheckResult::Ok {
+        deferred_suspension,
+        ..
+    } = body_check(db, instance)
+        && let Some(diag) = deferred_suspension.first()
+    {
+        return Err(SemanticAnalysisError::Diagnostic(diag.to_complete(db)));
+    }
+    Ok(())
 }
 
 pub struct SemanticAccessAnalysisPass;

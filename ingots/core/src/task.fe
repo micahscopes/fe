@@ -26,3 +26,23 @@ pub trait Suspend {
 
     fn suspend<T>(mut self, _ pending: own Pending<Self::Backend, T>) -> TaskOutcome<Self::Error, T>
 }
+
+/// The native task adapter's backend identity and zero-state capability.
+/// Runtime task identity and retained values live in the task frame, not here.
+pub struct Native {}
+
+impl Suspend for Native {
+    type Backend = Native
+    type Error = u64
+
+    fn suspend<T>(mut self, _ pending: own Pending<Native, T>) -> TaskOutcome<u64, T> {
+        unsafe { native_suspend(pending) }
+    }
+}
+
+extern {
+    /// The native runtime's privileged control transfer. Its failure payload
+    /// has one fixed schema; another provider may translate it but cannot
+    /// select a different decoder for this pending identity.
+    unsafe fn native_suspend<T>(_ pending: own Pending<Native, T>) -> TaskOutcome<u64, T>
+}

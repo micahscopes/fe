@@ -456,29 +456,56 @@ pub fn suspension_capability_method<'db>(db: &'db dyn HirAnalysisDb, func: Func<
         .is_some_and(|target| trait_reaches(db, containing_trait, target))
 }
 
-/// Whether a declared effect permits suspension. Callers expand effect rows
-/// before classifying their components. Concrete provider types are checked
-/// against the same nominal capability as trait-keyed requirements.
-pub fn effect_key_may_suspend<'db>(
+/// The actual privileged native cut, distinct from a capability whose
+/// contract merely permits suspension.
+pub fn native_suspension_primitive<'db>(db: &'db dyn HirAnalysisDb, func: Func<'db>) -> bool {
+    lib_func_matches(db, func, "core::task::native_suspend")
+}
+
+/// A declaration's suspension footprint. An unresolved row or proof is not
+/// evidence that a call cannot suspend; concrete admission must discharge it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SuspensionFootprint {
+    Absent,
+    MaySuspend,
+    Unresolved,
+}
+
+/// Classify one declared effect. Expanded rows can still contain abstract
+/// nested rows, which retain an unresolved footprint. Concrete provider types
+/// are checked against the same nominal capability as trait-keyed requirements.
+pub fn effect_key_suspension<'db>(
     db: &'db dyn HirAnalysisDb,
     scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
     key: EffectRequirementKey<'db>,
-) -> bool {
+) -> SuspensionFootprint {
     let Some(target) = resolve_lib_trait_path(db, scope, "core::task::Suspend") else {
-        return false;
+        return SuspensionFootprint::Unresolved;
     };
     match key {
-        EffectRequirementKey::Trait(inst) => trait_reaches(db, inst.def(db), target),
-        EffectRequirementKey::Type(ty) => matches!(
-            is_goal_satisfiable(
+        EffectRequirementKey::Trait(inst) => {
+            if trait_reaches(db, inst.def(db), target) {
+                SuspensionFootprint::MaySuspend
+            } else {
+                SuspensionFootprint::Absent
+            }
+        }
+        EffectRequirementKey::Type(ty) => {
+            match is_goal_satisfiable(
                 db,
                 TraitSolveCx::new(db, scope).with_assumptions(assumptions),
                 TraitInstId::new_simple(db, target, vec![ty]),
-            ),
-            GoalSatisfiability::Satisfied(_)
-        ),
-        EffectRequirementKey::Row(_) | EffectRequirementKey::Other => false,
+            ) {
+                GoalSatisfiability::Satisfied(_) => SuspensionFootprint::MaySuspend,
+                GoalSatisfiability::UnSat(_) => SuspensionFootprint::Absent,
+                GoalSatisfiability::NeedsConfirmation { .. }
+                | GoalSatisfiability::ContainsInvalid => SuspensionFootprint::Unresolved,
+            }
+        }
+        EffectRequirementKey::Row(_) | EffectRequirementKey::Other => {
+            SuspensionFootprint::Unresolved
+        }
     }
 }
 
