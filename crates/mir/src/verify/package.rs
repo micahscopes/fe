@@ -288,6 +288,7 @@ fn verify_synthetic_function<'db>(
                 }
             }
             RuntimeSyntheticSpec::MainRoot { .. }
+            | RuntimeSyntheticSpec::NativeTaskSegment { .. }
             | RuntimeSyntheticSpec::TestRoot { .. }
             | RuntimeSyntheticSpec::ManualContractRoot { .. }
             | RuntimeSyntheticSpec::ContractInitAbi { .. } => Ok(()),
