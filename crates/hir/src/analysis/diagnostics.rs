@@ -6095,7 +6095,7 @@ impl DiagnosticVoucher for ImplDiag<'_> {
             Self::UnfulfilledDeriveRequest { primary } => primary_diag(
                 severity,
                 "native derive request was not prepared",
-                "explicit native derive currently requires standalone authored-input preparation",
+                "explicit native derive requires authored-input preparation of its file or package",
                 primary.resolve(db),
                 error_code,
             ),
