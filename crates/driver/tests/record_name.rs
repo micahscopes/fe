@@ -100,10 +100,12 @@ use core::meta::{Code, Item, Record, record_name, variant}
 const fn inspect(_ record: Record) -> Code<Item> {
     let owner = record_name(record)
     let selected = record_name(variant(record, 0))
+    let second = record_name(variant(record, 1))
     quote {
         const fn check_name() -> bool {
             std::abi::sol(${owner}) == std::abi::sol("Door")
                 && std::abi::sol(${selected}) == std::abi::sol("Open")
+                && std::abi::sol(${second}) == std::abi::sol("Shut")
         }
     }
 }
@@ -134,4 +136,29 @@ struct Secret {}
         "Record is metadata, not an implicit name value"
     );
     assert!(db.generation_inputs().requests(&db).is_empty());
+}
+
+#[test]
+fn record_name_primitive_argument_refuses_without_published_output() {
+    let source = r#"
+use core::meta::{Code, Item, Record, record_name}
+const fn inspect(_ record: Record) -> Code<Item> {
+    let name = record_name(42 as u256)
+    quote { const fn wrong() -> u32 { std::abi::sol(${name}) } }
+}
+#[generate(inspect)]
+struct Target {}
+"#;
+    let mut db = DriverDataBase::default();
+    let file = db.workspace().touch(
+        &mut db,
+        Url::parse("file:///tmp/record-name-primitive.fe").unwrap(),
+        Some(source.into()),
+    );
+    let error = prepare_file(&db, file)
+        .err()
+        .expect("primitive is not issued record metadata");
+    assert!(error.cause.contains("type mismatch"), "{}", error.cause);
+    assert!(db.generation_inputs().requests(&db).is_empty());
+    assert!(db.generation_inputs().functions(&db).is_empty());
 }

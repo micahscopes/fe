@@ -2306,3 +2306,53 @@ pub(crate) fn is_unfulfilled_derive_request(
                     && Some(plan.target_file.clone()) == module.file(db).url(db)
             }))
 }
+
+#[cfg(test)]
+mod record_name_budget_tests {
+    use super::*;
+    use crate::test_db::HirAnalysisTestDb;
+
+    #[test]
+    fn record_name_fragments_and_repeated_splices_share_expansion_budget() {
+        // 3840 literals + 240 inner tuples + 15 tuples + one root = 4096.
+        // 3841 literals require 4097 nodes; 1919 literals require 2048.
+        for (chunks, expected_cost) in [(3840, 4096), (3841, 4097), (1919, 2048)] {
+            let mut db = HirAnalysisTestDb::default();
+            let name = "A".repeat(chunks * crate::analysis::ty::ty_def::MAX_INLINE_STRING_BYTES);
+            let file = db.new_stand_alone(
+                "record_name_budget.fe".into(),
+                &format!("struct {name} {{}}"),
+            );
+            let (module, _) = db.top_mod(file);
+            let declaration = module.all_structs(&db)[0];
+            let ty = TyId::adt(
+                &db,
+                crate::analysis::ty::adt_def::AdtRef::Struct(declaration).as_adt(&db),
+            );
+            let record = RecordInput::for_authored_type(&db, ty).unwrap();
+            let code = ItemCode::record_name(record);
+            assert_eq!(
+                ItemCode::record_name_cost(&db, record).unwrap(),
+                expected_cost
+            );
+            assert_eq!(
+                code.freeze(&db).is_ok(),
+                expected_cost <= MAX_GENERATED_AST_NODES
+            );
+            let mut validation_budget = MAX_GENERATED_AST_NODES;
+            let mut freeze_budget = MAX_GENERATED_AST_NODES;
+            let repetitions = MAX_GENERATED_AST_NODES / expected_cost;
+            for _ in 0..repetitions {
+                code.validate_with_budget(&db, &mut validation_budget)
+                    .unwrap();
+                code.freeze_with_budget(&db, &mut freeze_budget).unwrap();
+            }
+            assert!(
+                code.validate_with_budget(&db, &mut validation_budget)
+                    .is_err()
+            );
+            assert!(code.freeze_with_budget(&db, &mut freeze_budget).is_err());
+            assert_eq!(validation_budget, freeze_budget);
+        }
+    }
+}
