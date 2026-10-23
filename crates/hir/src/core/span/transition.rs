@@ -229,8 +229,12 @@ impl ChainInitiator for AssocMemberRoot<'_> {
                                 (ast::TraitItemKind::Const(c), AssocMemberKind::Const) => {
                                     Some(c.syntax().clone())
                                 }
+                                // Associated types and shapes, in order.
                                 (ast::TraitItemKind::Type(t), AssocMemberKind::Type) => {
                                     Some(t.syntax().clone())
+                                }
+                                (ast::TraitItemKind::Shape(s), AssocMemberKind::Type) => {
+                                    Some(s.syntax().clone())
                                 }
                                 _ => None,
                             })

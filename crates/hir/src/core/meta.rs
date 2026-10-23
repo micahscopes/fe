@@ -175,6 +175,7 @@ pub enum RecordInputError {
     NotEnum,
     WholeEnumHasNoFields,
     InvalidField,
+    InvisibleField,
     FieldOutsideRecord,
     VariantOutsideEnum,
     SelectedPayloadIsNotWholeEnum,
@@ -236,10 +237,59 @@ impl<'db> RecordInput<'db> {
         Self::for_authored_adt_ty(db, ty)
     }
 
-    fn for_authored_adt_ty(
+    /// Issue a complete record view only where its fields may be observed.
+    /// Omitting hidden fields would describe a different record, so admission
+    /// fails before the requesting provider can execute.
+    pub fn for_authored_type_from(
         db: &'db dyn HirAnalysisDb,
         ty: TyId<'db>,
+        requesting_scope: crate::hir_def::scope_graph::ScopeId<'db>,
     ) -> Result<Self, RecordInputError> {
+        use crate::{
+            analysis::name_resolution::is_scope_visible_from,
+            hir_def::{EnumVariant, FieldParent, scope_graph::ScopeId},
+        };
+        if !crate::analysis::ty::const_ty::ty_is_fully_ground(db, ty) {
+            return Err(RecordInputError::NotConcrete);
+        }
+        // Authorize raw declaration members before instantiating their types.
+        // Hidden field metadata may itself require compile-time evaluation.
+        let owner = Self::authored_owner(db, ty)?;
+        let fields_visible = |parent, count| {
+            (0..count).all(|index| {
+                is_scope_visible_from(db, ScopeId::Field(parent, index as u16), requesting_scope)
+            })
+        };
+        let visible = match owner {
+            RecordOwner::Struct(declaration) => fields_visible(
+                FieldParent::Struct(declaration),
+                declaration.hir_fields(db).data(db).len(),
+            ),
+            RecordOwner::Enum(declaration) => declaration
+                .variants_list(db)
+                .data(db)
+                .iter()
+                .enumerate()
+                .all(|(index, variant)| match variant.kind {
+                    VariantKind::Record(fields) => fields_visible(
+                        FieldParent::Variant(EnumVariant::new(declaration, index)),
+                        fields.data(db).len(),
+                    ),
+                    // Tuple payloads have no individually authored field
+                    // visibility, just like ordinary variant construction.
+                    VariantKind::Unit | VariantKind::Tuple(_) => true,
+                }),
+        };
+        if !visible {
+            return Err(RecordInputError::InvisibleField);
+        }
+        Self::for_authored_adt_ty(db, ty)
+    }
+
+    fn authored_owner(
+        db: &'db dyn HirAnalysisDb,
+        ty: TyId<'db>,
+    ) -> Result<RecordOwner<'db>, RecordInputError> {
         if !ty.is_star_kind(db) || ty.has_invalid(db) {
             return Err(RecordInputError::NotConcrete);
         }
@@ -258,6 +308,15 @@ impl<'db> RecordInput<'db> {
                 RecordOwner::Enum(declaration)
             }
         };
+        Ok(owner)
+    }
+
+    fn for_authored_adt_ty(
+        db: &'db dyn HirAnalysisDb,
+        ty: TyId<'db>,
+    ) -> Result<Self, RecordInputError> {
+        let owner = Self::authored_owner(db, ty)?;
+        let adt = ty.adt_def(db).ok_or(RecordInputError::NotRecord)?;
         for (variant, fields) in adt.fields(db).iter().enumerate() {
             for field in 0..fields.num_types() {
                 if crate::analysis::ty::adt_def::instantiate_adt_field_shape(
@@ -1388,8 +1447,16 @@ fn finalized_derive_provider<'db>(
     if goal.def(db).ingot(db) != scope.top_mod(db).ingot(db) {
         return Err("library/canonical goal establishment is pending the permits owner API".into());
     }
-    let input = RecordInput::for_authored_type(db, goal.args(db)[0])
-        .map_err(|cause| format!("native derive requires a concrete authored record: {cause:?}"))?;
+    let input =
+        RecordInput::for_authored_type_from(db, goal.args(db)[0], scope).map_err(|cause| {
+            match cause {
+            RecordInputError::InvisibleField => {
+                "native derive requires every target field to be visible from the requesting scope"
+                    .to_string()
+            }
+            _ => format!("native derive requires a concrete authored record: {cause:?}"),
+        }
+        })?;
     crate::analysis::ty::ty_check::admit_ground_type_application(
         db,
         input.ty(),

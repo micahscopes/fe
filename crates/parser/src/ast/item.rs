@@ -423,15 +423,18 @@ impl AssocConstSyntax {
 }
 
 ast_node! {
-    /// An associated type as written: a `type` in a trait or impl body, or a
-    /// quoted `type` alias lowered as an impl member.
+    /// An associated type as written: a `type` or `shape` in a trait or impl
+    /// body, or a quoted `type` alias lowered as an impl member.
     pub struct AssocTypeSyntax,
-    SK::TraitTypeItem | SK::TypeAlias,
+    SK::TraitTypeItem | SK::TraitShapeItem | SK::TypeAlias,
 }
 impl super::AttrListOwner for AssocTypeSyntax {}
 impl AssocTypeSyntax {
     pub fn name(&self) -> Option<SyntaxToken> {
-        support::token(self.syntax(), SK::Ident)
+        match TraitShapeItem::cast(self.syntax().clone()) {
+            Some(shape) => shape.name(),
+            None => support::token(self.syntax(), SK::Ident),
+        }
     }
 
     pub fn ty(&self) -> Option<super::Type> {
@@ -473,8 +476,31 @@ impl TraitUsesItem {
 }
 
 ast_node! {
+    /// `shape Step` in a trait definition, or `shape Step = (own usize,
+    /// D::Step)` in a trait implementation: an associated shape.
+    pub struct TraitShapeItem,
+    SK::TraitShapeItem,
+}
+impl super::AttrListOwner for TraitShapeItem {}
+impl TraitShapeItem {
+    /// The shape's name, after the `shape` keyword.
+    pub fn name(&self) -> Option<SyntaxToken> {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| token.kind() == SK::Ident)
+            .nth(1)
+    }
+
+    /// The shape an implementation gives it, after `=`.
+    pub fn ty(&self) -> Option<super::Type> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
     pub struct TraitItem,
-    SK::Func | SK::TraitTypeItem | SK::TraitConstItem | SK::TraitUsesItem
+    SK::Func | SK::TraitTypeItem | SK::TraitConstItem | SK::TraitUsesItem | SK::TraitShapeItem
 }
 impl TraitItem {
     pub fn kind(&self) -> TraitItemKind {
@@ -489,6 +515,9 @@ impl TraitItem {
             SK::TraitUsesItem => {
                 TraitItemKind::Uses(TraitUsesItem::cast(self.syntax().clone()).unwrap())
             }
+            SK::TraitShapeItem => {
+                TraitItemKind::Shape(TraitShapeItem::cast(self.syntax().clone()).unwrap())
+            }
             _ => unreachable!(),
         }
     }
@@ -499,6 +528,7 @@ pub enum TraitItemKind {
     Type(TraitTypeItem),
     Const(TraitConstItem),
     Uses(TraitUsesItem),
+    Shape(TraitShapeItem),
 }
 
 ast_node! {

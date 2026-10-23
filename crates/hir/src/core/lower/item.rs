@@ -10,7 +10,7 @@ use crate::{
     hir_def::{
         AttrListId, Body, BodyKind, CompBinOp, EffectParamListId, FuncParamListId, GenericArg,
         GenericArgListId, GenericParamListId, IdentId, ModeMarker, Partial, PathId, TraitRefId,
-        TupleTypeId, TypeBound, TypeId, WhereClauseId, item::*,
+        TupleTypeId, TypeBound, TypeId, WhereClauseId, item::*, params::KindBound,
     },
     lower::msg::lower_msg_as_mod,
     span::HirOrigin,
@@ -1017,6 +1017,15 @@ impl<'db> Trait<'db> {
                         consts.push(AssocConstDecl::lower_ast(ctxt, c));
                     }
                     ast::TraitItemKind::Uses(row) => rows.push(AssocRow::lower_ast(ctxt, row)),
+                    ast::TraitItemKind::Shape(shape) => {
+                        validate_unsupported_item_attrs(
+                            ctxt,
+                            shape.attr_list(),
+                            "shape",
+                            shape.name().map(|name| name.text().to_string()),
+                        );
+                        types.push(AssocTyDecl::lower_shape_ast(ctxt, shape));
+                    }
                 };
             }
         }
@@ -1067,6 +1076,17 @@ impl<'db> AssocTyDecl<'db> {
             default,
         }
     }
+
+    /// An associated shape, `shape Step`: an associated type of the
+    /// `shape` kind.
+    fn lower_shape_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::TraitShapeItem) -> Self {
+        AssocTyDecl {
+            attributes: AttrListId::lower_ast_opt(ctxt, ast.attr_list()),
+            name: IdentId::lower_token_partial(ctxt, ast.name()),
+            bounds: vec![TypeBound::Kind(Partial::Present(KindBound::Shape))],
+            default: TypeId::lower_ast_partial(ctxt, ast.ty()).to_opt(),
+        }
+    }
 }
 
 impl<'db> ImplTrait<'db> {
@@ -1085,9 +1105,10 @@ impl<'db> ImplTrait<'db> {
         let ty = TypeId::lower_ast_partial(ctxt, ast.ty());
         let origin = HirOrigin::raw(&ast);
 
-        // The `-> R` of a callable shape, `impl FnMut(u256) -> u256 for F`,
-        // is the implementation's `type Out = R`, not a binding of the trait.
-        let mut shape_types = vec![];
+        // The `-> R` of a callable trait's sugar,
+        // `impl FnMut(u256) -> u256 for F`, is the implementation's
+        // `type Out = R`, not a binding of the trait.
+        let mut out_types = vec![];
         if ast
             .trait_ref()
             .is_some_and(|trait_ref| trait_ref.fn_shape().is_some())
@@ -1102,11 +1123,12 @@ impl<'db> ImplTrait<'db> {
                 .iter()
                 .cloned()
                 .partition(|arg| matches!(arg, GenericArg::AssocType(_)));
-            shape_types.extend(outs.into_iter().filter_map(|out| match out {
+            out_types.extend(outs.into_iter().filter_map(|out| match out {
                 GenericArg::AssocType(binding) => Some(AssocTyDef {
                     attributes: AttrListId::new(db, Vec::new()),
                     name: binding.name,
                     type_ref: binding.ty,
+                    is_shape: false,
                     generated: None,
                 }),
                 _ => None,
@@ -1180,6 +1202,15 @@ impl<'db> ImplTrait<'db> {
                         consts.push(AssocConstDef::lower_ast(ctxt, c));
                     }
                     ast::TraitItemKind::Uses(row) => rows.push(AssocRow::lower_ast(ctxt, row)),
+                    ast::TraitItemKind::Shape(shape) => {
+                        validate_unsupported_item_attrs(
+                            ctxt,
+                            shape.attr_list(),
+                            "shape",
+                            shape.name().map(|name| name.text().to_string()),
+                        );
+                        types.push(AssocTyDef::lower_shape_ast(ctxt, shape));
+                    }
                 };
             }
         }
@@ -1228,10 +1259,10 @@ impl<'db> ImplTrait<'db> {
             super::generated::lower_derive_members(ctxt, &plan.code, &mut lower_member);
         }
 
-        shape_types.retain(|shape_type: &AssocTyDef| {
-            !types.iter().any(|defined| defined.name == shape_type.name)
+        out_types.retain(|out_type: &AssocTyDef| {
+            !types.iter().any(|defined| defined.name == out_type.name)
         });
-        types.extend(shape_types);
+        types.extend(out_types);
 
         let impl_trait = Self::new(
             ctxt.db(),
@@ -1277,6 +1308,7 @@ impl<'db> AssocTyDef<'db> {
             attributes: AttrListId::lower_ast_opt(ctxt, ast.attr_list()),
             name: IdentId::lower_token_partial(ctxt, ast.alias()),
             type_ref: TypeId::lower_ast_partial(ctxt, ast.ty()),
+            is_shape: false,
             generated: Some(ctxt.generated_member_syntax(ast.syntax())),
         })
     }
@@ -1287,6 +1319,18 @@ impl<'db> AssocTyDef<'db> {
             attributes,
             name: IdentId::lower_token_partial(ctxt, ast.name()),
             type_ref: TypeId::lower_ast_partial(ctxt, ast.ty()),
+            is_shape: false,
+            generated: None,
+        }
+    }
+
+    fn lower_shape_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::TraitShapeItem) -> Self {
+        let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        AssocTyDef {
+            attributes,
+            name: IdentId::lower_token_partial(ctxt, ast.name()),
+            type_ref: TypeId::lower_ast_partial(ctxt, ast.ty()),
+            is_shape: true,
             generated: None,
         }
     }
