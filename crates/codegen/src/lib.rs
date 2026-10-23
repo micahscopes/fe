@@ -20,8 +20,8 @@ pub use sonatina::{
 };
 #[cfg(feature = "cranelift")]
 pub use sonatina::{
-    NativeArtifacts, NativeOutputSelection, NativeTarget, NativeTestEntry, NativeTestSuite,
-    emit_module_native_artifacts, emit_module_native_ir, emit_module_native_object,
-    emit_test_suite_native,
+    NativeArtifacts, NativeOutputSelection, NativeTarget, NativeTaskArtifact, NativeTestEntry,
+    NativeTestSuite, emit_module_native_artifacts, emit_module_native_ir,
+    emit_module_native_object, emit_native_scalar_task, emit_test_suite_native,
 };
 pub use test_output::{ExpectedRevert, TestMetadata, TestModuleOutput, parse_expected_revert};
