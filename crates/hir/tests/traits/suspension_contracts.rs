@@ -111,6 +111,32 @@ fn hidden(_ pending: own Pending<Native, u64>) -> TaskOutcome<u64, u64> {
     var native = Native {}
     native.suspend(pending)
 }
+struct Owned { value: u64 }
+struct Pair { first: u64, second: Owned }
+impl Pair {
+    fn part(mut self) -> mut u64 {
+        let saved = self.second
+        yield mut self.first
+        self.second = saved
+    }
+}
+fn projection_live() uses (cap: mut Native) {
+    var pair = Pair { first: 5, second: Owned { value: 1 } }
+    let held = pair.part()
+    cut()
+    held = 9
+}
+fn projection_ended() uses (cap: mut Native) {
+    var pair = Pair { first: 5, second: Owned { value: 1 } }
+    let held = pair.part()
+    held = 9
+    cut()
+}
+fn hole(_ pair: mut Pair) uses (cap: mut Native) {
+    let saved = pair.second
+    cut()
+    pair.second = saved
+}
 "#,
     );
     let (module, _) = db.top_mod(file);
@@ -120,6 +146,9 @@ fn hidden(_ pending: own Pending<Native, u64>) -> TaskOutcome<u64, u64> {
         ("ended", true),
         ("input", false),
         ("hidden", false),
+        ("projection_live", false),
+        ("projection_ended", true),
+        ("hole", false),
     ] {
         let func = find_func(&db, module, name);
         let key = identity_semantic_instance_key(&db, BodyOwner::Func(func, None));
@@ -131,10 +160,10 @@ fn hidden(_ pending: own Pending<Native, u64>) -> TaskOutcome<u64, u64> {
                 .expect("access diagnostic, not upstream blockage");
             assert!(
                 diagnostic.sub_diagnostics.iter().any(|label| {
-                    label.message.contains(if name == "hidden" {
-                        "declares no suspension"
-                    } else {
-                        "borrowed data remains live"
+                    label.message.contains(match name {
+                        "hidden" => "declares no suspension",
+                        "hole" => "unrestored move",
+                        _ => "borrowed data remains live",
                     })
                 }),
                 "{name}: {diagnostic:?}"
