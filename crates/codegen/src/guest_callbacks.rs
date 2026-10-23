@@ -719,7 +719,7 @@ mod tests {
         .unwrap();
         let artifact = SonatinaWasmBackend::new()
             .with_import_modules(imports)
-            .compile_module(&module)
+            .compile_module(&module, &sonatina_codegen::BackendOptions::default())
             .unwrap();
         wasmparser::validate(&artifact.bytes).unwrap();
 

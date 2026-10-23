@@ -277,7 +277,7 @@ impl Backend for WasmBackend {
         } else {
             backend
         };
-        let artifact = backend.compile_module(&module).map_err(|errors| {
+        let artifact = backend.compile_module(&module, &sonatina_codegen::BackendOptions { opt_level: crate::sonatina::to_sonatina_opt_level(opt_level) }).map_err(|errors| {
             BackendError::Sonatina(format!(
                 "wasm backend: {}",
                 errors

@@ -810,7 +810,7 @@ fn zero_canonical_memory(
 
     fb.switch_to_block(header);
     let zero = fb.make_imm_value(Immediate::I32(0));
-    let index = fb.insert_inst(Phi::new(is, vec![(zero, entry)]), Type::I32);
+    let index = fb.insert_inst(Phi::new(is, vec![(zero, entry)].into()), Type::I32);
     let limit = fb.make_imm_value(Immediate::I32(byte_len));
     let more = fb.insert_inst(Lt::new(is, index, limit), Type::I1);
     fb.insert_inst_no_result(Br::new(is, more, body, done));
@@ -9927,7 +9927,7 @@ where
         let zero = self.fb.make_imm_value(Immediate::I32(0));
         let index = self
             .fb
-            .insert_inst(Phi::new(is, vec![(zero, entry)]), Type::I32);
+            .insert_inst(Phi::new(is, vec![(zero, entry)].into()), Type::I32);
         let end = self.fb.make_imm_value(Immediate::I32(len));
         let more = self.fb.insert_inst(Lt::new(is, index, end), Type::I1);
         self.fb.insert_inst_no_result(Br::new(is, more, body, done));
@@ -10861,7 +10861,7 @@ where
                     Ok(value)
                 } else {
                     Ok(self.fb.insert_inst(
-                        Bitcast::new(self.module.builder.inst_set(), value, target_ty),
+                        Bitcast::new_unchecked(self.module.builder.inst_set(), value, target_ty),
                         target_ty,
                     ))
                 }
@@ -11329,7 +11329,7 @@ where
         let zero = self.fb.make_imm_value(Immediate::I32(0));
         let index = self
             .fb
-            .insert_inst(Phi::new(is, vec![(zero, copy_entry)]), Type::I32);
+            .insert_inst(Phi::new(is, vec![(zero, copy_entry)].into()), Type::I32);
         let end = self.fb.make_imm_value(Immediate::I32(byte_len));
         let more = self.fb.insert_inst(Lt::new(is, index, end), Type::I1);
         self.fb

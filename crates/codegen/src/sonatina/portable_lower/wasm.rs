@@ -1494,9 +1494,9 @@ impl<'db, 'a> PortableModuleLowerer<'db, 'a, Wasm32> {
         // a direct parameter edit can never swallow an older gesture merely
         // because its event tag is the newest record.
         fb.switch_to_block(classify_header);
-        let classify_index = fb.insert_inst(Phi::new(is, vec![(zero, entry)]), Type::I32);
+        let classify_index = fb.insert_inst(Phi::new(is, vec![(zero, entry)].into()), Type::I32);
         let true_value = fb.make_imm_value(Immediate::I1(true));
-        let all_coalescible = fb.insert_inst(Phi::new(is, vec![(true_value, entry)]), Type::I1);
+        let all_coalescible = fb.insert_inst(Phi::new(is, vec![(true_value, entry)].into()), Type::I1);
         let classify_more = fb.insert_inst(Lt::new(is, classify_index, event_count), Type::I1);
         fb.insert_inst_no_result(Br::new(is, classify_more, classify_body, classify_done));
 
@@ -1544,10 +1544,10 @@ impl<'db, 'a> PortableModuleLowerer<'db, 'a, Wasm32> {
 
         fb.switch_to_block(header);
         let one = fb.make_imm_value(Immediate::I32(1));
-        let event_index = fb.insert_inst(Phi::new(is, vec![(one, initialize_block)]), Type::I32);
+        let event_index = fb.insert_inst(Phi::new(is, vec![(one, initialize_block)].into()), Type::I32);
         let mut coalesced = Vec::with_capacity(event_fields);
         for (value, ty) in initial.into_iter().zip(event_tys.iter().copied()) {
-            coalesced.push(fb.insert_inst(Phi::new(is, vec![(value, initialize_block)]), ty));
+            coalesced.push(fb.insert_inst(Phi::new(is, vec![(value, initialize_block)].into()), ty));
         }
         let more = fb.insert_inst(Lt::new(is, event_index, event_count), Type::I1);
         fb.insert_inst_no_result(Br::new(is, more, body, done));
@@ -1649,7 +1649,7 @@ impl<'db, 'a> PortableModuleLowerer<'db, 'a, Wasm32> {
         // is deliberately generic over event meaning; only the semantically
         // derived homogeneous coalescing tag chooses the fast path above.
         fb.switch_to_block(sequential_header);
-        let sequential_index = fb.insert_inst(Phi::new(is, vec![(zero, classify_done)]), Type::I32);
+        let sequential_index = fb.insert_inst(Phi::new(is, vec![(zero, classify_done)].into()), Type::I32);
         let sequential_more = fb.insert_inst(Lt::new(is, sequential_index, event_count), Type::I1);
         fb.insert_inst_no_result(Br::new(
             is,
@@ -2074,7 +2074,7 @@ impl<'db, 'a> PortableModuleLowerer<'db, 'a, Wasm32> {
             fb.insert_inst_no_result(Jump::new(is, copy_header));
             fb.switch_to_block(copy_header);
             let zero = fb.make_imm_value(Immediate::I32(0));
-            let index = fb.insert_inst(Phi::new(is, vec![(zero, copy_entry)]), Type::I32);
+            let index = fb.insert_inst(Phi::new(is, vec![(zero, copy_entry)].into()), Type::I32);
             let more = fb.insert_inst(Lt::new(is, index, byte_length), Type::I1);
             fb.insert_inst_no_result(Br::new(is, more, copy_body, copy_done));
 

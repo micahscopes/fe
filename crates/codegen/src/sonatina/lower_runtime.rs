@@ -4326,10 +4326,10 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
         self.fb.switch_to_block(header);
         let result = self
             .fb
-            .insert_inst(Phi::new(self.module.inst_set(), vec![(one, entry)]), ty);
+            .insert_inst(Phi::new(self.module.inst_set(), vec![(one, entry)].into()), ty);
         let idx = self
             .fb
-            .insert_inst(Phi::new(self.module.inst_set(), vec![(zero, entry)]), ty);
+            .insert_inst(Phi::new(self.module.inst_set(), vec![(zero, entry)].into()), ty);
         let done_cond = self
             .fb
             .insert_inst(Eq::new(self.module.inst_set(), idx, exp), Type::I1);

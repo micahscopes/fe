@@ -497,7 +497,7 @@ pub fn compile_runtime_package_wasm_with_options(
     } else {
         backend
     };
-    backend.compile_module(&module).map_err(|errors| {
+    backend.compile_module(&module, &sonatina_codegen::BackendOptions::default()).map_err(|errors| {
         LowerError::Internal(format!(
             "wasm backend: {}",
             errors
@@ -581,7 +581,7 @@ pub fn compile_prepared_runtime_package_wasm(
     } else {
         backend
     };
-    backend.compile_module(&prepared.module).map_err(|errors| {
+    backend.compile_module(&prepared.module, &sonatina_codegen::BackendOptions::default()).map_err(|errors| {
         LowerError::Internal(format!(
             "wasm backend: {}",
             errors
@@ -752,7 +752,7 @@ fn diagnostic_func_ref(location: &Location) -> Option<FuncRef> {
     }
 }
 
-fn to_sonatina_opt_level(opt_level: OptLevel) -> SonatinaOptLevel {
+pub(super) fn to_sonatina_opt_level(opt_level: OptLevel) -> SonatinaOptLevel {
     match opt_level {
         OptLevel::O0 => SonatinaOptLevel::O0,
         OptLevel::O1 => SonatinaOptLevel::O1,

@@ -40,7 +40,7 @@ default = ["spirv-backend"]
 spirv-backend = ["sonatina-codegen/spirv-backend", "dep:naga"]
 # Host-only JIT support. Kept out of the default graph so browser/compiler
 # builds do not pull Cranelift, native object support, or a JIT runtime.
-native-backend = ["sonatina-codegen/cranelift"]
+native-backend = ["sonatina-codegen/cranelift-jit"]
 # Reviewed overlay capability. This is deliberately off by default because
 # Fe's published Sonatina pin predates typed indirect-call IR/table lowering.
 sonatina-indirect-calls = []

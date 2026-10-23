@@ -9,7 +9,7 @@ use compiler_db::DriverDataBase;
 use mir::RuntimePackage;
 use sonatina_codegen::{
     Backend as _,
-    isa::cranelift::{CraneliftArtifact, CraneliftBackend},
+    isa::cranelift::{CraneliftJitArtifact, CraneliftJitBackend},
 };
 use sonatina_ir::{Linkage, Type};
 
@@ -20,7 +20,7 @@ use super::{LowerError, portable_lower};
 /// The executable allocation is owned by `artifact`; no callable pointer can
 /// escape this value through the safe API.
 pub struct NativeI32EntryArtifact {
-    artifact: CraneliftArtifact,
+    artifact: CraneliftJitArtifact,
     entry: String,
 }
 
@@ -38,7 +38,7 @@ impl NativeI32EntryArtifact {
         let function: Entry = unsafe {
             let pointer = self
                 .artifact
-                .get_func_ptr::<Entry>(&self.entry)
+                .function_address(&self.entry)
                 .expect("verified native entry disappeared from its artifact");
             std::mem::transmute(pointer)
         };
@@ -151,7 +151,7 @@ pub struct NativeSurfaceEvent {
 /// `f32` state leaves, returning four `f32` state leaves. Wide scalar returns
 /// use Sonatina's checked caller-owned native result buffer.
 pub struct NativeSurfaceTransition4F32Artifact {
-    artifact: CraneliftArtifact,
+    artifact: CraneliftJitArtifact,
     entry: String,
 }
 
@@ -175,7 +175,7 @@ impl NativeSurfaceTransition4F32Artifact {
         let function: Entry = unsafe {
             let pointer = self
                 .artifact
-                .get_func_ptr::<Entry>(&self.entry)
+                .function_address(&self.entry)
                 .expect("verified native surface transition disappeared from its artifact");
             std::mem::transmute(pointer)
         };
@@ -276,7 +276,7 @@ pub struct NativeSurfaceRecoveryStep {
 /// every intermediate value; the generated browser wrapper keeps the same
 /// state in private Wasm globals and exposes only the selected action.
 pub struct NativeSurfaceRecoveryArtifact {
-    artifact: CraneliftArtifact,
+    artifact: CraneliftJitArtifact,
     entry: String,
     event_first: bool,
 }
@@ -310,7 +310,7 @@ impl NativeSurfaceRecoveryArtifact {
         unsafe {
             let pointer = self
                 .artifact
-                .get_func_ptr::<()>(&self.entry)
+                .function_address(&self.entry)
                 .expect("verified native surface recovery policy disappeared from its artifact");
             if self.event_first {
                 let function: EventFirst = std::mem::transmute(pointer);
@@ -361,7 +361,7 @@ pub struct NativeSurfaceScheduleStep {
 /// ABI; construction binds its compiler-resolved emitted symbol and exact
 /// nominal record ABI.
 pub struct NativeSurfaceScheduleArtifact {
-    artifact: CraneliftArtifact,
+    artifact: CraneliftJitArtifact,
     entry: String,
     event_first: bool,
 }
@@ -397,7 +397,7 @@ impl NativeSurfaceScheduleArtifact {
         unsafe {
             let pointer = self
                 .artifact
-                .get_func_ptr::<()>(&self.entry)
+                .function_address(&self.entry)
                 .expect("verified native surface policy disappeared from its artifact");
             if self.event_first {
                 let function: EventFirst = std::mem::transmute(pointer);
@@ -574,7 +574,7 @@ pub const MERKLE_ROOT_NATIVE_ENTRY_ARITY: usize = 81;
 /// An owning JIT artifact with one verified public
 /// `(i32 x 81) -> i32` entry (see [`MERKLE_ROOT_NATIVE_ENTRY_ARITY`]).
 pub struct NativeMerkleRootEntryArtifact {
-    artifact: CraneliftArtifact,
+    artifact: CraneliftJitArtifact,
     entry: String,
 }
 
@@ -607,7 +607,7 @@ impl NativeMerkleRootEntryArtifact {
         let function: Entry = unsafe {
             let pointer = self
                 .artifact
-                .get_func_ptr::<Entry>(&self.entry)
+                .function_address(&self.entry)
                 .expect("verified native entry disappeared from its artifact");
             std::mem::transmute(pointer)
         };
@@ -660,7 +660,7 @@ pub const GRID_LOOP_NATIVE_ENTRY_ARITY: usize = 42;
 /// An owning JIT artifact with one verified public
 /// `(i32 x 42) -> i32` entry (see [`GRID_LOOP_NATIVE_ENTRY_ARITY`]).
 pub struct NativeGridLoopEntryArtifact {
-    artifact: CraneliftArtifact,
+    artifact: CraneliftJitArtifact,
     entry: String,
 }
 
@@ -690,7 +690,7 @@ impl NativeGridLoopEntryArtifact {
         let function: Entry = unsafe {
             let pointer = self
                 .artifact
-                .get_func_ptr::<Entry>(&self.entry)
+                .function_address(&self.entry)
                 .expect("verified native entry disappeared from its artifact");
             std::mem::transmute(pointer)
         };
@@ -737,7 +737,7 @@ pub const MERKLE8_ROOT_NATIVE_ENTRY_ARITY: usize = 161;
 /// An owning JIT artifact with one verified public
 /// `(i32 x 161) -> i32` entry (see [`MERKLE8_ROOT_NATIVE_ENTRY_ARITY`]).
 pub struct NativeMerkle8RootEntryArtifact {
-    artifact: CraneliftArtifact,
+    artifact: CraneliftJitArtifact,
     entry: String,
 }
 
@@ -778,7 +778,7 @@ impl NativeMerkle8RootEntryArtifact {
         let function: Entry = unsafe {
             let pointer = self
                 .artifact
-                .get_func_ptr::<Entry>(&self.entry)
+                .function_address(&self.entry)
                 .expect("verified native entry disappeared from its artifact");
             std::mem::transmute(pointer)
         };
@@ -916,9 +916,9 @@ fn expected_definition_names(module: &sonatina_ir::Module) -> Vec<String> {
 fn compile_and_verify_definitions(
     module: sonatina_ir::Module,
     expected_definitions: &[String],
-) -> Result<CraneliftArtifact, LowerError> {
-    let artifact = CraneliftBackend::new()
-        .compile_module(&module)
+) -> Result<CraneliftJitArtifact, LowerError> {
+    let artifact = CraneliftJitBackend::new()
+        .compile_module(&module, &sonatina_codegen::BackendOptions::default())
         .map_err(|errors| {
             LowerError::Internal(format!(
                 "native backend: {}",
@@ -937,7 +937,7 @@ fn compile_and_verify_definitions(
             // definition. Contain that private upstream assertion and convert
             // it to this API's ordinary fail-closed error.
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                artifact.get_func_ptr::<()>(name)
+                artifact.function_address(name)
             }))
             .ok()
             .flatten()

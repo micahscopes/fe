@@ -960,8 +960,8 @@ fn inline_spirv_calls_from_roots(
     for (function, hint) in original_hints {
         module.ctx.set_inline_hint(function, hint);
     }
-    let forwarded_ret_stats = run_forwarded_ret_elim(module, ForwardedRetElimConfig::default());
-    let dead_ret_stats = run_dead_ret_elim(module, DeadRetElimConfig::default());
+    let forwarded_ret_stats = run_forwarded_ret_elim(module, roots, ForwardedRetElimConfig::default());
+    let dead_ret_stats = run_dead_ret_elim(module, roots, DeadRetElimConfig::default());
     if forwarded_ret_stats.removed_rets != 0 || dead_ret_stats.removed_rets != 0 {
         let mut affected = roots.to_vec();
         affected.extend(preserved_helpers.iter().copied());
