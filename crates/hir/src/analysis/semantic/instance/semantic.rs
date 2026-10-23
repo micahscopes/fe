@@ -178,7 +178,7 @@ pub enum SemanticEffectEnvInstantiationError<'db> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SemanticBodyAdmissionError<'db> {
+pub enum SemanticBodyAdmissionError<'db> {
     BlockedByUpstreamDiagnostics(Box<[crate::analysis::ty::ty_check::SmirLoweringIssue]>),
     IncompleteLoweringPlan(Box<[crate::analysis::ty::ty_check::SmirLoweringIssue]>),
     CallSiteFinalization(crate::analysis::semantic::SemanticDiagnosticId<'db>),
@@ -1941,7 +1941,9 @@ impl<'db> SemanticInstance<'db> {
         Ok(())
     }
 
-    pub(crate) fn admitted_body(
+    /// The shared admitted body for downstream semantic consumers. Admission
+    /// preserves failures of checking, call planning and instance limits.
+    pub fn admitted_body(
         self,
         db: &'db dyn HirAnalysisDb,
     ) -> Result<&'db SemanticBody<'db>, SemanticBodyAdmissionError<'db>> {

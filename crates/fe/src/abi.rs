@@ -6,8 +6,8 @@ use hir::{
     analysis::{
         name_resolution::{PathRes, resolve_path},
         semantic::{
-            EvalOutcome, SemConstScalar, SemConstValue, SemOrigin, SemanticInstance,
-            SemanticInstanceKey, eval_const_ref, resolve_semantic_const_ref,
+            CallSiteId, EvalOutcome, SExpr, SStmtKind, SemConstScalar, SemConstValue, SemOrigin,
+            SemanticInstance, SemanticInstanceKey, eval_const_ref, resolve_semantic_const_ref,
             root_semantic_instance_key,
         },
         ty::{
@@ -343,7 +343,11 @@ fn collect_contract_error_types<'db>(
         contract.scope(),
         "std::evm::effects::revert_error",
     );
-    let error_trait = resolve_lib_trait_path(db, contract.scope(), "core::error::ErrorVariant");
+    let error_trait = hir::analysis::ty::corelib::resolve_lib_trait_path(
+        db,
+        contract.scope(),
+        "core::error::ErrorVariant",
+    );
     let sol_ty = resolve_sol_abi_ty(db, contract.scope())?;
     let mut owners = Vec::new();
     if contract.init(db).is_some() {
@@ -372,9 +376,31 @@ fn collect_contract_error_types<'db>(
         if !visited.insert(key) {
             continue;
         }
+        let instance = SemanticInstance::new(db, key);
+        let admitted = instance
+            .admitted_body(db)
+            .map_err(|error| format!("cannot admit error ABI call graph: {error:?}"))?;
         let typed = key.typed_body(db);
         let Some(body) = typed.body() else { continue };
-        for (expr, partial) in body.exprs(db).iter() {
+        // Lowering owns closure regions and implicit protocol calls. Inspect
+        // only expression calls actually present in this admitted instance.
+        let expression_calls = admitted
+            .blocks
+            .iter()
+            .flat_map(|block| &block.stmts)
+            .filter_map(|stmt| match &stmt.kind {
+                SStmtKind::Assign {
+                    expr:
+                        SExpr::Call {
+                            call_site: CallSiteId::Expr(expr),
+                            ..
+                        },
+                    ..
+                } => Some(*expr),
+                _ => None,
+            });
+        for expr in expression_calls {
+            let partial = expr.data(db, body);
             let hir::hir_def::Partial::Present(hir::hir_def::Expr::Call(_, args)) = partial else {
                 continue;
             };
@@ -482,19 +508,7 @@ fn collect_contract_error_types<'db>(
                 errors.push(ty);
             }
         }
-        let instance = SemanticInstance::new(db, key);
-        if let Some(diagnostic) = instance.call_site_finalization_diagnostic(db) {
-            return Err(format!(
-                "cannot finalize error ABI call graph: {diagnostic:?}"
-            ));
-        }
-        pending.extend(
-            instance
-                .call_sites(db)
-                .iter()
-                .flatten()
-                .filter_map(|site| site.callee.map(|callee| callee.key)),
-        );
+        pending.extend(admitted.callees().into_iter().map(|callee| callee.key));
     }
     Ok(errors)
 }
@@ -929,25 +943,8 @@ fn resolve_sol_abi_ty<'db>(
     db: &'db DriverDataBase,
     scope: ScopeId<'db>,
 ) -> Result<TyId<'db>, String> {
-    let ingot = scope.ingot(db);
-    let std_root = if ingot.kind(db) == IngotKind::Std {
-        IdentId::make_ingot(db)
-    } else {
-        IdentId::new(db, "std".to_string())
-    };
-
-    let sol_path = PathId::from_ident(db, std_root)
-        .push_ident(db, IdentId::new(db, "abi".to_string()))
-        .push_ident(db, IdentId::new(db, "Sol".to_string()));
-
-    let assumptions = PredicateListId::empty_list(db);
-    match resolve_path(db, sol_path, scope, assumptions, false) {
-        Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => Ok(ty),
-        Ok(other) => Err(format!(
-            "expected `std::abi::Sol` to resolve to a type, got `{other:?}`"
-        )),
-        Err(err) => Err(format!("failed to resolve `std::abi::Sol`: {err:?}")),
-    }
+    hir::analysis::ty::corelib::resolve_lib_type_path(db, scope, "std::abi::Sol")
+        .ok_or_else(|| "cannot resolve canonical `std::abi::Sol` type".to_string())
 }
 
 /// Derive ABI state mutability from the effective recv-arm effect requirement set.
@@ -2088,6 +2085,114 @@ pub contract C {
                 {"name":"first","type":"uint256"}, {"name":"second","type":"uint256"}
             ])
         );
+    }
+
+    #[test]
+    fn error_discovery_respects_unused_invoked_and_nested_closure_regions() {
+        for (body, expected) in [
+            (
+                "let f = || revert_error(ClosureFailure {})\nlet _ = f",
+                false,
+            ),
+            ("let f = || revert_error(ClosureFailure {})\nf()", true),
+            (
+                "let outer = || { let inner = || revert_error(ClosureFailure {})\nlet _ = inner }\nouter()",
+                false,
+            ),
+            (
+                "let outer = || { let inner = || revert_error(ClosureFailure {})\ninner() }\nouter()",
+                true,
+            ),
+        ] {
+            let code = format!(
+                r#"
+use std::abi::sol
+use std::evm::revert_error
+#[error]
+struct ClosureFailure {{}}
+msg M {{
+    #[selector = sol("fail()")]
+    Fail {{}}
+}}
+pub contract C {{ recv M {{ Fail {{}} {{ {body} }} }} }}
+"#
+            );
+            let entries = abi_entries(&code, "C");
+            let errors = entries
+                .iter()
+                .filter(|entry| entry["type"] == "error")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                errors.len(),
+                usize::from(expected),
+                "body={body} entries={entries:?}"
+            );
+            if expected {
+                assert_eq!(errors[0]["name"], "ClosureFailure");
+            }
+        }
+    }
+
+    #[test]
+    fn error_discovery_includes_collection_protocol_calls_and_direct_controls() {
+        for (start, next, direct, name) in [
+            (
+                "revert_error(StartFailure {})",
+                "c + 1",
+                "xs.start()",
+                "StartFailure",
+            ),
+            (
+                "0",
+                "revert_error(NextFailure {})",
+                "xs.next(0)",
+                "NextFailure",
+            ),
+        ] {
+            for body in [
+                "for x in xs { let _ = x }".to_string(),
+                format!("let _ = {direct}"),
+            ] {
+                let code = format!(
+                    r#"
+use core::iter::Collection
+use std::abi::sol
+use std::evm::revert_error
+#[error]
+struct StartFailure {{}}
+#[error]
+struct NextFailure {{}}
+struct ErrorCollection {{}}
+impl Collection for ErrorCollection {{
+    type Cursor = usize
+    type Item = u256
+    fn start(self) -> usize {{ {start} }}
+    fn has(self, _ c: usize) -> bool {{ c < 1 }}
+    fn next(self, _ c: usize) -> usize {{ {next} }}
+    fn at(self, _ c: usize) -> ref u256 {{
+        let value: u256 = 7
+        yield ref value
+    }}
+}}
+msg M {{
+    #[selector = sol("fail()")]
+    Fail {{}}
+}}
+pub contract C {{ recv M {{ Fail {{}} {{
+    let xs = ErrorCollection {{}}
+    {body}
+}} }} }}
+"#
+                );
+                let entries = abi_entries(&code, "C");
+                let errors = entries
+                    .iter()
+                    .filter(|entry| entry["type"] == "error")
+                    .collect::<Vec<_>>();
+                assert_eq!(errors.len(), 1, "body={body} entries={entries:?}");
+                assert_eq!(errors[0]["name"], name);
+            }
+        }
     }
 
     #[test]
