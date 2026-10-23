@@ -664,16 +664,20 @@ impl<'db> FileLowerCtxt<'db> {
         &self,
         record_ref: &common::generation::FrozenRecordRef,
     ) -> AuthoredRecord<'db> {
+        self.authored_record_at(&record_ref.target_file, record_ref.target_range)
+    }
+
+    fn authored_record_at(&self, file: &url::Url, range: parser::TextRange) -> AuthoredRecord<'db> {
         let db = self.db();
         let file = db
             .workspace()
-            .get(db, &record_ref.target_file)
+            .get(db, file)
             .expect("validated frozen record file exists in workspace");
         let top_mod = map_file_to_mod_impl(db, file);
         let syntax = top_mod_ast(db, top_mod)
             .syntax()
             .descendants()
-            .filter(|node| node.text_range() == record_ref.target_range)
+            .filter(|node| node.text_range() == range)
             .find_map(|node| {
                 ast::Struct::cast(node.clone())
                     .map(RecordSyntax::Struct)
@@ -681,9 +685,20 @@ impl<'db> FileLowerCtxt<'db> {
             })
             .expect("validated authored record item exists in target module");
         AuthoredRecord {
-            scope: AuthoredScope::item(db, top_mod, record_ref.target_range),
+            scope: AuthoredScope::item(db, top_mod, range),
             syntax,
         }
+    }
+
+    /// A path naming the authored type declaration `decl`, bound when it is
+    /// resolved.
+    pub(super) fn authored_decl_path(
+        &self,
+        decl: &common::generation::FrozenDeclRef,
+        generic_args: crate::hir_def::GenericArgListId<'db>,
+    ) -> PathId<'db> {
+        self.authored_record_at(&decl.file, decl.range)
+            .path(self.db(), generic_args)
     }
 
     /// The record's lowered item, when it is declared in this module and was

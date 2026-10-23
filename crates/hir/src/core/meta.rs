@@ -486,11 +486,28 @@ impl<'db> RecordInput<'db> {
             .file(db)
             .url(db)
             .ok_or("record owner has no source URL")?;
+        let adt = self
+            .ty
+            .adt_def(db)
+            .ok_or("record input has no authored declaration")?;
+        let identity = TyId::foldl(db, TyId::adt(db, adt), adt.params(db));
+        let args = if self.ty == identity {
+            None
+        } else {
+            Some(
+                self.ty
+                    .generic_args(db)
+                    .iter()
+                    .map(|arg| freeze_generic_arg(db, *arg))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        };
         Ok(FrozenRecordRef {
             owner_kind,
             target_file,
             target_range,
             variant_index: self.variant_index,
+            args,
         })
     }
 }
@@ -541,6 +558,122 @@ impl<'db> RecordField<'db> {
             index: self.index,
         })
     }
+}
+
+/// Freeze a ground type of the authored view by declaration identity, for
+/// rebinding in the output view. Declarations cross as file and authored
+/// range, primitives by name and constants as scalars; no semantic identity
+/// of this database does.
+pub(crate) fn freeze_ground_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Result<common::generation::FrozenTy, &'static str> {
+    use crate::analysis::ty::{
+        provider::AddressSpace,
+        ty_def::{PrimTy, TyBase, TyData},
+    };
+    use common::generation::{FrozenGenericArg, FrozenTy};
+    if let TyData::Never = ty.data(db) {
+        return Ok(FrozenTy::Never);
+    }
+    let (base, args) = ty.decompose_ty_app(db);
+    let args = args
+        .iter()
+        .map(|arg| freeze_generic_arg(db, *arg))
+        .collect::<Result<Vec<_>, _>>()?;
+    let unsupported = "a spliced type must be a record, primitive, tuple, array or pointer applied to ground arguments";
+    let types = |args: Vec<FrozenGenericArg>| {
+        args.into_iter()
+            .map(|arg| match arg {
+                FrozenGenericArg::Type(ty) => Ok(ty),
+                FrozenGenericArg::Const(_) => Err(unsupported),
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    match base.data(db) {
+        TyData::TyBase(TyBase::Adt(adt)) => Ok(FrozenTy::Declared {
+            decl: freeze_decl(db, adt.adt_ref(db))?,
+            args,
+        }),
+        TyData::TyBase(TyBase::Prim(PrimTy::Tuple(_))) => Ok(FrozenTy::Tuple(types(args)?)),
+        TyData::TyBase(TyBase::Prim(PrimTy::Array)) => match <[_; 2]>::try_from(args) {
+            Ok([FrozenGenericArg::Type(elem), FrozenGenericArg::Const(len)]) => {
+                Ok(FrozenTy::Array {
+                    elem: Box::new(elem),
+                    len,
+                })
+            }
+            _ => Err(unsupported),
+        },
+        TyData::TyBase(TyBase::Prim(PrimTy::Ptr(AddressSpace::Memory))) => {
+            match <[_; 1]>::try_from(types(args)?) {
+                Ok([pointee]) => Ok(FrozenTy::Ptr(Box::new(pointee))),
+                Err(_) => Err(unsupported),
+            }
+        }
+        TyData::TyBase(TyBase::Prim(primitive)) => {
+            let hir_primitive = crate::hir_def::prim_ty::PrimTy::all_types()
+                .iter()
+                .find(|candidate| {
+                    crate::analysis::ty::ty_def::TyBase::from(**candidate)
+                        == TyBase::Prim(*primitive)
+                })
+                .ok_or(unsupported)?;
+            Ok(FrozenTy::Primitive {
+                name: hir_primitive.name(db).data(db).to_string(),
+                args,
+            })
+        }
+        _ => Err(unsupported),
+    }
+}
+
+fn freeze_generic_arg<'db>(
+    db: &'db dyn HirAnalysisDb,
+    arg: TyId<'db>,
+) -> Result<common::generation::FrozenGenericArg, &'static str> {
+    use crate::analysis::{
+        semantic::SemConstValue,
+        ty::{const_ty::ConstTyData, ty_def::TyData},
+    };
+    let TyData::ConstTy(constant) = arg.data(db) else {
+        return Ok(common::generation::FrozenGenericArg::Type(
+            freeze_ground_ty(db, arg)?,
+        ));
+    };
+    let ConstTyData::Value(value) = constant.evaluate(db, None).data(db) else {
+        return Err("a spliced type's constant argument must be evaluated");
+    };
+    let SemConstValue::Scalar { ty, value } = value.value().value(db) else {
+        return Err("a spliced type's constant argument must be a boolean or integer");
+    };
+    Ok(common::generation::FrozenGenericArg::Const(
+        ItemCode::freeze_scalar(db, *ty, value)?,
+    ))
+}
+
+fn freeze_decl<'db>(
+    db: &'db dyn HirAnalysisDb,
+    declaration: crate::analysis::ty::adt_def::AdtRef<'db>,
+) -> Result<common::generation::FrozenDeclRef, &'static str> {
+    use crate::analysis::ty::adt_def::AdtRef;
+    let (top_mod, pointer) = match declaration {
+        AdtRef::Struct(s) => match s.origin(db) {
+            HirOrigin::Raw(pointer) => (s.top_mod(db), pointer.syntax_node_ptr()),
+            _ => return Err("a spliced type names a declaration that is not authored"),
+        },
+        AdtRef::Enum(e) => match e.origin(db) {
+            HirOrigin::Raw(pointer) => (e.top_mod(db), pointer.syntax_node_ptr()),
+            _ => return Err("a spliced type names a declaration that is not authored"),
+        },
+    };
+    Ok(common::generation::FrozenDeclRef {
+        file: top_mod
+            .file(db)
+            .url(db)
+            .ok_or("a spliced type's declaration has no source URL")?,
+        range: pointer.text_range(),
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1003,12 +1136,6 @@ impl<'db> ItemCode<'db> {
                         )),
                         SemConstValue::Meta { value, .. } => match value {
                             MetaValue::Record(record) => {
-                                let adt = record.ty().adt_def(db)
-                                    .ok_or("record splice has no authored declaration")?;
-                                let identity_ty = TyId::foldl(db, TyId::adt(db, adt), adt.params(db));
-                                if record.ty() != identity_ty {
-                                    return Err("record splices from instantiated generic records are not supported yet; the generated type would lose its actual arguments");
-                                }
                                 Ok(FrozenHoleValue::Record(record.freeze(db)?))
                             }
                             MetaValue::Field(field) => {
@@ -1023,8 +1150,18 @@ impl<'db> ItemCode<'db> {
                                     ..record
                                 };
                                 let authored_field = RecordField { record: identity, index: field.index() };
+                                // A type written without the record's parameters keeps its
+                                // written form; one over them is the instantiated type.
                                 if field.ty(db) != authored_field.ty(db) {
-                                    return Err("field type splices from instantiated generic records are not supported yet; the generated type would lose its actual arguments");
+                                    return Ok(FrozenHoleValue::Type(freeze_ground_ty(
+                                        db,
+                                        crate::analysis::ty::normalize::normalize_ty(
+                                            db,
+                                            field.ty(db),
+                                            record.scope(),
+                                            crate::analysis::ty::trait_resolution::PredicateListId::empty_list(db),
+                                        ),
+                                    )?));
                                 }
                                 Ok(FrozenHoleValue::FieldType(field.freeze(db)?))
                             }
@@ -1628,6 +1765,7 @@ pub fn freeze_generation_request<'db>(
                 .ok_or("target declaration has no source URL")?,
             target_range,
             variant_index: None,
+            args: None,
         },
     })
 }

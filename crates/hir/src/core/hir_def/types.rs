@@ -1,4 +1,4 @@
-use super::{AuthoredScope, Body, GenericArg, IdentId, Partial, PathId};
+use super::{AuthoredScope, Body, GenericArg, GenericArgListId, IdentId, Partial, PathId};
 use crate::HirDb;
 
 #[salsa::interned]
@@ -52,7 +52,7 @@ impl<'db> TypeId<'db> {
             TypeKind::AuthoredField(field) => field
                 .bound_type(db)
                 .is_some_and(|ty| ty.mentions_maybe_mut(db)),
-            TypeKind::Primitive(_) | TypeKind::Never => false,
+            TypeKind::Primitive(..) | TypeKind::Never => false,
         }
     }
 
@@ -113,7 +113,9 @@ impl<'db> TypeId<'db> {
                 );
                 format!("[{elem_ty}; {len_str}]")
             }
-            TypeKind::Primitive(primitive) => primitive.name(db).data(db).to_string(),
+            TypeKind::Primitive(primitive, args) => {
+                format!("{}{}", primitive.name(db).data(db), args.pretty_print(db))
+            }
             TypeKind::Never => "!".into(),
             TypeKind::AuthoredField(field) => field
                 .bound_type(db)
@@ -147,8 +149,9 @@ pub enum TypeKind<'db> {
     Ptr(Partial<TypeId<'db>>),
     Mode(TypeMode, Partial<TypeId<'db>>),
     Path(Partial<PathId<'db>>),
-    /// Compiler-owned primitive identity for frozen scalar holes.
-    Primitive(super::prim_ty::PrimTy),
+    /// Compiler-owned primitive identity for frozen scalar holes and frozen
+    /// types, with its arguments: `String<N>`.
+    Primitive(super::prim_ty::PrimTy, GenericArgListId<'db>),
     Tuple(TupleTypeId<'db>),
     /// The first `TypeId` is the element type, the second `Body` is the length.
     Array(Partial<TypeId<'db>>, Partial<Body<'db>>),

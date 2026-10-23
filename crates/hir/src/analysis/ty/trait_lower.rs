@@ -96,7 +96,7 @@ fn raw_impl_self_key<'db>(
             HirTyKind::Tuple(tuple) => Some(ImplSelfKey::Prim(PrimTy::Tuple(tuple.data(db).len()))),
             HirTyKind::Array(..) => Some(ImplSelfKey::Prim(PrimTy::Array)),
             HirTyKind::AuthoredField(field) => lower(db, field.bound_type(db)?, scope),
-            HirTyKind::Primitive(_) | HirTyKind::Never => None,
+            HirTyKind::Primitive(..) | HirTyKind::Never => None,
         }
     }
 

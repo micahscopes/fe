@@ -1239,7 +1239,7 @@ fn find_written_path<'db, R>(
                 }
             })
         }
-        TypeKind::Primitive(_) | TypeKind::Never => None,
+        TypeKind::Primitive(..) | TypeKind::Never => None,
         // A spliced field type is written in its record, not here.
         TypeKind::AuthoredField(_) => None,
     }
