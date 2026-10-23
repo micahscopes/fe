@@ -2276,9 +2276,9 @@ use std::evm::revert_error
 {declaration}
 msg M {{
     #[selector = sol("fail()")]
-    Fail {{}}
+    Fail {{}},
     #[selector = sol("headSize()")]
-    HeadSize {{}} -> u256
+    HeadSize {{}} -> u256,
 }}
 pub contract C {{
     recv M {{
