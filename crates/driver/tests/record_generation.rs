@@ -1900,7 +1900,9 @@ struct Box<T> { value: T }
 /// because the generated type would have lost `Box<u256>`'s argument. The
 /// record's actual arguments now cross into the output view, so `${ty}` is
 /// `u256` and `${record}` is `Box<u256>`. The `u8` instance discriminates: a
-/// lost argument would accept 300 there.
+/// lost argument would let `255 + 1` evaluate there. (A literal's range is
+/// not checked against a narrower type, so the arithmetic is the
+/// discriminator.)
 #[test]
 fn instantiated_generic_field_type_and_record_splices_keep_their_actual_arguments() {
     let source = r#"use core::derive::Derive
@@ -1911,14 +1913,15 @@ struct Provider {}
 impl Derive<Value> for Provider {
     const fn derive(_ record: Record) -> Code<Item> {
         let ty = field_type(field(record, 0))
-        quote { const fn value() -> u256 { let v: ${ty} = 300
-            v as u256 } }
+        quote { const fn value() -> u256 { let v: ${ty} = 255
+            let w = v + 1
+            w as u256 } }
     }
 }
 impl Value for Box<u256> with (Provider)
 const fn observe() -> u256 { <Box<u256> as Value>::value() }
 "#;
-    let eval_observe = |source: &str| {
+    let eval_observe = |source: &str| -> Result<String, String> {
         let (db, file) = input(source);
         let output = prepare_file(&db, file)
             .unwrap_or_else(|error| panic!("{error}"))
@@ -1946,7 +1949,7 @@ const fn observe() -> u256 { <Box<u256> as Value>::value() }
             GenericSubst::for_body_owner(&output, owner, vec![]),
         );
         let EvalOutcome::Ready(value) = result else {
-            panic!("{result:?}")
+            return Err(format!("{result:?}"));
         };
         let SemConstValue::Scalar {
             value: SemConstScalar::Int { value },
@@ -1955,31 +1958,28 @@ const fn observe() -> u256 { <Box<u256> as Value>::value() }
         else {
             panic!("{:?}", value.value(&output))
         };
-        value.to_string()
+        Ok(value.to_string())
     };
-    assert_eq!(eval_observe(source), "300");
+    assert_eq!(eval_observe(source), Ok("256".to_string()));
 
     let narrow = source.replace("Box<u256>", "Box<u8>");
-    let (db, file) = input(&narrow);
-    let error = prepare_file(&db, file)
-        .err()
-        .expect("300 is out of range for the actual argument u8");
+    let outcome = eval_observe(&narrow);
     assert!(
-        error.cause.contains("generated output admission failed"),
-        "{error}"
+        outcome.is_err(),
+        "`255 + 1` overflows the actual argument u8, got {outcome:?}"
     );
 
     let record_splice = source.replace(
-        "let v: ${ty} = 300\n            v as u256",
-        "let b: ${record} = Box { value: 300 }\n            b.value as u256",
+        "let v: ${ty} = 255\n            let w = v + 1",
+        "let b: ${record} = Box { value: 255 }\n            let w = b.value + 1",
     );
     assert_ne!(record_splice, source);
-    assert_eq!(eval_observe(&record_splice), "300");
+    assert_eq!(eval_observe(&record_splice), Ok("256".to_string()));
     let narrow = record_splice.replace("Box<u256>", "Box<u8>");
-    let (db, file) = input(&narrow);
+    let outcome = eval_observe(&narrow);
     assert!(
-        prepare_file(&db, file).is_err(),
-        "`Box<u8>` must not accept a 300 field"
+        outcome.is_err(),
+        "`Box<u8>` must overflow at 255 + 1, got {outcome:?}"
     );
 
     let scalar = source
@@ -1987,8 +1987,12 @@ const fn observe() -> u256 { <Box<u256> as Value>::value() }
             "let ty = field_type(field(record, 0))",
             "let n = field_count(record)",
         )
-        .replace("let v: ${ty} = 300", "let v: u256 = ${n} as u256");
-    assert_eq!(eval_observe(&scalar), "1");
+        .replace(
+            "let v: ${ty} = 255\n            let w = v + 1",
+            "let v: u256 = ${n} as u256\n            let w = v",
+        );
+    assert_ne!(scalar, source);
+    assert_eq!(eval_observe(&scalar), Ok("1".to_string()));
 }
 
 #[test]

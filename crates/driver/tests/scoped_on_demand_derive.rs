@@ -34,6 +34,13 @@ fn prepare_err(source: &str) -> String {
 }
 
 fn eval_const_fn_u256(db: &DriverDataBase, fn_name: &str) -> String {
+    try_eval_const_fn_u256(db, fn_name).unwrap_or_else(|outcome| {
+        panic!("expected Ready for `{fn_name}`, got {outcome}");
+    })
+}
+
+/// The integer a const function evaluates to, or its unfinished outcome.
+fn try_eval_const_fn_u256(db: &DriverDataBase, fn_name: &str) -> Result<String, String> {
     let url = Url::parse("file:///tmp/scoped-on-demand-derive.fe").unwrap();
     let file = db.workspace().get(db, &url).unwrap();
     let module = db.top_mod(file);
@@ -54,7 +61,7 @@ fn eval_const_fn_u256(db: &DriverDataBase, fn_name: &str) -> String {
         GenericSubst::for_body_owner(db, owner, Vec::new()),
     );
     let EvalOutcome::Ready(value) = outcome else {
-        panic!("expected Ready for `{fn_name}`, got {outcome:?}");
+        return Err(format!("{outcome:?}"));
     };
     let SemConstValue::Scalar {
         value: SemConstScalar::Int { value },
@@ -63,7 +70,7 @@ fn eval_const_fn_u256(db: &DriverDataBase, fn_name: &str) -> String {
     else {
         panic!("expected Int scalar for `{fn_name}`");
     };
-    value.to_string()
+    Ok(value.to_string())
 }
 
 #[test]
@@ -1049,8 +1056,9 @@ const fn observe() -> u256 {
     let output = prepare(&both).unwrap();
     assert_eq!(eval_const_fn_u256(&output, "observe"), "707");
 
-    // The instance's field type reaches the generated body: 300 fits `u256`
-    // but not `u8`.
+    // The instance's field type reaches the generated body: 255 + 1 fits
+    // `u256` but overflows `u8`. (A literal's range is not checked against a
+    // narrower type, so the arithmetic is the discriminator.)
     let typed = both
         .replace(
             "    use core::meta::{Code, Item, Record}\n    const fn helper",
@@ -1058,14 +1066,19 @@ const fn observe() -> u256 {
         )
         .replace(
             "            quote { const fn value() -> u256 { helper() } }",
-            "            let ty = field_type(field(record, 0))\n            quote { const fn value() -> u256 { let v: ${ty} = 300\n                v as u256 + helper() } }",
+            "            let ty = field_type(field(record, 0))\n            quote { const fn value() -> u256 { let v: ${ty} = 255\n                let w = v + 1\n                w as u256 + helper() } }",
         );
     assert_ne!(typed, both);
     let wide = typed.replace("<Box<u8> as Value>::value() * 100 + ", "");
     let output = prepare(&wide).unwrap();
-    assert_eq!(eval_const_fn_u256(&output, "observe"), "307");
+    assert_eq!(eval_const_fn_u256(&output, "observe"), "263");
     let narrow = typed.replace(" + <Box<u256> as Value>::value()", "");
-    assert!(prepare(&narrow).is_err(), "`Box<u8>` must not accept 300");
+    let output = prepare(&narrow).unwrap();
+    let outcome = try_eval_const_fn_u256(&output, "observe");
+    assert!(
+        outcome.is_err(),
+        "`Box<u8>` must overflow at 255 + 1, got {outcome:?}"
+    );
 }
 
 #[test]
