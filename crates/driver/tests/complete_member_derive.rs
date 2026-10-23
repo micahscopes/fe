@@ -549,3 +549,93 @@ impl<T> Report for Envelope<T> with (Asks)
     let cause = prepare_err(source);
     assert!(cause.contains("concrete ground types"), "{cause}");
 }
+
+/// A trait with an associated shape. The provider supplies the shape and the
+/// method whose result it describes; the shape keeps the mode it is written
+/// with, so `mut? u256` agrees with the method's `mut? u256`.
+const SHAPED: &str = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record, field}
+
+trait Driver {
+    shape Step
+    fn at(mut? self) -> Self::Step
+}
+
+struct One { x: u256 }
+
+struct Stepper {}
+impl Derive<Driver> for Stepper {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let f = field(record, 0)
+        quote {
+            shape Step = mut? u256
+            fn at(mut? self) -> mut? u256 { mut? self.${f} }
+        }
+    }
+}
+
+impl Driver for One with (Stepper)
+"#;
+
+#[test]
+fn quoted_shape_members_keep_their_modes() {
+    prepare(SHAPED).unwrap();
+    // A shape whose mode disagrees with the method is the error a
+    // handwritten implementation gets, not a lost mode.
+    let disagreeing = SHAPED.replace("shape Step = mut? u256", "shape Step = own u256");
+    assert_ne!(disagreeing, SHAPED);
+    let generated = prepare_err(&disagreeing);
+    let handwritten = r#"trait Driver {
+    shape Step
+    fn at(mut? self) -> Self::Step
+}
+
+struct One { x: u256 }
+
+impl Driver for One {
+    shape Step = own u256
+    fn at(mut? self) -> mut? u256 { mut? self.x }
+}
+"#;
+    let mut db = DriverDataBase::default();
+    let file = db
+        .workspace()
+        .touch(&mut db, Url::parse(URL).unwrap(), Some(handwritten.into()));
+    let expected = db.run_on_top_mod(db.top_mod(file)).format_diags(&db);
+    let headers = |text: &str| {
+        let mut lines = text
+            .lines()
+            .filter(|line| line.starts_with("error"))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        lines.sort();
+        lines
+    };
+    assert!(!headers(&expected).is_empty(), "{expected}");
+    for header in headers(&expected) {
+        assert!(
+            generated.contains(&header),
+            "missing {header:?} in {generated}"
+        );
+    }
+}
+
+/// A quoted shape has no module item form: at a module root it is reported,
+/// not dropped.
+#[test]
+fn quoted_shapes_outside_implementations_are_refused() {
+    let source = r#"use core::meta::{Code, Item, Record}
+pub const fn make(_ r: Record) -> Code<Item> {
+    quote {
+        shape Step = own u256
+    }
+}
+#[generate(make)]
+struct One { x: u256 }
+"#;
+    let cause = prepare_err(source);
+    assert!(
+        cause.contains("a quoted shape is an associated shape member"),
+        "{cause}"
+    );
+}

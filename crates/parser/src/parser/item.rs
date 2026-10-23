@@ -820,7 +820,7 @@ impl super::Parse for TraitUsesItemScope {
     }
 }
 
-define_scope! { TraitShapeItemScope, TraitShapeItem }
+define_scope! { pub(super) TraitShapeItemScope, TraitShapeItem }
 impl super::Parse for TraitShapeItemScope {
     type Error = Recovery<ErrProof>;
 
