@@ -1,6 +1,7 @@
 use super::effects::Log
 
-/// Trait implemented by `#[event]` structs.
+/// Trait implemented by `#[event]` structs and by records generated with
+/// `std::derive::event_struct`, whose indexed fields have `Indexed<T>` types.
 ///
 /// `Event.emit(self, log)` emits an EVM log whose first topic (`topic0`) is the
 /// keccak256 hash of the Solidity-compatible event signature, followed by up to
