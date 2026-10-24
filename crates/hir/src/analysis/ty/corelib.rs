@@ -541,7 +541,10 @@ pub fn effect_key_suspension<'db>(
             ) {
                 GoalSatisfiability::Satisfied(_) => SuspensionFootprint::MaySuspend,
                 GoalSatisfiability::UnSat(_) => SuspensionFootprint::Absent,
+                // A provider that generation has not yet supplied might still
+                // implement the capability, so absence cannot be concluded.
                 GoalSatisfiability::NeedsConfirmation { .. }
+                | GoalSatisfiability::NeedsGeneration(_)
                 | GoalSatisfiability::ContainsInvalid => SuspensionFootprint::Unresolved,
             }
         }
