@@ -3089,9 +3089,15 @@ impl std::evm::Event for Ledger {{
             .flat_map(|w| u256_word(*w))
             .collect::<Vec<_>>();
         // (call, topics, data), each written out from `cast keccak`/`cast abi-encode`.
-        let expected: Vec<(&str, Vec<Vec<u8>>, Vec<u8>)> = vec![
-            ("emitPaused()", vec![topic(EVENT_TOPIC_PAUSED)], Vec::new()),
-            (
+        struct ExpectedLog {
+            call: &'static str,
+            topics: Vec<Vec<u8>>,
+            data: Vec<u8>,
+        }
+        let log = |call, topics, data| ExpectedLog { call, topics, data };
+        let expected = vec![
+            log("emitPaused()", vec![topic(EVENT_TOPIC_PAUSED)], Vec::new()),
+            log(
                 "emitTransfer()",
                 vec![
                     topic(EVENT_TOPIC_TRANSFER),
@@ -3100,17 +3106,17 @@ impl std::evm::Event for Ledger {{
                 ],
                 u256_word_u16(500),
             ),
-            (
+            log(
                 "emitNote()",
                 vec![topic(EVENT_TOPIC_NOTE), address_word(0x11)],
                 note_data,
             ),
-            (
+            log(
                 "emitMoved()",
                 vec![topic(EVENT_TOPIC_MOVED), address_word(0x11)],
                 moved_data,
             ),
-            (
+            log(
                 "emitLedger()",
                 vec![
                     topic(EVENT_TOPIC_LEDGER),
@@ -3164,7 +3170,7 @@ impl std::evm::Event for Ledger {{
             let harness = FeContractHarness::compile("C", source)
                 .unwrap_or_else(|error| panic!("{label}: {error:?}"));
             let mut instance = harness.deploy_instance().expect("deploy event twin");
-            for (call, topics, data) in &expected {
+            for ExpectedLog { call, topics, data } in &expected {
                 let calldata = selector_for_signature(call).to_be_bytes();
                 let outcome = instance
                     .call_raw_with_logs(&calldata, ExecutionOptions::default())
