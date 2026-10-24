@@ -2277,19 +2277,32 @@ fn event_generation_refuses_before_publishing_and_accepts_the_limit() {
     prepare_file(&db, file)
         .unwrap()
         .expect("three indexed fields are the limit and are accepted");
-    for (label, fields) in [
+    for (label, fields, cause) in [
         (
             "four indexed",
             "a: Indexed<u256>, b: Indexed<u256>, c: Indexed<u256>, d: Indexed<u256>",
+            "Panicked",
         ),
-        ("dynamic topic", "a: Indexed<Bytes>"),
-        ("pointer field", "a: *u8"),
+        (
+            "dynamic topic",
+            "a: Indexed<Bytes>",
+            "query_field requires a satisfied FieldQuery::evaluate implementation",
+        ),
+        (
+            "pointer field",
+            "a: *u8",
+            "query_field requires a satisfied FieldQuery::evaluate implementation",
+        ),
     ] {
         let source = event(fields);
         let (db, file) = input(&source);
+        let error = prepare_file(&db, file)
+            .err()
+            .unwrap_or_else(|| panic!("{label} must refuse generation"));
         assert!(
-            prepare_file(&db, file).is_err(),
-            "{label} must refuse generation"
+            error.cause.contains(cause),
+            "{label}: unexpected cause {}",
+            error.cause
         );
         assert!(
             db.generation_inputs().functions(&db).is_empty(),
