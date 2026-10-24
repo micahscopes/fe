@@ -2310,3 +2310,26 @@ fn event_generation_refuses_before_publishing_and_accepts_the_limit() {
         );
     }
 }
+
+#[test]
+fn generated_msg_selectors_match_independent_signatures() {
+    // The literals come from foundry `cast sig`, not from Fe or this crate.
+    assert!(prepared_check(
+        include_str!("fixtures/four_clients_msg.fe"),
+        "check_msg"
+    ));
+}
+
+#[test]
+fn msg_generation_requires_the_ordinary_codec_and_composes_with_other_returns() {
+    let provider = "use core::meta::{Code, Item, Record}\nuse std::derive::sol_selector\nconst fn returning_bool(_ record: Record) -> Code<Item> {\n    let selector = sol_selector(record)\n    quote {\n        impl core::message::MsgVariant<std::abi::Sol> for ${record} {\n            const SELECTOR: u32 = ${selector}\n            type Return = bool\n        }\n    }\n}\n";
+    let ok = format!(
+        "{provider}#[abi]\n#[generate(returning_bool)]\nstruct Check {{ value: u256 }}\nconst fn check_ret() -> bool {{ <Check as core::message::MsgVariant<std::abi::Sol>>::SELECTOR == 0xcce3a419 }}\n"
+    );
+    assert!(prepared_check(&ok, "check_ret"));
+    // Without Encode and Decode the complete generated implementation is refused.
+    let bare = format!("{provider}#[generate(returning_bool)]\nstruct Check {{ value: u256 }}\n");
+    let (db, file) = input(&bare);
+    assert!(prepare_file(&db, file).is_err());
+    assert!(db.generation_inputs().functions(&db).is_empty());
+}
