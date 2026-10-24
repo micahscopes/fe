@@ -2389,3 +2389,31 @@ struct Pair { first: u256, second: u256 }
         error.cause
     );
 }
+
+#[test]
+fn generated_event_keeps_user_names_apart_from_generated_locals() {
+    // Field and type names that equal the generated locals and the generic
+    // parameter must not capture or be captured. The hash is from `cast keccak`
+    // of ten `uint256` fields.
+    let source = r#"use std::derive::event_struct
+use std::evm::{Event, Indexed}
+type L = u256
+#[generate(event_struct)]
+struct E {
+    log: Indexed<u256>,
+    out: u256,
+    tails: u256,
+    head_pos: u256,
+    data_buf: u256,
+    total: u256,
+    head_size: u256,
+    topic1: Indexed<u256>,
+    indexed_count: u256,
+    x: L,
+}
+const fn check_hygiene() -> bool {
+    <E as Event>::TOPIC0 == 0x7d6861bb0fe47458a65a413d857f050057227d2eb948eadb167c7a778a3f9779
+}
+"#;
+    assert!(prepared_check(source, "check_hygiene"));
+}
