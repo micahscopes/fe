@@ -1,0 +1,25 @@
+use std::abi::{Bytes, DynArray}
+use std::derive::event_struct
+use std::evm::{Address, Event, Indexed}
+
+#[generate(event_struct)]
+struct Paused {}
+
+#[generate(event_struct)]
+struct Transfer { from: Indexed<Address>, to: Indexed<Address>, value: u256 }
+
+#[generate(event_struct)]
+struct Mixed { provider: Indexed<Address>, values: DynArray<u256>, extra: Bytes, invariant: u256 }
+
+#[generate(event_struct)]
+struct Legacy { from: Indexed<Address>, to: Address }
+
+#[event]
+struct CompilerLegacy { #[indexed] from: Address, to: Address }
+
+const fn check_event() -> bool {
+    <Paused as Event>::TOPIC0 == 0x9e87fac88ff661f02d44f95383c817fece4bce600a3dab7a54406878b965e752
+        && <Transfer as Event>::TOPIC0 == 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
+        && <Mixed as Event>::TOPIC0 == 0x97cd0165cf79835d3d0313bb5b69cd7cffaba79923a1a4d398385b5c9950a6a2
+        && <Legacy as Event>::TOPIC0 == 0x3f5a61389d13926d73833e187e1691556b4f938c469904579b26f5479af10c79
+}

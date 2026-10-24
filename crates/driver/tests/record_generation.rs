@@ -2288,3 +2288,81 @@ fn generated_error_selector_and_layout_match_independent_signatures() {
         }
     ));
 }
+
+fn prepared_check(source: &str, function_name: &str) -> bool {
+    let (db, file) = input(source);
+    let output = prepare_file(&db, file).unwrap().unwrap();
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    let module = output.top_mod(output_file);
+    assert!(!output.run_on_top_mod(module).has_errors(&output));
+    let function = module
+        .all_funcs(&output)
+        .iter()
+        .find(|f| {
+            f.name(&output)
+                .to_opt()
+                .is_some_and(|name| name.data(&output) == function_name)
+        })
+        .unwrap();
+    let owner = BodyOwner::Func(*function, None);
+    let result = eval_body_owner_const(
+        &output,
+        owner,
+        GenericSubst::for_body_owner(&output, owner, vec![]),
+    );
+    let EvalOutcome::Ready(value) = result else {
+        panic!("{result:?}")
+    };
+    matches!(
+        value.value(&output),
+        SemConstValue::Scalar {
+            value: SemConstScalar::Bool(true),
+            ..
+        }
+    )
+}
+
+#[test]
+fn generated_event_topic0_matches_independent_signatures() {
+    // The literals come from foundry `cast keccak`, not from Fe or this crate.
+    assert!(prepared_check(
+        include_str!("fixtures/four_clients_event.fe"),
+        "check_event"
+    ));
+}
+
+#[test]
+fn event_generation_refuses_before_publishing_and_accepts_the_limit() {
+    let event = |fields: &str| {
+        format!(
+            "use std::abi::Bytes\nuse std::derive::event_struct\nuse std::evm::Indexed\n#[generate(event_struct)]\nstruct E {{ {fields} }}\n"
+        )
+    };
+    let three = event("a: Indexed<u256>, b: Indexed<u256>, c: Indexed<u256>, d: u256");
+    let (db, file) = input(&three);
+    prepare_file(&db, file)
+        .unwrap()
+        .expect("three indexed fields are the limit and are accepted");
+    for (label, fields) in [
+        (
+            "four indexed",
+            "a: Indexed<u256>, b: Indexed<u256>, c: Indexed<u256>, d: Indexed<u256>",
+        ),
+        ("dynamic topic", "a: Indexed<Bytes>"),
+        ("pointer field", "a: *u8"),
+    ] {
+        let source = event(fields);
+        let (db, file) = input(&source);
+        assert!(
+            prepare_file(&db, file).is_err(),
+            "{label} must refuse generation"
+        );
+        assert!(
+            db.generation_inputs().functions(&db).is_empty(),
+            "{label} must publish nothing"
+        );
+    }
+}
