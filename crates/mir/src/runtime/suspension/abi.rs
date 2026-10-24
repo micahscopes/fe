@@ -7,7 +7,7 @@ use hir::analysis::{
     ty::{AddressSpace, ty_def::TyId},
 };
 
-use super::NativeScalarTaskPlan;
+use super::{NativeScalarTaskPlan, check_native_step_protocol};
 use crate::{
     MirDb,
     instance::{
@@ -71,6 +71,9 @@ pub fn plan_native_scalar_abi<'db>(
             "native scalar task entry currently requires erased capability inputs only",
         ));
     }
+    // Frame words are sized from the Step variants below and read back by
+    // index in the adapters, so the segments must agree with those variants.
+    check_native_step_protocol(db, task.step_layout(db), &segments[0], &segments[1..])?;
     let Layout::Enum(step) = task.step_layout(db).data(db) else {
         return Err(unsupported("native task Step is not an enum"));
     };
