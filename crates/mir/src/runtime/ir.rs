@@ -916,6 +916,14 @@ pub enum RuntimeFunctionOwner<'db> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
 pub enum RuntimeSyntheticSpec<'db> {
+    NativeTaskAdapter {
+        plan: super::suspension::NativeScalarAbiPlan<'db>,
+        index: u16,
+    },
+    NativeTaskSegment {
+        plan: super::suspension::NativeScalarTaskPlan<'db>,
+        index: u16,
+    },
     MainRoot {
         callee: RuntimeInstance<'db>,
         entry_args: EntrySemanticArgsPlan<'db>,
