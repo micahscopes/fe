@@ -45,7 +45,7 @@ pub(super) fn parse_expr_atom<S: TokenStream>(
             if parser
                 .parents
                 .iter()
-                .any(|entry| entry.scope.syntax_kind() == SyntaxKind::QuoteExpr)
+                .any(|entry| entry.kind == SyntaxKind::QuoteExpr)
             {
                 parser.parse_cp(QuoteHoleScope::default(), None)
             } else {
@@ -155,7 +155,7 @@ impl super::Parse for BlockExprScope {
                 .iter()
                 .rev()
                 .nth(1)
-                .is_some_and(|entry| entry.scope.syntax_kind() == SyntaxKind::QuoteExpr);
+                .is_some_and(|entry| entry.kind == SyntaxKind::QuoteExpr);
             // `unsafe {` starts an `unsafe` block, not an `unsafe fn` item.
             if (parser.current_kind().is_some_and(SyntaxKind::is_item_head)
                 || (in_quote_body
