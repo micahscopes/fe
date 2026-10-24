@@ -1425,9 +1425,7 @@ pub contract C { recv M { Answer {} -> u256 { generated() } } }
             FeContractHarness::compile("C", &source)
                 .err()
                 .expect("contract provider fault"),
-            compile_runtime_sonatina_from_source(&source)
-                .err()
-                .expect("runtime provider fault"),
+            compile_runtime_sonatina_from_source(&source).expect_err("runtime provider fault"),
         ] {
             let HarnessError::CompilerDiagnostics(message) = error else {
                 panic!("{error:?}")
@@ -1466,8 +1464,7 @@ pub contract C { recv M { Answer {} -> u256 { generated() } } }
                 .err()
                 .expect("ordinary contract type error"),
             compile_runtime_sonatina_from_source(&invalid)
-                .err()
-                .expect("ordinary runtime type error"),
+                .expect_err("ordinary runtime type error"),
         ] {
             let HarnessError::CompilerDiagnostics(message) = error else {
                 panic!("{error:?}")
