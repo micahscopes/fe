@@ -3458,4 +3458,329 @@ pub contract C uses (log: mut Log) {{
             .expect("four indexed fields have no log encoding");
         assert!(error.contains("has 4 indexed fields; at most 3"), "{error}");
     }
+
+    /// The message set shared by the generated, `msg` and handwritten twins.
+    /// `ENCODE` is the expression that builds the `Sum` variant to encode.
+    fn msg_contract(declarations: &str, grouped: bool, sum_path: &str) -> String {
+        let (open, close) = if grouped {
+            ("recv M {", "}")
+        } else {
+            ("recv {", "}")
+        };
+        format!(
+            r#"
+use std::abi::{{Bytes, sol}}
+use std::evm::{{Address, encode_msg_calldata, revert_bytes}}
+{declarations}
+pub contract C {{
+    {open}
+        Probe {{}} {{
+            revert_bytes(encode_msg_calldata({sum_path} {{ a: 3, b: 4 }}).span())
+        }}
+        Quiet {{}} {{}}
+        Sum {{ a, b }} -> u256 {{ a + b }}
+        Transfer {{ to, amount }} -> bool {{
+            let _ = to
+            amount == 500
+        }}
+        Note {{ id, body }} -> u256 {{ id + body.len() as u256 }}
+    {close}
+}}
+"#
+        )
+    }
+
+    const GENERATED_MSGS: &str = r#"
+use core::meta::{Code, Item, Record}
+use std::derive::{msg_variant, sol_selector}
+const fn returning_u256(_ record: Record) -> Code<Item> {
+    let selector = sol_selector(record)
+    quote {
+        impl core::message::MsgVariant<std::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ${selector}
+            type Return = u256
+        }
+    }
+}
+const fn returning_bool(_ record: Record) -> Code<Item> {
+    let selector = sol_selector(record)
+    quote {
+        impl core::message::MsgVariant<std::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ${selector}
+            type Return = bool
+        }
+    }
+}
+#[abi]
+#[generate(msg_variant)]
+struct Probe {}
+#[abi]
+#[generate(msg_variant)]
+struct Quiet {}
+#[abi]
+#[generate(returning_u256)]
+struct Sum { a: u256, b: u256 }
+#[abi]
+#[generate(returning_bool)]
+struct Transfer { to: Address, amount: u256 }
+#[abi]
+#[generate(returning_u256)]
+struct Note { id: u256, body: Bytes }
+"#;
+
+    const LEGACY_MSGS: &str = r#"
+msg M {
+    #[selector = sol("Probe()")]
+    Probe {},
+    #[selector = sol("Quiet()")]
+    Quiet {},
+    #[selector = sol("Sum(uint256,uint256)")]
+    Sum { a: u256, b: u256 } -> u256,
+    #[selector = sol("Transfer(address,uint256)")]
+    Transfer { to: Address, amount: u256 } -> bool,
+    #[selector = sol("Note(uint256,bytes)")]
+    Note { id: u256, body: Bytes } -> u256,
+}
+"#;
+
+    // Selectors are literals from `cast sig`. The empty and two-word variants
+    // carry a fully handwritten codec; the others use the compiler's `#[abi]`
+    // codec with a handwritten `MsgVariant`.
+    const HANDWRITTEN_MSGS: &str = r#"
+struct Probe {}
+impl core::abi::AbiSize for Probe {
+    const HEAD_SIZE: u256 = 0
+    const IS_DYNAMIC: bool = false
+}
+impl core::abi::Encode<std::abi::Sol> for Probe {
+    fn encode(own self, _ out: core::abi::AbiFrame) { let _ = out }
+}
+impl core::abi::Decode<std::abi::Sol> for Probe {
+    fn decode_payload<D: core::abi::AbiDecoder<std::abi::Sol>, I: core::abi::ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let _ = d
+        let _ = input
+        Self {}
+    }
+}
+impl core::message::MsgVariant<std::abi::Sol> for Probe {
+    const SELECTOR: u32 = 0xab5dd677
+    type Return = ()
+}
+struct Quiet {}
+impl core::abi::AbiSize for Quiet {
+    const HEAD_SIZE: u256 = 0
+    const IS_DYNAMIC: bool = false
+}
+impl core::abi::Encode<std::abi::Sol> for Quiet {
+    fn encode(own self, _ out: core::abi::AbiFrame) { let _ = out }
+}
+impl core::abi::Decode<std::abi::Sol> for Quiet {
+    fn decode_payload<D: core::abi::AbiDecoder<std::abi::Sol>, I: core::abi::ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let _ = d
+        let _ = input
+        Self {}
+    }
+}
+impl core::message::MsgVariant<std::abi::Sol> for Quiet {
+    const SELECTOR: u32 = 0x018c59c6
+    type Return = ()
+}
+struct Sum { a: u256, b: u256 }
+impl core::abi::AbiSize for Sum {
+    const HEAD_SIZE: u256 = 64
+    const IS_DYNAMIC: bool = false
+}
+impl core::abi::Encode<std::abi::Sol> for Sum {
+    fn encode(own self, _ out: core::abi::AbiFrame) {
+        out.store_word(at: 0, value: self.a)
+        out.store_word(at: 32, value: self.b)
+    }
+}
+impl core::abi::Decode<std::abi::Sol> for Sum {
+    fn decode_payload<D: core::abi::AbiDecoder<std::abi::Sol>, I: core::abi::ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let a = u256::decode_payload(mut d, input)
+        let b = u256::decode_payload(mut d, input)
+        Self { a, b }
+    }
+}
+impl core::message::MsgVariant<std::abi::Sol> for Sum {
+    const SELECTOR: u32 = 0x17ef4e4b
+    type Return = u256
+}
+#[abi]
+struct Transfer { to: Address, amount: u256 }
+impl core::message::MsgVariant<std::abi::Sol> for Transfer {
+    const SELECTOR: u32 = 0x69ca02dd
+    type Return = bool
+}
+#[abi]
+struct Note { id: u256, body: Bytes }
+impl core::message::MsgVariant<std::abi::Sol> for Note {
+    const SELECTOR: u32 = 0x475da781
+    type Return = u256
+}
+"#;
+
+    #[test]
+    fn abi_msg_runtime_and_json_match_literal_oracles() {
+        use contract_harness::{ExecutionOptions, FeContractHarness, HarnessError};
+
+        let twins = [
+            ("generated", msg_contract(GENERATED_MSGS, false, "Sum")),
+            ("msg", msg_contract(LEGACY_MSGS, true, "M::Sum")),
+            ("handwritten", msg_contract(HANDWRITTEN_MSGS, false, "Sum")),
+        ];
+        let call =
+            |selector: &str, payload: &str| hex::decode(format!("{selector}{payload}")).unwrap();
+        let sum_payload = concat!(
+            "0000000000000000000000000000000000000000000000000000000000000003",
+            "0000000000000000000000000000000000000000000000000000000000000004"
+        );
+        let transfer_payload = |amount: &str| {
+            format!("0000000000000000000000000000000000000000000000000000000000000022{amount}")
+        };
+        let amount_500 = "00000000000000000000000000000000000000000000000000000000000001f4";
+        let amount_501 = "00000000000000000000000000000000000000000000000000000000000001f5";
+        let note_payload = concat!(
+            "0000000000000000000000000000000000000000000000000000000000000007",
+            "0000000000000000000000000000000000000000000000000000000000000040",
+            "0000000000000000000000000000000000000000000000000000000000000003",
+            "aabbcc0000000000000000000000000000000000000000000000000000000000"
+        );
+        let word = |value: u8| {
+            let mut word = vec![0u8; 32];
+            word[31] = value;
+            word
+        };
+        let expected_json = serde_json::json!({
+            "Probe": [[], []],
+            "Quiet": [[], []],
+            "Sum": [
+                [{"name":"a","type":"uint256"},{"name":"b","type":"uint256"}],
+                [{"name":"","type":"uint256"}]
+            ],
+            "Transfer": [
+                [{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],
+                [{"name":"","type":"bool"}]
+            ],
+            "Note": [
+                [{"name":"id","type":"uint256"},{"name":"body","type":"bytes"}],
+                [{"name":"","type":"uint256"}]
+            ],
+        });
+        for (label, source) in &twins {
+            let entries = abi_entries(source, "C");
+            let functions = entries
+                .iter()
+                .filter(|entry| entry["type"] == "function")
+                .collect::<Vec<_>>();
+            assert_eq!(functions.len(), 5, "{label}: {entries:?}");
+            for (name, io) in expected_json.as_object().unwrap() {
+                let function = functions
+                    .iter()
+                    .find(|function| function["name"] == *name)
+                    .unwrap_or_else(|| panic!("{label}: function {name} in {entries:?}"));
+                assert_eq!(function["inputs"], io[0], "{label}: {name} inputs");
+                assert_eq!(function["outputs"], io[1], "{label}: {name} outputs");
+            }
+            let harness = FeContractHarness::compile("C", source)
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            let mut instance = harness.deploy_instance().expect("deploy message twin");
+            let options = ExecutionOptions::default();
+
+            // encode_msg_calldata: selector and payload bytes.
+            let probe = instance
+                .call_raw(&call("ab5dd677", ""), options)
+                .expect_err("probe reverts with the encoded calldata");
+            let HarnessError::Revert(bytes) = probe else {
+                panic!("{label}: {probe:?}")
+            };
+            assert_eq!(
+                bytes.0,
+                call("17ef4e4b", sum_payload),
+                "{label} encoded Sum"
+            );
+
+            // Unit return, then decoded arguments and returned words.
+            let quiet = instance
+                .call_raw(&call("018c59c6", ""), options)
+                .unwrap_or_else(|error| panic!("{label} Quiet: {error:?}"));
+            assert!(quiet.return_data.is_empty(), "{label} Quiet");
+            for (selector, payload, expected) in [
+                ("17ef4e4b", sum_payload.to_string(), word(7)),
+                ("69ca02dd", transfer_payload(amount_500), word(1)),
+                ("69ca02dd", transfer_payload(amount_501), word(0)),
+                ("475da781", note_payload.to_string(), word(10)),
+            ] {
+                let result = instance
+                    .call_raw(&call(selector, &payload), options)
+                    .unwrap_or_else(|error| panic!("{label} {selector}: {error:?}"));
+                assert_eq!(result.return_data, expected, "{label} {selector}");
+            }
+        }
+    }
+
+    #[test]
+    fn msg_json_emits_only_verified_canonical_selectors() {
+        let base = |selector: &str, ty: &str| {
+            format!(
+                r#"
+use std::abi::sol
+struct Sum {{ a: {ty}, b: {ty} }}
+impl core::abi::AbiSize for Sum {{
+    const HEAD_SIZE: u256 = 64
+    const IS_DYNAMIC: bool = false
+}}
+impl core::abi::Encode<std::abi::Sol> for Sum {{
+    fn encode(own self, _ out: core::abi::AbiFrame) {{ let _ = out }}
+}}
+impl core::abi::Decode<std::abi::Sol> for Sum {{
+    fn decode_payload<D: core::abi::AbiDecoder<std::abi::Sol>, I: core::abi::ByteInput>(_ d: mut D, _ input: I) -> Self {{
+        let a = {ty}::decode_payload(mut d, input)
+        let b = {ty}::decode_payload(mut d, input)
+        Self {{ a, b }}
+    }}
+}}
+impl core::message::MsgVariant<std::abi::Sol> for Sum {{
+    const SELECTOR: u32 = {selector}
+    type Return = ()
+}}
+pub contract C {{
+    recv {{
+        Sum {{ a, b }} {{
+            let _ = a
+            let _ = b
+        }}
+    }}
+}}
+"#
+            )
+        };
+        let functions = |source: &str| {
+            let result = generate_test_abi_result(source, "C").expect("abi");
+            let entries: Vec<Value> = serde_json::from_str(&result.json).unwrap();
+            (
+                entries.iter().filter(|e| e["type"] == "function").count(),
+                result.warnings,
+            )
+        };
+        // The canonical selector of the declared name and field types is emitted.
+        let (count, warnings) = functions(&base("0x17ef4e4b", "u256"));
+        assert_eq!((count, warnings.len()), (1, 0), "{warnings:?}");
+        // The same hash does not describe other field types: name and hash are
+        // only bytes, so the entry is withheld with the existing warning.
+        let (count, warnings) = functions(&base("0x17ef4e4b", "bool"));
+        assert_eq!(count, 0);
+        assert!(
+            warnings[0].contains("manual `MsgVariant` impls"),
+            "{warnings:?}"
+        );
+        // A selector for another name is withheld too.
+        let (count, warnings) = functions(&base("sol(\"sum(uint256,uint256)\")", "u256"));
+        assert_eq!(count, 0);
+        assert!(
+            warnings[0].contains("manual `MsgVariant` impls"),
+            "{warnings:?}"
+        );
+    }
 }
