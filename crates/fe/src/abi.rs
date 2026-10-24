@@ -290,13 +290,10 @@ fn event_param_descs<'db>(
     struct_: Struct<'db>,
     ty: TyId<'db>,
 ) -> Result<Vec<NamedAbiParamDesc>, String> {
-    let indexed_owner = hir::analysis::ty::corelib::resolve_lib_type_path(
-        db,
-        scope,
-        "std::evm::event::Indexed",
-    )
-    .and_then(|owner| owner.adt_def(db))
-    .ok_or("cannot resolve canonical `std::evm::Indexed` type")?;
+    let indexed_owner =
+        hir::analysis::ty::corelib::resolve_lib_type_path(db, scope, "std::evm::event::Indexed")
+            .and_then(|owner| owner.adt_def(db))
+            .ok_or("cannot resolve canonical `std::evm::Indexed` type")?;
     let hir_fields = struct_.hir_fields(db).data(db);
     let field_tys = ty.field_types(db);
     if hir_fields.len() != field_tys.len() {
@@ -310,9 +307,10 @@ fn event_param_descs<'db>(
     for (field, field_ty) in hir_fields.iter().zip(field_tys) {
         let wrapped = field_ty.adt_def(db) == Some(indexed_owner);
         let value_ty = if wrapped {
-            *field_ty.generic_args(db).first().ok_or(
-                "canonical `Indexed` type is missing its value type",
-            )?
+            *field_ty
+                .generic_args(db)
+                .first()
+                .ok_or("canonical `Indexed` type is missing its value type")?
         } else {
             field_ty
         };
@@ -326,7 +324,10 @@ fn event_param_descs<'db>(
             desc: semantic_ty_to_abi_desc(db, value_ty)?,
         });
     }
-    let indexed = params.iter().filter(|param| param.indexed == Some(true)).count();
+    let indexed = params
+        .iter()
+        .filter(|param| param.indexed == Some(true))
+        .count();
     if indexed > MAX_INDEXED_EVENT_FIELDS {
         return Err(format!(
             "event `{}` has {indexed} indexed fields; at most {MAX_INDEXED_EVENT_FIELDS} fit in a log",
@@ -684,8 +685,15 @@ fn collect_instance_event_types<'db>(
                 continue;
             };
             if let Some(&callee) = callees.first()
-                && let Some(ty) =
-                    checked_emitted_event(db, contract_scope, typed_body, body, expr_id, callee, emit_traits)?
+                && let Some(ty) = checked_emitted_event(
+                    db,
+                    contract_scope,
+                    typed_body,
+                    body,
+                    expr_id,
+                    callee,
+                    emit_traits,
+                )?
                 && seen.insert(ty)
             {
                 out.push(ty);
@@ -704,15 +712,7 @@ fn collect_instance_event_types<'db>(
         }
     }
     for callee in protocol_callees {
-        collect_instance_event_types(
-            db,
-            contract_scope,
-            callee,
-            emit_traits,
-            out,
-            seen,
-            visited,
-        )?;
+        collect_instance_event_types(db, contract_scope, callee, emit_traits, out, seen, visited)?;
     }
     Ok(())
 }
@@ -3084,7 +3084,10 @@ impl std::evm::Event for Ledger {{
         let mut tail = vec![0u8; 32];
         tail[..3].copy_from_slice(&[0xaa, 0xbb, 0xcc]);
         note_data.extend(tail);
-        let moved_data = [1u8, 2, 3].iter().flat_map(|w| u256_word(*w)).collect::<Vec<_>>();
+        let moved_data = [1u8, 2, 3]
+            .iter()
+            .flat_map(|w| u256_word(*w))
+            .collect::<Vec<_>>();
         // (call, topics, data), each written out from `cast keccak`/`cast abi-encode`.
         let expected: Vec<(&str, Vec<Vec<u8>>, Vec<u8>)> = vec![
             ("emitPaused()", vec![topic(EVENT_TOPIC_PAUSED)], Vec::new()),
@@ -3175,7 +3178,11 @@ impl std::evm::Event for Ledger {{
                     .map(|topic| topic.as_slice().to_vec())
                     .collect::<Vec<_>>();
                 assert_eq!(&actual_topics, topics, "{label} {call} topics");
-                assert_eq!(log.data.data.as_ref(), data.as_slice(), "{label} {call} data");
+                assert_eq!(
+                    log.data.data.as_ref(),
+                    data.as_slice(),
+                    "{label} {call} data"
+                );
             }
         }
     }
@@ -3393,7 +3400,11 @@ pub contract C uses (log: mut Log) {{
             let entries = abi_entries(&code, "C");
             assert_eq!(
                 event_names(&entries),
-                if expected { vec!["Quiet"] } else { Vec::<&str>::new() },
+                if expected {
+                    vec!["Quiet"]
+                } else {
+                    Vec::<&str>::new()
+                },
                 "body={body} entries={entries:?}"
             );
         }
