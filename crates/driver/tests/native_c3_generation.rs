@@ -276,13 +276,15 @@ const RESULT: u256 = Key::value()
             Url::parse("file:///tmp/explicit-derive-item-shape.fe").unwrap(),
             Some(rejected.clone()),
         );
+        // A sibling is lowered as a member of the header, never dropped, and
+        // ordinary impl conformance refuses it like a handwritten extra method.
         let error = prepare_file(&db, file)
             .err()
             .expect("every sibling output node must be admitted or refused");
         assert!(
             error
                 .cause
-                .contains("bounded derive requires one function template"),
+                .contains("method `ignored` is not defined in trait `Value`"),
             "{error}"
         );
         assert!(db.generation_inputs().functions(&db).is_empty());

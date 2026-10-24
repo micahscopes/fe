@@ -314,6 +314,7 @@ fn create_bool_assoc_const<'db, O: Clone + Into<crate::span::DesugaredOrigin>>(
         ty: Partial::Present(ty),
         value: Partial::Present(body),
         vis: crate::hir_def::Visibility::Public,
+        generated: None,
     }
 }
 
@@ -350,6 +351,7 @@ pub(super) fn create_head_size_assoc_const<'db, O: Clone + Into<crate::span::Des
         ty: Partial::Present(ty),
         value: Partial::Present(body),
         vis: crate::hir_def::Visibility::Public,
+        generated: None,
     }
 }
 
@@ -635,6 +637,7 @@ fn create_selector_const<'db>(
         ty: Partial::Present(selector_ty),
         value: Partial::Present(body),
         vis: crate::hir_def::Visibility::Public,
+        generated: None,
     }
 }
 

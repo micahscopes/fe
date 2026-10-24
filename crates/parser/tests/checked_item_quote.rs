@@ -1,6 +1,6 @@
 use fe_parser::{
     RecoveryMode, SyntaxNode,
-    ast::{QuoteExpr, QuoteHoleExpr, prelude::AstNode},
+    ast::{QuoteExpr, QuoteHoleExpr, TraitShapeItem, prelude::AstNode},
     parse_source_file,
 };
 
@@ -118,7 +118,47 @@ fn quoted_item_whitelist_does_not_restrict_ordinary_local_declarations() {
     assert!(
         errors.iter().any(|error| error
             .msg()
-            .contains("only functions, constants and impls can be quoted")),
+            .contains("only functions, constants, types and impls can be quoted")),
         "{errors:?}"
     );
+    // An associated type member is quotable; its destination admits it.
+    let member_type = "const fn make() { quote { type Unit = u256\n const fn f() {} } }";
+    let (_, errors) = parse_source_file(member_type, RecoveryMode::NoRecover);
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn an_associated_shape_may_open_or_follow_other_members_of_a_quote() {
+    for body in [
+        "shape Step = mut? u256\n fn at(mut? self) -> mut? u256 { 1 }",
+        "fn at(mut? self) -> mut? u256 { 1 }\n shape Step = mut? u256",
+        "shape Step = own u256",
+    ] {
+        let source = format!("const fn provider() {{ quote {{ {body} }} }}");
+        let (green, errors) = parse_source_file(&source, RecoveryMode::Recover);
+        assert!(errors.is_empty(), "{body}: {errors:?}");
+        let root = SyntaxNode::new_root(green);
+        let quotes: Vec<_> = root.descendants().filter_map(QuoteExpr::cast).collect();
+        assert_eq!(quotes.len(), 1, "{body}");
+        let items = quotes[0].item_list().unwrap_or_else(|| panic!("{body}"));
+        assert_eq!(
+            items
+                .syntax()
+                .children()
+                .filter(|child| TraitShapeItem::can_cast(child.kind()))
+                .count(),
+            1,
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn shape_is_an_ordinary_identifier_in_a_quoted_expression() {
+    let source = "const fn provider(shape: u256) { quote { shape } }";
+    let (green, errors) = parse_source_file(source, RecoveryMode::Recover);
+    assert!(errors.is_empty(), "{errors:?}");
+    let root = SyntaxNode::new_root(green);
+    let quotes: Vec<_> = root.descendants().filter_map(QuoteExpr::cast).collect();
+    assert!(quotes[0].item_list().is_none());
 }

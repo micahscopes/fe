@@ -2,9 +2,9 @@ use parser::ast::{self, prelude::*};
 
 use super::FileLowerCtxt;
 use crate::core::hir_def::{
-    AssocTypeGenericArg, Body, GenericArg, GenericArgListId, IdentId, ItemKind, Partial, PathId,
-    PathKind, TraitRefId, TupleTypeId, TypeGenericArg, TypeId, TypeKind, TypeMode, VariantKind,
-    params::GenericParamListId, scope_graph::ScopeId,
+    AssocTypeGenericArg, AuthoredFieldType, AuthoredScope, Body, GenericArg, GenericArgListId,
+    IdentId, ItemKind, Partial, PathId, PathKind, TraitRefId, TupleTypeId, TypeGenericArg, TypeId,
+    TypeKind, TypeMode,
 };
 
 impl<'db> TypeId<'db> {
@@ -13,91 +13,82 @@ impl<'db> TypeId<'db> {
             ast::TypeKind::QuoteHole(hole) => {
                 let db = ctxt.db();
                 match ctxt.current_hole(hole.syntax().text_range()) {
+                    Some(common::generation::FrozenHoleValue::Record(ref record_ref))
+                        if let Some(args) = &record_ref.args =>
+                    {
+                        // The record's actual arguments.
+                        let record = ctxt.authored_record(record_ref);
+                        let generic_args = GenericArgListId::thaw(ctxt, args);
+                        TypeKind::Path(Partial::Present(record.path(db, generic_args)))
+                    }
+                    Some(common::generation::FrozenHoleValue::Type(frozen)) => {
+                        return TypeId::thaw(ctxt, &frozen);
+                    }
                     Some(common::generation::FrozenHoleValue::Record(record_ref)) => {
-                        let item = ctxt.resolve_record_item(&record_ref);
-                        let params = match item {
-                            ItemKind::Struct(s) => s.generic_params(db),
-                            ItemKind::Enum(e) => e.generic_params(db),
-                            _ => GenericParamListId::new(db, Vec::new()),
-                        };
-                        let generic_args = if params.data(db).is_empty() {
+                        // The record over its own parameters, which the generated
+                        // item declares.
+                        let record = ctxt.authored_record(&record_ref);
+                        let params: Vec<_> = record
+                            .generic_params()
+                            .into_iter()
+                            .flatten()
+                            .map(|param| {
+                                let name = match param.kind() {
+                                    ast::GenericParamKind::Type(p) => p.name(),
+                                    ast::GenericParamKind::Const(p) => p.name(),
+                                    ast::GenericParamKind::Shape(p) => p.name(),
+                                }
+                                .map(|name| IdentId::new(db, name.text().to_string()));
+                                (
+                                    name,
+                                    matches!(param.kind(), ast::GenericParamKind::Const(_)),
+                                )
+                            })
+                            .collect();
+                        let generic_args = if params.is_empty() {
                             GenericArgListId::none(db)
                         } else {
                             let args: Vec<_> = params
-                                .data(db)
-                                .iter()
-                                .map(|param| {
-                                    let ty = param.name().to_opt().map(|ident| {
-                                        TypeId::new(
-                                            db,
-                                            TypeKind::Path(Partial::Present(PathId::from_ident(
-                                                db, ident,
-                                            ))),
-                                        )
-                                    });
-                                    match param {
-                                        crate::hir_def::params::GenericParam::Const(_) => {
-                                            GenericArg::Const(
-                                                crate::hir_def::params::ConstGenericArg {
-                                                    value: param
-                                                        .name()
-                                                        .to_opt()
-                                                        .map(|name| {
-                                                            Body::lower_const_param_name(ctxt, name)
-                                                        })
-                                                        .into(),
-                                                },
+                                .into_iter()
+                                .map(|(name, is_const)| {
+                                    if is_const {
+                                        GenericArg::Const(crate::hir_def::params::ConstGenericArg {
+                                            value: name
+                                                .map(|name| {
+                                                    Body::lower_const_param_name(ctxt, name)
+                                                })
+                                                .into(),
+                                        })
+                                    } else {
+                                        let ty = name.map(|ident| {
+                                            TypeId::new(
+                                                db,
+                                                TypeKind::Path(Partial::Present(
+                                                    PathId::from_ident(db, ident),
+                                                )),
                                             )
-                                        }
-                                        _ => GenericArg::Type(TypeGenericArg { ty: ty.into() }),
+                                        });
+                                        GenericArg::Type(TypeGenericArg { ty: ty.into() })
                                     }
                                 })
                                 .collect();
                             GenericArgListId::new(db, args, true)
                         };
-                        let display = PathId::new(
-                            db,
-                            PathKind::Ident {
-                                ident: item.name(db).into(),
-                                generic_args,
-                            },
-                            None,
-                        );
-                        let path = PathId::new(
-                            db,
-                            PathKind::BoundItem {
-                                item: ScopeId::Item(item),
-                                display,
-                            },
-                            None,
-                        );
-                        TypeKind::Path(Partial::Present(path))
+                        TypeKind::Path(Partial::Present(record.path(db, generic_args)))
                     }
                     Some(common::generation::FrozenHoleValue::FieldType(field_ref)) => {
-                        let record_item = ctxt.resolve_record_item(&field_ref.record);
-                        let resolved = match (record_item, field_ref.record.variant_index) {
-                            (ItemKind::Struct(s), None) => s
-                                .fields(db)
-                                .data(db)
-                                .get(field_ref.index)
-                                .and_then(|f| f.type_ref.to_opt()),
-                            (ItemKind::Enum(e), Some(v)) => {
-                                match e.variants_list(db).data(db).get(v).map(|v| &v.kind) {
-                                    Some(VariantKind::Tuple(tuple_id)) => tuple_id
-                                        .data(db)
-                                        .get(field_ref.index)
-                                        .and_then(|t| t.to_opt()),
-                                    Some(VariantKind::Record(fields_id)) => fields_id
-                                        .data(db)
-                                        .get(field_ref.index)
-                                        .and_then(|f| f.type_ref.to_opt()),
-                                    _ => None,
-                                }
-                            }
-                            _ => None,
-                        };
-                        if let Some(ty) = resolved {
-                            return bind_type_to_scope(db, ty, record_item);
+                        let record = ctxt.authored_record(&field_ref.record);
+                        let variant = field_ref.record.variant_index;
+                        if record.field_has_type(variant, field_ref.index) {
+                            return TypeId::new(
+                                db,
+                                TypeKind::AuthoredField(AuthoredFieldType::new(
+                                    db,
+                                    record.scope,
+                                    variant,
+                                    field_ref.index,
+                                )),
+                            );
                         }
                         ctxt.record_generation_error(
                             hole.syntax().text_range(),
@@ -235,19 +226,18 @@ fn record_param_names<'db>(db: &'db dyn crate::HirDb, item: ItemKind<'db>) -> Ve
 pub(super) fn bind_path_to_scope<'db>(
     db: &'db dyn crate::HirDb,
     path: PathId<'db>,
-    item: ItemKind<'db>,
+    scope: AuthoredScope<'db>,
     param_names: &[IdentId<'db>],
 ) -> PathId<'db> {
-    let scope = ScopeId::Item(item);
     let parent = path
         .parent(db)
-        .map(|p| bind_path_to_scope(db, p, item, param_names));
+        .map(|p| bind_path_to_scope(db, p, scope, param_names));
     match path.kind(db) {
         PathKind::Ident {
             ident,
             generic_args,
         } => {
-            let generic_args = bind_generic_arg_list_to_scope(db, generic_args, item, param_names);
+            let generic_args = bind_generic_arg_list_to_scope(db, generic_args, scope, param_names);
             if parent.is_none()
                 && let Partial::Present(ident_id) = ident
             {
@@ -291,8 +281,8 @@ pub(super) fn bind_path_to_scope<'db>(
             )
         }
         PathKind::QualifiedType { type_, trait_ } => {
-            let type_ = bind_type_to_scope_with_params(db, type_, item, param_names);
-            let trait_ = bind_trait_ref_to_scope(db, trait_, item, param_names);
+            let type_ = bind_type_to_scope_with_params(db, type_, scope, param_names);
+            let trait_ = bind_trait_ref_to_scope(db, trait_, scope, param_names);
             PathId::new(db, PathKind::QualifiedType { type_, trait_ }, parent)
         }
         PathKind::BoundIngot { ingot, display } => {
@@ -303,7 +293,7 @@ pub(super) fn bind_path_to_scope<'db>(
             display,
         } => {
             let generic_args =
-                bind_generic_arg_list_to_scope(db, display.generic_args(db), item, param_names);
+                bind_generic_arg_list_to_scope(db, display.generic_args(db), scope, param_names);
             let display = display
                 .with_generic_args(db, generic_args)
                 .unwrap_or(display);
@@ -322,7 +312,7 @@ pub(super) fn bind_path_to_scope<'db>(
             display,
         } => {
             let generic_args =
-                bind_generic_arg_list_to_scope(db, display.generic_args(db), item, param_names);
+                bind_generic_arg_list_to_scope(db, display.generic_args(db), scope, param_names);
             let display = display
                 .with_generic_args(db, generic_args)
                 .unwrap_or(display);
@@ -342,7 +332,7 @@ pub(super) fn bind_path_to_scope<'db>(
 fn bind_generic_arg_list_to_scope<'db>(
     db: &'db dyn crate::HirDb,
     args: GenericArgListId<'db>,
-    item: ItemKind<'db>,
+    scope: AuthoredScope<'db>,
     param_names: &[IdentId<'db>],
 ) -> GenericArgListId<'db> {
     if !args.is_given(db) && args.data(db).is_empty() {
@@ -356,7 +346,7 @@ fn bind_generic_arg_list_to_scope<'db>(
                 ty: ty_arg
                     .ty
                     .to_opt()
-                    .map(|t| bind_type_to_scope_with_params(db, t, item, param_names))
+                    .map(|t| bind_type_to_scope_with_params(db, t, scope, param_names))
                     .into(),
             }),
             GenericArg::Const(c) => GenericArg::Const(c.clone()),
@@ -367,7 +357,7 @@ fn bind_generic_arg_list_to_scope<'db>(
                 ty: assoc
                     .ty
                     .to_opt()
-                    .map(|t| bind_type_to_scope_with_params(db, t, item, param_names))
+                    .map(|t| bind_type_to_scope_with_params(db, t, scope, param_names))
                     .into(),
             }),
         })
@@ -378,49 +368,50 @@ fn bind_generic_arg_list_to_scope<'db>(
 pub(super) fn bind_trait_ref_to_scope<'db>(
     db: &'db dyn crate::HirDb,
     trait_ref: TraitRefId<'db>,
-    item: ItemKind<'db>,
+    scope: AuthoredScope<'db>,
     param_names: &[IdentId<'db>],
 ) -> TraitRefId<'db> {
     let path: Partial<PathId<'db>> = trait_ref
         .path(db)
         .to_opt()
-        .map(|p| bind_path_to_scope(db, p, item, param_names))
+        .map(|p| bind_path_to_scope(db, p, scope, param_names))
         .into();
     TraitRefId::new(db, path)
 }
 
-pub(super) fn bind_type_to_scope<'db>(
+pub(crate) fn bind_type_to_scope<'db>(
     db: &'db dyn crate::HirDb,
     ty: TypeId<'db>,
+    scope: AuthoredScope<'db>,
     item: ItemKind<'db>,
 ) -> TypeId<'db> {
     let param_names = record_param_names(db, item);
-    bind_type_to_scope_with_params(db, ty, item, &param_names)
+    bind_type_to_scope_with_params(db, ty, scope, &param_names)
 }
 
 fn bind_type_to_scope_with_params<'db>(
     db: &'db dyn crate::HirDb,
     ty: TypeId<'db>,
-    item: ItemKind<'db>,
+    scope: AuthoredScope<'db>,
     param_names: &[IdentId<'db>],
 ) -> TypeId<'db> {
     let kind = match ty.data(db) {
         TypeKind::Ptr(inner) => TypeKind::Ptr(
             inner
                 .to_opt()
-                .map(|t| bind_type_to_scope_with_params(db, t, item, param_names))
+                .map(|t| bind_type_to_scope_with_params(db, t, scope, param_names))
                 .into(),
         ),
         TypeKind::Mode(mode, inner) => TypeKind::Mode(
             *mode,
             inner
                 .to_opt()
-                .map(|t| bind_type_to_scope_with_params(db, t, item, param_names))
+                .map(|t| bind_type_to_scope_with_params(db, t, scope, param_names))
                 .into(),
         ),
         TypeKind::Path(path) => TypeKind::Path(
             path.to_opt()
-                .map(|p| bind_path_to_scope(db, p, item, param_names))
+                .map(|p| bind_path_to_scope(db, p, scope, param_names))
                 .into(),
         ),
         TypeKind::Tuple(tuple_id) => {
@@ -429,7 +420,7 @@ fn bind_type_to_scope_with_params<'db>(
                 .iter()
                 .map(|elem| {
                     elem.to_opt()
-                        .map(|t| bind_type_to_scope_with_params(db, t, item, param_names))
+                        .map(|t| bind_type_to_scope_with_params(db, t, scope, param_names))
                         .into()
                 })
                 .collect();
@@ -437,12 +428,17 @@ fn bind_type_to_scope_with_params<'db>(
         }
         TypeKind::Array(elem, len) => TypeKind::Array(
             elem.to_opt()
-                .map(|t| bind_type_to_scope_with_params(db, t, item, param_names))
+                .map(|t| bind_type_to_scope_with_params(db, t, scope, param_names))
                 .into(),
             *len,
         ),
-        TypeKind::Primitive(p) => TypeKind::Primitive(*p),
+        TypeKind::Primitive(p, args) => TypeKind::Primitive(
+            *p,
+            bind_generic_arg_list_to_scope(db, *args, scope, param_names),
+        ),
         TypeKind::Never => TypeKind::Never,
+        // Already bound in its record's declaration.
+        TypeKind::AuthoredField(field) => TypeKind::AuthoredField(*field),
     };
     TypeId::new(db, kind)
 }
@@ -450,6 +446,7 @@ fn bind_type_to_scope_with_params<'db>(
 pub(super) fn bind_generic_param_to_scope<'db>(
     db: &'db dyn crate::HirDb,
     param: crate::core::hir_def::params::GenericParam<'db>,
+    scope: AuthoredScope<'db>,
     item: ItemKind<'db>,
 ) -> crate::core::hir_def::params::GenericParam<'db> {
     use crate::core::hir_def::params::{
@@ -464,21 +461,21 @@ pub(super) fn bind_generic_param_to_scope<'db>(
                 .into_iter()
                 .map(|b| match b {
                     TypeBound::Trait(tr, mode) => {
-                        TypeBound::Trait(bind_trait_ref_to_scope(db, tr, item, &param_names), mode)
+                        TypeBound::Trait(bind_trait_ref_to_scope(db, tr, scope, &param_names), mode)
                     }
                     TypeBound::Kind(k) => TypeBound::Kind(k),
                 })
                 .collect(),
             default_ty: tp
                 .default_ty
-                .map(|t| bind_type_to_scope_with_params(db, t, item, &param_names)),
+                .map(|t| bind_type_to_scope_with_params(db, t, scope, &param_names)),
         }),
         GenericParam::Const(cp) => GenericParam::Const(ConstGenericParam {
             name: cp.name,
             ty: cp
                 .ty
                 .to_opt()
-                .map(|t| bind_type_to_scope_with_params(db, t, item, &param_names))
+                .map(|t| bind_type_to_scope_with_params(db, t, scope, &param_names))
                 .into(),
             default: cp.default,
         }),
@@ -488,6 +485,7 @@ pub(super) fn bind_generic_param_to_scope<'db>(
 pub(super) fn bind_where_predicate_to_scope<'db>(
     db: &'db dyn crate::HirDb,
     pred: crate::core::hir_def::params::WhereClausePredicate<'db>,
+    scope: AuthoredScope<'db>,
     item: ItemKind<'db>,
 ) -> crate::core::hir_def::params::WhereClausePredicate<'db> {
     use crate::core::hir_def::params::{TypeBound, WhereClausePredicate, WherePredicate};
@@ -497,19 +495,98 @@ pub(super) fn bind_where_predicate_to_scope<'db>(
             ty: wp
                 .ty
                 .to_opt()
-                .map(|t| bind_type_to_scope_with_params(db, t, item, &param_names))
+                .map(|t| bind_type_to_scope_with_params(db, t, scope, &param_names))
                 .into(),
             bounds: wp
                 .bounds
                 .into_iter()
                 .map(|b| match b {
                     TypeBound::Trait(tr, mode) => {
-                        TypeBound::Trait(bind_trait_ref_to_scope(db, tr, item, &param_names), mode)
+                        TypeBound::Trait(bind_trait_ref_to_scope(db, tr, scope, &param_names), mode)
                     }
                     TypeBound::Kind(k) => TypeBound::Kind(k),
                 })
                 .collect(),
         }),
         WhereClausePredicate::Const(body) => WhereClausePredicate::Const(body),
+    }
+}
+
+impl<'db> TypeId<'db> {
+    /// A ground type frozen in the authored view, rebound in this view by the
+    /// same declarations: never by name lookup at the place it is spliced.
+    pub(super) fn thaw(
+        ctxt: &mut FileLowerCtxt<'db>,
+        frozen: &common::generation::FrozenTy,
+    ) -> Self {
+        use common::generation::FrozenTy;
+        let db = ctxt.db();
+        let kind = match frozen {
+            FrozenTy::Declared { decl, args } => {
+                let args = GenericArgListId::thaw(ctxt, args);
+                TypeKind::Path(Partial::Present(ctxt.authored_decl_path(decl, args)))
+            }
+            FrozenTy::Primitive { name, args } => {
+                let primitive =
+                    crate::hir_def::prim_ty::PrimTy::from_name(db, IdentId::new(db, name.clone()))
+                        .expect("validated frozen primitive");
+                TypeKind::Primitive(primitive, GenericArgListId::thaw(ctxt, args))
+            }
+            FrozenTy::Tuple(elems) => {
+                let elems = elems
+                    .iter()
+                    .map(|elem| Partial::Present(Self::thaw(ctxt, elem)))
+                    .collect::<Vec<_>>();
+                TypeKind::Tuple(TupleTypeId::new(db, elems))
+            }
+            FrozenTy::Array { elem, len } => TypeKind::Array(
+                Partial::Present(Self::thaw(ctxt, elem)),
+                Partial::Present(Body::thaw_const(ctxt, len)),
+            ),
+            FrozenTy::Ptr(pointee) => TypeKind::Ptr(Partial::Present(Self::thaw(ctxt, pointee))),
+            FrozenTy::Never => TypeKind::Never,
+            FrozenTy::HeaderParam(index) => TypeKind::Path(ctxt.header_param_path(*index)),
+        };
+        Self::new(db, kind)
+    }
+}
+
+impl<'db> GenericArgListId<'db> {
+    pub(super) fn thaw(
+        ctxt: &mut FileLowerCtxt<'db>,
+        args: &[common::generation::FrozenGenericArg],
+    ) -> Self {
+        use common::generation::FrozenGenericArg;
+        let db = ctxt.db();
+        if args.is_empty() {
+            return Self::none(db);
+        }
+        let args = args
+            .iter()
+            .map(|arg| match arg {
+                FrozenGenericArg::Type(ty) => GenericArg::Type(TypeGenericArg {
+                    ty: Partial::Present(TypeId::thaw(ctxt, ty)),
+                }),
+                FrozenGenericArg::Const(value) => {
+                    GenericArg::Const(crate::hir_def::params::ConstGenericArg {
+                        value: Partial::Present(Body::thaw_const(ctxt, value)),
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+        Self::new(db, args, true)
+    }
+}
+
+impl<'db> Body<'db> {
+    fn thaw_const(ctxt: &mut FileLowerCtxt<'db>, frozen: &common::generation::FrozenConst) -> Self {
+        use common::generation::FrozenConst;
+        match frozen {
+            FrozenConst::Value(value) => Self::lower_frozen_scalar(ctxt, value),
+            FrozenConst::HeaderParam(index) => {
+                let path = ctxt.header_param_path(*index);
+                Self::lower_bound_path(ctxt, path)
+            }
+        }
     }
 }

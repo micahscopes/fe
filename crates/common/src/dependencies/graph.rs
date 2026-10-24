@@ -49,6 +49,38 @@ impl DependencyGraph {
         )
     }
 
+    /// Replace `destination`'s graph with this one, field for field, so a view
+    /// built from the same inputs resolves dependencies and trust identically.
+    pub fn copy_into(&self, source: &dyn InputDb, destination: &mut dyn InputDb) {
+        let target = destination.dependency_graph();
+        target.set_graph(destination).to(self.graph(source));
+        target.set_node_map(destination).to(self.node_map(source));
+        target
+            .set_git_locations(destination)
+            .to(self.git_locations(source));
+        target
+            .set_reverse_git_map(destination)
+            .to(self.reverse_git_map(source));
+        target
+            .set_ingots_by_metadata(destination)
+            .to(self.ingots_by_metadata(source));
+        target
+            .set_workspace_members(destination)
+            .to(self.workspace_members(source));
+        target
+            .set_workspace_root_by_member(destination)
+            .to(self.workspace_root_by_member(source));
+        target
+            .set_expected_member_metadata(destination)
+            .to(self.expected_member_metadata(source));
+        target
+            .set_forced_dependency_arithmetic(destination)
+            .to(self.forced_dependency_arithmetic(source));
+        target
+            .set_root_ingots(destination)
+            .to(self.root_ingots(source));
+    }
+
     fn allocate_node(
         graph: &mut DiGraph<Url, EdgeWeight>,
         node_map: &mut HashMap<Url, NodeIndex>,

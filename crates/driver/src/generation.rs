@@ -171,6 +171,13 @@ fn evaluation_error<'db>(
     }
 }
 
+/// The authored requests of one source file, frozen against the authored view.
+struct FileRequests {
+    requests: Vec<common::generation::FrozenGenerationRequest>,
+    has_scoped_opening: bool,
+    root_range: parser::TextRange,
+}
+
 /// Nothing is published when any input request fails. The returned database
 /// owns the unchanged source text and the complete frozen output plan.
 pub fn prepare_file(
@@ -191,8 +198,126 @@ pub fn prepare_file(
             "generation requires the authored input view; output is checked once".into(),
         ));
     }
-    let (green, parse_errors) =
-        parser::parse_source_file(file.text(db), parser::RecoveryMode::Recover);
+    let Some(found) = file_requests(db, file, true)? else {
+        return Ok(None);
+    };
+    if found.requests.is_empty() && !found.has_scoped_opening {
+        return Err(error(
+            parser::TextRange::empty(0.into()),
+            "generation request requires an authored concrete record in a module".into(),
+        ));
+    }
+    admit_requests(
+        db,
+        &ViewBasis::Standalone(file),
+        &[url],
+        found.requests,
+        Some(found.root_range),
+    )
+    .map(Some)
+}
+
+/// Prepare every authored request of the given ingots and of the ingots they
+/// depend on, in one immutable view of the whole program. The authored
+/// database is unchanged, also on failure. `None` means there is nothing to
+/// generate, so consumers keep using the authored view.
+///
+/// Requests are evaluated against authored input exactly as for a standalone
+/// file; scoped openings use the same dependency frontier. Output diagnostics
+/// stay in the returned view, where each consumer reports them with their own
+/// spans, instead of being collapsed into one preparation error.
+pub fn prepare_ingots(
+    db: &DriverDataBase,
+    roots: &[url::Url],
+) -> Result<Option<DriverDataBase>, GenerationError> {
+    use hir::hir_def::HirIngot;
+    let Some(first) = roots.first() else {
+        return Ok(None);
+    };
+    if !db.generation_inputs().functions(db).is_empty()
+        || !db.generation_inputs().requests(db).is_empty()
+    {
+        return Err(GenerationError {
+            file: first.clone(),
+            range: parser::TextRange::empty(0.into()),
+            cause: "generation requires the authored input view; output is checked once".into(),
+        });
+    }
+    // The selected ingots and their resolved dependency closure. The builtin
+    // libraries carry no generation requests; standalone files are prepared
+    // one at a time by `prepare_file`.
+    let mut pending = roots
+        .iter()
+        .filter_map(|root| db.workspace().containing_ingot(db, root.clone()))
+        .collect::<Vec<_>>();
+    let mut seen = std::collections::HashSet::new();
+    let mut files = std::collections::BTreeMap::new();
+    while let Some(ingot) = pending.pop() {
+        if matches!(
+            ingot.kind(db),
+            IngotKind::Core | IngotKind::Std | IngotKind::StandAlone
+        ) || !seen.insert(ingot.base(db))
+        {
+            continue;
+        }
+        for (url, file) in ingot.files(db).iter() {
+            if matches!(file.kind(db), Some(common::file::IngotFileKind::Source)) {
+                files.insert(url, file);
+            }
+        }
+        pending.extend(
+            ingot
+                .resolved_external_ingots(db)
+                .iter()
+                .map(|(_, dependency)| *dependency),
+        );
+    }
+    let mut requests = Vec::new();
+    let mut has_scoped_opening = false;
+    for file in files.values() {
+        if let Some(found) = file_requests(db, *file, false)? {
+            requests.extend(found.requests);
+            has_scoped_opening |= found.has_scoped_opening;
+        }
+    }
+    if requests.is_empty() && !has_scoped_opening {
+        return Ok(None);
+    }
+    let modules = files.into_keys().collect::<Vec<_>>();
+    admit_requests(db, &ViewBasis::Package, &modules, requests, None).map(Some)
+}
+
+/// Replace an authored database with the prepared view of `roots` when they
+/// request generation, so every later consumer reads the generated program.
+pub fn prepare_ingots_in_place(
+    db: &mut DriverDataBase,
+    roots: &[url::Url],
+) -> Result<(), GenerationError> {
+    if let Some(prepared) = prepare_ingots(db, roots)? {
+        *db = prepared;
+    }
+    Ok(())
+}
+
+/// Collect and evaluate the explicit requests of one authored file. `None`
+/// means the file contains no generation syntax outside quotations.
+fn file_requests(
+    db: &DriverDataBase,
+    file: File,
+    standalone_only: bool,
+) -> Result<Option<FileRequests>, GenerationError> {
+    let url = file.url(db).expect("indexed generation input");
+    let error = |range, cause| GenerationError {
+        file: url.clone(),
+        range,
+        cause,
+    };
+    // Every request form spells `generate` or `with`; other files need no parse.
+    let text = file.text(db);
+    if !text.contains("generate") && !text.contains("with") {
+        return Ok(None);
+    }
+    let (green, parse_errors) = parser::parse_source_file(text, parser::RecoveryMode::Recover);
     let root = ast::Root::cast(parser::SyntaxNode::new_root(green)).unwrap();
     let has_scoped_syntax = root
         .syntax()
@@ -239,9 +364,10 @@ pub fn prepare_file(
             format!("authored parse errors: {parse_errors:?}"),
         ));
     }
-    if file
-        .containing_ingot(db)
-        .is_none_or(|ingot| ingot.kind(db) != IngotKind::StandAlone)
+    if standalone_only
+        && file
+            .containing_ingot(db)
+            .is_none_or(|ingot| ingot.kind(db) != IngotKind::StandAlone)
     {
         return Err(error(
             parser::TextRange::empty(0.into()),
@@ -251,7 +377,26 @@ pub fn prepare_file(
     let module = db.top_mod(file);
     let mut requests = Vec::new();
     let mut consumed = std::collections::HashSet::new();
-    for item in root.items().into_iter().flatten() {
+    // Records in any module's item list; those in function bodies and quotes
+    // are refused below.
+    let records = root
+        .syntax()
+        .descendants()
+        .filter_map(ast::Item::cast)
+        .filter(|item| {
+            !item.syntax().ancestors().skip(1).any(|node| {
+                ast::BlockExpr::can_cast(node.kind()) || ast::QuoteExpr::can_cast(node.kind())
+            })
+        });
+    for item in records {
+        // The output joins the record's module, and the request resolves
+        // its provider there.
+        let publication = item
+            .syntax()
+            .ancestors()
+            .skip(1)
+            .find_map(ast::Mod::cast)
+            .map(|module| module.syntax().text_range());
         let attributes = match item.kind() {
             Some(ast::ItemKind::Struct(record)) => record.attr_list(),
             Some(ast::ItemKind::Enum(enum_)) => enum_.attr_list(),
@@ -286,10 +431,15 @@ pub fn prepare_file(
                 })
             }).collect::<Result<Vec<_>, _>>()?;
             let segments = segments.iter().map(String::as_str).collect::<Vec<_>>();
+            let request_scope = match publication {
+                None => module.scope(),
+                Some(range) => hir::core::meta::authored_mod_scope(db, module, range)
+                    .ok_or_else(|| error(range, "cannot recover the record's module".into()))?,
+            };
             let resolved = hir::analysis::name_resolution::resolve_path(
                 db,
                 hir::hir_def::PathId::from_segments(db, &segments),
-                module.scope(),
+                request_scope,
                 hir::analysis::ty::trait_resolution::PredicateListId::empty_list(db),
                 true,
             )
@@ -313,7 +463,7 @@ pub fn prepare_file(
             if !hir::analysis::name_resolution::is_scope_visible_from(
                 db,
                 provider.scope(),
-                module.scope(),
+                request_scope,
             ) {
                 return Err(error(
                     range,
@@ -361,7 +511,9 @@ pub fn prepare_file(
                     )
                 })?;
             }
-            requests.push(evaluate_provider(db, file, provider, input, range)?);
+            let mut request = evaluate_provider(db, file, provider, input, range)?;
+            request.publication = publication;
+            requests.push(request);
         }
     }
     for request_ast in root.syntax().descendants().filter_map(ast::ImplTrait::cast) {
@@ -376,16 +528,17 @@ pub fn prepare_file(
         {
             continue;
         }
-        // Nested declarations are a documented pending interface, never ignored.
-        if !root
-            .items()
-            .into_iter()
-            .flatten()
-            .any(|item| item.syntax().text_range() == range)
+        // A header in any module's item list is an ordinary module member, so
+        // it sees that module's private names. Block-local headers are a
+        // pending interface, never ignored.
+        if request_ast
+            .syntax()
+            .ancestors()
+            .any(|node| ast::BlockExpr::cast(node).is_some())
         {
             return Err(error(
                 range,
-                "bounded native derive currently requires a root declaration".into(),
+                "native derive inside a function body is not supported yet; declare the header in a module".into(),
             ));
         }
         let request = hir::core::meta::authored_derive_request(db, module, &request_ast)
@@ -395,17 +548,17 @@ pub fn prepare_file(
                     "cannot recover authored derive header identity".into(),
                 )
             })?;
-        let segments = path.segments().map(|segment| {
-            if segment.generic_args().is_some() || segment.qualified_type().is_some() {
-                return Err(error(segment.syntax().text_range(), "bounded native derive provider path does not support generic or qualified segments".into()));
-            }
-            segment.ident().map(|token| token.text().to_string())
-                .ok_or_else(|| error(segment.syntax().text_range(), "invalid native derive provider path segment".into()))
-        }).collect::<Result<Vec<_>, _>>()?;
-        let segments = segments.iter().map(String::as_str).collect::<Vec<_>>();
+        // The provider path as written and lowered with the header, including
+        // its arguments (`Scaled<10>`).
+        let provider_path = request.derive_provider(db).ok_or_else(|| {
+            error(
+                path.syntax().text_range(),
+                "invalid native derive provider path".into(),
+            )
+        })?;
         let resolved = hir::analysis::name_resolution::resolve_path(
             db,
-            hir::hir_def::PathId::from_segments(db, &segments),
+            provider_path,
             request.scope(),
             hir::analysis::ty::trait_resolution::PredicateListId::empty_list(db),
             true,
@@ -506,36 +659,72 @@ pub fn prepare_file(
             ));
         }
     }
-    if requests.is_empty() && !has_scoped_opening {
-        return Err(error(
-            parser::TextRange::empty(0.into()),
-            "generation request requires an authored concrete root record".into(),
-        ));
-    }
+    Ok(Some(FileRequests {
+        requests,
+        has_scoped_opening,
+        root_range: root.syntax().text_range(),
+    }))
+}
+
+/// Where a prepared view takes its authored inputs from.
+enum ViewBasis {
+    /// Only the one standalone file, over the builtin libraries.
+    Standalone(File),
+    /// Every authored input of the database, including dependencies.
+    Package,
+}
+
+/// One preparation transaction over `modules`. Explicit requests are already
+/// frozen; scoped demands are discovered in the output view. A standalone
+/// transaction also admits the whole output once, as before; a package view
+/// is returned with its ordinary diagnostics for consumers to report.
+fn admit_requests(
+    db: &DriverDataBase,
+    basis: &ViewBasis,
+    modules: &[url::Url],
+    mut requests: Vec<common::generation::FrozenGenerationRequest>,
+    standalone_root: Option<parser::TextRange>,
+) -> Result<DriverDataBase, GenerationError> {
+    let error_at = |file: &url::Url, range, cause| GenerationError {
+        file: file.clone(),
+        range,
+        cause,
+    };
+    let fallback_file = &modules[0];
+    let whole_input = standalone_root.unwrap_or_else(|| parser::TextRange::empty(0.into()));
     let mut completed = std::collections::HashSet::new();
     // Every retry starts from unchanged authored text and the cumulative plan.
     // A bounded transaction never recursively treats generated output as input.
     for _ in 0..128 {
-        let output = prepared_view(db, file, &requests);
-        let output_file = output.workspace().get(&output, &url).unwrap();
-        let output_module = output.top_mod(output_file);
-        let _ = output_module.scope_graph(&output);
-        let lowering_errors = hir::lower::generation_lowering_errors(&output, output_module);
-        if let Some(first) = lowering_errors.first() {
-            return Err(GenerationError {
-                file: first.file.url(&output).unwrap_or_else(|| url.clone()),
-                range: first.primary_range,
-                cause: first.message.clone(),
-            });
+        let output = prepared_view(db, basis, &requests);
+        let output_module = |url: &url::Url| {
+            let file = output
+                .workspace()
+                .get(&output, url)
+                .expect("prepared view keeps every authored file");
+            (file, output.top_mod(file))
+        };
+        for url in modules {
+            let (_, module) = output_module(url);
+            let _ = module.scope_graph(&output);
+            let lowering_errors = hir::lower::generation_lowering_errors(&output, module);
+            if let Some(first) = lowering_errors.first() {
+                return Err(GenerationError {
+                    file: first.file.url(&output).unwrap_or_else(|| url.clone()),
+                    range: first.primary_range,
+                    cause: first.message.clone(),
+                });
+            }
         }
         // A generated header is not eligible merely because it was lowered.
         // Validate conformance before retrying any goal against the new plan.
         use hir::diagnosable::Diagnosable;
-        for scoped in requests
-            .iter()
-            .filter_map(|request| request.scoped_impl.as_ref())
-        {
-            let implementation = output_module
+        for request in &requests {
+            let Some(scoped) = request.scoped_impl.as_ref() else {
+                continue;
+            };
+            let (_, module) = output_module(&request.target_file);
+            let implementation = module
                 .all_impl_traits(&output)
                 .iter()
                 .copied()
@@ -545,7 +734,8 @@ pub fn prepare_file(
                         .is_some_and(|name| name.data(&output) == &scoped.selection_name)
                 })
                 .ok_or_else(|| {
-                    error(
+                    error_at(
+                        &scoped.demand.opening.file,
                         scoped.demand.opening.binding_range,
                         "generated scoped implementation was not constructed".into(),
                     )
@@ -570,28 +760,35 @@ pub fn prepare_file(
                 return Err(diagnostic_error(
                     &output,
                     &complete,
-                    error(
+                    error_at(
+                        &scoped.demand.opening.file,
                         scoped.demand.opening.binding_range,
                         "generated implementation admission failed".into(),
                     ),
                 ));
             }
         }
-        let pending = hir::analysis::ty::trait_resolution::generation::preparation_demands(
-            &output,
-            output_module,
-        );
+        let pending = modules
+            .iter()
+            .flat_map(|url| {
+                hir::analysis::ty::trait_resolution::generation::preparation_demands(
+                    &output,
+                    output_module(url).1,
+                )
+            })
+            .collect::<Vec<_>>();
         if !pending.is_empty() {
             let mut new_requests = Vec::new();
             let mut batch = std::collections::HashSet::new();
+            let first_opening = pending[0].opening.clone();
             // Reject every invalid opening before any provider can run; query
             // accumulator order must never grant authority to an earlier entry.
             let pending = pending
                 .into_iter()
                 .map(|pending| {
-                    pending
-                        .demand
-                        .map_err(|cause| error(pending.opening.binding_range, cause))
+                    pending.demand.map_err(|cause| {
+                        error_at(&pending.opening.file, pending.opening.binding_range, cause)
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             // Admission can itself depend on generated const-condition bodies.
@@ -599,36 +796,40 @@ pub fn prepare_file(
             let mut pending = std::collections::VecDeque::from(pending);
             let mut ready = Vec::new();
             while let Some(demand) = pending.pop_front() {
+                let file = demand.opening.file.clone();
                 let range = demand.opening.binding_range;
                 if !batch.insert(demand.clone()) {
                     continue;
                 }
                 if completed.contains(&demand) {
-                    return Err(error(
+                    return Err(error_at(
+                        &file,
                         range,
                         "generated implementation did not discharge its preparation dependency"
                             .into(),
                     ));
                 }
                 let request = hir::core::meta::rebind_generation_request(&output, &demand)
-                    .map_err(|cause| error(range, cause))?;
+                    .map_err(|cause| error_at(&file, range, cause))?;
                 let dependencies = scoped_provider_admission_preflight::accumulated::<
                     hir::analysis::ty::trait_resolution::generation::GenerationDemand,
                 >(&output, request);
                 let blocked = !dependencies.is_empty();
                 for dependency in dependencies {
-                    pending.push_back(
-                        dependency
-                            .demand
-                            .clone()
-                            .map_err(|cause| error(dependency.opening.binding_range, cause))?,
-                    );
+                    pending.push_back(dependency.demand.clone().map_err(|cause| {
+                        error_at(
+                            &dependency.opening.file,
+                            dependency.opening.binding_range,
+                            cause,
+                        )
+                    })?);
                 }
                 if !blocked {
                     ready.push((demand, request));
                 }
             }
             for (demand, request) in ready {
+                let file = demand.opening.file.clone();
                 let range = demand.opening.binding_range;
                 let opening = request.opening(&output);
                 let origin = opening.scope(&output).item();
@@ -643,13 +844,19 @@ pub fn prepare_file(
                     scoped_provider_error(
                         &output,
                         cause,
-                        error(range, "scoped derive provider admission failed".into()),
+                        error_at(
+                            &file,
+                            range,
+                            "scoped derive provider admission failed".into(),
+                        ),
                     )
                 })?;
                 if provider_needs_generation(&output, key) {
                     continue;
                 }
-                let mut plan = evaluate_provider_instance(&output, output_file, key, input, range)?;
+                let (opening_file, _) = output_module(&file);
+                let mut plan =
+                    evaluate_provider_instance(&output, opening_file, key, input, range)?;
                 completed.insert(demand.clone());
                 plan.scoped_impl = Some(common::generation::FrozenScopedImpl {
                     selection_name: scoped_selection_name(&demand),
@@ -660,28 +867,37 @@ pub fn prepare_file(
                 break;
             }
             if new_requests.is_empty() {
-                return Err(error(root.syntax().text_range(),
+                let (file, range) = match standalone_root {
+                    Some(root) => (fallback_file.clone(), root),
+                    None => (first_opening.file, first_opening.binding_range),
+                };
+                return Err(error_at(&file, range,
                     "scoped derive dependencies cannot make progress (cyclic or unresolved provider bodies)".into()));
             }
             requests.extend(new_requests);
             continue;
         }
-        let diagnostics = output.run_on_top_mod(output_module);
-        if diagnostics.has_errors(&output) {
-            return Err(diagnostic_error(
-                &output,
-                &diagnostics.finalize(&output),
-                error(
-                    root.syntax().text_range(),
-                    "generated output admission failed".into(),
-                ),
-            ));
+        if let ViewBasis::Standalone(_) = basis {
+            let (_, module) = output_module(fallback_file);
+            let diagnostics = output.run_on_top_mod(module);
+            if diagnostics.has_errors(&output) {
+                return Err(diagnostic_error(
+                    &output,
+                    &diagnostics.finalize(&output),
+                    error_at(
+                        fallback_file,
+                        whole_input,
+                        "generated output admission failed".into(),
+                    ),
+                ));
+            }
+            drop(diagnostics);
         }
-        drop(diagnostics);
-        return Ok(Some(output));
+        return Ok(output);
     }
-    Err(error(
-        root.syntax().text_range(),
+    Err(error_at(
+        fallback_file,
+        whole_input,
         "scoped generation preparation limit exceeded".into(),
     ))
 }
@@ -751,6 +967,8 @@ fn scoped_selection_name(demand: &common::generation::ScopedDeriveDemand) -> Str
         format!("{:?}", demand.trait_ref.range),
         demand.target.target_file.as_str().to_owned(),
         format!("{:?}", demand.target.target_range),
+        // Each instance of a generic target is its own implementation.
+        format!("{:?}", demand.target.args),
         format!("{:?}", demand.mode),
     ] {
         use std::fmt::Write;
@@ -795,22 +1013,28 @@ fn scoped_provider_error(
 
 fn prepared_view(
     db: &DriverDataBase,
-    file: File,
+    basis: &ViewBasis,
     requests: &[common::generation::FrozenGenerationRequest],
 ) -> DriverDataBase {
-    let url = file.url(db).expect("indexed generation input");
-    let mut output = DriverDataBase::default();
-    output
-        .workspace()
-        .touch(&mut output, url.clone(), Some(file.text(db).clone()));
-    output
-        .compiler_options()
-        .set_recovery_mode(&mut output)
-        .to(db.compiler_options().recovery_mode(db));
-    output
-        .compilation_settings()
-        .set_profile(&mut output)
-        .to(db.compilation_settings().profile(db).clone());
+    let mut output = match basis {
+        ViewBasis::Standalone(file) => {
+            let url = file.url(db).expect("indexed generation input");
+            let mut output = DriverDataBase::default();
+            output
+                .workspace()
+                .touch(&mut output, url.clone(), Some(file.text(db).clone()));
+            output
+                .compiler_options()
+                .set_recovery_mode(&mut output)
+                .to(db.compiler_options().recovery_mode(db));
+            output
+                .compilation_settings()
+                .set_profile(&mut output)
+                .to(db.compilation_settings().profile(db).clone());
+            output
+        }
+        ViewBasis::Package => db.fork_inputs(),
+    };
     output
         .generation_inputs()
         .set_requests(&mut output)
@@ -861,9 +1085,10 @@ fn evaluate_provider_instance<'db>(
         range,
         cause,
     };
-    if !provider.is_const(db)
-        || provider.body(db).is_none()
-        || !CallableDef::Func(provider).params(db).is_empty()
+    // The function itself takes no binders; those of its implementation, as in
+    // `impl<const K: u256> Derive<G> for Scaled<K>`, are fixed by the ground
+    // provider application the instance was finalized for.
+    if !provider.is_const(db) || provider.body(db).is_none() || provider.declares_generic_params(db)
     {
         return Err(error(
             range,

@@ -28,6 +28,10 @@ pub struct ScopeGraph<'db> {
     pub scopes: IndexMap<ScopeId<'db>, Scope<'db>>,
     /// The all unresolved uses in the graph, this is used in name resolution.
     pub unresolved_uses: FxHashSet<Use<'db>>,
+    /// Generated items whose lexical parent is a producer scope in another
+    /// module. Lowering records them; the module's linked graph adds each as
+    /// the item's lexical edge, so lowering never reads the other module.
+    pub foreign_origins: Vec<(ScopeId<'db>, super::AuthoredScope<'db>)>,
 }
 
 impl<'db> ScopeGraph<'db> {
@@ -119,6 +123,31 @@ impl<'db> ScopeId<'db> {
             ScopeId::Field(p, _) => p.top_mod(db),
             ScopeId::Variant(v) => v.enum_.top_mod(db),
             ScopeId::Block(body, _) => body.top_mod(db),
+        }
+    }
+
+    /// The module whose syntax this scope was lowered from. A generated item
+    /// is published into its target module but written in its producer's
+    /// quotation, which is its lexical parent; everything else is in `top_mod`.
+    pub fn syntax_top_mod(self, db: &'db dyn HirDb) -> TopLevelMod<'db> {
+        let mut scope = self;
+        loop {
+            match scope {
+                ScopeId::Item(ItemKind::Body(body)) | ScopeId::Block(body, _) => {
+                    return body.syntax_top_mod(db);
+                }
+                ScopeId::Item(ItemKind::TopMod(top_mod)) => return top_mod,
+                _ => {}
+            }
+            if scope.data(db).publication_parent.is_some() {
+                return scope
+                    .lex_parent(db)
+                    .map_or_else(|| scope.top_mod(db), |producer| producer.top_mod(db));
+            }
+            match scope.parent(db) {
+                Some(parent) => scope = parent,
+                None => return scope.top_mod(db),
+            }
         }
     }
 

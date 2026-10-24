@@ -64,7 +64,7 @@ impl<'db> PathId<'db> {
                         ctxt.resolve_sub_quote_local_ident(ident.text())
                     };
                     let generic_args = GenericArgListId::lower_ast_opt(ctxt, seg.generic_args());
-                    let producer_scope = ctxt.quote_frames.last().unwrap().producer_scope;
+                    let producer_scope = ctxt.quote_frames.last().unwrap().producer;
                     let display = Self::new(
                         db,
                         PathKind::Ident {
@@ -92,7 +92,7 @@ impl<'db> PathId<'db> {
                 {
                     let display_ident = IdentId::make_super(db);
                     let generic_args = GenericArgListId::lower_ast_opt(ctxt, seg.generic_args());
-                    let producer_scope = ctxt.quote_frames.last().unwrap().producer_scope;
+                    let producer_scope = ctxt.quote_frames.last().unwrap().producer;
                     let display = Self::new(
                         db,
                         PathKind::Ident {

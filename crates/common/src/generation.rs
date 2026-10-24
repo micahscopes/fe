@@ -75,6 +75,57 @@ pub struct FrozenRecordRef {
     pub target_file: Url,
     pub target_range: TextRange,
     pub variant_index: Option<usize>,
+    /// The record's actual arguments, or `None` for the record over its own
+    /// parameters, which a generated item then declares.
+    pub args: Option<Vec<FrozenGenericArg>>,
+}
+
+/// An authored type declaration, by its file and syntax range.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FrozenDeclRef {
+    pub file: Url,
+    pub range: TextRange,
+}
+
+/// A type of the authored view by declaration identity: the actual type and
+/// constant arguments of a reflected record or field, ground except for the
+/// parameters of the request's own header, rebound by the same declarations
+/// in the output view.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FrozenTy {
+    /// An authored struct or enum applied to its arguments.
+    Declared {
+        decl: FrozenDeclRef,
+        args: Vec<FrozenGenericArg>,
+    },
+    /// A builtin type by its name, such as `u8` or `String`, applied to its
+    /// arguments.
+    Primitive {
+        name: String,
+        args: Vec<FrozenGenericArg>,
+    },
+    Tuple(Vec<FrozenTy>),
+    Array {
+        elem: Box<FrozenTy>,
+        len: FrozenConst,
+    },
+    Ptr(Box<FrozenTy>),
+    Never,
+    /// A type parameter of the request's own authored header, by position.
+    HeaderParam(usize),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FrozenGenericArg {
+    Type(FrozenTy),
+    Const(FrozenConst),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FrozenConst {
+    Value(FrozenScalar),
+    /// A const parameter of the request's own authored header, by position.
+    HeaderParam(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -88,7 +139,11 @@ pub enum FrozenHoleValue {
     Scalar(FrozenScalar),
     Record(FrozenRecordRef),
     Field(FrozenFieldRef),
+    /// A field's declared type, over the record's own parameters.
     FieldType(FrozenFieldRef),
+    /// A ground type: the instantiated type of a field of a record with
+    /// actual arguments.
+    Type(FrozenTy),
     Code(FrozenCode),
 }
 
@@ -130,6 +185,9 @@ pub struct FrozenGenerationRequest {
     pub scoped_impl: Option<FrozenScopedImpl>,
     /// Authored derive header receiving this generated method.
     pub request_impl: Option<TextRange>,
+    /// The authored `mod` whose items a whole-item output joins, as its
+    /// record does; `None` for the file's root module.
+    pub publication: Option<TextRange>,
     pub code: FrozenCode,
 }
 

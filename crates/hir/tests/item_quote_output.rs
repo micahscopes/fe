@@ -268,17 +268,46 @@ const fn make() -> Code<Item> {
     );
 }
 
+/// A quoted `type` is an associated type member. Spliced at module level it is
+/// reported where it lands, never dropped or published as a module alias.
 #[test]
-fn quoted_type_alias_is_explicitly_rejected_before_freezing() {
-    let mut db = HirAnalysisTestDb::default();
-    let file = db.new_stand_alone(
-        "unsupported-quoted-alias.fe".into(),
-        "use core::meta::{Code, Item}\nconst fn make() -> Code<Item> { quote { type Generated = u256 } }\n",
-    );
-    let (module, _) = db.top_mod(file);
-    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(module));
+fn quoted_type_alias_is_refused_as_a_module_item() {
+    let source = "use core::meta::{Code, Item}\nconst fn make() -> Code<Item> { quote { type Generated = u256 } }\n";
+    let mut input = HirAnalysisTestDb::default();
+    let file = input.new_stand_alone("quoted-alias.fe".into(), source);
+    let (module, _) = input.top_mod(file);
+    input.assert_no_diags(module);
+    let owner = BodyOwner::Func(find_func(&input, module, "make"), None);
+    let EvalOutcome::Ready(value) = eval_body_owner_const(
+        &input,
+        owner,
+        GenericSubst::for_body_owner(&input, owner, vec![]),
+    ) else {
+        panic!("item quote evaluation failed");
+    };
+    let SemConstValue::ItemCode { code, .. } = value.value(&input) else {
+        panic!("provider did not return item code");
+    };
+    let request = code.freeze_request(&input, file).unwrap();
+
+    let mut output = HirAnalysisTestDb::default();
+    let file = output.new_stand_alone("quoted-alias.fe".into(), source);
+    output
+        .generation_inputs()
+        .set_requests(&mut output)
+        .to(vec![request]);
+    let (module, _) = output.top_mod(file);
+    let errors = fe_hir::lower::generation_lowering_errors(&output, module);
     assert!(
-        rendered.contains("only functions, constants and impls can be quoted"),
-        "{rendered}"
+        errors.iter().any(|error| error
+            .message
+            .contains("a quoted type is an associated type member")),
+        "{errors:?}"
+    );
+    assert!(
+        !module
+            .children_non_nested(&output)
+            .any(|item| matches!(item, ItemKind::TypeAlias(_))),
+        "a quoted type must not be published as a module alias"
     );
 }

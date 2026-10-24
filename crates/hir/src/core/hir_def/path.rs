@@ -19,12 +19,16 @@ pub enum PathKind<'db> {
         ingot: Ingot<'db>,
         display: IdentId<'db>,
     },
+    /// A declaration written in an authored module, bound when the path is
+    /// resolved.
     BoundItem {
-        item: super::scope_graph::ScopeId<'db>,
+        item: super::AuthoredScope<'db>,
         display: PathId<'db>,
     },
+    /// A name resolved in an authored scope instead of where the path occurs:
+    /// generated code naming items of its producer or of a reflected record.
     InScope {
-        scope: super::scope_graph::ScopeId<'db>,
+        scope: super::AuthoredScope<'db>,
         local_ident: Option<IdentId<'db>>,
         display: PathId<'db>,
     },
@@ -110,7 +114,7 @@ impl<'db> PathId<'db> {
             parent.hygiene_scope(db)
         } else {
             match self.kind(db) {
-                PathKind::InScope { scope, .. } => Some(scope),
+                PathKind::InScope { scope, .. } => Some(scope.resolve(db)),
                 _ => None,
             }
         }

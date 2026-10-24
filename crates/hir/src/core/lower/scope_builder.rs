@@ -4,10 +4,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::{
     HirDb,
     hir_def::{
-        Body, Enum, EnumVariant, ExprId, FieldDefListId, FieldParent, FuncParamListId,
-        FuncParamName, GenericParamListId, GenericParamOwner, HirIngot, Impl, ItemKind,
-        TopLevelMod, TrackedItemId, TrackedItemVariant, Trait, Use, VariantDefListId, VariantKind,
-        Visibility,
+        AuthoredLocator, AuthoredScope, Body, Enum, EnumVariant, ExprId, FieldDefListId,
+        FieldParent, FuncParamListId, FuncParamName, GenericParamListId, GenericParamOwner,
+        HirIngot, Impl, ItemKind, TopLevelMod, TrackedItemId, TrackedItemVariant, Trait, Use,
+        VariantDefListId, VariantKind, Visibility,
         scope_graph::{EdgeKind, Scope, ScopeEdge, ScopeGraph, ScopeId},
     },
 };
@@ -36,12 +36,7 @@ pub(super) struct ScopeGraphBuilder<'db> {
     module_stack: Vec<NodeId>,
     id_stack: Vec<TrackedItemId<'db>>,
     declared_blocks: Vec<FxHashMap<NodeId, Option<ExprId>>>,
-    quoted_origins: Vec<(
-        ItemKind<'db>,
-        TopLevelMod<'db>,
-        Option<parser::TextRange>,
-        Option<parser::TextRange>,
-    )>,
+    quoted_origins: Vec<(ItemKind<'db>, AuthoredScope<'db>)>,
 }
 
 impl<'db> ScopeGraphBuilder<'db> {
@@ -334,110 +329,26 @@ impl<'db> ScopeGraphBuilder<'db> {
             })
     }
 
-    pub(super) fn find_trait_by_range(
-        &self,
-        range: parser::TextRange,
-    ) -> Option<crate::hir_def::Trait<'db>> {
-        use parser::ast::prelude::*;
-        let root = super::top_mod_ast(self.db, self.top_mod);
-        self.graph.nodes.values().find_map(|(scope, _)| {
-            let ScopeId::Item(ItemKind::Trait(trait_)) = *scope else {
-                return None;
-            };
-            let crate::span::HirOrigin::Raw(ptr) = trait_.origin(self.db) else {
-                return None;
-            };
-            (ptr.to_node(root.syntax()).syntax().text_range() == range).then_some(trait_)
-        })
-    }
-
-    pub(super) fn resolve_producer_scope(
-        &self,
-        quote_top_mod: TopLevelMod<'db>,
-        producer: Option<parser::TextRange>,
-        producer_block: Option<parser::TextRange>,
-    ) -> ScopeId<'db> {
-        use parser::ast::prelude::*;
-        let root = super::top_mod_ast(self.db, quote_top_mod);
-        let scopes: Vec<ScopeId<'db>> = if quote_top_mod == self.top_mod {
-            self.graph.nodes.values().map(|(scope, _)| *scope).collect()
-        } else {
-            quote_top_mod
-                .scope_graph(self.db)
-                .scopes
-                .keys()
-                .copied()
-                .collect()
-        };
-        if let Some(range) = producer_block
-            && let Some(scope) = scopes.iter().copied().find(|&scope| {
-                let ScopeId::Block(body, expression) = scope else {
-                    return false;
-                };
-                let crate::span::HirOrigin::Raw(ptr) =
-                    body.source_map(self.db).expr_map.node_to_source(expression)
-                else {
-                    return false;
-                };
-                let expr_node = ptr.to_node(root.syntax());
-                expr_node.syntax().text_range() == range
-                    || parser::ast::UnsafeExpr::cast(expr_node.syntax().clone())
-                        .and_then(|u| u.block())
-                        .is_some_and(|b| b.syntax().text_range() == range)
-            })
-        {
-            return scope;
-        }
-        if let Some(range) = producer
-            && let Some(scope) = scopes.iter().copied().find(|&scope| {
-                let ScopeId::Item(ItemKind::Mod(mod_)) = scope else {
-                    return false;
-                };
-                let crate::span::HirOrigin::Raw(ptr) = mod_.origin(self.db) else {
-                    return false;
-                };
-                ptr.to_node(root.syntax()).syntax().text_range() == range
-            })
-        {
-            return scope;
-        }
-        ScopeId::Item(ItemKind::TopMod(quote_top_mod))
-    }
-
     /// Keep target discovery edges while giving the whole generated item
     /// its producer lexical origin. Its body remains a child of the item.
     pub(super) fn defer_quoted_item_origin(
         &mut self,
         item: ItemKind<'db>,
-        quote_top_mod: TopLevelMod<'db>,
-        producer: Option<parser::TextRange>,
-        producer_block: Option<parser::TextRange>,
+        producer: AuthoredScope<'db>,
     ) {
-        self.quoted_origins
-            .push((item, quote_top_mod, producer, producer_block));
+        self.quoted_origins.push((item, producer));
     }
 
     pub(super) fn apply_quoted_function_origins(&mut self) {
-        for (item, quote_top_mod, producer, block) in std::mem::take(&mut self.quoted_origins) {
-            self.set_quoted_item_origin(item, quote_top_mod, producer, block);
+        for (item, producer) in std::mem::take(&mut self.quoted_origins) {
+            self.set_quoted_item_origin(item, producer);
         }
-    }
-
-    pub(super) fn set_quoted_function_origin(
-        &mut self,
-        function: crate::hir_def::Func<'db>,
-        producer: Option<parser::TextRange>,
-        producer_block: Option<parser::TextRange>,
-    ) {
-        self.set_quoted_item_origin(function.into(), self.top_mod, producer, producer_block);
     }
 
     pub(super) fn set_quoted_item_origin(
         &mut self,
         item: ItemKind<'db>,
-        quote_top_mod: TopLevelMod<'db>,
-        producer: Option<parser::TextRange>,
-        producer_block: Option<parser::TextRange>,
+        producer: AuthoredScope<'db>,
     ) {
         let item_node = self
             .graph
@@ -469,12 +380,22 @@ impl<'db> ScopeGraphBuilder<'db> {
             self.graph
                 .add_edge(item_node, publication_node, EdgeKind::self_ty());
         }
-        let lexical_scope = self.resolve_producer_scope(quote_top_mod, producer, producer_block);
-        if quote_top_mod != self.top_mod {
-            self.graph
-                .add_external_edge(item_node, lexical_scope, EdgeKind::lex());
+        // A producer in another module is linked after lowering: its scope
+        // graph may itself contain code generated from this module.
+        if producer.top_mod(self.db) != self.top_mod {
+            self.graph.foreign_origins.push((item_node, producer));
             return;
         }
+        let AuthoredLocator::Producer { module, block } = producer.locator(self.db) else {
+            unreachable!("a quotation's origin is its producer scope")
+        };
+        let lexical_scope = find_producer_scope(
+            self.db,
+            self.top_mod,
+            self.graph.nodes.values().map(|(scope, _)| *scope),
+            module,
+            block,
+        );
         let lexical = self
             .graph
             .nodes
@@ -670,6 +591,59 @@ impl<'db> ScopeGraphBuilder<'db> {
     }
 }
 
+/// The scope a quotation in `quote_top_mod` was written in, among `scopes` of
+/// that module's graph: the authored block at `producer_block`, else the `mod`
+/// at `producer`, else the module itself.
+pub(super) fn find_producer_scope<'db>(
+    db: &'db dyn HirDb,
+    quote_top_mod: TopLevelMod<'db>,
+    scopes: impl IntoIterator<Item = ScopeId<'db>>,
+    producer: Option<parser::TextRange>,
+    producer_block: Option<parser::TextRange>,
+) -> ScopeId<'db> {
+    use parser::ast::prelude::*;
+    let root = super::top_mod_ast(db, quote_top_mod);
+    let scopes: Vec<ScopeId<'db>> = scopes.into_iter().collect();
+    if let Some(range) = producer_block
+        && let Some(scope) = scopes.iter().copied().find(|&scope| {
+            let ScopeId::Block(body, expression) = scope else {
+                return false;
+            };
+            // A producer is authored in the quote's module; generated
+            // bodies there point into other quotes.
+            if body.syntax_top_mod(db) != quote_top_mod {
+                return false;
+            }
+            let crate::span::HirOrigin::Raw(ptr) =
+                body.source_map(db).expr_map.node_to_source(expression)
+            else {
+                return false;
+            };
+            let expr_node = ptr.to_node(root.syntax());
+            expr_node.syntax().text_range() == range
+                || parser::ast::UnsafeExpr::cast(expr_node.syntax().clone())
+                    .and_then(|u| u.block())
+                    .is_some_and(|b| b.syntax().text_range() == range)
+        })
+    {
+        return scope;
+    }
+    if let Some(range) = producer
+        && let Some(scope) = scopes.iter().copied().find(|&scope| {
+            let ScopeId::Item(ItemKind::Mod(mod_)) = scope else {
+                return false;
+            };
+            let crate::span::HirOrigin::Raw(ptr) = mod_.origin(db) else {
+                return false;
+            };
+            ptr.to_node(root.syntax()).syntax().text_range() == range
+        })
+    {
+        return scope;
+    }
+    ScopeId::Item(ItemKind::TopMod(quote_top_mod))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct NodeId(u32);
 entity_impl!(NodeId);
@@ -679,10 +653,16 @@ struct IntermediateScopeGraph<'db> {
     nodes: PrimaryMap<NodeId, (ScopeId<'db>, Scope<'db>)>,
     edges: FxHashMap<NodeId, Vec<(NodeId, EdgeKind<'db>)>>,
     unresolved_uses: FxHashSet<Use<'db>>,
+    foreign_origins: Vec<(NodeId, AuthoredScope<'db>)>,
 }
 
 impl<'db> IntermediateScopeGraph<'db> {
     fn build(mut self, top_mod: TopLevelMod<'db>) -> ScopeGraph<'db> {
+        let foreign_origins = self
+            .foreign_origins
+            .iter()
+            .map(|(node, producer)| (self.nodes[*node].0, *producer))
+            .collect();
         for (from_node, edges) in self.edges {
             for (dest_node, kind) in edges {
                 let dest = self.nodes[dest_node].0;
@@ -701,6 +681,7 @@ impl<'db> IntermediateScopeGraph<'db> {
             top_mod,
             scopes,
             unresolved_uses: self.unresolved_uses,
+            foreign_origins,
         }
     }
 

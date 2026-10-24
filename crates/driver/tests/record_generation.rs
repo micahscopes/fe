@@ -1572,12 +1572,17 @@ struct Pair {
         oob_err.cause
     );
 
+    // A record in a nested module was refused ("generation request requires an
+    // authored concrete root record") while whole-item output could only join
+    // the file's root. It now joins the record's own module, and the request
+    // resolves its provider there.
     let submod_source = r#"
-use core::meta::{Code, Item, Record}
+use core::meta::{Code, Item, Record, field_count}
 
 pub const fn make(_ r: Record) -> Code<Item> {
+    let n = field_count(r)
     quote {
-        fn generated() -> usize { 1 }
+        pub const fn generated() -> usize { ${n} }
     }
 }
 
@@ -1585,19 +1590,38 @@ mod nested {
     #[generate(super::make)]
     pub struct Inner {
         pub x: u256,
+        pub y: u256,
     }
 }
+
+const fn probe() -> usize { nested::generated() }
 "#;
     let (db, file) = input(submod_source);
-    let submod_err = prepare_file(&db, file)
-        .err()
-        .expect("submodule #[generate] must refuse");
+    let output = prepare_file(&db, file)
+        .unwrap_or_else(|error| panic!("{error}"))
+        .expect("a prepared view");
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    assert_generated_integer(&output, output_file, "probe", "2");
+    // The output is a member of `nested`, not of the root.
+    let at_root = submod_source.replace("nested::generated()", "generated()");
+    let (db, file) = input(&at_root);
     assert!(
-        submod_err
-            .cause
-            .contains("generation request requires an authored concrete root record"),
-        "{}",
-        submod_err.cause
+        prepare_file(&db, file).is_err(),
+        "`generated` is not a root item"
+    );
+
+    // A record declared in a function body has no module to join.
+    let in_body = submod_source.replace(
+        "const fn probe() -> usize { nested::generated() }",
+        "fn local() {\n    #[generate(make)]\n    struct Local { x: u256 }\n}",
+    );
+    let (db, file) = input(&in_body);
+    assert!(
+        prepare_file(&db, file).is_err(),
+        "a body-local #[generate] must refuse, never be ignored"
     );
 }
 
@@ -1871,8 +1895,16 @@ struct Box<T> { value: T }
     );
 }
 
+/// Until frozen requests carried type arguments, both splices below were
+/// refused ("... from instantiated generic records are not supported yet"),
+/// because the generated type would have lost `Box<u256>`'s argument. The
+/// record's actual arguments now cross into the output view, so `${ty}` is
+/// `u256` and `${record}` is `Box<u256>`. The `u8` instance discriminates: a
+/// lost argument would let `255 + 1` evaluate there. (A literal's range is
+/// not checked against a narrower type, so the arithmetic is the
+/// discriminator.)
 #[test]
-fn instantiated_generic_field_type_splice_refuses_without_losing_scalar_reflection() {
+fn instantiated_generic_field_type_and_record_splices_keep_their_actual_arguments() {
     let source = r#"use core::derive::Derive
 use core::meta::{Code, Item, Record, field, field_count, field_type}
 trait Value { const fn value() -> u256 }
@@ -1881,33 +1913,73 @@ struct Provider {}
 impl Derive<Value> for Provider {
     const fn derive(_ record: Record) -> Code<Item> {
         let ty = field_type(field(record, 0))
-        quote { const fn value() -> ${ty} { 7 } }
+        quote { const fn value() -> u256 { let v: ${ty} = 255
+            let w = v + 1
+            w as u256 } }
     }
 }
 impl Value for Box<u256> with (Provider)
 const fn observe() -> u256 { <Box<u256> as Value>::value() }
 "#;
-    let (db, file) = input(source);
-    let error = prepare_file(&db, file)
-        .err()
-        .expect("instantiated type arguments must not be discarded");
+    let eval_observe = |source: &str| -> Result<String, String> {
+        let (db, file) = input(source);
+        let output = prepare_file(&db, file)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .expect("a prepared view");
+        let output_file = output
+            .workspace()
+            .get(&output, &file.url(&db).unwrap())
+            .unwrap();
+        let function = output
+            .top_mod(output_file)
+            .all_funcs(&output)
+            .iter()
+            .copied()
+            .find(|function| {
+                function
+                    .name(&output)
+                    .to_opt()
+                    .is_some_and(|name| name.data(&output) == "observe")
+            })
+            .expect("observe");
+        let owner = BodyOwner::Func(function, None);
+        let result = eval_body_owner_const(
+            &output,
+            owner,
+            GenericSubst::for_body_owner(&output, owner, vec![]),
+        );
+        let EvalOutcome::Ready(value) = result else {
+            return Err(format!("{result:?}"));
+        };
+        let SemConstValue::Scalar {
+            value: SemConstScalar::Int { value },
+            ..
+        } = value.value(&output)
+        else {
+            panic!("{:?}", value.value(&output))
+        };
+        Ok(value.to_string())
+    };
+    assert_eq!(eval_observe(source), Ok("256".to_string()));
+
+    let narrow = source.replace("Box<u256>", "Box<u8>");
+    let outcome = eval_observe(&narrow);
     assert!(
-        error
-            .cause
-            .contains("field type splices from instantiated generic records are not supported yet"),
-        "{error}"
+        outcome.is_err(),
+        "`255 + 1` overflows the actual argument u8, got {outcome:?}"
     );
 
-    let record_splice = source.replace("-> ${ty} { 7 }", "-> ${record} { 7 }");
-    let (db, file) = input(&record_splice);
-    let error = prepare_file(&db, file)
-        .err()
-        .expect("record splice must not lose concrete target arguments");
+    let record_splice = source.replace(
+        "let v: ${ty} = 255\n            let w = v + 1",
+        "let b: ${record} = Box { value: 255 }\n            let w = b.value + 1",
+    );
+    assert_ne!(record_splice, source);
+    assert_eq!(eval_observe(&record_splice), Ok("256".to_string()));
+    let narrow = record_splice.replace("Box<u256>", "Box<u8>");
+    let outcome = eval_observe(&narrow);
     assert!(
-        error
-            .cause
-            .contains("record splices from instantiated generic records are not supported yet"),
-        "{error}"
+        outcome.is_err(),
+        "`Box<u8>` must overflow at 255 + 1, got {outcome:?}"
     );
 
     let scalar = source
@@ -1915,15 +1987,12 @@ const fn observe() -> u256 { <Box<u256> as Value>::value() }
             "let ty = field_type(field(record, 0))",
             "let n = field_count(record)",
         )
-        .replace("-> ${ty} { 7 }", "-> u256 { ${n} as u256 }");
-    let fixed_field = source.replace(
-        "struct Box<T> { value: T }",
-        "struct Box<T> { value: u256 }",
-    );
-    for positive in [scalar, fixed_field] {
-        let (db, file) = input(&positive);
-        assert!(prepare_file(&db, file).unwrap().is_some());
-    }
+        .replace(
+            "let v: ${ty} = 255\n            let w = v + 1",
+            "let v: u256 = ${n} as u256\n            let w = v",
+        );
+    assert_ne!(scalar, source);
+    assert_eq!(eval_observe(&scalar), Ok("1".to_string()));
 }
 
 #[test]

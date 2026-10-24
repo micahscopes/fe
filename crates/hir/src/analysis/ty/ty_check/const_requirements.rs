@@ -674,14 +674,40 @@ pub fn admit_ground_type_application<'db>(
     origin: ItemKind<'db>,
     span: DynLazySpan<'db>,
 ) -> Result<(), GroundTypeAdmissionError<'db>> {
-    use crate::analysis::ty::trait_resolution::{
-        TraitSolveCx, WellFormedness, check_ty_wf, constraint::ty_constraints,
+    admit_type_application(db, ty, origin, span, None)
+}
+
+/// Admit the target of an explicit derive header that declares binders, before
+/// its provider executes: the checks of a ground application, under the
+/// header's own premises. A requirement proved by a premise the header states
+/// is admitted as that premise, because ordinary implementation selection
+/// proves it again for each instance where the generated implementation is
+/// used. Constant requirements over the binders are likewise checked there.
+pub fn admit_header_type_application<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+    header: crate::hir_def::ImplTrait<'db>,
+    span: DynLazySpan<'db>,
+) -> Result<(), GroundTypeAdmissionError<'db>> {
+    admit_type_application(db, ty, header.into(), span, Some(header))
+}
+
+fn admit_type_application<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+    origin: ItemKind<'db>,
+    span: DynLazySpan<'db>,
+    header: Option<crate::hir_def::ImplTrait<'db>>,
+) -> Result<(), GroundTypeAdmissionError<'db>> {
+    use crate::analysis::ty::{
+        evidence::Evidence,
+        trait_resolution::{TraitSolveCx, WellFormedness, check_ty_wf, constraint::ty_constraints},
     };
     use crate::semantic::diagnostics::Diagnosable;
-    if !ty.is_star_kind(db)
-        || ty.has_invalid(db)
-        || !crate::analysis::ty::const_ty::ty_is_fully_ground(db, ty)
-    {
+    let ground = crate::analysis::ty::const_ty::ty_is_fully_ground(db, ty);
+    let admissible = ground
+        || header.is_some_and(|header| crate::core::meta::ground_over_header(db, ty, header));
+    if !ty.is_star_kind(db) || ty.has_invalid(db) || !admissible {
         return Err(GroundTypeAdmissionError {
             kind: GroundTypeAdmissionKind::UnsupportedInput,
             diagnostics: Vec::new(),
@@ -717,6 +743,9 @@ pub fn admit_ground_type_application<'db>(
             let admitted = crate::analysis::ty::evidence::prove(db, context, goal)
                 .ok_or((GroundBoundAdmissionCause::NotProven, Vec::new()))
                 .and_then(|proof| {
+                    if header.is_some() && matches!(proof.data(db), Evidence::Assumption(_)) {
+                        return Ok(());
+                    }
                     retained_bound_requirements(db, proof, goal, origin.scope(), span.clone())
                 });
             if let Err((cause, mut diagnostics)) = admitted {
@@ -762,7 +791,9 @@ pub fn admit_ground_type_application<'db>(
             diagnostics,
         });
     }
-    if let Some(unmet) = check_type_requirements(db, ty, origin.scope(), &FxHashSet::default()) {
+    if ground
+        && let Some(unmet) = check_type_requirements(db, ty, origin.scope(), &FxHashSet::default())
+    {
         return Err(GroundTypeAdmissionError {
             kind: GroundTypeAdmissionKind::Requirement,
             diagnostics: vec![unmet_requirement_diag(

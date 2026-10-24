@@ -34,6 +34,13 @@ fn prepare_err(source: &str) -> String {
 }
 
 fn eval_const_fn_u256(db: &DriverDataBase, fn_name: &str) -> String {
+    try_eval_const_fn_u256(db, fn_name).unwrap_or_else(|outcome| {
+        panic!("expected Ready for `{fn_name}`, got {outcome}");
+    })
+}
+
+/// The integer a const function evaluates to, or its unfinished outcome.
+fn try_eval_const_fn_u256(db: &DriverDataBase, fn_name: &str) -> Result<String, String> {
     let url = Url::parse("file:///tmp/scoped-on-demand-derive.fe").unwrap();
     let file = db.workspace().get(db, &url).unwrap();
     let module = db.top_mod(file);
@@ -54,7 +61,7 @@ fn eval_const_fn_u256(db: &DriverDataBase, fn_name: &str) -> String {
         GenericSubst::for_body_owner(db, owner, Vec::new()),
     );
     let EvalOutcome::Ready(value) = outcome else {
-        panic!("expected Ready for `{fn_name}`, got {outcome:?}");
+        return Err(format!("{outcome:?}"));
     };
     let SemConstValue::Scalar {
         value: SemConstScalar::Int { value },
@@ -63,7 +70,7 @@ fn eval_const_fn_u256(db: &DriverDataBase, fn_name: &str) -> String {
     else {
         panic!("expected Int scalar for `{fn_name}`");
     };
-    value.to_string()
+    Ok(value.to_string())
 }
 
 #[test]
@@ -1011,8 +1018,12 @@ const fn check_both() -> u256 {
     assert_eq!(eval_const_fn_u256(&output, "check_both"), "1112");
 }
 
+/// Scoped requests over instances of a generic record were refused ("scoped
+/// derive cannot yet preserve concrete generic target arguments") until frozen
+/// demands carried the target's arguments. Each instance is now its own
+/// implementation, and a field-type splice is that instance's field type.
 #[test]
-fn scoped_derive_preserves_private_producer_helper_and_refuses_generic_targets() {
+fn scoped_derive_preserves_private_producer_helper_and_generic_target_arguments() {
     let source = r#"use core::derive::Derive
 use core::meta::{Code, Item, Record}
 trait Value { const fn value() -> u256 }
@@ -1036,16 +1047,38 @@ const fn observe() -> u256 {
 "#;
     let output = prepare(source).unwrap();
     assert_eq!(eval_const_fn_u256(&output, "observe"), "7");
-    for target in ["Box<u8>", "Box<u256>"] {
-        let generic = source
-            .replace("struct Pair {}", "struct Box<T> { value: T }")
-            .replace("Pair::value()", &format!("<{target} as Value>::value()"));
-        let error = prepare_err(&generic);
-        assert!(
-            error.contains("scoped derive cannot yet preserve concrete generic target arguments"),
-            "{target}: {error}"
+    let both = source
+        .replace("struct Pair {}", "struct Box<T> { value: T }")
+        .replace(
+            "Pair::value()",
+            "<Box<u8> as Value>::value() * 100 + <Box<u256> as Value>::value()",
         );
-    }
+    let output = prepare(&both).unwrap();
+    assert_eq!(eval_const_fn_u256(&output, "observe"), "707");
+
+    // The instance's field type reaches the generated body: 255 + 1 fits
+    // `u256` but overflows `u8`. (A literal's range is not checked against a
+    // narrower type, so the arithmetic is the discriminator.)
+    let typed = both
+        .replace(
+            "    use core::meta::{Code, Item, Record}\n    const fn helper",
+            "    use core::meta::{Code, Item, Record, field, field_type}\n    const fn helper",
+        )
+        .replace(
+            "            quote { const fn value() -> u256 { helper() } }",
+            "            let ty = field_type(field(record, 0))\n            quote { const fn value() -> u256 { let v: ${ty} = 255\n                let w = v + 1\n                w as u256 + helper() } }",
+        );
+    assert_ne!(typed, both);
+    let wide = typed.replace("<Box<u8> as Value>::value() * 100 + ", "");
+    let output = prepare(&wide).unwrap();
+    assert_eq!(eval_const_fn_u256(&output, "observe"), "263");
+    let narrow = typed.replace(" + <Box<u256> as Value>::value()", "");
+    let output = prepare(&narrow).unwrap();
+    let outcome = try_eval_const_fn_u256(&output, "observe");
+    assert!(
+        outcome.is_err(),
+        "`Box<u8>` must overflow at 255 + 1, got {outcome:?}"
+    );
 }
 
 #[test]

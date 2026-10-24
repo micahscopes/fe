@@ -1940,7 +1940,14 @@ impl<'db> TyChecker<'db> {
         let mut owner_scope = Some(self.env.owner().scope());
         let mut generated_owner = false;
         while let Some(scope) = owner_scope {
-            generated_owner |= scope.data(self.db).publication_parent.is_some();
+            // Members under an explicit derive header, such as its generated
+            // constants, are generated even though the header is authored.
+            generated_owner |= scope.data(self.db).publication_parent.is_some()
+                || matches!(
+                    scope,
+                    ScopeId::Item(ItemKind::ImplTrait(header))
+                        if crate::core::meta::is_derive_request(self.db, header)
+                );
             owner_scope = scope.parent(self.db);
         }
         let body = self.body();

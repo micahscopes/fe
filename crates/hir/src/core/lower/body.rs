@@ -45,6 +45,54 @@ impl<'db> Body<'db> {
         ctxt.build(None, expr, BodyKind::Anonymous)
     }
 
+    /// A body whose expression is `path`, already bound.
+    pub(super) fn lower_bound_path(
+        f_ctxt: &mut FileLowerCtxt<'db>,
+        path: Partial<PathId<'db>>,
+    ) -> Self {
+        let id = f_ctxt.joined_id(TrackedItemVariant::NamelessBody);
+        let mut ctxt = BodyCtxt::new(f_ctxt, id);
+        let expr = ctxt.push_expr(Expr::Path(path), HirOrigin::None);
+        ctxt.build(None, expr, BodyKind::Anonymous)
+    }
+
+    /// A body whose expression is a frozen constant, `4 as usize`, as a
+    /// scalar splice lowers it.
+    pub(super) fn lower_frozen_scalar(
+        f_ctxt: &mut FileLowerCtxt<'db>,
+        scalar: &common::generation::FrozenScalar,
+    ) -> Self {
+        use crate::hir_def::{IntegerId, LitKind, TypeId, TypeKind, UnOp, prim_ty::PrimTy};
+        use common::generation::FrozenScalar;
+        let id = f_ctxt.joined_id(TrackedItemVariant::NamelessBody);
+        let mut ctxt = BodyCtxt::new(f_ctxt, id);
+        let db = ctxt.f_ctxt.db();
+        let expr = match scalar {
+            FrozenScalar::Bool(value) => {
+                ctxt.push_expr(Expr::Lit(LitKind::Bool(*value)), HirOrigin::None)
+            }
+            FrozenScalar::Int {
+                negative,
+                bytes,
+                primitive,
+            } => {
+                let integer = IntegerId::new(db, num_bigint::BigUint::from_bytes_be(bytes));
+                let mut value = ctxt.push_expr(Expr::Lit(LitKind::Int(integer)), HirOrigin::None);
+                if *negative {
+                    value = ctxt.push_expr(Expr::Un(value, UnOp::Minus), HirOrigin::None);
+                }
+                let primitive = PrimTy::from_name(db, IdentId::new(db, primitive.clone()))
+                    .expect("validated frozen integer primitive");
+                let ty = TypeId::new(
+                    db,
+                    TypeKind::Primitive(primitive, crate::hir_def::GenericArgListId::none(db)),
+                );
+                ctxt.push_expr(Expr::Cast(value, Partial::Present(ty)), HirOrigin::None)
+            }
+        };
+        ctxt.build(None, expr, BodyKind::Anonymous)
+    }
+
     pub(super) fn lower_ast_nameless(f_ctxt: &mut FileLowerCtxt<'db>, ast: ast::Expr) -> Self {
         Self::lower_ast_with_variant(
             f_ctxt,
@@ -253,6 +301,7 @@ impl<'ctxt, 'db> BodyCtxt<'ctxt, 'db> {
             self.conds,
             self.pats,
             self.f_ctxt.top_mod(),
+            self.f_ctxt.syntax_top_mod(),
             self.source_map,
             origin,
         );

@@ -157,3 +157,22 @@ fn named_impl_alias_survives_formatting_and_reparsing() {
     assert_eq!(item.selection_name().unwrap().text(), "Alt");
     assert_eq!(crate::format_str(&formatted, &config).unwrap(), formatted);
 }
+
+#[test]
+fn explicit_derive_headers_keep_their_provider_and_requirements() {
+    // Regression: the header printer had no case for `with (P)`, so an
+    // explicit derive request formatted as an empty handwritten impl.
+    let config = crate::Config::default();
+    for source in [
+        "impl Score for Pair with (FieldCount)\n",
+        "impl Score for Pair as Zero with (ZeroScore)\n",
+        "impl<T: Bits> Report for Envelope<T> with (providers::FirstField)\n",
+        "impl Report for Plain with (Scaled<10>)\n",
+        "impl<T> Report for Envelope<T> with (FirstField) where T: Bits\n",
+    ] {
+        let result = crate::format_str(source, &config).unwrap();
+        assert_eq!(result.trim_end(), source.trim_end());
+    }
+    let result = crate::format_str("impl Score for Pair with(FieldCount)", &config).unwrap();
+    assert_eq!(result.trim_end(), "impl Score for Pair with (FieldCount)");
+}

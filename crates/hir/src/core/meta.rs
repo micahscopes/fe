@@ -245,13 +245,35 @@ impl<'db> RecordInput<'db> {
         ty: TyId<'db>,
         requesting_scope: crate::hir_def::scope_graph::ScopeId<'db>,
     ) -> Result<Self, RecordInputError> {
+        if !crate::analysis::ty::const_ty::ty_is_fully_ground(db, ty) {
+            return Err(RecordInputError::NotConcrete);
+        }
+        Self::issue_from(db, ty, requesting_scope)
+    }
+
+    /// Issue a view of the target of an explicit derive header that declares
+    /// binders: ground except for those binders, whose fields have the
+    /// header's parameters as their types. The header is the requesting scope.
+    pub fn for_header_type(
+        db: &'db dyn HirAnalysisDb,
+        ty: TyId<'db>,
+        header: crate::hir_def::ImplTrait<'db>,
+    ) -> Result<Self, RecordInputError> {
+        if !ground_over_header(db, ty, header) {
+            return Err(RecordInputError::NotConcrete);
+        }
+        Self::issue_from(db, ty, header.scope())
+    }
+
+    fn issue_from(
+        db: &'db dyn HirAnalysisDb,
+        ty: TyId<'db>,
+        requesting_scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    ) -> Result<Self, RecordInputError> {
         use crate::{
             analysis::name_resolution::is_scope_visible_from,
             hir_def::{EnumVariant, FieldParent, scope_graph::ScopeId},
         };
-        if !crate::analysis::ty::const_ty::ty_is_fully_ground(db, ty) {
-            return Err(RecordInputError::NotConcrete);
-        }
         // Authorize raw declaration members before instantiating their types.
         // Hidden field metadata may itself require compile-time evaluation.
         let owner = Self::authored_owner(db, ty)?;
@@ -486,11 +508,28 @@ impl<'db> RecordInput<'db> {
             .file(db)
             .url(db)
             .ok_or("record owner has no source URL")?;
+        let adt = self
+            .ty
+            .adt_def(db)
+            .ok_or("record input has no authored declaration")?;
+        let identity = TyId::foldl(db, TyId::adt(db, adt), adt.params(db));
+        let args = if self.ty == identity {
+            None
+        } else {
+            Some(
+                self.ty
+                    .generic_args(db)
+                    .iter()
+                    .map(|arg| freeze_generic_arg(db, *arg))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        };
         Ok(FrozenRecordRef {
             owner_kind,
             target_file,
             target_range,
             variant_index: self.variant_index,
+            args,
         })
     }
 }
@@ -541,6 +580,171 @@ impl<'db> RecordField<'db> {
             index: self.index,
         })
     }
+}
+
+/// Whether `ty` is ground except for parameters `header` itself declares.
+pub(crate) fn ground_over_header<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+    header: crate::hir_def::ImplTrait<'db>,
+) -> bool {
+    use crate::analysis::ty::{const_ty::ConstTyData, ty_def::TyData};
+    use crate::hir_def::{ItemKind, scope_graph::ScopeId};
+    let declared = |param: &crate::analysis::ty::ty_def::TyParam<'db>| {
+        !param.is_implicit()
+            && matches!(
+                param.scope(db),
+                ScopeId::GenericParam(ItemKind::ImplTrait(owner), _) if owner == header
+            )
+    };
+    match ty.data(db) {
+        TyData::TyParam(param) => declared(param),
+        TyData::TyApp(abs, arg) => {
+            ground_over_header(db, *abs, header) && ground_over_header(db, *arg, header)
+        }
+        TyData::ConstTy(constant) => match constant.data(db) {
+            ConstTyData::TyParam(param, _) => declared(param),
+            _ => crate::analysis::ty::const_ty::ty_is_fully_ground(db, ty),
+        },
+        _ => crate::analysis::ty::const_ty::ty_is_fully_ground(db, ty),
+    }
+}
+
+/// Freeze a type of the authored view by declaration identity, for rebinding
+/// in the output view. Declarations cross as file and authored range,
+/// primitives by name, constants as scalars and the derive header's own
+/// parameters by position; no semantic identity of this database does.
+pub(crate) fn freeze_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Result<common::generation::FrozenTy, &'static str> {
+    use crate::analysis::ty::{
+        provider::AddressSpace,
+        ty_def::{PrimTy, TyBase, TyData},
+    };
+    use common::generation::{FrozenGenericArg, FrozenTy};
+    match ty.data(db) {
+        TyData::Never => return Ok(FrozenTy::Never),
+        TyData::TyParam(param) => return header_param_index(db, param).map(FrozenTy::HeaderParam),
+        _ => {}
+    }
+    let (base, args) = ty.decompose_ty_app(db);
+    let args = args
+        .iter()
+        .map(|arg| freeze_generic_arg(db, *arg))
+        .collect::<Result<Vec<_>, _>>()?;
+    let unsupported = "a spliced type must be a record, primitive, tuple, array or pointer, applied to ground arguments or the derive header's parameters";
+    let types = |args: Vec<FrozenGenericArg>| {
+        args.into_iter()
+            .map(|arg| match arg {
+                FrozenGenericArg::Type(ty) => Ok(ty),
+                FrozenGenericArg::Const(_) => Err(unsupported),
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    match base.data(db) {
+        TyData::TyBase(TyBase::Adt(adt)) => Ok(FrozenTy::Declared {
+            decl: freeze_decl(db, adt.adt_ref(db))?,
+            args,
+        }),
+        TyData::TyBase(TyBase::Prim(PrimTy::Tuple(_))) => Ok(FrozenTy::Tuple(types(args)?)),
+        TyData::TyBase(TyBase::Prim(PrimTy::Array)) => match <[_; 2]>::try_from(args) {
+            Ok([FrozenGenericArg::Type(elem), FrozenGenericArg::Const(len)]) => {
+                Ok(FrozenTy::Array {
+                    elem: Box::new(elem),
+                    len,
+                })
+            }
+            _ => Err(unsupported),
+        },
+        TyData::TyBase(TyBase::Prim(PrimTy::Ptr(AddressSpace::Memory))) => {
+            match <[_; 1]>::try_from(types(args)?) {
+                Ok([pointee]) => Ok(FrozenTy::Ptr(Box::new(pointee))),
+                Err(_) => Err(unsupported),
+            }
+        }
+        TyData::TyBase(TyBase::Prim(primitive)) => {
+            let hir_primitive = crate::hir_def::prim_ty::PrimTy::all_types()
+                .iter()
+                .find(|candidate| {
+                    crate::analysis::ty::ty_def::TyBase::from(**candidate)
+                        == TyBase::Prim(*primitive)
+                })
+                .ok_or(unsupported)?;
+            Ok(FrozenTy::Primitive {
+                name: hir_primitive.name(db).data(db).to_string(),
+                args,
+            })
+        }
+        _ => Err(unsupported),
+    }
+}
+
+fn freeze_generic_arg<'db>(
+    db: &'db dyn HirAnalysisDb,
+    arg: TyId<'db>,
+) -> Result<common::generation::FrozenGenericArg, &'static str> {
+    use crate::analysis::{
+        semantic::SemConstValue,
+        ty::{const_ty::ConstTyData, ty_def::TyData},
+    };
+    use common::generation::{FrozenConst, FrozenGenericArg};
+    let TyData::ConstTy(constant) = arg.data(db) else {
+        return Ok(FrozenGenericArg::Type(freeze_ty(db, arg)?));
+    };
+    if let ConstTyData::TyParam(param, _) = constant.data(db) {
+        return Ok(FrozenGenericArg::Const(FrozenConst::HeaderParam(
+            header_param_index(db, param)?,
+        )));
+    }
+    let ConstTyData::Value(value) = constant.evaluate(db, None).data(db) else {
+        return Err("a spliced type's constant argument must be evaluated");
+    };
+    let SemConstValue::Scalar { ty, value } = value.value().value(db) else {
+        return Err("a spliced type's constant argument must be a boolean or integer");
+    };
+    Ok(FrozenGenericArg::Const(FrozenConst::Value(
+        ItemCode::freeze_scalar(db, *ty, value)?,
+    )))
+}
+
+/// The position of a parameter declared by an authored implementation header,
+/// the only binders a frozen type may name: the request's own header.
+fn header_param_index<'db>(
+    db: &'db dyn HirAnalysisDb,
+    param: &crate::analysis::ty::ty_def::TyParam<'db>,
+) -> Result<usize, &'static str> {
+    use crate::hir_def::{ItemKind, scope_graph::ScopeId};
+    match param.scope(db) {
+        ScopeId::GenericParam(ItemKind::ImplTrait(_), index) if !param.is_implicit() => {
+            Ok(index as usize)
+        }
+        _ => Err("a spliced type may name only its derive header's own parameters"),
+    }
+}
+
+fn freeze_decl<'db>(
+    db: &'db dyn HirAnalysisDb,
+    declaration: crate::analysis::ty::adt_def::AdtRef<'db>,
+) -> Result<common::generation::FrozenDeclRef, &'static str> {
+    use crate::analysis::ty::adt_def::AdtRef;
+    let (top_mod, pointer) = match declaration {
+        AdtRef::Struct(s) => match s.origin(db) {
+            HirOrigin::Raw(pointer) => (s.top_mod(db), pointer.syntax_node_ptr()),
+            _ => return Err("a spliced type names a declaration that is not authored"),
+        },
+        AdtRef::Enum(e) => match e.origin(db) {
+            HirOrigin::Raw(pointer) => (e.top_mod(db), pointer.syntax_node_ptr()),
+            _ => return Err("a spliced type names a declaration that is not authored"),
+        },
+    };
+    Ok(common::generation::FrozenDeclRef {
+        file: top_mod
+            .file(db)
+            .url(db)
+            .ok_or("a spliced type's declaration has no source URL")?,
+        range: pointer.text_range(),
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -654,6 +858,14 @@ pub(crate) fn quote_item_declarations(
     quote: &ast::QuoteExpr,
 ) -> Result<Vec<ast::Item>, &'static str> {
     if let Some(items) = quote.item_list() {
+        // A shape is a member, never one of these declarations: not dropped.
+        if items
+            .syntax()
+            .children()
+            .any(|child| ast::TraitShapeItem::can_cast(child.kind()))
+        {
+            return Err("a quoted shape is an associated shape member of an implementation");
+        }
         return Ok(items.into_iter().collect());
     }
     if let Some(block) = quote.body() {
@@ -1003,12 +1215,6 @@ impl<'db> ItemCode<'db> {
                         )),
                         SemConstValue::Meta { value, .. } => match value {
                             MetaValue::Record(record) => {
-                                let adt = record.ty().adt_def(db)
-                                    .ok_or("record splice has no authored declaration")?;
-                                let identity_ty = TyId::foldl(db, TyId::adt(db, adt), adt.params(db));
-                                if record.ty() != identity_ty {
-                                    return Err("record splices from instantiated generic records are not supported yet; the generated type would lose its actual arguments");
-                                }
                                 Ok(FrozenHoleValue::Record(record.freeze(db)?))
                             }
                             MetaValue::Field(field) => {
@@ -1023,8 +1229,18 @@ impl<'db> ItemCode<'db> {
                                     ..record
                                 };
                                 let authored_field = RecordField { record: identity, index: field.index() };
+                                // A type written without the record's parameters keeps its
+                                // written form; one over them is the instantiated type.
                                 if field.ty(db) != authored_field.ty(db) {
-                                    return Err("field type splices from instantiated generic records are not supported yet; the generated type would lose its actual arguments");
+                                    return Ok(FrozenHoleValue::Type(freeze_ty(
+                                        db,
+                                        crate::analysis::ty::normalize::normalize_ty(
+                                            db,
+                                            field.ty(db),
+                                            record.scope(),
+                                            crate::analysis::ty::trait_resolution::PredicateListId::empty_list(db),
+                                        ),
+                                    )?));
                                 }
                                 Ok(FrozenHoleValue::FieldType(field.freeze(db)?))
                             }
@@ -1061,6 +1277,7 @@ impl<'db> ItemCode<'db> {
                 .url(db)
                 .ok_or("generation target has no source URL")?,
             request_impl: None,
+            publication: None,
             code: self.freeze(db)?,
         })
     }
@@ -1279,12 +1496,13 @@ impl<'db> ItemCode<'db> {
                             Some(
                                 ast::ItemKind::Func(_)
                                     | ast::ItemKind::Const(_)
+                                    | ast::ItemKind::TypeAlias(_)
                                     | ast::ItemKind::Impl(_)
                                     | ast::ItemKind::ImplTrait(_)
                             )
                         ) {
                             return Err(
-                                "item quotation supports function, const, impl, and trait impl declarations",
+                                "item quotation supports function, const, type, impl, and trait impl declarations",
                             );
                         }
                     }
@@ -1316,12 +1534,13 @@ impl<'db> ItemCode<'db> {
                         Some(
                             ast::ItemKind::Func(_)
                                 | ast::ItemKind::Const(_)
+                                | ast::ItemKind::TypeAlias(_)
                                 | ast::ItemKind::Impl(_)
                                 | ast::ItemKind::ImplTrait(_)
                         )
                     ) {
                         return Err(
-                            "item quotation supports function, const, impl, and trait impl declarations",
+                            "item quotation supports function, const, type, impl, and trait impl declarations",
                         );
                     }
                 }
@@ -1387,12 +1606,8 @@ pub fn native_derive_provider<'db>(
     ),
     NativeDeriveProviderError<'db>,
 > {
-    if !request.impl_params(db).is_empty() || !request.where_clause(db).predicates(db).is_empty() {
-        return Err(
-            "bounded native derive requires a concrete header without binders or where conditions"
-                .into(),
-        );
-    }
+    // A header may declare binders and requirements, as a handwritten one
+    // does; its target is then admitted under the header's own premises.
     let goal = request
         .candidate_trait_inst_result(db)
         .map_err(|_| "cannot resolve requested trait and target")?;
@@ -1407,6 +1622,7 @@ pub fn native_derive_provider<'db>(
         provider_ty,
         request.into(),
         request.scope(),
+        Some(request),
         (request.span().ty().into(), request.span().into()),
     )
 }
@@ -1419,6 +1635,7 @@ fn finalized_derive_provider<'db>(
     provider_ty: TyId<'db>,
     origin: crate::hir_def::ItemKind<'db>,
     scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    header: Option<crate::hir_def::ImplTrait<'db>>,
     spans: (crate::span::DynLazySpan<'db>, crate::span::DynLazySpan<'db>),
 ) -> Result<
     (
@@ -1433,11 +1650,10 @@ fn finalized_derive_provider<'db>(
         trait_resolution::PredicateListId,
         ty_def::{TyBase, TyData},
     };
-    if goal.args(db).len() != 1
-        || !goal.assoc_type_bindings(db).is_empty()
-        || !goal.def(db).types(db).is_empty()
-        || !goal.def(db).consts(db).is_empty()
-    {
+    // Associated items are supplied as members and admitted by ordinary impl
+    // conformance. Scoped requests reach here only after
+    // `freeze_generation_request`, which still refuses them.
+    if goal.args(db).len() != 1 || !goal.assoc_type_bindings(db).is_empty() {
         return Err(
             "bounded native derive requires an unparameterized goal without associated equalities"
                 .into(),
@@ -1446,22 +1662,35 @@ fn finalized_derive_provider<'db>(
     if goal.def(db).ingot(db) != scope.top_mod(db).ingot(db) {
         return Err("library/canonical goal establishment is pending the permits owner API".into());
     }
-    let input =
-        RecordInput::for_authored_type_from(db, goal.args(db)[0], scope).map_err(|cause| {
-            match cause {
-            RecordInputError::InvisibleField => {
-                "native derive requires every target field to be visible from the requesting scope"
-                    .to_string()
-            }
-            _ => format!("native derive requires a concrete authored record: {cause:?}"),
+    let target = goal.args(db)[0];
+    // A target over the header's own binders is issued and admitted under
+    // the header's premises; every other target must be ground.
+    let header = header.filter(|_| !crate::analysis::ty::const_ty::ty_is_fully_ground(db, target));
+    let input = match header {
+        Some(header) => RecordInput::for_header_type(db, target, header),
+        None => RecordInput::for_authored_type_from(db, target, scope),
+    }
+    .map_err(|cause| match cause {
+        RecordInputError::InvisibleField => {
+            "native derive requires every target field to be visible from the requesting scope"
+                .to_string()
         }
-        })?;
-    crate::analysis::ty::ty_check::admit_ground_type_application(
-        db,
-        input.ty(),
-        origin,
-        spans.0.clone(),
-    )
+        _ => format!("native derive requires a concrete authored record: {cause:?}"),
+    })?;
+    match header {
+        Some(header) => crate::analysis::ty::ty_check::admit_header_type_application(
+            db,
+            input.ty(),
+            header,
+            spans.0.clone(),
+        ),
+        None => crate::analysis::ty::ty_check::admit_ground_type_application(
+            db,
+            input.ty(),
+            origin,
+            spans.0.clone(),
+        ),
+    }
     .map_err(NativeDeriveProviderError::Target)?;
     if provider_ty.has_param(db) || provider_ty.has_invalid(db) || !provider_ty.is_star_kind(db) {
         return Err("native derive requires a concrete provider type".into());
@@ -1594,9 +1823,22 @@ pub fn freeze_generation_request<'db>(
             )
         }
     };
-    if !goal.self_ty(db).decompose_ty_app(db).1.is_empty() {
-        return Err("scoped derive cannot yet preserve concrete generic target arguments".into());
-    }
+    // A generic target keeps its actual arguments, which must be ground: a
+    // scoped opening has no header whose binders a generated item could name.
+    let target_args = goal.self_ty(db).decompose_ty_app(db).1;
+    let args = if target_args.is_empty() {
+        None
+    } else {
+        if !crate::analysis::ty::const_ty::ty_is_fully_ground(db, goal.self_ty(db)) {
+            return Err("scoped derive requires a ground target".into());
+        }
+        Some(
+            target_args
+                .iter()
+                .map(|arg| freeze_generic_arg(db, *arg))
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+    };
     if !opening.provider_ty(db).decompose_ty_app(db).1.is_empty() {
         return Err(
             "bounded scoped derive does not yet admit concrete generic provider applications"
@@ -1627,8 +1869,152 @@ pub fn freeze_generation_request<'db>(
                 .ok_or("target declaration has no source URL")?,
             target_range,
             variant_index: None,
+            args,
         },
     })
+}
+
+/// Rebind a frozen type in this view by declaration identity: the semantic
+/// twin of lowering's `TypeId::thaw`, for a scoped demand's target.
+fn thaw_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    frozen: &common::generation::FrozenTy,
+) -> Result<TyId<'db>, String> {
+    use crate::analysis::ty::ty_def::{PrimTy, TyBase, TyData};
+    use common::generation::FrozenTy;
+    let args = |args: &[common::generation::FrozenGenericArg]| {
+        args.iter()
+            .map(|arg| thaw_generic_arg(db, arg))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let base = |prim: PrimTy| TyId::new(db, TyData::TyBase(TyBase::Prim(prim)));
+    Ok(match frozen {
+        FrozenTy::Declared {
+            decl,
+            args: decl_args,
+        } => TyId::foldl(db, thaw_decl(db, decl)?, &args(decl_args)?),
+        FrozenTy::Primitive {
+            name,
+            args: prim_args,
+        } => {
+            let primitive =
+                crate::hir_def::prim_ty::PrimTy::from_name(db, IdentId::new(db, name.clone()))
+                    .ok_or("a frozen primitive is not a builtin type")?;
+            let base = TyId::new(db, TyData::TyBase(TyBase::from(primitive)));
+            TyId::foldl(db, base, &args(prim_args)?)
+        }
+        FrozenTy::Tuple(elems) => {
+            let elems = elems
+                .iter()
+                .map(|elem| thaw_ty(db, elem))
+                .collect::<Result<Vec<_>, _>>()?;
+            TyId::foldl(db, base(PrimTy::Tuple(elems.len())), &elems)
+        }
+        FrozenTy::Array { elem, len } => TyId::foldl(
+            db,
+            base(PrimTy::Array),
+            &[thaw_ty(db, elem)?, thaw_const(db, len)?],
+        ),
+        FrozenTy::Ptr(pointee) => TyId::ptr_to(db, thaw_ty(db, pointee)?),
+        FrozenTy::Never => TyId::never(db),
+        FrozenTy::HeaderParam(_) => {
+            return Err("a scoped demand names no derive header parameters".into());
+        }
+    })
+}
+
+fn thaw_generic_arg<'db>(
+    db: &'db dyn HirAnalysisDb,
+    arg: &common::generation::FrozenGenericArg,
+) -> Result<TyId<'db>, String> {
+    match arg {
+        common::generation::FrozenGenericArg::Type(ty) => thaw_ty(db, ty),
+        common::generation::FrozenGenericArg::Const(value) => thaw_const(db, value),
+    }
+}
+
+fn thaw_const<'db>(
+    db: &'db dyn HirAnalysisDb,
+    frozen: &common::generation::FrozenConst,
+) -> Result<TyId<'db>, String> {
+    use crate::analysis::semantic::{SemConstId, SemConstScalar, SemConstValue};
+    use crate::analysis::ty::ty_def::{TyBase, TyData};
+    use common::generation::{FrozenConst, FrozenScalar};
+    let FrozenConst::Value(scalar) = frozen else {
+        return Err("a scoped demand names no derive header parameters".into());
+    };
+    let primitive = |name: &str| {
+        crate::hir_def::prim_ty::PrimTy::from_name(db, IdentId::new(db, name.to_string()))
+            .map(|primitive| TyId::new(db, TyData::TyBase(TyBase::from(primitive))))
+            .ok_or("a frozen constant has no builtin type")
+    };
+    let (ty, value) = match scalar {
+        FrozenScalar::Bool(value) => (primitive("bool")?, SemConstScalar::Bool(*value)),
+        FrozenScalar::Int {
+            negative,
+            bytes,
+            primitive: name,
+        } => {
+            let sign = if *negative {
+                num_bigint::Sign::Minus
+            } else {
+                num_bigint::Sign::Plus
+            };
+            (
+                primitive(name)?,
+                SemConstScalar::Int {
+                    value: num_bigint::BigInt::from_bytes_be(sign, bytes),
+                },
+            )
+        }
+    };
+    let value = SemConstId::new(db, SemConstValue::Scalar { ty, value });
+    Ok(TyId::const_ty(
+        db,
+        crate::analysis::ty::const_ty::const_ty_from_sem_const(db, value),
+    ))
+}
+
+/// The struct or enum written at `decl` in this view.
+fn thaw_decl<'db>(
+    db: &'db dyn HirAnalysisDb,
+    decl: &common::generation::FrozenDeclRef,
+) -> Result<TyId<'db>, String> {
+    use crate::analysis::ty::adt_def::AdtRef;
+    let file = db
+        .workspace()
+        .get(db, &decl.file)
+        .ok_or("a frozen declaration's file is missing")?;
+    let module = crate::lower::map_file_to_mod_impl(db, file);
+    let written_at = |origin: Option<ast::SyntaxNodePtr>| {
+        origin.is_some_and(|pointer| pointer.text_range() == decl.range)
+    };
+    let declaration = module
+        .all_structs(db)
+        .iter()
+        .copied()
+        .find(|s| {
+            written_at(match s.origin(db) {
+                HirOrigin::Raw(pointer) => Some(pointer.syntax_node_ptr()),
+                _ => None,
+            })
+        })
+        .map(AdtRef::Struct)
+        .or_else(|| {
+            module
+                .all_enums(db)
+                .iter()
+                .copied()
+                .find(|e| {
+                    written_at(match e.origin(db) {
+                        HirOrigin::Raw(pointer) => Some(pointer.syntax_node_ptr()),
+                        _ => None,
+                    })
+                })
+                .map(AdtRef::Enum)
+        })
+        .ok_or("a frozen declaration is missing in unchanged source")?;
+    Ok(TyId::adt(db, declaration.as_adt(db)))
 }
 
 /// Rebind an accumulated dependency through exact declarations and the checked
@@ -1698,8 +2084,15 @@ pub fn rebind_generation_request<'db>(
         common::generation::ScopedDeriveMode::Ref => crate::hir_def::ModeMarker::None,
         common::generation::ScopedDeriveMode::Mut => crate::hir_def::ModeMarker::Mut,
     };
-    let goal = TraitInstId::new_simple(db, trait_, vec![TyId::adt(db, target.as_adt(db))])
-        .with_mode(db, mode);
+    let args = demand
+        .target
+        .args
+        .iter()
+        .flatten()
+        .map(|arg| thaw_generic_arg(db, arg))
+        .collect::<Result<Vec<_>, _>>()?;
+    let target = TyId::foldl(db, TyId::adt(db, target.as_adt(db)), &args);
+    let goal = TraitInstId::new_simple(db, trait_, vec![target]).with_mode(db, mode);
     let request = GenerationRequest::new(db, opening, goal);
     if freeze_generation_request(db, request)? != *demand {
         return Err("requested identities changed while preparing unchanged source".into());
@@ -1768,11 +2161,29 @@ pub fn scoped_derive_provider<'db>(
         opening.provider_ty(db),
         origin,
         opening.scope(db),
+        None,
         (span.clone(), span),
     )
 }
 
 /// Recover the exact authored header, never a first-by-name implementation.
+/// The scope of the authored `mod` written at `range` in `module`.
+pub fn authored_mod_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    module: crate::hir_def::TopLevelMod<'db>,
+    range: parser::TextRange,
+) -> Option<crate::hir_def::scope_graph::ScopeId<'db>> {
+    module
+        .all_mods(db)
+        .iter()
+        .copied()
+        .find(|mod_| {
+            matches!(mod_.origin(db), HirOrigin::Raw(pointer)
+                if pointer.syntax_node_ptr().text_range() == range)
+        })
+        .map(|mod_| mod_.scope())
+}
+
 pub fn authored_derive_request<'db>(
     db: &'db dyn HirAnalysisDb,
     module: crate::hir_def::TopLevelMod<'db>,
@@ -1787,8 +2198,32 @@ pub fn authored_derive_request<'db>(
             let HirOrigin::Raw(ptr) = implementation.origin(db) else {
                 return false;
             };
-            ptr.to_node(root.syntax()).syntax().text_range() == ast.syntax().text_range()
+            implementation.scope().syntax_top_mod(db) == module
+                && ptr.to_node(root.syntax()).syntax().text_range() == ast.syntax().text_range()
         })
+}
+
+/// The header syntax of an implementation, read from the module it was
+/// written in: a generated implementation is written in its producer's quote.
+fn impl_trait_syntax<'db>(
+    db: &'db dyn HirAnalysisDb,
+    implementation: crate::hir_def::ImplTrait<'db>,
+) -> Option<(crate::hir_def::TopLevelMod<'db>, ast::ImplTrait)> {
+    let HirOrigin::Raw(ptr) = implementation.origin(db) else {
+        return None;
+    };
+    let module = implementation.scope().syntax_top_mod(db);
+    let root = crate::core::lower::top_mod_ast(db, module);
+    Some((module, ptr.to_node(root.syntax())))
+}
+
+/// An explicit derive header `impl Tr for T with (P)`. Every member under it
+/// is generated from the provider's quotations, not authored here.
+pub(crate) fn is_derive_request(
+    db: &dyn HirAnalysisDb,
+    request: crate::hir_def::ImplTrait<'_>,
+) -> bool {
+    impl_trait_syntax(db, request).is_some_and(|(_, ast)| ast.derive_provider().is_some())
 }
 
 /// A header-only request is not an implementation before its output plan exists.
@@ -1796,14 +2231,15 @@ pub(crate) fn is_unfulfilled_derive_request(
     db: &dyn HirAnalysisDb,
     request: crate::hir_def::ImplTrait<'_>,
 ) -> bool {
-    let HirOrigin::Raw(ptr) = request.origin(db) else {
+    let Some((module, ast)) = impl_trait_syntax(db, request) else {
         return false;
     };
-    let root = crate::core::lower::top_mod_ast(db, request.top_mod(db));
-    let ast = ptr.to_node(root.syntax());
+    // A plan only fulfils a header written in its target file; a quoted header
+    // has no authored identity to prepare against and stays unfulfilled.
     ast.derive_provider().is_some()
-        && !db.generation_inputs().requests(db).iter().any(|plan| {
-            plan.request_impl == Some(ast.syntax().text_range())
-                && Some(plan.target_file.clone()) == request.top_mod(db).file(db).url(db)
-        })
+        && !(module == request.top_mod(db)
+            && db.generation_inputs().requests(db).iter().any(|plan| {
+                plan.request_impl == Some(ast.syntax().text_range())
+                    && Some(plan.target_file.clone()) == module.file(db).url(db)
+            }))
 }
