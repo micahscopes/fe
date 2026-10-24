@@ -38,7 +38,7 @@ pub struct Indexed<T> {
 
 impl<T> Indexed<T> {
     #[inline(always)]
-    pub const fn new(_ value: T) -> Self {
+    pub const fn new(_ value: own T) -> Self {
         Indexed { value }
     }
 }
