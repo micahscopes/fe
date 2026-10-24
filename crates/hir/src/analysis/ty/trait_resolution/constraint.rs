@@ -124,12 +124,20 @@ pub(crate) fn ty_constraints<'db>(
             func_def.params(db),
             collect_func_def_constraints(db, *func_def, true),
         ),
+        // A computed application must meet its declaration's requirements
+        // where it is written, before unfolding can drop an argument.
+        TyData::TyBase(TyBase::TypeFn(def)) => (
+            collect_generic_params(db, (*def).into()).params(db),
+            collect_constraints(db, (*def).into()),
+        ),
         _ => {
             return PredicateListId::empty_list(db);
         }
     };
 
-    let mut args = args.to_vec();
+    // Arguments past the declaration's parameters apply a computed result of
+    // a higher kind; the declaration places no requirement on them.
+    let mut args = args[..args.len().min(params.len())].to_vec();
 
     // Generalize unbound type parameters.
     for &arg in params.iter().skip(args.len()) {

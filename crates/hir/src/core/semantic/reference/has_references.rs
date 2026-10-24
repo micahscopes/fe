@@ -18,7 +18,7 @@ use super::{ReferenceView, Target};
 use super::collector::{
     body_references, const_references, contract_references, enum_references,
     func_signature_references, impl_references, impl_trait_references, static_assert_references,
-    struct_references, trait_references, type_alias_references, use_references,
+    struct_references, trait_references, type_alias_references, type_fn_references, use_references,
 };
 
 /// Empty reference slice for types that don't contain references.
@@ -63,6 +63,7 @@ impl<'db> HasReferences<'db> for ItemKind<'db> {
             ItemKind::Struct(struct_) => struct_references(db, *struct_),
             ItemKind::Enum(enum_) => enum_references(db, *enum_),
             ItemKind::TypeAlias(alias) => type_alias_references(db, *alias),
+            ItemKind::TypeFn(def) => type_fn_references(db, *def),
             ItemKind::Impl(impl_) => impl_references(db, *impl_),
             ItemKind::Trait(trait_) => trait_references(db, *trait_),
             ItemKind::ImplTrait(impl_trait) => impl_trait_references(db, *impl_trait),

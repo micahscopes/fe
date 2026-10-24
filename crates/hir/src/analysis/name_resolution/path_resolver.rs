@@ -2479,6 +2479,20 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                     PathRes::Const(const_, ty)
                 }
 
+                // Only a full application is a type: applying fewer arguments
+                // would let a higher-kinded parameter drop a const slot.
+                ItemKind::TypeFn(def) => {
+                    let expected = collect_generic_params(db, def.into()).params(db).len();
+                    let given = path.generic_args(db).len(db);
+                    if given != expected {
+                        return Err(PathResError::new(
+                            PathResErrorKind::ArgNumMismatch { expected, given },
+                            path,
+                        ));
+                    }
+                    PathRes::Ty(TyId::foldl(db, TyId::type_fn(db, def), &args()))
+                }
+
                 ItemKind::TypeAlias(type_alias) => {
                     let alias = match lowering_cx.const_bodies() {
                         ConstBodyLowering::Eager => lower_type_alias(db, type_alias),

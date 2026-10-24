@@ -1,0 +1,34 @@
+// A struct with a field written as a computed type, or as a projection, has
+// the size of the type the field resolves to.
+pub struct Leaf { pub v: u256 }
+pub struct Node<A> { pub l: A, pub r: A }
+recursive type fn VTree<const N: usize>() -> (*) {
+    match N {
+        0 => Leaf
+        _ => Node<VTree<{N - 1}>>
+    }
+}
+pub struct Computed { pub t: VTree<1> }
+pub struct Written { pub t: Node<Leaf> }
+pub struct Nested { pub t: (VTree<1>, [VTree<0>; 2]) }
+
+trait Out { type O }
+pub struct Picks {}
+impl Out for Picks { type O = VTree<2> }
+pub struct Projected { pub t: <Picks as Out>::O }
+
+#[test]
+fn computed_field_size() {
+    assert!(core::size_of<Written>() == 64)
+    assert!(core::size_of<VTree<1>>() == 64)
+    assert!(core::size_of<Computed>() == 64)
+    assert!(core::size_of<Nested>() == 128)
+    assert!(core::size_of<Projected>() == 128)
+}
+
+#[test]
+fn computed_field_values() {
+    let tree: VTree<1> = Node { l: Leaf { v: 3 }, r: Leaf { v: 4 } }
+    let holder = Computed { t: tree }
+    assert!(holder.t.l.v + holder.t.r.v == 7)
+}

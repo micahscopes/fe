@@ -1,0 +1,28 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/computed_type_mutual_cycle_b.fe
+---
+error[3-0079]: computed type depends on itself
+  ┌─ computed_type_mutual_cycle_b.fe:4:47
+  │
+4 │ const fn size_alpha() -> u256 { core::size_of<Alpha<0>>() }
+  │                                               ^^^^^^^^ computing this type requires its own result
+
+error[3-0079]: computed type depends on itself
+  ┌─ computed_type_mutual_cycle_b.fe:5:46
+  │
+5 │ const fn size_beta() -> u256 { core::size_of<Beta<0>>() }
+  │                                              ^^^^^^^ computing this type requires its own result
+
+error[3-0079]: computed type depends on itself
+   ┌─ computed_type_mutual_cycle_b.fe:18:20
+   │
+18 │ fn use_beta(x: own Beta<0>) {}
+   │                    ^^^^^^^ computing this type requires its own result
+
+error[3-0079]: computed type depends on itself
+   ┌─ computed_type_mutual_cycle_b.fe:19:21
+   │
+19 │ fn use_alpha(x: own Alpha<0>) {}
+   │                     ^^^^^^^^ computing this type requires its own result

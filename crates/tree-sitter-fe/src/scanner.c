@@ -8,6 +8,7 @@ enum TokenType {
   BLOCK_COMMENT_END,
   GENERIC_OPEN,
   COMPARISON_LT,
+  RECURSIVE_KEYWORD,
 };
 
 void *tree_sitter_fe_external_scanner_create(void) { return NULL; }
@@ -348,6 +349,32 @@ static bool can_follow_generic_path_expr(TSLexer *lexer) {
   return true;
 }
 
+static bool is_ident_char(int32_t c) {
+  return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9');
+}
+
+// Advances over `word` and succeeds only if it is not followed by more of an
+// identifier.
+static bool scan_word(TSLexer *lexer, const char *word) {
+  for (const char *c = word; *c; c++) {
+    if (lexer->lookahead != *c) return false;
+    advance(lexer);
+  }
+  return !is_ident_char(lexer->lookahead);
+}
+
+// `recursive` is a keyword only before `type`, as in the compiler.
+static bool scan_recursive_keyword(TSLexer *lexer) {
+  if (!scan_word(lexer, "recursive")) return false;
+  lexer->mark_end(lexer);
+  while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
+         lexer->lookahead == '\r' || lexer->lookahead == '\n') {
+    advance(lexer);
+  }
+  return scan_word(lexer, "type");
+}
+
 bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
                                           const bool *valid_symbols) {
   (void)payload;
@@ -368,6 +395,17 @@ bool tree_sitter_fe_external_scanner_scan(void *payload, TSLexer *lexer,
       return true;
     }
     // Automatic semicolon not needed -- fall through to check other tokens
+  }
+
+  if (valid_symbols[RECURSIVE_KEYWORD]) {
+    while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
+           lexer->lookahead == '\r' || lexer->lookahead == '\n') {
+      skip(lexer);
+    }
+    if (lexer->lookahead == 'r') {
+      lexer->result_symbol = RECURSIVE_KEYWORD;
+      return scan_recursive_keyword(lexer);
+    }
   }
 
   // Disambiguate '<': generic open vs comparison less-than.

@@ -1,0 +1,44 @@
+// Each recursive type fn below breaks one rule of the declaration and gets
+// one error at the declaration.
+struct Node<T> {}
+struct Term<const I: usize> {}
+trait Marker {}
+
+// Recursive calls must step the subject down.
+recursive type fn Inc<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<Inc<{N + 1}>> } }
+recursive type fn SameSubject<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<SameSubject<{N - 0}>> } }
+recursive type fn DivOne<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<DivOne<{N / 1}>> } }
+recursive type fn FromOther<const O: usize, const N: usize>() -> (*) { match N { 0 => bool, _ => FromOther<O, {O - 1}> } }
+// The `_` arm can see 1, so `N - 2` could underflow.
+recursive type fn Under<const N: usize>() -> (*) { match N { 0 => bool, 2 => bool, _ => Node<Under<{N - 2}>> } }
+// A recursive call in a literal arm is checked against that literal.
+recursive type fn BaseCall<const N: usize>() -> (*) { match N { 0 => BaseCall<{N - 1}>, _ => BaseCall<{N - 1}> } }
+recursive type fn DivZero<const N: usize>() -> (*) { match N { _ => Node<DivZero<{N / 2}>> } }
+recursive type fn Forward<T, const N: usize>() -> (*) { match N { 0 => T, _ => Forward<bool, {N - 1}> } }
+recursive type fn Arity<T, const N: usize>() -> (*) { match N { 0 => T, _ => Arity<{N - 1}> } }
+
+// The shape of the declaration.
+recursive type fn NoSelf<const N: usize>() -> (*) { match N { 0 => bool, _ => u8 } }
+recursive type fn NoWild<const N: usize>() -> (*) { match N { 0 => bool, 1 => NoWild<{0}> } }
+recursive type fn Dup<const N: usize>() -> (*) { match N { 0 => bool, 0 => bool, _ => Dup<{N - 1}> } }
+recursive type fn WildFirst<const N: usize>() -> (*) { match N { _ => bool, 0 => WildFirst<{0}> } }
+recursive type fn BoolSubject<const N: bool>() -> (*) { match N { _ => BoolSubject<{N}> } }
+recursive type fn NoSubject<T>() -> (*) { match T { _ => NoSubject<T> } }
+recursive type fn WrongMatch<const O: usize, const N: usize>() -> (*) { match O { 0 => bool, _ => WrongMatch<O, {N - 1}> } }
+recursive type fn ConstWhere<const N: usize>() -> (*) where N > 0 { match N { 0 => bool, _ => ConstWhere<{N - 1}> } }
+recursive type fn BoundOther<T, const N: usize>() -> (*) where Node<T>: Marker { match N { 0 => T, _ => BoundOther<T, {N - 1}> } }
+
+// Arms.
+recursive type fn Other<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<(Inc<{N - 1}>, Other<{N - 1}>)> } }
+recursive type fn Kind<const N: usize>() -> (*) { match N { 0 => Node, _ => Kind<{N - 1}> } }
+fn runtime(_ i: usize) -> usize { i }
+recursive type fn Payload<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<(Term<{runtime(N)}>, Payload<{N - 1}>)> } }
+const fn tagged<const K: usize>(_ i: usize) -> usize { i + K }
+recursive type fn GenericPayload<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<(Term<{tagged<1>(N)}>, GenericPayload<{N - 1}>)> } }
+recursive type fn IfPayload<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<(Term<{if true { 1 } else { 2 }}>, IfPayload<{N - 1}>)> } }
+
+// Aliases may not hide or add recursive calls, or name another type fn.
+type Mask<const N: usize> = Masked<N>
+recursive type fn Masked<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<(Masked<{N - 1}>, Mask<N>)> } }
+type Hidden<const N: usize> = Inc<N>
+recursive type fn ThroughAlias<const N: usize>() -> (*) { match N { 0 => bool, _ => Node<(Hidden<N>, ThroughAlias<{N - 1}>)> } }

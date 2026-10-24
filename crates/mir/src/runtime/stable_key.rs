@@ -455,6 +455,7 @@ pub fn type_identity<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
             TyBase::Contract(contract) => {
                 format!("contract${}", item_identity(db, (*contract).into()))
             }
+            TyBase::TypeFn(def) => format!("type_fn${}", item_identity(db, (*def).into())),
             TyBase::Func(callable) => match callable {
                 CallableDef::Func(func) => format!("func${}", item_identity(db, (*func).into())),
                 CallableDef::VariantCtor(variant) => format!(

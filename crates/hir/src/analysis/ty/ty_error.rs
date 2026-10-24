@@ -325,10 +325,11 @@ fn collect_hir_ty_diags_in_mode<'db>(
         .collect()
 }
 
-/// Projections in a written type are resolved only when the type is
-/// normalized. Report one that cannot be resolved within the normalization
-/// limits where it is written: elsewhere it would be an invalid type, which
-/// matches any type.
+/// Projections and computed types in a written type are resolved only when
+/// the type is normalized. Report one that cannot be resolved where it is
+/// written: elsewhere it would be an invalid type, which matches any type.
+/// A projection fails only at the normalization limits; unfolding a computed
+/// type can also fault in a const payload or need its own result.
 pub(crate) fn normalization_limit_diag<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: TyId<'db>,
@@ -336,10 +337,16 @@ pub(crate) fn normalization_limit_diag<'db>(
     assumptions: PredicateListId<'db>,
     span: DynLazySpan<'db>,
 ) -> Option<TyDiagCollection<'db>> {
-    (ty.has_projection(db)
-        && first_invalid_ty_cause(db, normalize_ty(db, ty, scope, assumptions))
-            == Some(InvalidCause::TypeNormalizationLimit))
-    .then(|| TyLowerDiag::TypeNormalizationLimit(span).into())
+    if !ty.has_projection(db) {
+        return None;
+    }
+    let cause = first_invalid_ty_cause(db, normalize_ty(db, ty, scope, assumptions))?;
+    if super::type_fn::contains_computed_application(db, ty) {
+        super::type_fn::computed_type_failure_diag(span, &cause)
+    } else {
+        (cause == InvalidCause::TypeNormalizationLimit)
+            .then(|| TyLowerDiag::TypeNormalizationLimit(span).into())
+    }
 }
 
 pub fn collect_ty_lower_errors<'db>(
@@ -1014,6 +1021,11 @@ pub(crate) fn diag_from_invalid_cause<'db>(
         InvalidCause::TypeLoweringCycle => TyLowerDiag::TypeLoweringCycle(span).into(),
 
         InvalidCause::TypeNormalizationLimit => TyLowerDiag::TypeNormalizationLimit(span).into(),
+
+        InvalidCause::ComputedTypeCycle => TyLowerDiag::ComputedTypeCycle(span).into(),
+
+        // The definition reports its own error.
+        InvalidCause::ComputedTypeDefinitionInvalid => return None,
 
         InvalidCause::NotAType(_) => return None,
 

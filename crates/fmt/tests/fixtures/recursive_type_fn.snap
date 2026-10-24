@@ -1,0 +1,19 @@
+---
+source: crates/fmt/tests/format_snapshots.rs
+expression: output
+input_file: tests/fixtures/recursive_type_fn.fe
+---
+pub recursive type fn Tree<T, const O: usize, const N: usize>() -> (*) where T: Marker {
+    match N {
+        0 => T
+        2 => Pair<T, T>
+        _ => Pair<Term<{ payload(N - 1, O) }>, Tree<T, O, { N - 1 }>>
+    }
+}
+
+recursive type fn Halves<F: * -> *, const N: usize>() -> * -> * {
+    match N {
+        0 => F
+        _ => Halves<F, { N / 2 }>
+    }
+}

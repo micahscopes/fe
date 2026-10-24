@@ -37,7 +37,7 @@ use crate::{
             provider::AddressSpace,
             ty_check::{
                 BodyOwner, EffectParamSite, EffectPassMode, LocalBinding, ParamSite, infer_body,
-                inference_met_lowering_cycle,
+                inference_met_computed_type_cycle, inference_met_lowering_cycle,
             },
             ty_def::{InvalidCause, TyData, TyId},
         },
@@ -1416,8 +1416,15 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
             owner @ (BodyOwner::Func(_, _)
             | BodyOwner::Const(_)
             | BodyOwner::AnonConstBody { .. }) => {
-                if inference_met_lowering_cycle(self.db, infer_body(self.db, owner)) {
-                    return Err(CtfeError::InvalidBody { origin });
+                // A body whose inference is part of a cycle is provisional, and
+                // evaluating it is part of that cycle: the value depends on
+                // itself. Saying so, rather than failing silently, keeps the
+                // cycle named whichever query the cycle starts from.
+                let inference = infer_body(self.db, owner);
+                if inference_met_lowering_cycle(self.db, inference)
+                    || inference_met_computed_type_cycle(self.db, inference)
+                {
+                    return Err(CtfeError::RecursiveConst { origin });
                 }
                 // An instance that reaches the instance limits recurses
                 // without end, as evaluation past its own limit does.
@@ -2392,6 +2399,11 @@ impl<'db, 'body> CtfeMachine<'db, 'body> {
                 RuntimeSizeError::InvalidType(InvalidCause::ConstEvalNegativeExponent {
                     ..
                 }) => CtfeError::NegativeExponent { origin },
+                // The size depends on a computed type whose computation needs
+                // this evaluation's own result.
+                RuntimeSizeError::InvalidType(InvalidCause::ComputedTypeCycle) => {
+                    CtfeError::RecursiveConst { origin }
+                }
                 RuntimeSizeError::InvalidType(cause) => CtfeError::InvalidOperation {
                     origin,
                     message: cause.pretty_print(self.db),
