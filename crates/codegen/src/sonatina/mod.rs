@@ -1,6 +1,10 @@
 mod lower_runtime;
 #[cfg(feature = "cranelift")]
+mod native_tasks;
+#[cfg(feature = "cranelift")]
 mod native_tests;
+#[cfg(feature = "cranelift")]
+pub use native_tasks::{NativeTaskArtifact, emit_native_scalar_task};
 pub(crate) mod observability;
 #[cfg(feature = "cranelift")]
 pub use native_tests::{NativeTestEntry, NativeTestSuite, emit_test_suite_native};

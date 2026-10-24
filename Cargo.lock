@@ -2509,6 +2509,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fe-native-runtime"
+version = "26.4.0"
+
+[[package]]
 name = "fe-parser"
 version = "26.4.0"
 dependencies = [

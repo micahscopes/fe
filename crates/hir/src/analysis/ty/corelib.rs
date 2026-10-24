@@ -445,6 +445,71 @@ fn trait_reaches<'db>(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>, target: Tr
             .any(|bound| trait_reaches(db, bound.def(db), target))
 }
 
+/// Whether a resolved method's contract permits runtime suspension. The
+/// nominal capability, rather than the method's spelling or implementation
+/// body, establishes this footprint.
+pub fn suspension_capability_method<'db>(db: &'db dyn HirAnalysisDb, func: Func<'db>) -> bool {
+    let func = func.trait_method_def(db).unwrap_or(func);
+    let Some(containing_trait) = func.containing_trait(db) else {
+        return false;
+    };
+    resolve_lib_trait_path(db, func.scope(), "core::task::Suspend")
+        .is_some_and(|target| trait_reaches(db, containing_trait, target))
+}
+
+/// The actual privileged native cut, distinct from a capability whose
+/// contract merely permits suspension.
+pub fn native_suspension_primitive<'db>(db: &'db dyn HirAnalysisDb, func: Func<'db>) -> bool {
+    lib_func_matches(db, func, "core::task::native_suspend")
+}
+
+/// A declaration's suspension footprint. An unresolved row or proof is not
+/// evidence that a call cannot suspend; concrete admission must discharge it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update)]
+pub enum SuspensionFootprint {
+    Absent,
+    MaySuspend,
+    Unresolved,
+}
+
+/// Classify one declared effect. Expanded rows can still contain abstract
+/// nested rows, which retain an unresolved footprint. Concrete provider types
+/// are checked against the same nominal capability as trait-keyed requirements.
+pub fn effect_key_suspension<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    key: EffectRequirementKey<'db>,
+) -> SuspensionFootprint {
+    let Some(target) = resolve_lib_trait_path(db, scope, "core::task::Suspend") else {
+        return SuspensionFootprint::Unresolved;
+    };
+    match key {
+        EffectRequirementKey::Trait(inst) => {
+            if trait_reaches(db, inst.def(db), target) {
+                SuspensionFootprint::MaySuspend
+            } else {
+                SuspensionFootprint::Absent
+            }
+        }
+        EffectRequirementKey::Type(ty) => {
+            match is_goal_satisfiable(
+                db,
+                TraitSolveCx::new(db, scope).with_assumptions(assumptions),
+                TraitInstId::new_simple(db, target, vec![ty]),
+            ) {
+                GoalSatisfiability::Satisfied(_) => SuspensionFootprint::MaySuspend,
+                GoalSatisfiability::UnSat(_) => SuspensionFootprint::Absent,
+                GoalSatisfiability::NeedsConfirmation { .. }
+                | GoalSatisfiability::ContainsInvalid => SuspensionFootprint::Unresolved,
+            }
+        }
+        EffectRequirementKey::Row(_) | EffectRequirementKey::Other => {
+            SuspensionFootprint::Unresolved
+        }
+    }
+}
+
 /// The persistent and transient state an external execution started by `func`
 /// can access. A call or creation can reenter the contract and write any slot;
 /// a static call only reads; precompiles cannot call back. Methods of reentrant

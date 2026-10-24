@@ -38,11 +38,12 @@ use crate::{
                 NTerminatorKind, NValueDefinition, NValueId, NormalizedBody, ReadMode,
                 access::AccessTarget,
             },
+            suspension::suspension_contract,
         },
         ty::{
             corelib::{
-                MemoryAccessKind, bounded_by_sealed_capabilities, effect_key_state_access,
-                external_call_state_access, is_sealed_evm_capability,
+                MemoryAccessKind, SuspensionFootprint, bounded_by_sealed_capabilities,
+                effect_key_state_access, external_call_state_access, is_sealed_evm_capability,
             },
             provider::{AddressSpace, provider_semantics},
             shape::Shape,
@@ -92,6 +93,8 @@ pub(super) struct Token<'db> {
     origin: SemOrigin<'db>,
     /// An access of a zero-sized place protects no data.
     zero_sized: bool,
+    /// Whether concrete instantiation is still needed to determine custody.
+    abstract_size: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -177,6 +180,9 @@ pub(super) struct Analysis<'a, 'db> {
     split_of: FxHashMap<NValueId, (usize, usize)>,
     entry: Vec<Option<State>>,
     moved_at: FxHashMap<(MoveKey, Path), SemOrigin<'db>>,
+    /// Generic checks retain these obligations; runtime admission must
+    /// discharge them by checking the concrete instance.
+    deferred_suspension: Vec<Diag<'db>>,
     /// The statement at which each block diverges into a call that never returns.
     divergence: Vec<Option<usize>>,
     /// Whether transfer functions report violations.
@@ -233,6 +239,7 @@ impl<'a, 'db> Analysis<'a, 'db> {
                 .collect(),
             entry: vec![None; body.blocks.len()],
             moved_at: FxHashMap::default(),
+            deferred_suspension: Vec::new(),
             divergence: vec![None; body.blocks.len()],
             checking: false,
         };
@@ -286,6 +293,7 @@ impl<'a, 'db> Analysis<'a, 'db> {
             parents: TokenSet::new(),
             origin,
             zero_sized: false,
+            abstract_size: false,
         }
     }
 
@@ -320,6 +328,9 @@ impl<'a, 'db> Analysis<'a, 'db> {
                 let mut input = self.new_token(TokenKind::Input, mode, origin);
                 input.regions.push(AbsPlace::new(Base::Param(param)));
                 input.zero_sized = self.holds_nothing(target);
+                input.abstract_size = target.has_param(self.db)
+                    || target.has_projection(self.db)
+                    || target.has_var(self.db);
                 self.token(value_id, Site::Open, input)
             } else {
                 // An effect handle names its provider's domain.
@@ -822,6 +833,9 @@ impl<'a, 'db> Analysis<'a, 'db> {
         let resolved = self.resolve(place);
         let mut access = self.new_token(TokenKind::Access, mode, origin);
         access.zero_sized = self.holds_nothing(place.ty);
+        access.abstract_size = place.ty.has_param(self.db)
+            || place.ty.has_projection(self.db)
+            || place.ty.has_var(self.db);
         let id = self.token(result, Site::Open, access);
         let token = &mut self.tokens[id as usize];
         token.regions = resolved.regions;
@@ -862,6 +876,9 @@ impl<'a, 'db> Analysis<'a, 'db> {
             let zero_sized = direct
                 .iter()
                 .all(|token| self.tokens[*token as usize].zero_sized);
+            let abstract_size = direct
+                .iter()
+                .any(|token| self.tokens[*token as usize].abstract_size);
             let id = self.token(
                 result,
                 Site::Arg(position),
@@ -871,6 +888,7 @@ impl<'a, 'db> Analysis<'a, 'db> {
             token.regions = regions;
             token.parents = direct;
             token.zero_sized = zero_sized;
+            token.abstract_size = abstract_size;
             reservations.push(id);
         }
         let mut footprints: Vec<_> = args
@@ -893,10 +911,12 @@ impl<'a, 'db> Analysis<'a, 'db> {
             reservations.push(id);
         }
         let mut held = Held::new();
-        for (component, (path, mode, _)) in
+        for (component, (path, mode, ty)) in
             access_components(self.db, shape).into_iter().enumerate()
         {
             let mut grant = self.new_token(TokenKind::Grant, mode, origin);
+            grant.abstract_size =
+                ty.has_param(self.db) || ty.has_projection(self.db) || ty.has_var(self.db);
             grant.regions.push(AbsPlace::new(Base::Grant {
                 session: result,
                 component: component as u16,
@@ -2099,6 +2119,9 @@ impl<'a, 'db> Analysis<'a, 'db> {
         siblings: &[TokenId],
         origin: SemOrigin<'db>,
     ) -> Result<(), Diag<'db>> {
+        if self.checking {
+            self.check_suspension_call(callee, state, origin)?;
+        }
         // A closure is called as a function whose first parameter is its
         // environment.
         let owner = callee.owner(self.db);
@@ -2235,6 +2258,101 @@ impl<'a, 'db> Analysis<'a, 'db> {
                     *arg_origin,
                     "this argument and an effect of the same call reach one place, and one of them is `mut`".into(),
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A cut retains the caller's dynamic extent, so ordinary read/read
+    /// compatibility is insufficient. Authority handles alone retain no data.
+    fn check_suspension_call(
+        &mut self,
+        callee: SemanticInstanceKey<'db>,
+        state: &State,
+        origin: SemOrigin<'db>,
+    ) -> Result<(), Diag<'db>> {
+        let contract = suspension_contract(self.db, callee);
+        if contract.entries.is_empty() {
+            return Ok(());
+        }
+        // Check the definition locally. Callers continue to depend only on
+        // its signature, even if it constructs a provider inside its body.
+        let caller_contract = suspension_contract(self.db, self.instance.key(self.db));
+        if caller_contract.entries.is_empty() {
+            return Err(self.diag(
+                SemanticDiagnosticKind::TransportViolation,
+                origin,
+                "this call may suspend, but this function declares no suspension capability or effect row".into(),
+            ));
+        }
+        if !caller_contract
+            .entries
+            .iter()
+            .any(|entry| entry.footprint == SuspensionFootprint::MaySuspend)
+        {
+            self.deferred_suspension.push(
+                self.diag(
+                    SemanticDiagnosticKind::TransportViolation,
+                    origin,
+                    "this function's suspension authority must be resolved before runtime lowering"
+                        .into(),
+                ),
+            );
+        }
+        if contract
+            .entries
+            .iter()
+            .any(|entry| entry.footprint == SuspensionFootprint::Unresolved)
+        {
+            self.deferred_suspension.push(self.diag(
+                SemanticDiagnosticKind::TransportViolation,
+                origin,
+                "this call's suspension footprint must be resolved before runtime lowering".into(),
+            ));
+        }
+        if !contract
+            .entries
+            .iter()
+            .any(|entry| entry.footprint == SuspensionFootprint::MaySuspend)
+        {
+            return Ok(());
+        }
+        for (key, path) in &state.moved {
+            if matches!(key, MoveKey::Access(_) | MoveKey::Param(_)) {
+                let mut diag = self.diag(
+                    SemanticDiagnosticKind::TransportViolation,
+                    origin,
+                    "cannot suspend while a borrowed place has an unrestored move".into(),
+                );
+                if let Some(moved) = self.moved_at.get(&(*key, path.clone())) {
+                    diag.push_secondary("the move requiring restoration".into(), self.span(*moved));
+                }
+                return Err(diag);
+            }
+        }
+        for id in self.active(state).collect::<Vec<_>>() {
+            let token = &self.tokens[id as usize];
+            if token.kind == TokenKind::Handle || token.zero_sized {
+                continue;
+            }
+            let mut diag = self.diag(
+                SemanticDiagnosticKind::TransportViolation,
+                origin,
+                if token.abstract_size {
+                    "suspension requires a concrete check of this borrowed value's custody"
+                } else {
+                    "cannot suspend while this borrowed data remains live"
+                }
+                .into(),
+            );
+            diag.push_secondary(
+                "the retained access starts here".into(),
+                self.span(token.origin),
+            );
+            if token.abstract_size {
+                self.deferred_suspension.push(diag);
+            } else {
+                return Err(diag);
             }
         }
         Ok(())
@@ -2574,16 +2692,26 @@ fn specific_origin<'db>(first: SemOrigin<'db>, second: SemOrigin<'db>) -> SemOri
     }
 }
 
-/// Checks a body, returning its warnings and its result spaces.
+pub(super) struct CheckedBody<'db> {
+    pub warnings: Vec<Diag<'db>>,
+    pub spaces: Vec<Option<AddressSpace>>,
+    pub deferred_suspension: Vec<Diag<'db>>,
+}
+
+/// Checks a body, retaining generic obligations for the runtime gate.
 pub(super) fn check_body<'db>(
     db: &'db dyn HirAnalysisDb,
     instance: SemanticInstance<'db>,
     body: &NormalizedBody<'db>,
-) -> Result<(Vec<Diag<'db>>, Vec<Option<AddressSpace>>), Diag<'db>> {
+) -> Result<CheckedBody<'db>, Diag<'db>> {
     let mut analysis = Analysis::new(db, instance, body, true);
     analysis.solve();
     let spaces = analysis.check()?;
-    Ok((analysis.discarded_writes(), spaces))
+    Ok(CheckedBody {
+        warnings: analysis.discarded_writes(),
+        spaces,
+        deferred_suspension: analysis.deferred_suspension,
+    })
 }
 
 /// Adds `extra` to `parents`, once each.

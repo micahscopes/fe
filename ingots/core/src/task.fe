@@ -1,0 +1,58 @@
+/// A single pending delivery from backend `B`, carrying a value of type `T`.
+///
+/// The runtime owns the identity. Safe code cannot mint or duplicate a pending
+/// delivery, and suspending consumes it. The backend parameter prevents a
+/// delivery from one backend being used with another backend's capability.
+pub struct Pending<B, T> {
+    unsafe id: u64,
+}
+
+/// The result delivered when a suspended computation is resumed.
+#[must_use]
+pub enum TaskOutcome<E, T> {
+    Failure(E),
+    Success(T),
+    Cancelled,
+}
+
+/// Authority to suspend for a delivery from this provider's backend.
+///
+/// This capability describes a possible control transfer, including when a
+/// particular implementation can supply the result immediately. It does not
+/// grant permission to retain borrowed data across that transfer.
+pub trait Suspend {
+    type Backend
+    type Error
+
+    fn suspend<T>(mut self, _ pending: own Pending<Self::Backend, T>) -> TaskOutcome<Self::Error, T>
+}
+
+/// The native task adapter's backend identity and zero-state capability.
+/// Runtime task identity and retained values live in the task frame, not here.
+pub struct Native {}
+
+impl Native {
+    /// Begin a native scalar delivery owned by the currently running task.
+    /// The runtime retains registration custody until delivery or task exit.
+    pub fn begin(mut self) -> Pending<Native, u64> {
+        unsafe { Pending { id: native_task_begin() } }
+    }
+}
+
+impl Suspend for Native {
+    type Backend = Native
+    type Error = u64
+
+    fn suspend<T>(mut self, _ pending: own Pending<Native, T>) -> TaskOutcome<u64, T> {
+        unsafe { native_suspend(pending) }
+    }
+}
+
+extern {
+    unsafe fn native_task_begin() -> u64
+
+    /// The native runtime's privileged control transfer. Its failure payload
+    /// has one fixed schema; another provider may translate it but cannot
+    /// select a different decoder for this pending identity.
+    unsafe fn native_suspend<T>(_ pending: own Pending<Native, T>) -> TaskOutcome<u64, T>
+}
