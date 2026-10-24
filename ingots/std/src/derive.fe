@@ -143,13 +143,21 @@ pub const fn sol_tuple_type(_ record: Record) -> Code<Expr> {
     quote { (${acc}, ")") }
 }
 
-/// Generate the ordinary error selector implementation for a record.
-pub const fn error_variant(_ record: Record) -> Code<Item> {
+/// The canonical Solidity selector of a record: the first four bytes of the
+/// hash of `Name(type,...)`, from the nominal name and the fields' Solidity
+/// types. The name is only hash input; it grants the record no role.
+pub const fn sol_selector(_ record: Record) -> Code<Expr> {
     let tuple_ty = sol_tuple_type(record)
     let name = record_name(record)
+    quote { ingot::abi::sol((${name}, ${tuple_ty})) }
+}
+
+/// Generate the ordinary error selector implementation for a record.
+pub const fn error_variant(_ record: Record) -> Code<Item> {
+    let selector = sol_selector(record)
     quote {
         impl core::error::ErrorVariant<ingot::abi::Sol> for ${record} {
-            const SELECTOR: u32 = ingot::abi::sol((${name}, ${tuple_ty}))
+            const SELECTOR: u32 = ${selector}
         }
     }
 }
@@ -384,6 +392,20 @@ pub const fn event_struct(_ record: Record) -> Code<Item> {
                 ${steps}
                 ${log_call}
             }
+        }
+    }
+}
+
+/// Generate the message identity of a record that already has an ordinary
+/// codec (`Encode<Sol>` and `Decode<Sol>`, for example from `#[abi]`): the
+/// canonical selector, and a unit return. A message that returns a value
+/// writes its own provider around `sol_selector`.
+pub const fn msg_variant(_ record: Record) -> Code<Item> {
+    let selector = sol_selector(record)
+    quote {
+        impl core::message::MsgVariant<ingot::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ${selector}
+            type Return = ()
         }
     }
 }

@@ -219,20 +219,39 @@ fn recv_arm_to_abi_entry(
         .name(db)
         .to_opt()
         .map_or_else(|| "<unknown>".to_string(), |name| name.data(db).to_string());
-    if !variant_has_canonical_json_abi_shape(db, variant_struct) {
-        return Ok(RecvArmAbiEmission::Skip(format!(
-            "skipping recv arm `{variant_name}`: ABI shape is not compiler-known for manual `MsgVariant` impls; only `msg`-generated variants are emitted"
-        )));
-    }
-    let abi_info = arm_view.abi_info(db, sol_ty);
-    let Some(selector_signature) = abi_info.selector_signature.as_deref() else {
-        return Ok(RecvArmAbiEmission::Skip(format!(
-            "skipping recv arm `{variant_name}`: selector signature is unknown; \
-             use `#[selector = sol(\"name(types)\")]` to include it in the ABI"
-        )));
+    let skip_manual = |detail: &str| {
+        RecvArmAbiEmission::Skip(format!(
+            "skipping recv arm `{variant_name}`: ABI shape is not compiler-known for manual `MsgVariant` impls; only `msg`-generated variants and impls whose selector is the canonical hash of their name and field types are emitted{detail}"
+        ))
     };
-
-    let input_descs = struct_ty_to_abi_param_descs(db, variant_struct, variant_ty, |_| None)?;
+    let abi_info = arm_view.abi_info(db, sol_ty);
+    let (selector_signature, input_descs) =
+        if variant_has_canonical_json_abi_shape(db, variant_struct) {
+            let Some(selector_signature) = abi_info.selector_signature.as_deref() else {
+                return Ok(RecvArmAbiEmission::Skip(format!(
+                    "skipping recv arm `{variant_name}`: selector signature is unknown; \
+                 use `#[selector = sol(\"name(types)\")]` to include it in the ABI"
+                )));
+            };
+            let input_descs =
+                struct_ty_to_abi_param_descs(db, variant_struct, variant_ty, |_| None)?;
+            (selector_signature.to_string(), input_descs)
+        } else {
+            // Another impl states no signature. Its resolved selector must be the
+            // hash of the canonical signature built from the struct name and the
+            // applied field types; the name only supplies bytes to compare.
+            let input_descs =
+                match struct_ty_to_abi_param_descs(db, variant_struct, variant_ty, |_| None) {
+                    Ok(input_descs) => input_descs,
+                    Err(error) => return Ok(skip_manual(&format!(" ({error})"))),
+                };
+            let canonical = canonical_function_signature(&variant_name, &input_descs);
+            if abi_info.selector_value != Some(selector_for_signature(&canonical)) {
+                return Ok(skip_manual(""));
+            }
+            (canonical, input_descs)
+        };
+    let selector_signature = selector_signature.as_str();
     // A tuple return is a parameter list (Solidity multi-value `returns`), so
     // each element becomes its own output, matching its runtime encoding.
     let output_tys = match abi_info.ret_ty {
@@ -3490,8 +3509,13 @@ pub contract C {{
         )
     }
 
+    // The record-init field-list splice a generated `Decode` needs does not
+    // exist yet, so each decode half is written out; size, encoding and the
+    // message identity are generated.
     const GENERATED_MSGS: &str = r#"
+use core::abi::{AbiDecoder, ByteInput, Decode, decode_field}
 use core::meta::{Code, Item, Record}
+use std::abi::Sol
 use std::derive::{msg_variant, sol_selector}
 const fn returning_u256(_ record: Record) -> Code<Item> {
     let selector = sol_selector(record)
@@ -3511,21 +3535,61 @@ const fn returning_bool(_ record: Record) -> Code<Item> {
         }
     }
 }
-#[abi]
+#[generate(std::derive::abi_size)]
+#[generate(std::derive::abi_encode)]
 #[generate(msg_variant)]
 struct Probe {}
-#[abi]
+impl Decode<Sol> for Probe {
+    fn decode_payload<D: AbiDecoder<Sol>, I: ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let _ = d
+        let _ = input
+        Self {}
+    }
+}
+#[generate(std::derive::abi_size)]
+#[generate(std::derive::abi_encode)]
 #[generate(msg_variant)]
 struct Quiet {}
-#[abi]
+impl Decode<Sol> for Quiet {
+    fn decode_payload<D: AbiDecoder<Sol>, I: ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let _ = d
+        let _ = input
+        Self {}
+    }
+}
+#[generate(std::derive::abi_size)]
+#[generate(std::derive::abi_encode)]
 #[generate(returning_u256)]
 struct Sum { a: u256, b: u256 }
-#[abi]
+impl Decode<Sol> for Sum {
+    fn decode_payload<D: AbiDecoder<Sol>, I: ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let a = decode_field<Sol, u256, D, I>(mut d, input)
+        let b = decode_field<Sol, u256, D, I>(mut d, input)
+        Self { a, b }
+    }
+}
+#[generate(std::derive::abi_size)]
+#[generate(std::derive::abi_encode)]
 #[generate(returning_bool)]
 struct Transfer { to: Address, amount: u256 }
-#[abi]
+impl Decode<Sol> for Transfer {
+    fn decode_payload<D: AbiDecoder<Sol>, I: ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let to = decode_field<Sol, Address, D, I>(mut d, input)
+        let amount = decode_field<Sol, u256, D, I>(mut d, input)
+        Self { to, amount }
+    }
+}
+#[generate(std::derive::abi_size)]
+#[generate(std::derive::abi_encode)]
 #[generate(returning_u256)]
 struct Note { id: u256, body: Bytes }
+impl Decode<Sol> for Note {
+    fn decode_payload<D: AbiDecoder<Sol>, I: ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let id = decode_field<Sol, u256, D, I>(mut d, input)
+        let body = decode_field<Sol, Bytes, D, I>(mut d, input)
+        Self { id, body }
+    }
+}
 "#;
 
     const LEGACY_MSGS: &str = r#"
