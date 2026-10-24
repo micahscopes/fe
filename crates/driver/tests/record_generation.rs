@@ -2355,3 +2355,37 @@ fn msg_generation_requires_the_ordinary_codec_and_composes_with_other_returns() 
         .expect("abi record is not authored");
     assert!(error.cause.contains("NotAuthored"), "{}", error.cause);
 }
+
+#[test]
+fn record_init_field_list_splice_is_not_expressible_yet() {
+    // A generated `Decode` builds `Self { f0: .., f1: .. }` from a fold over the
+    // fields. The fold can only carry a `Code<Expr>`, and the grammar accepts
+    // one `label: expr` per record-init entry, so an accumulated field list
+    // cannot be spliced back. This documents the gap; it is expected to change
+    // when a field-list splice exists.
+    let source = r#"use core::meta::{Code, Expr, Field, Item, Record, field_type}
+use std::derive::{FieldStep, fold_fields}
+struct Build {}
+impl FieldStep for Build {
+    const fn unit() -> Code<Expr> {
+        quote { Pair {} }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        quote { Pair { ${acc}, ${field}: 1 } }
+    }
+}
+const fn make(_ record: Record) -> Code<Item> {
+    let built = fold_fields<Build>(record)
+    quote { const fn built() -> u256 { let value = ${built}\n 0 } }
+}
+#[generate(make)]
+struct Pair { first: u256, second: u256 }
+"#;
+    let (db, file) = input(source);
+    let error = prepare_file(&db, file).err().expect("field-list splice");
+    assert!(
+        error.cause.contains("authored parse errors"),
+        "{}",
+        error.cause
+    );
+}
