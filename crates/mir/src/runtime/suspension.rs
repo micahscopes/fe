@@ -132,6 +132,7 @@ pub fn prepare_native_scalar_cuts<'db>(
         ));
     }
     let entries = live_on_entry(&body.blocks);
+    let defined = defined_on_entry(body);
     let mut cuts = Vec::new();
     for (index, block) in body.blocks.iter().enumerate() {
         if let RTerminator::TerminalCall { callee, .. } = &block.terminator
@@ -177,6 +178,13 @@ pub fn prepare_native_scalar_cuts<'db>(
                                 )));
                             }
                         };
+                        // A capture is saved from the local at the cut, so the
+                        // local needs a value on every path that reaches it.
+                        if !defined_before(&defined, block, index, statement, local) {
+                            return Err(LowerError::Unsupported(format!(
+                                "native scalar suspension cannot capture {local:?}: it is not assigned on every path to the cut"
+                            )));
+                        }
                         captures.push(capture);
                     }
                     cuts.push(NativeSuspensionCut {
@@ -196,6 +204,65 @@ pub fn prepare_native_scalar_cuts<'db>(
     }
     cuts.sort_by_key(|cut| (cut.block, cut.statement));
     Ok(cuts)
+}
+
+/// The locals assigned on every path from the entry to the start of each
+/// block, or `None` for an unreachable block. Parameters and provider values
+/// arrive with the call. MIR verification checks classes, not availability, so
+/// this is the only place that establishes a value exists.
+fn defined_on_entry(body: &RuntimeBody<'_>) -> Vec<Option<BTreeSet<RLocalId>>> {
+    let mut entries: Vec<Option<BTreeSet<RLocalId>>> = vec![None; body.blocks.len()];
+    entries[0] = Some(
+        body.signature
+            .params
+            .iter()
+            .map(|param| param.local)
+            .chain(body.provider_bindings.iter().map(|binding| binding.value))
+            .collect(),
+    );
+    let mut pending = vec![0];
+    while let Some(index) = pending.pop() {
+        let block = &body.blocks[index];
+        let mut out = entries[index].clone().unwrap_or_default();
+        out.extend(block.stmts.iter().filter_map(assigned));
+        for next in block.terminator.successors() {
+            let next = next.index();
+            let merged = match &entries[next] {
+                None => out.clone(),
+                Some(known) => known.intersection(&out).copied().collect(),
+            };
+            if entries[next].as_ref() != Some(&merged) {
+                entries[next] = Some(merged);
+                pending.push(next);
+            }
+        }
+    }
+    entries
+}
+
+fn assigned(stmt: &RStmt<'_>) -> Option<RLocalId> {
+    match stmt {
+        RStmt::Assign { dst, .. } => Some(*dst),
+        _ => None,
+    }
+}
+
+/// Whether `local` is assigned on every path to just before `statement`. A cut
+/// in an unreachable block is never resumed from a path, so it holds vacuously.
+fn defined_before(
+    defined: &[Option<BTreeSet<RLocalId>>],
+    block: &RBlock<'_>,
+    index: usize,
+    statement: usize,
+    local: RLocalId,
+) -> bool {
+    defined[index]
+        .as_ref()
+        .is_none_or(|entry| entry.contains(&local))
+        || block.stmts[..statement]
+            .iter()
+            .filter_map(assigned)
+            .any(|dst| dst == local)
 }
 
 fn live_at_exit(block: &RBlock<'_>, entries: &[BTreeSet<RLocalId>]) -> BTreeSet<RLocalId> {

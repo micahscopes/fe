@@ -1,10 +1,12 @@
 use common::{InputDb, stdlib::HasBuiltinCore};
+use cranelift_entity::EntityRef;
 use driver::DriverDataBase;
 use fe_mir::{
     RuntimeInstance, RuntimeInstanceKey,
     instance::{RuntimeInstanceSource, get_or_build_runtime_instance},
     runtime::{
-        RExpr, RStmt, RuntimeClass,
+        ConstScalar, RBlock, RBlockId, RExpr, RLocal, RLocalId, RStmt, RTerminator, RuntimeBody,
+        RuntimeCarrier, RuntimeClass, RuntimeLocalRoot, ScalarClass, ScalarRepr, ScalarRole,
         suspension::{
             NativeScalarTaskPlan, ScalarCapture, build_native_scalar_segments,
             check_native_step_protocol, compose_native_scalar_task, plan_native_scalar_abi,
@@ -15,7 +17,7 @@ use fe_mir::{
 use hir::{
     analysis::{
         semantic::{SemanticInstance, root_semantic_instance_key},
-        ty::ty_check::BodyOwner,
+        ty::{ty_check::BodyOwner, ty_def::TyId},
     },
     hir_def::TopLevelMod,
 };
@@ -310,4 +312,126 @@ fn step_variants_and_segment_captures_must_agree_before_a_frame_is_planned() {
         plan_native_scalar_abi(&db, with(missing_resume)).is_err(),
         "a Step variant without a segment"
     );
+}
+
+/// Rewrite `body` so that a fresh scalar `x` is assigned before the first
+/// suspension, either on one branch of a new entry test or, for the control,
+/// before it. `x` is also read after the cut, so it is live across it.
+fn with_scalar_defined<'db>(
+    db: &'db DriverDataBase,
+    body: &RuntimeBody<'db>,
+    cut_block: RBlockId,
+    on_every_path: bool,
+) -> (RuntimeBody<'db>, RLocalId) {
+    let mut body = body.clone();
+    let origin = body.terminator_origins[0];
+    let word = ScalarClass {
+        repr: ScalarRepr::Int {
+            bits: 64,
+            signed: false,
+        },
+        role: ScalarRole::Plain,
+    };
+    let flag = ScalarClass {
+        repr: ScalarRepr::Bool,
+        role: ScalarRole::Plain,
+    };
+    let mut local = |class: ScalarClass<'db>| {
+        body.locals.push(RLocal {
+            semantic_ty: TyId::unit(db),
+            carrier: RuntimeCarrier::Value(RuntimeClass::Scalar(class)),
+            root: RuntimeLocalRoot::None,
+        });
+        RLocalId::new(body.locals.len() - 1)
+    };
+    let (x, sink, cond) = (local(word.clone()), local(word), local(flag));
+    let define = RStmt::Assign {
+        dst: x,
+        expr: RExpr::ConstScalar(ConstScalar::Int {
+            bits: 64,
+            signed: false,
+            words: vec![7],
+        }),
+    };
+    let test = RStmt::Assign {
+        dst: cond,
+        expr: RExpr::ConstScalar(ConstScalar::Bool(true)),
+    };
+    // The old entry block moves to the end so that block zero stays the entry.
+    let moved = RBlockId::new(body.blocks.len());
+    let define_block = RBlockId::new(body.blocks.len() + 1);
+    let old_entry = body.blocks[0].clone();
+    let old_stmt_origins = body.stmt_origins[0].clone();
+    let old_terminator_origin = body.terminator_origins[0];
+    body.blocks.push(old_entry);
+    body.stmt_origins.push(old_stmt_origins);
+    body.terminator_origins.push(old_terminator_origin);
+    body.blocks.push(RBlock {
+        stmts: vec![define.clone()],
+        terminator: RTerminator::Goto(moved),
+    });
+    body.stmt_origins.push(vec![origin]);
+    body.terminator_origins.push(origin);
+    body.blocks[0] = if on_every_path {
+        RBlock {
+            stmts: vec![define, test],
+            terminator: RTerminator::Goto(moved),
+        }
+    } else {
+        RBlock {
+            stmts: vec![test],
+            terminator: RTerminator::Branch {
+                cond,
+                then_bb: define_block,
+                else_bb: moved,
+            },
+        }
+    };
+    body.stmt_origins[0] = vec![origin; body.blocks[0].stmts.len()];
+    let cut_block = if cut_block.index() == 0 {
+        moved
+    } else {
+        cut_block
+    };
+    body.blocks[cut_block.index()].stmts.push(RStmt::Assign {
+        dst: sink,
+        expr: RExpr::Use(x),
+    });
+    body.stmt_origins[cut_block.index()].push(origin);
+    (body, x)
+}
+
+#[test]
+fn a_scalar_defined_on_only_one_path_to_a_cut_is_not_captured() {
+    let mut db = DriverDataBase::default();
+    db.initialize_builtin_core();
+    let file = db.workspace().touch(
+        &mut db,
+        Url::parse("file:///native_suspension.fe").unwrap(),
+        Some(FIXTURE.into()),
+    );
+    let module = db.top_mod(file);
+    let instance = fixture_instance(&db, module, "entry");
+    let composed = compose_native_scalar_task(&db, instance).unwrap();
+    let cut_block = prepare_native_scalar_cuts(&db, &composed).unwrap()[0].block;
+
+    // Control: the same extra scalar assigned before the branch is captured.
+    let (always, x) = with_scalar_defined(&db, &composed, cut_block, true);
+    let cuts = prepare_native_scalar_cuts(&db, &always).expect("defined on every path");
+    assert!(cuts[0].captures.iter().any(|capture| {
+        let ScalarCapture::Value { local, .. } = capture;
+        *local == x
+    }));
+    build_native_scalar_segments(&db, &always).expect("segments for the control");
+
+    // A scalar assigned on one branch only has no value on the other path, so
+    // the entry segment would store an undefined value in the frame.
+    let (sometimes, x) = with_scalar_defined(&db, &composed, cut_block, false);
+    let error = prepare_native_scalar_cuts(&db, &sometimes)
+        .expect_err("a scalar undefined on one path cannot be captured");
+    assert!(
+        format!("{error:?}").contains(&format!("{x:?}")),
+        "{error:?}"
+    );
+    assert!(build_native_scalar_segments(&db, &sometimes).is_err());
 }
