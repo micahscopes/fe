@@ -16,10 +16,18 @@ use mir::{
 };
 use std::{
     fs,
+    os::unix::process::ExitStatusExt,
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
 use url::Url;
+
+/// SIGILL, the signal for `ud2` on x86_64. The aarch64 trap encoding may raise
+/// SIGTRAP instead; that case is not exercised on this host.
+#[cfg(target_arch = "x86_64")]
+const TRAP_SIGNALS: [i32; 1] = [4];
+#[cfg(target_arch = "aarch64")]
+const TRAP_SIGNALS: [i32; 2] = [4, 5];
 
 const PREFIX: &str = r#"
 use core::task::{Native, Suspend, TaskOutcome}
@@ -227,13 +235,16 @@ fn main() {{
         String::from_utf8_lossy(&result.stderr)
     );
     if invalid_tag {
+        // The adapter's default arm is a MIR trap, which the backend emits as
+        // an illegal-instruction fault. Any other termination (a segfault, an
+        // abort, or a normal exit) means the arm was not the one reached.
+        let status = Command::new(dir.join("run"))
+            .arg("invalid")
+            .status()
+            .unwrap();
         assert!(
-            !Command::new(dir.join("run"))
-                .arg("invalid")
-                .status()
-                .unwrap()
-                .success(),
-            "invalid wire tag must trap"
+            TRAP_SIGNALS.contains(&status.signal().unwrap_or_default()),
+            "invalid wire tag must terminate by a trap signal {TRAP_SIGNALS:?}, got {status:?}"
         );
     }
     fs::remove_dir_all(dir).unwrap();
