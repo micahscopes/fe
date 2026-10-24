@@ -160,6 +160,12 @@ pub enum FrozenCode {
     Empty {
         kind: FrozenCodeKind,
     },
+    /// Name captured from the compiler-issued authored record. The declaration
+    /// reference preserves provenance; copying never re-resolves the name.
+    RecordName {
+        record: FrozenRecordRef,
+        name: String,
+    },
     VariantBinders {
         record: FrozenRecordRef,
         group: usize,

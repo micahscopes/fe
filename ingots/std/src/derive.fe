@@ -1,5 +1,9 @@
-use core::abi::AbiSize
-use core::meta::{Code, Expr, Field, Record, field, field_count, field_type}
+use core::abi::{AbiFrame, AbiSize, Encode}
+use core::meta::{
+    Code, Expr, Field, FieldQuery, Item, Record, field, field_count, field_type, query_field,
+    record_name,
+}
+use ingot::evm::{Indexed, TopicValue}
 
 /// One step of a fold over the fields of a record, written as code.
 ///
@@ -53,5 +57,355 @@ impl FieldStep for AbiIsDynamic {
     const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
         let ty = field_type(field)
         quote { ${acc} || ingot::derive::abi_is_dynamic<${ty}>() }
+    }
+}
+
+/// Sum of the fields' dynamic tail payload sizes on `self`.
+pub struct AbiPayloadSize {}
+impl FieldStep for AbiPayloadSize {
+    const fn unit() -> Code<Expr> {
+        quote { 0 }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote { ${acc} + core::abi::dynamic_payload_size<${ty}>(self.${field}) }
+    }
+}
+
+/// Generate ABI layout metadata and exact payload sizing for a record.
+/// Field prerequisites are checked on the complete generated implementation.
+pub const fn abi_size(_ record: Record) -> Code<Item> {
+    let head = fold_fields<AbiHeadSize>(record)
+    let dynamic = fold_fields<AbiIsDynamic>(record)
+    let payload = fold_fields<AbiPayloadSize>(record)
+    quote {
+        impl core::abi::AbiSize for ${record} {
+            const HEAD_SIZE: u256 = ${head}
+            const IS_DYNAMIC: bool = ${dynamic}
+
+            fn payload_size(self) -> u256 {
+                <Self as core::abi::AbiSize>::HEAD_SIZE + ${payload}
+            }
+        }
+    }
+}
+
+/// Encode fields in declaration order, advancing the head and tail positions.
+pub struct AbiEncodeStep {}
+impl FieldStep for AbiEncodeStep {
+    const fn unit() -> Code<Expr> {
+        quote { () }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote(out, head_pos, tails) {
+            {
+                ${acc}
+                tails = core::abi::encode_field<ingot::abi::Sol, ${ty}>(
+                    self.${field}, out, head_pos: head_pos, tails: tails,
+                )
+                head_pos += core::abi::abi_field_head_size<${ty}>()
+            }
+        }
+    }
+}
+
+/// Generate Solidity ABI encoding using the record's shared layout metadata.
+pub const fn abi_encode(_ record: Record) -> Code<Item> {
+    let steps = fold_fields<AbiEncodeStep>(record)
+    quote(out, head_pos, tails) {
+        impl core::abi::Encode<ingot::abi::Sol> for ${record} {
+            fn encode(own self, _ out: core::abi::AbiFrame) {
+                var tails = out.tail(<Self as core::abi::AbiSize>::HEAD_SIZE)
+                var head_pos: u256 = 0
+                let _ = tails
+                let _ = head_pos
+                ${steps}
+            }
+        }
+    }
+}
+
+/// Solidity tuple signature of the record's fields, for selector hashing.
+pub const fn sol_tuple_type(_ record: Record) -> Code<Expr> {
+    let n = field_count(record)
+    if n == 0 {
+        return quote { "()" }
+    }
+    let ty0 = field_type(field(record, 0))
+    var acc: Code<Expr> = quote { ("(", <${ty0} as ingot::abi::SolCompat>::SOL_TYPE) }
+    var i: usize = 1
+    while i < n {
+        let ty = field_type(field(record, i))
+        acc = quote { (${acc}, ",", <${ty} as ingot::abi::SolCompat>::SOL_TYPE) }
+        i += 1
+    }
+    quote { (${acc}, ")") }
+}
+
+/// The canonical Solidity selector of a record: the first four bytes of the
+/// hash of `Name(type,...)`, from the nominal name and the fields' Solidity
+/// types. The name is only hash input; it grants the record no role.
+pub const fn sol_selector(_ record: Record) -> Code<Expr> {
+    let tuple_ty = sol_tuple_type(record)
+    let name = record_name(record)
+    quote { ingot::abi::sol((${name}, ${tuple_ty})) }
+}
+
+/// Generate the ordinary error selector implementation for a record.
+pub const fn error_variant(_ record: Record) -> Code<Item> {
+    let selector = sol_selector(record)
+    quote {
+        impl core::error::ErrorVariant<ingot::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ${selector}
+        }
+    }
+}
+
+/// Generate an error's selector, layout and encoding implementations together.
+pub const fn error_struct(_ record: Record) -> Code<Item> {
+    let variant = error_variant(record)
+    let size = abi_size(record)
+    let encode = abi_encode(record)
+    quote {
+        ${variant}
+        ${size}
+        ${encode}
+    }
+}
+
+pub(ingot) trait EventFieldSeal {}
+impl<T> EventFieldSeal for Indexed<T> {}
+impl<T: AbiSize + Encode<ingot::abi::Sol>> EventFieldSeal for T {}
+
+/// How one field of a generated event takes part in the log: an `Indexed<T>`
+/// field is a topic and has no data; any other field is ABI data.
+///
+/// This trait is sealed. Its two implementations are the only ones, so
+/// `IS_INDEXED` is true exactly for the canonical `Indexed` wrapper.
+pub trait EventField: EventFieldSeal {
+    const IS_INDEXED: bool
+    /// Head bytes this field takes in the data payload.
+    const DATA_HEAD_SIZE: u256
+
+    /// Dynamic tail bytes this field takes in the data payload.
+    fn data_dynamic_size(self) -> u256
+    /// Write the field into the data frame when it is data, and return the
+    /// remaining tails and the field's topic word (zero for data).
+    fn emit_field(
+        own self,
+        _ out: AbiFrame,
+        head_pos: u256,
+        tails: own AbiFrame,
+    ) -> (AbiFrame, u256)
+}
+
+impl<T: TopicValue> EventField for Indexed<T> {
+    const IS_INDEXED: bool = true
+    const DATA_HEAD_SIZE: u256 = 0
+
+    #[inline(always)]
+    fn data_dynamic_size(self) -> u256 {
+        0
+    }
+
+    #[inline(always)]
+    fn emit_field(
+        own self,
+        _ out: AbiFrame,
+        head_pos: u256,
+        tails: own AbiFrame,
+    ) -> (AbiFrame, u256) {
+        let _ = out
+        let _ = head_pos
+        (tails, self.value.as_topic())
+    }
+}
+
+impl<T: AbiSize + Encode<ingot::abi::Sol>> EventField for T {
+    const IS_INDEXED: bool = false
+    const DATA_HEAD_SIZE: u256 = core::abi::abi_field_head_size<T>()
+
+    #[inline(always)]
+    fn data_dynamic_size(self) -> u256 {
+        core::abi::dynamic_payload_size<T>(self)
+    }
+
+    #[inline(always)]
+    fn emit_field(
+        own self,
+        _ out: AbiFrame,
+        head_pos: u256,
+        tails: own AbiFrame,
+    ) -> (AbiFrame, u256) {
+        (core::abi::encode_field<ingot::abi::Sol, T>(self, out, head_pos: head_pos, tails: tails), 0)
+    }
+}
+
+/// The reflected field type is an indexed topic.
+pub struct IsIndexedField<T> {}
+impl<T: EventField> FieldQuery<bool> for IsIndexedField<T> {
+    const fn evaluate() -> bool {
+        <T as EventField>::IS_INDEXED
+    }
+}
+
+/// Solidity allows three indexed topics after `topic0` in a non-anonymous event.
+pub const MAX_INDEXED_EVENT_FIELDS: usize = 3
+
+/// Number of `Indexed` fields of `record`.
+pub const fn indexed_field_count(_ record: Record) -> usize {
+    var count: usize = 0
+    var i: usize = 0
+    while i < field_count(record) {
+        if query_field<IsIndexedField, bool>(field_type(field(record, i))) {
+            count += 1
+        }
+        i += 1
+    }
+    count
+}
+
+/// Sum of the data fields' head sizes: an indexed field has none.
+pub struct EventHeadSize {}
+impl FieldStep for EventHeadSize {
+    const fn unit() -> Code<Expr> {
+        quote { 0 }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote { ${acc} + <${ty} as ingot::derive::EventField>::DATA_HEAD_SIZE }
+    }
+}
+
+/// Sum of the data fields' dynamic tail sizes on `self`.
+pub struct EventDynamicSize {}
+impl FieldStep for EventDynamicSize {
+    const fn unit() -> Code<Expr> {
+        quote { 0 }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote { ${acc} + <${ty} as ingot::derive::EventField>::data_dynamic_size(self.${field}) }
+    }
+}
+
+/// Send each field to the data frame or to the next free topic slot.
+pub struct EventEmitStep {}
+impl FieldStep for EventEmitStep {
+    const fn unit() -> Code<Expr> {
+        quote { () }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        let ty = field_type(field)
+        quote(out, head_pos, tails, indexed_count, topic1, topic2, topic3) {
+            {
+                ${acc}
+                let (next_tails, field_topic) = <${ty} as ingot::derive::EventField>::emit_field(
+                    self.${field},
+                    out,
+                    head_pos: head_pos,
+                    tails: tails,
+                )
+                tails = next_tails
+                head_pos += <${ty} as ingot::derive::EventField>::DATA_HEAD_SIZE
+                if <${ty} as ingot::derive::EventField>::IS_INDEXED {
+                    if indexed_count == 0 {
+                        topic1 = field_topic
+                    } else if indexed_count == 1 {
+                        topic2 = field_topic
+                    } else {
+                        topic3 = field_topic
+                    }
+                    indexed_count += 1
+                }
+            }
+        }
+    }
+}
+
+/// The `logN` call for an event with `topics` indexed fields.
+const fn event_log_call(_ topics: usize) -> Code<Expr> {
+    if topics == 0 {
+        return quote(log, data_buf) {
+            log.log1(data: data_buf.span(), topic0: Self::TOPIC0)
+        }
+    }
+    if topics == 1 {
+        return quote(log, data_buf, topic1) {
+            log.log2(data: data_buf.span(), topic0: Self::TOPIC0, topic1: topic1)
+        }
+    }
+    if topics == 2 {
+        return quote(log, data_buf, topic1, topic2) {
+            log.log3(data: data_buf.span(), topic0: Self::TOPIC0, topic1: topic1, topic2: topic2)
+        }
+    }
+    quote(log, data_buf, topic1, topic2, topic3) {
+        log.log4(
+            data: data_buf.span(),
+            topic0: Self::TOPIC0,
+            topic1: topic1,
+            topic2: topic2,
+            topic3: topic3,
+        )
+    }
+}
+
+/// Generate `impl std::evm::Event` for a record: `TOPIC0` from the nominal
+/// name and the fields' Solidity types, and an `emit` that logs `Indexed`
+/// fields as topics and the other fields as ABI data.
+///
+/// A record with more than `MAX_INDEXED_EVENT_FIELDS` indexed fields has no
+/// log encoding and is refused here, before any code is published.
+pub const fn event_struct(_ record: Record) -> Code<Item> {
+    if indexed_field_count(record) > MAX_INDEXED_EVENT_FIELDS {
+        core::panic_code(core::panics::PANIC_ASSERT)
+    }
+    let tuple_ty = sol_tuple_type(record)
+    let name = record_name(record)
+    let data_head = fold_fields<EventHeadSize>(record)
+    let data_dynamic = fold_fields<EventDynamicSize>(record)
+    let steps = fold_fields<EventEmitStep>(record)
+    let log_call = event_log_call(indexed_field_count(record))
+    quote(log, out, head_pos, tails, indexed_count, topic1, topic2, topic3, data_buf, head_size, total) {
+        impl ingot::evm::Event for ${record} {
+            const TOPIC0: u256 = core::keccak((${name}, ${tuple_ty}))
+
+            fn emit<L: ingot::evm::Log>(own self, _ log: mut L) {
+                let head_size: u256 = ${data_head}
+                let total: u256 = head_size + ${data_dynamic}
+                let data_buf = core::ptr::MemBuffer::alloc(total as usize)
+                let out = unsafe { core::abi::AbiFrame::from_raw_parts(ptr: data_buf.ptr(), len: total) }
+                var tails = out.tail(head_size)
+                var head_pos: u256 = 0
+                var indexed_count: usize = 0
+                var topic1: u256 = 0
+                var topic2: u256 = 0
+                var topic3: u256 = 0
+                let _ = tails
+                let _ = head_pos
+                let _ = indexed_count
+                let _ = topic1
+                let _ = topic2
+                let _ = topic3
+                ${steps}
+                ${log_call}
+            }
+        }
+    }
+}
+
+/// Generate the message identity of a record that already has an ordinary
+/// codec (`Encode<Sol>` and `Decode<Sol>`, for example from `#[abi]`): the
+/// canonical selector, and a unit return. A message that returns a value
+/// writes its own provider around `sol_selector`.
+pub const fn msg_variant(_ record: Record) -> Code<Item> {
+    let selector = sol_selector(record)
+    quote {
+        impl core::message::MsgVariant<ingot::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ${selector}
+            type Return = ()
+        }
     }
 }

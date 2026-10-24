@@ -384,6 +384,18 @@ impl<'db> RecordInput<'db> {
         }
     }
 
+    /// Nominal authored name, or the selected enum payload's variant name.
+    pub fn name(self, db: &'db dyn HirAnalysisDb) -> Option<IdentId<'db>> {
+        match (self.owner, self.variant_index) {
+            (RecordOwner::Struct(record), None) => record.name(db).to_opt(),
+            (RecordOwner::Enum(record), None) => record.name(db).to_opt(),
+            (RecordOwner::Enum(record), Some(index)) => {
+                record.variants_list(db).data(db).get(index)?.name.to_opt()
+            }
+            _ => None,
+        }
+    }
+
     pub fn scope(self) -> crate::hir_def::scope_graph::ScopeId<'db> {
         match self.owner {
             RecordOwner::Struct(s) => s.scope(),
@@ -922,6 +934,9 @@ pub enum CodeData<'db> {
     Empty {
         kind: common::generation::FrozenCodeKind,
     },
+    RecordName {
+        record: RecordInput<'db>,
+    },
     VariantBinders {
         record: RecordInput<'db>,
         group: usize,
@@ -945,6 +960,29 @@ impl<'db> ItemCode<'db> {
         Self {
             data: CodeData::Empty { kind },
         }
+    }
+
+    pub fn record_name(record: RecordInput<'db>) -> Self {
+        Self {
+            data: CodeData::RecordName { record },
+        }
+    }
+
+    fn record_name_cost(
+        db: &'db dyn HirAnalysisDb,
+        record: RecordInput<'db>,
+    ) -> Result<usize, &'static str> {
+        record.validate(db)?;
+        let name = record
+            .name(db)
+            .ok_or("record_name requires an authored declaration name")?;
+        let mut width = crate::core::lower::signature_name_chunks(name.data(db)).len();
+        let mut nodes = width;
+        while width > 16 {
+            nodes += width / 16 + usize::from(width % 16 > 1);
+            width = width.div_ceil(16);
+        }
+        Ok(nodes + usize::from(width > 1))
     }
 
     pub fn variant_binders(record: RecordInput<'db>, group: usize) -> Self {
@@ -976,7 +1014,9 @@ impl<'db> ItemCode<'db> {
         match &self.data {
             CodeData::Template { kind, .. } | CodeData::Empty { kind } => *kind,
             CodeData::VariantBinders { .. } => FrozenCodeKind::Pat,
-            CodeData::VariantBinderField { .. } => FrozenCodeKind::Expr,
+            CodeData::VariantBinderField { .. } | CodeData::RecordName { .. } => {
+                FrozenCodeKind::Expr
+            }
         }
     }
 
@@ -1156,6 +1196,21 @@ impl<'db> ItemCode<'db> {
         use crate::analysis::semantic::SemConstValue;
         use common::generation::{FrozenCode, FrozenHoleValue};
         match &self.data {
+            CodeData::RecordName { record } => {
+                let cost = Self::record_name_cost(db, *record)?;
+                if cost > *remaining_nodes {
+                    return Err("generated code tree exceeds the expanded AST node limit of 4096");
+                }
+                *remaining_nodes -= cost;
+                Ok(FrozenCode::RecordName {
+                    record: record.freeze(db)?,
+                    name: record
+                        .name(db)
+                        .ok_or("record_name requires an authored declaration name")?
+                        .data(db)
+                        .to_string(),
+                })
+            }
             CodeData::Empty { kind } => Ok(FrozenCode::Empty { kind: *kind }),
             CodeData::VariantBinders { record, group } => {
                 if *remaining_nodes == 0 {
@@ -1313,6 +1368,14 @@ impl<'db> ItemCode<'db> {
         use crate::analysis::semantic::SemConstValue;
         use common::generation::FrozenCodeKind;
         match &self.data {
+            CodeData::RecordName { record } => {
+                let cost = Self::record_name_cost(db, *record)?;
+                if cost > *remaining_nodes {
+                    return Err("generated code tree exceeds the expanded AST node limit of 4096");
+                }
+                *remaining_nodes -= cost;
+                return Ok(());
+            }
             CodeData::Empty { .. } => return Ok(()),
             CodeData::VariantBinders { .. } | CodeData::VariantBinderField { .. } => {
                 if *remaining_nodes == 0 {
@@ -2189,17 +2252,14 @@ pub fn authored_derive_request<'db>(
     module: crate::hir_def::TopLevelMod<'db>,
     ast: &ast::ImplTrait,
 ) -> Option<crate::hir_def::ImplTrait<'db>> {
-    let root = crate::core::lower::top_mod_ast(db, module);
     module
         .all_impl_traits(db)
         .iter()
         .copied()
         .find(|implementation| {
-            let HirOrigin::Raw(ptr) = implementation.origin(db) else {
-                return false;
-            };
-            implementation.scope().syntax_top_mod(db) == module
-                && ptr.to_node(root.syntax()).syntax().text_range() == ast.syntax().text_range()
+            impl_trait_syntax(db, *implementation).is_some_and(|(written_in, syntax)| {
+                written_in == module && syntax.syntax().text_range() == ast.syntax().text_range()
+            })
         })
 }
 
@@ -2242,4 +2302,54 @@ pub(crate) fn is_unfulfilled_derive_request(
                 plan.request_impl == Some(ast.syntax().text_range())
                     && Some(plan.target_file.clone()) == module.file(db).url(db)
             }))
+}
+
+#[cfg(test)]
+mod record_name_budget_tests {
+    use super::*;
+    use crate::test_db::HirAnalysisTestDb;
+
+    #[test]
+    fn record_name_fragments_and_repeated_splices_share_expansion_budget() {
+        // 3840 literals + 240 inner tuples + 15 tuples + one root = 4096.
+        // 3841 literals require 4097 nodes; 1919 literals require 2048.
+        for (chunks, expected_cost) in [(3840, 4096), (3841, 4097), (1919, 2048)] {
+            let mut db = HirAnalysisTestDb::default();
+            let name = "A".repeat(chunks * crate::analysis::ty::ty_def::MAX_INLINE_STRING_BYTES);
+            let file = db.new_stand_alone(
+                "record_name_budget.fe".into(),
+                &format!("struct {name} {{}}"),
+            );
+            let (module, _) = db.top_mod(file);
+            let declaration = module.all_structs(&db)[0];
+            let ty = TyId::adt(
+                &db,
+                crate::analysis::ty::adt_def::AdtRef::Struct(declaration).as_adt(&db),
+            );
+            let record = RecordInput::for_authored_type(&db, ty).unwrap();
+            let code = ItemCode::record_name(record);
+            assert_eq!(
+                ItemCode::record_name_cost(&db, record).unwrap(),
+                expected_cost
+            );
+            assert_eq!(
+                code.freeze(&db).is_ok(),
+                expected_cost <= MAX_GENERATED_AST_NODES
+            );
+            let mut validation_budget = MAX_GENERATED_AST_NODES;
+            let mut freeze_budget = MAX_GENERATED_AST_NODES;
+            let repetitions = MAX_GENERATED_AST_NODES / expected_cost;
+            for _ in 0..repetitions {
+                code.validate_with_budget(&db, &mut validation_budget)
+                    .unwrap();
+                code.freeze_with_budget(&db, &mut freeze_budget).unwrap();
+            }
+            assert!(
+                code.validate_with_budget(&db, &mut validation_budget)
+                    .is_err()
+            );
+            assert!(code.freeze_with_budget(&db, &mut freeze_budget).is_err());
+            assert_eq!(validation_budget, freeze_budget);
+        }
+    }
 }

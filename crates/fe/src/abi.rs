@@ -1,26 +1,28 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use common::ingot::IngotKind;
 use driver::DriverDataBase;
 use hir::{
     analysis::{
         name_resolution::{PathRes, resolve_path},
+        semantic::{
+            CallSiteId, EvalOutcome, SExpr, SStmtKind, SemConstScalar, SemConstValue, SemOrigin,
+            SemanticInstanceKey, eval_const_ref, get_or_build_semantic_instance,
+            resolve_semantic_const_ref, root_semantic_instance_key,
+        },
         ty::{
             abi_ty::{self, AbiComponent, AbiTypeDesc, ParsedFunctionSignature},
             adt_def::AdtRef,
-            binder::Binder,
+            assoc_const::AssocConstUse,
             corelib::{RuntimeBuiltinFuncKind, runtime_builtin_func_kind},
-            normalize::normalize_from_assumptions,
+            evidence::UseEvidence,
             trait_def::TraitInstId,
-            trait_resolution::{PredicateListId, TraitSolveCx},
-            ty_check::{BodyOwner, check_body},
-            ty_def::{BorrowKind, TyBase, TyData, TyId},
+            trait_resolution::PredicateListId,
+            ty_check::{BodyOwner, ConstRef},
+            ty_def::{PrimTy, TyBase, TyData, TyId},
         },
     },
-    hir_def::{
-        FieldDefListId, Func, GenericParamOwner, IdentId, PathId, Struct, TopLevelMod, Trait,
-        scope_graph::ScopeId,
-    },
+    hir_def::{FieldDefListId, IdentId, PathId, Struct, TopLevelMod, Trait, scope_graph::ScopeId},
 };
 use serde::Serialize;
 use tiny_keccak::{Hasher, Keccak};
@@ -151,17 +153,15 @@ pub fn generate_contract_abi(
         }
     }
 
-    for struct_ in collect_contract_event_structs(db, contract, false) {
-        entries.push(event_struct_to_abi_entry(db, struct_)?);
+    // Error discovery admits the contract's call graph and checks each
+    // reachable selector before any event or error entry is emitted.
+    let error_types = collect_contract_error_types(db, contract)?;
+    for event_ty in collect_contract_event_types(db, contract)? {
+        entries.push(event_type_to_abi_entry(db, contract.scope(), event_ty)?);
     }
 
-    for struct_ in collect_contract_event_structs(db, contract, true) {
-        let mut entry = event_struct_to_abi_entry(db, struct_)?;
-        entry.entry_type = "error".to_string();
-        entry.anonymous = None;
-        for input in entry.inputs.iter_mut().flatten() {
-            input.indexed = None;
-        }
+    for error_ty in error_types {
+        let entry = error_type_to_abi_entry(db, error_ty)?;
         // Solidity's built-in errors are implicit. Declaring them as custom
         // errors makes consumers such as ethers reject the entire ABI.
         if let Some([input]) = entry.inputs.as_deref()
@@ -219,20 +219,39 @@ fn recv_arm_to_abi_entry(
         .name(db)
         .to_opt()
         .map_or_else(|| "<unknown>".to_string(), |name| name.data(db).to_string());
-    if !variant_has_canonical_json_abi_shape(db, variant_struct) {
-        return Ok(RecvArmAbiEmission::Skip(format!(
-            "skipping recv arm `{variant_name}`: ABI shape is not compiler-known for manual `MsgVariant` impls; only `msg`-generated variants are emitted"
-        )));
-    }
-    let abi_info = arm_view.abi_info(db, sol_ty);
-    let Some(selector_signature) = abi_info.selector_signature.as_deref() else {
-        return Ok(RecvArmAbiEmission::Skip(format!(
-            "skipping recv arm `{variant_name}`: selector signature is unknown; \
-             use `#[selector = sol(\"name(types)\")]` to include it in the ABI"
-        )));
+    let skip_manual = |detail: &str| {
+        RecvArmAbiEmission::Skip(format!(
+            "skipping recv arm `{variant_name}`: ABI shape is not compiler-known for manual `MsgVariant` impls; only `msg`-generated variants and impls whose selector is the canonical hash of their name and field types are emitted{detail}"
+        ))
     };
-
-    let input_descs = struct_ty_to_abi_param_descs(db, variant_struct, variant_ty, |_| None)?;
+    let abi_info = arm_view.abi_info(db, sol_ty);
+    let (selector_signature, input_descs) =
+        if variant_has_canonical_json_abi_shape(db, variant_struct) {
+            let Some(selector_signature) = abi_info.selector_signature.as_deref() else {
+                return Ok(RecvArmAbiEmission::Skip(format!(
+                    "skipping recv arm `{variant_name}`: selector signature is unknown; \
+                 use `#[selector = sol(\"name(types)\")]` to include it in the ABI"
+                )));
+            };
+            let input_descs =
+                struct_ty_to_abi_param_descs(db, variant_struct, variant_ty, |_| None)?;
+            (selector_signature.to_string(), input_descs)
+        } else {
+            // Another impl states no signature. Its resolved selector must be the
+            // hash of the canonical signature built from the struct name and the
+            // applied field types; the name only supplies bytes to compare.
+            let input_descs =
+                match struct_ty_to_abi_param_descs(db, variant_struct, variant_ty, |_| None) {
+                    Ok(input_descs) => input_descs,
+                    Err(error) => return Ok(skip_manual(&format!(" ({error})"))),
+                };
+            let canonical = canonical_function_signature(&variant_name, &input_descs);
+            if abi_info.selector_value != Some(selector_for_signature(&canonical)) {
+                return Ok(skip_manual(""));
+            }
+            (canonical, input_descs)
+        };
+    let selector_signature = selector_signature.as_str();
     // A tuple return is a parameter list (Solidity multi-value `returns`), so
     // each element becomes its own output, matching its runtime encoding.
     let output_tys = match abi_info.ret_ty {
@@ -280,194 +299,441 @@ fn recv_arm_to_abi_entry(
     }))
 }
 
-fn event_struct_to_abi_entry(db: &DriverDataBase, struct_: Struct<'_>) -> Result<AbiEntry, String> {
-    let event_name = struct_
+/// The inputs of an event in declaration order. A field is indexed when it
+/// carries the compiler's `#[indexed]` mark or has the canonical
+/// `std::evm::Indexed<T>` type, whose Solidity type is that of `T`. The owner
+/// is identified by its resolved declaration, never by spelling.
+fn event_param_descs<'db>(
+    db: &'db DriverDataBase,
+    scope: ScopeId<'db>,
+    struct_: Struct<'db>,
+    ty: TyId<'db>,
+) -> Result<Vec<NamedAbiParamDesc>, String> {
+    let indexed_owner =
+        hir::analysis::ty::corelib::resolve_lib_type_path(db, scope, "std::evm::event::Indexed")
+            .and_then(|owner| owner.adt_def(db))
+            .ok_or("cannot resolve canonical `std::evm::Indexed` type")?;
+    let hir_fields = struct_.hir_fields(db).data(db);
+    let field_tys = ty.field_types(db);
+    if hir_fields.len() != field_tys.len() {
+        return Err(format!(
+            "field count mismatch: {} HIR fields vs {} semantic fields",
+            hir_fields.len(),
+            field_tys.len()
+        ));
+    }
+    let mut params = Vec::with_capacity(field_tys.len());
+    for (field, field_ty) in hir_fields.iter().zip(field_tys) {
+        let wrapped = field_ty.adt_def(db) == Some(indexed_owner);
+        let value_ty = if wrapped {
+            *field_ty
+                .generic_args(db)
+                .first()
+                .ok_or("canonical `Indexed` type is missing its value type")?
+        } else {
+            field_ty
+        };
+        params.push(NamedAbiParamDesc {
+            name: field
+                .name
+                .to_opt()
+                .map(|ident| ident.data(db).to_string())
+                .unwrap_or_default(),
+            indexed: Some(wrapped || field.is_event_indexed),
+            desc: semantic_ty_to_abi_desc(db, value_ty)?,
+        });
+    }
+    let indexed = params
+        .iter()
+        .filter(|param| param.indexed == Some(true))
+        .count();
+    if indexed > MAX_INDEXED_EVENT_FIELDS {
+        return Err(format!(
+            "event `{}` has {indexed} indexed fields; at most {MAX_INDEXED_EVENT_FIELDS} fit in a log",
+            ty.pretty_print(db)
+        ));
+    }
+    Ok(params)
+}
+
+/// Solidity allows three indexed topics after `topic0` in a non-anonymous event.
+const MAX_INDEXED_EVENT_FIELDS: usize = 3;
+
+fn event_type_to_abi_entry<'db>(
+    db: &'db DriverDataBase,
+    scope: ScopeId<'db>,
+    ty: TyId<'db>,
+) -> Result<AbiEntry, String> {
+    let struct_ = struct_from_ty(db, ty).ok_or("event type is not a struct")?;
+    let name = struct_
         .name(db)
         .to_opt()
-        .map(|name| name.data(db).to_string())
-        .ok_or_else(|| "event struct is missing a name".to_string())?;
-    let field_tys: Vec<_> = struct_
-        .field_tys(db)
-        .into_iter()
-        .map(|ty| ty.instantiate_identity())
-        .collect();
-    let inputs = named_field_param_descs(db, struct_.hir_fields(db), &field_tys, |field| {
-        Some(field.is_event_indexed)
-    })?
-    .into_iter()
-    .map(NamedAbiParamDesc::into_param)
-    .collect();
-
+        .ok_or("event struct is missing a name")?;
+    let inputs = event_param_descs(db, scope, struct_, ty)?;
     Ok(AbiEntry {
         entry_type: "event".to_string(),
-        name: Some(event_name),
-        inputs: Some(inputs),
+        name: Some(name.data(db).to_string()),
+        inputs: Some(
+            inputs
+                .into_iter()
+                .map(NamedAbiParamDesc::into_param)
+                .collect(),
+        ),
         outputs: None,
         state_mutability: None,
         anonymous: Some(false),
     })
 }
 
-fn collect_contract_event_structs<'db>(
+fn error_type_to_abi_entry(db: &DriverDataBase, ty: TyId<'_>) -> Result<AbiEntry, String> {
+    let struct_ = struct_from_ty(db, ty).ok_or("error type is not a struct")?;
+    let name = struct_
+        .name(db)
+        .to_opt()
+        .ok_or("error struct is missing a name")?;
+    let inputs = struct_ty_to_abi_param_descs(db, struct_, ty, |_| None)?;
+    Ok(AbiEntry {
+        entry_type: "error".to_string(),
+        name: Some(name.data(db).to_string()),
+        inputs: Some(
+            inputs
+                .into_iter()
+                .map(NamedAbiParamDesc::into_param)
+                .collect(),
+        ),
+        outputs: None,
+        state_mutability: None,
+        anonymous: None,
+    })
+}
+
+/// The instances execution enters a contract through: its init and each
+/// receive arm.
+fn contract_root_instances<'db>(
     db: &'db DriverDataBase,
     contract: hir::hir_def::Contract<'db>,
-    errors: bool,
-) -> Vec<Struct<'db>> {
-    let mut events = Vec::new();
-    let mut seen = HashSet::new();
-    let mut visited_funcs = HashSet::new();
-    let emit_traits = resolve_event_emit_traits(db, contract.scope());
+) -> Result<Vec<SemanticInstanceKey<'db>>, String> {
+    let mut owners = Vec::new();
+    if contract.init(db).is_some() {
+        owners.push(BodyOwner::ContractInit { contract });
+    }
+    for recv in contract.recv_views(db) {
+        for arm in recv.arms(db) {
+            owners.push(BodyOwner::ContractRecvArm {
+                contract,
+                recv_idx: recv.index(db),
+                arm_idx: arm.index(db),
+            });
+        }
+    }
+    owners
+        .into_iter()
+        .map(|owner| root_semantic_instance_key(db, owner).map_err(|error| format!("{error:?}")))
+        .collect()
+}
+
+/// Evaluate the associated constant `name` of a goal the checker has already
+/// proved, through that proof, as execution does. `what` names the constant
+/// and `subject` the declaration it belongs to in diagnostics.
+#[allow(clippy::too_many_arguments)]
+fn eval_proved_trait_const<'db>(
+    db: &'db DriverDataBase,
+    body: hir::hir_def::Body<'db>,
+    typed: &hir::analysis::ty::ty_check::TypedBody<'db>,
+    expr: hir::hir_def::ExprId,
+    goal: TraitInstId<'db>,
+    proof: hir::analysis::ty::evidence::EvidenceId<'db>,
+    name: &str,
+    ty: TyId<'db>,
+    what: &str,
+    subject: &str,
+) -> Result<hir::analysis::semantic::SemConstId<'db>, String> {
+    let mut evidence = UseEvidence::default();
+    evidence.record_dispatch(goal, Some(proof));
+    let reference = ConstRef::TraitConst {
+        use_: AssocConstUse::new(
+            body.scope(),
+            typed.assumptions(),
+            goal,
+            IdentId::new(db, name.to_string()),
+        ),
+        evidence,
+    };
+    let reference = resolve_semantic_const_ref(db, reference, ty, SemOrigin::Expr(expr))
+        .ok_or_else(|| format!("missing checked {what} for `{subject}`"))?;
+    match eval_const_ref(db, reference) {
+        EvalOutcome::Ready(value) => Ok(value),
+        failure => Err(format!(
+            "{what} evaluation failed for `{subject}`: {failure:?}"
+        )),
+    }
+}
+
+/// Error reachability follows the same applied instances and proof transport
+/// used by execution. The complete type remains attached to its field layout.
+fn collect_contract_error_types<'db>(
+    db: &'db DriverDataBase,
+    contract: hir::hir_def::Contract<'db>,
+) -> Result<Vec<TyId<'db>>, String> {
     let error_func = hir::analysis::ty::corelib::resolve_lib_func_path(
         db,
         contract.scope(),
         "std::evm::effects::revert_error",
     );
-
-    if contract.init(db).is_some() {
-        let (_, typed_body) = hir::analysis::ty::ty_check::check_contract_init_body(db, contract);
-        collect_typed_body_event_structs(
-            db,
-            typed_body,
-            &emit_traits,
-            errors,
-            error_func,
-            &mut events,
-            &mut seen,
-            &mut visited_funcs,
-        );
-    }
-
-    for recv in contract.recv_views(db) {
-        for arm in recv.arms(db) {
-            let (_, typed_body) = hir::analysis::ty::ty_check::check_contract_recv_arm_body(
-                db,
-                contract,
-                recv.index(db),
-                arm.index(db),
-            );
-            collect_typed_body_event_structs(
-                db,
-                typed_body,
-                &emit_traits,
-                errors,
-                error_func,
-                &mut events,
-                &mut seen,
-                &mut visited_funcs,
-            );
-        }
-    }
-
-    events
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_typed_body_event_structs<'db>(
-    db: &'db DriverDataBase,
-    typed_body: &hir::analysis::ty::ty_check::TypedBody<'db>,
-    emit_traits: &EventEmitTraits<'db>,
-    errors: bool,
-    error_func: Option<Func<'db>>,
-    out: &mut Vec<Struct<'db>>,
-    seen: &mut HashSet<Struct<'db>>,
-    visited_funcs: &mut HashSet<VisitedFuncBody<'db>>,
-) {
-    let Some(body) = typed_body.body() else {
-        return;
-    };
-
-    for (expr_id, partial_expr) in body.exprs(db).iter() {
-        let hir::hir_def::Partial::Present(_) = partial_expr else {
+    let error_trait = hir::analysis::ty::corelib::resolve_lib_trait_path(
+        db,
+        contract.scope(),
+        "core::error::ErrorVariant",
+    );
+    let sol_ty = resolve_sol_abi_ty(db, contract.scope())?;
+    let mut pending = contract_root_instances(db, contract)
+        .map_err(|error| format!("cannot prepare error ABI reachability: {error}"))?;
+    let mut visited = HashSet::new();
+    let mut seen = HashSet::new();
+    let mut errors = Vec::new();
+    while let Some(key) = pending.pop() {
+        if !visited.insert(key) {
             continue;
-        };
-        if errors {
-            if let Some(struct_) = reverted_error_struct(db, typed_body, body, expr_id, error_func)
-                && seen.insert(struct_)
-            {
-                out.push(struct_);
-            }
-        } else if let Some(struct_) =
-            emitted_event_struct(db, typed_body, body, expr_id, emit_traits)
-        {
-            push_event_struct(db, out, seen, struct_);
         }
-
-        // Operators also have semantic callees, even without call syntax.
-        if let Some(callable) = typed_body.callable_expr(expr_id)
-            && let hir::hir_def::CallableDef::Func(func) = callable.callable_def
-        {
-            let mut target = VisitedFuncBody::from_callable(func, callable);
-            if let Some(method) = callable.selected_method(
-                db,
-                TraitSolveCx::new(db, body.scope()).with_assumptions(typed_body.assumptions()),
-            ) && let Some(impl_func) = method.body()
-                && let Ok(body_args) = method.complete_body_args(db, callable.generic_args())
-            {
-                target.func = impl_func;
-                target.generic_args = body_args.into_values();
-            }
-            // The body the call runs: a `mut?` function's at the call's mode.
-            let owner = BodyOwner::func_at(db, target.func, callable.mode());
-            target.mode = owner.mode();
-            if target.func.body(db).is_none() || !visited_funcs.insert(target.clone()) {
+        let instance = get_or_build_semantic_instance(db, key);
+        let admitted = instance
+            .admitted_body(db)
+            .map_err(|error| format!("cannot admit error ABI call graph: {error:?}"))?;
+        let typed = key.typed_body(db);
+        let Some(body) = typed.body() else { continue };
+        // Lowering owns closure regions and implicit protocol calls. Inspect
+        // only expression calls actually present in this admitted instance.
+        let expression_calls = admitted
+            .blocks
+            .iter()
+            .flat_map(|block| &block.stmts)
+            .filter_map(|stmt| match &stmt.kind {
+                SStmtKind::Assign {
+                    expr:
+                        SExpr::Call {
+                            call_site: CallSiteId::Expr(expr),
+                            callee,
+                            ..
+                        },
+                    ..
+                } => Some((*expr, callee.key)),
+                _ => None,
+            });
+        for (expr, callee) in expression_calls {
+            let partial = expr.data(db, body);
+            let hir::hir_def::Partial::Present(hir::hir_def::Expr::Call(_, args)) = partial else {
+                continue;
+            };
+            let Some(callable) = typed.callable_expr(expr) else {
+                continue;
+            };
+            let hir::hir_def::CallableDef::Func(func) = callable.callable_def else {
+                continue;
+            };
+            let is_revert = Some(func) == error_func;
+            let is_panic =
+                runtime_builtin_func_kind(db, func) == Some(RuntimeBuiltinFuncKind::PanicWithValue);
+            if !is_revert && !is_panic {
                 continue;
             }
-            let (_, func_typed_body) = check_body(db, owner);
-            let func_typed_body =
-                instantiate_callable_typed_body(db, func_typed_body.clone(), &target);
-            collect_typed_body_event_structs(
-                db,
-                &func_typed_body,
-                emit_traits,
-                errors,
-                error_func,
-                out,
-                seen,
-                visited_funcs,
-            );
+            let Some(arg) = args.first() else { continue };
+            let mut ty = typed.expr_ty(db, arg.expr);
+            while let Some((_, inner)) = ty.as_capability(db) {
+                ty = inner;
+            }
+            let Some(struct_) = struct_from_ty(db, ty) else {
+                continue;
+            };
+            if is_panic {
+                // This intrinsic declares no ErrorVariant bound. Its existing
+                // compiler-issued error origin remains the supported contract.
+                if !matches!(
+                    hir::span::struct_ast(db, struct_),
+                    hir::span::HirOrigin::Desugared(hir::span::DesugaredOrigin::Error(_))
+                ) {
+                    continue;
+                }
+            } else {
+                let error_trait =
+                    error_trait.ok_or("missing canonical ErrorVariant declaration")?;
+                let goal = TraitInstId::new_simple(db, error_trait, vec![ty, sol_ty]);
+                // The callee instance answers a closed slot the call does not
+                // transport; its normalization scope gives that proof's ingot.
+                let instance_scope = callee.impl_env(db).normalization_scope(db);
+                let proved = callable
+                    .proved_bound(db, instance_scope, goal)
+                    .ok_or_else(|| {
+                        format!(
+                            "missing declaration-owned checked ErrorVariant proof for `{}`",
+                            ty.pretty_print(db)
+                        )
+                    })?;
+                if !proved.proof.is_closed(db) || proved.proof.answering(db, goal).is_none() {
+                    return Err(format!(
+                        "error ABI requires a closed checked ErrorVariant proof for `{}`",
+                        ty.pretty_print(db)
+                    ));
+                }
+                let inputs = struct_ty_to_abi_param_descs(db, struct_, ty, |_| None)?;
+                let name = struct_
+                    .name(db)
+                    .to_opt()
+                    .ok_or("error struct is missing a name")?;
+                let signature = format!(
+                    "{}({})",
+                    name.data(db),
+                    inputs
+                        .iter()
+                        .map(|input| input.desc.canonical_type.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+                let value = eval_proved_trait_const(
+                    db,
+                    body,
+                    typed,
+                    expr,
+                    goal,
+                    proved.proof,
+                    "SELECTOR",
+                    TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::U32))),
+                    "error SELECTOR",
+                    &signature,
+                )?;
+                let selector = match value.value(db) {
+                    SemConstValue::Scalar {
+                        value: SemConstScalar::Int { value },
+                        ..
+                    } => value.to_string().parse::<u32>().ok(),
+                    _ => None,
+                }
+                .ok_or_else(|| format!("error SELECTOR is not u32 for `{signature}`"))?;
+                if selector != selector_for_signature(&signature) {
+                    return Err(format!(
+                        "error SELECTOR does not match canonical signature `{signature}`"
+                    ));
+                }
+            }
+            if seen.insert(ty) {
+                errors.push(ty);
+            }
         }
+        pending.extend(admitted.callees().into_iter().map(|callee| callee.key));
     }
+    Ok(errors)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct VisitedFuncBody<'db> {
-    func: Func<'db>,
-    /// The mode of the body of `func`, a `mut?` function, the call runs.
-    mode: Option<BorrowKind>,
-    generic_args: Vec<TyId<'db>>,
-    trait_inst: Option<TraitInstId<'db>>,
-}
-
-impl<'db> VisitedFuncBody<'db> {
-    fn from_callable(
-        func: Func<'db>,
-        callable: &hir::analysis::ty::ty_check::Callable<'db>,
-    ) -> Self {
-        Self {
-            func,
-            mode: callable.mode(),
-            generic_args: callable.generic_args().to_vec(),
-            trait_inst: callable.trait_inst(),
-        }
-    }
-}
-
-fn instantiate_callable_typed_body<'db>(
+/// Event reachability follows the admitted instance graph execution uses, as
+/// error reachability does, so instance identity and the shared admission
+/// limits bound it. Each body contributes its events in expression order,
+/// before the instances its calls at that expression reach.
+///
+/// An emitted type is reported only with the checked `Event` proof of the call
+/// that emits it. Its `TOPIC0` is evaluated through that proof and must be the
+/// hash of the signature the JSON entry states, so a name or a hash written in
+/// the source never decides what the ABI says.
+fn collect_contract_event_types<'db>(
     db: &'db DriverDataBase,
-    typed_body: hir::analysis::ty::ty_check::TypedBody<'db>,
-    target: &VisitedFuncBody<'db>,
-) -> hir::analysis::ty::ty_check::TypedBody<'db> {
-    let mut typed_body = Binder::bind(GenericParamOwner::Func(target.func), typed_body)
-        .instantiate(db, &target.generic_args);
-    if let Some(trait_inst) = target.trait_inst {
-        typed_body = normalize_from_assumptions(
+    contract: hir::hir_def::Contract<'db>,
+) -> Result<Vec<TyId<'db>>, String> {
+    let mut events = Vec::new();
+    let mut seen = HashSet::new();
+    let mut visited = HashSet::new();
+    let emit_traits = resolve_event_emit_traits(db, contract.scope());
+    let roots = contract_root_instances(db, contract)
+        .map_err(|error| format!("cannot prepare event ABI reachability: {error}"))?;
+    for root in roots {
+        collect_instance_event_types(
             db,
-            typed_body,
-            target.func.scope(),
-            PredicateListId::new(db, vec![trait_inst]),
-        );
+            contract.scope(),
+            root,
+            &emit_traits,
+            &mut events,
+            &mut seen,
+            &mut visited,
+        )?;
     }
-    typed_body
+    Ok(events)
+}
+
+fn collect_instance_event_types<'db>(
+    db: &'db DriverDataBase,
+    contract_scope: ScopeId<'db>,
+    key: SemanticInstanceKey<'db>,
+    emit_traits: &EventEmitTraits<'db>,
+    out: &mut Vec<TyId<'db>>,
+    seen: &mut HashSet<TyId<'db>>,
+    visited: &mut HashSet<SemanticInstanceKey<'db>>,
+) -> Result<(), String> {
+    if !visited.insert(key) {
+        return Ok(());
+    }
+    let admitted = get_or_build_semantic_instance(db, key)
+        .admitted_body(db)
+        .map_err(|error| format!("cannot admit event ABI call graph: {error:?}"))?;
+    let mut expression_callees: HashMap<hir::hir_def::ExprId, Vec<SemanticInstanceKey<'db>>> =
+        HashMap::new();
+    let mut protocol_callees = Vec::new();
+    for stmt in admitted.blocks.iter().flat_map(|block| &block.stmts) {
+        let SStmtKind::Assign {
+            expr: SExpr::Call {
+                call_site, callee, ..
+            },
+            ..
+        } = &stmt.kind
+        else {
+            continue;
+        };
+        match call_site {
+            CallSiteId::Expr(expr) => expression_callees
+                .entry(*expr)
+                .or_default()
+                .push(callee.key),
+            CallSiteId::ForLoop(..) => protocol_callees.push(callee.key),
+        }
+    }
+    let typed_body = key.typed_body(db);
+    if let Some(body) = typed_body.body() {
+        for (expr_id, partial_expr) in body.exprs(db).iter() {
+            let hir::hir_def::Partial::Present(_) = partial_expr else {
+                continue;
+            };
+            // Only calls this admitted instance performs can emit; a call in
+            // an uninvoked closure region has no callee here.
+            let Some(callees) = expression_callees.get(&expr_id) else {
+                continue;
+            };
+            if let Some(&callee) = callees.first()
+                && let Some(ty) = checked_emitted_event(
+                    db,
+                    contract_scope,
+                    typed_body,
+                    body,
+                    expr_id,
+                    callee,
+                    emit_traits,
+                )?
+                && seen.insert(ty)
+            {
+                out.push(ty);
+            }
+            for &callee in callees {
+                collect_instance_event_types(
+                    db,
+                    contract_scope,
+                    callee,
+                    emit_traits,
+                    out,
+                    seen,
+                    visited,
+                )?;
+            }
+        }
+    }
+    for callee in protocol_callees {
+        collect_instance_event_types(db, contract_scope, callee, emit_traits, out, seen, visited)?;
+    }
+    Ok(())
 }
 
 struct EventEmitTraits<'db> {
@@ -485,13 +751,20 @@ fn resolve_event_emit_traits<'db>(
     }
 }
 
-fn emitted_event_struct<'db>(
+/// The event type a call emits, once its `Event` proof is checked, or `None`
+/// when the call is not the canonical `Log::emit` or `Event::emit`.
+///
+/// `Log::emit<E: Event>` carries the proof as its declaration-owned bound for
+/// `E`; a direct `Event::emit` call carries it as its dispatch proof.
+fn checked_emitted_event<'db>(
     db: &'db DriverDataBase,
+    contract_scope: ScopeId<'db>,
     typed_body: &hir::analysis::ty::ty_check::TypedBody<'db>,
     body: hir::hir_def::Body<'db>,
     expr_id: hir::hir_def::ExprId,
+    callee: SemanticInstanceKey<'db>,
     emit_traits: &EventEmitTraits<'db>,
-) -> Option<Struct<'db>> {
+) -> Result<Option<TyId<'db>>, String> {
     let hir::hir_def::Partial::Present(hir::hir_def::Expr::MethodCall(
         receiver,
         method_name,
@@ -499,86 +772,120 @@ fn emitted_event_struct<'db>(
         args,
     )) = expr_id.data(db, body)
     else {
-        return None;
+        return Ok(None);
     };
-    let method_name = method_name.to_opt()?;
+    let Some(method_name) = method_name.to_opt() else {
+        return Ok(None);
+    };
     if method_name.data(db) != "emit" {
-        return None;
+        return Ok(None);
     }
-
-    let callable = typed_body.callable_expr(expr_id)?;
-    let hir::hir_def::CallableDef::Func(func) = callable.callable_def else {
-        return None;
+    let Some(callable) = typed_body.callable_expr(expr_id) else {
+        return Ok(None);
     };
-    if func.name(db).to_opt()? != method_name {
-        return None;
+    let hir::hir_def::CallableDef::Func(func) = callable.callable_def else {
+        return Ok(None);
+    };
+    if func.name(db).to_opt() != Some(method_name) {
+        return Ok(None);
     }
-
-    let trait_def = callable.trait_inst()?.def(db);
-    if emit_traits
+    let Some(trait_inst) = callable.trait_inst() else {
+        return Ok(None);
+    };
+    let trait_def = trait_inst.def(db);
+    let through_log = emit_traits
         .log_trait
-        .is_some_and(|log_trait| trait_def == log_trait)
-    {
-        let event_expr = args.first()?.expr;
-        let struct_ = struct_from_ty(db, typed_body.expr_ty(db, event_expr))?;
-        return is_event_struct(db, struct_).then_some(struct_);
-    }
-    if emit_traits
+        .is_some_and(|log_trait| trait_def == log_trait);
+    let through_event = emit_traits
         .event_trait
-        .is_some_and(|event_trait| trait_def == event_trait)
-    {
-        let struct_ = struct_from_ty(db, typed_body.expr_ty(db, *receiver))?;
-        return is_event_struct(db, struct_).then_some(struct_);
-    }
-
-    None
-}
-
-fn reverted_error_struct<'db>(
-    db: &'db DriverDataBase,
-    typed_body: &hir::analysis::ty::ty_check::TypedBody<'db>,
-    body: hir::hir_def::Body<'db>,
-    expr_id: hir::hir_def::ExprId,
-    error_func: Option<Func<'db>>,
-) -> Option<Struct<'db>> {
-    let hir::hir_def::Partial::Present(hir::hir_def::Expr::Call(_, args)) = expr_id.data(db, body)
-    else {
-        return None;
+        .is_some_and(|event_trait| trait_def == event_trait);
+    let emitted = if through_log {
+        let Some(arg) = args.first() else {
+            return Ok(None);
+        };
+        arg.expr
+    } else if through_event {
+        *receiver
+    } else {
+        return Ok(None);
     };
-    let callable = typed_body.callable_expr(expr_id)?;
-    let hir::hir_def::CallableDef::Func(func) = callable.callable_def else {
-        return None;
+    let mut ty = typed_body.expr_ty(db, emitted);
+    while let Some((_, inner)) = ty.as_capability(db) {
+        ty = inner;
+    }
+    let Some(struct_) = struct_from_ty(db, ty) else {
+        return Ok(None);
     };
-    if Some(func) != error_func
-        && runtime_builtin_func_kind(db, func) != Some(RuntimeBuiltinFuncKind::PanicWithValue)
-    {
-        return None;
+    let event_trait = emit_traits
+        .event_trait
+        .ok_or("missing canonical Event declaration")?;
+    let goal = TraitInstId::new_simple(db, event_trait, vec![ty]);
+    let proof = if through_log {
+        let instance_scope = callee.impl_env(db).normalization_scope(db);
+        callable
+            .proved_bound(db, instance_scope, goal)
+            .map(|proved| proved.proof)
+    } else {
+        callable
+            .use_evidence()
+            .dispatch
+            .filter(|dispatch| dispatch.goal == goal)
+            .map(|dispatch| dispatch.proof)
     }
-    let struct_ = struct_from_ty(db, typed_body.expr_ty(db, args.first()?.expr))?;
-    matches!(
-        hir::span::struct_ast(db, struct_),
-        hir::span::HirOrigin::Desugared(hir::span::DesugaredOrigin::Error(_))
-    )
-    .then_some(struct_)
+    .ok_or_else(|| {
+        format!(
+            "missing declaration-owned checked Event proof for `{}`",
+            ty.pretty_print(db)
+        )
+    })?;
+    if !proof.is_closed(db) || proof.answering(db, goal).is_none() {
+        return Err(format!(
+            "event ABI requires a closed checked Event proof for `{}`",
+            ty.pretty_print(db)
+        ));
+    }
+    let name = struct_
+        .name(db)
+        .to_opt()
+        .ok_or("event struct is missing a name")?;
+    let inputs = event_param_descs(db, contract_scope, struct_, ty)?;
+    let signature = canonical_function_signature(name.data(db), &inputs);
+    let value = eval_proved_trait_const(
+        db,
+        body,
+        typed_body,
+        expr_id,
+        goal,
+        proof,
+        "TOPIC0",
+        TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::U256))),
+        "event TOPIC0",
+        &signature,
+    )?;
+    let topic0 = match value.value(db) {
+        SemConstValue::Scalar {
+            value: SemConstScalar::Int { value },
+            ..
+        } => Some(value.to_str_radix(16)),
+        _ => None,
+    }
+    .ok_or_else(|| format!("event TOPIC0 is not u256 for `{signature}`"))?;
+    if topic0 != keccak_hex_without_leading_zeros(&signature) {
+        return Err(format!(
+            "event TOPIC0 does not match canonical signature `{signature}`"
+        ));
+    }
+    Ok(Some(ty))
 }
 
-fn push_event_struct<'db>(
-    db: &'db DriverDataBase,
-    out: &mut Vec<Struct<'db>>,
-    seen: &mut HashSet<Struct<'db>>,
-    struct_: Struct<'db>,
-) {
-    if !seen.insert(struct_) || !is_event_struct(db, struct_) {
-        return;
-    }
-    out.push(struct_);
-}
-
-fn is_event_struct(db: &DriverDataBase, struct_: Struct<'_>) -> bool {
-    matches!(
-        hir::span::struct_ast(db, struct_),
-        hir::span::HirOrigin::Desugared(hir::span::DesugaredOrigin::Event(_))
-    )
+fn keccak_hex_without_leading_zeros(signature: &str) -> String {
+    let mut hasher = Keccak::v256();
+    let mut output = [0u8; 32];
+    hasher.update(signature.as_bytes());
+    hasher.finalize(&mut output);
+    let hex: String = output.iter().map(|byte| format!("{byte:02x}")).collect();
+    let trimmed = hex.trim_start_matches('0');
+    if trimmed.is_empty() { "0" } else { trimmed }.to_string()
 }
 
 fn variant_has_canonical_json_abi_shape(db: &DriverDataBase, struct_: Struct<'_>) -> bool {
@@ -788,25 +1095,8 @@ fn resolve_sol_abi_ty<'db>(
     db: &'db DriverDataBase,
     scope: ScopeId<'db>,
 ) -> Result<TyId<'db>, String> {
-    let ingot = scope.ingot(db);
-    let std_root = if ingot.kind(db) == IngotKind::Std {
-        IdentId::make_ingot(db)
-    } else {
-        IdentId::new(db, "std".to_string())
-    };
-
-    let sol_path = PathId::from_ident(db, std_root)
-        .push_ident(db, IdentId::new(db, "abi".to_string()))
-        .push_ident(db, IdentId::new(db, "Sol".to_string()));
-
-    let assumptions = PredicateListId::empty_list(db);
-    match resolve_path(db, sol_path, scope, assumptions, false) {
-        Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => Ok(ty),
-        Ok(other) => Err(format!(
-            "expected `std::abi::Sol` to resolve to a type, got `{other:?}`"
-        )),
-        Err(err) => Err(format!("failed to resolve `std::abi::Sol`: {err:?}")),
-    }
+    hir::analysis::ty::corelib::resolve_lib_type_path(db, scope, "std::abi::Sol")
+        .ok_or_else(|| "cannot resolve canonical `std::abi::Sol` type".to_string())
 }
 
 /// Derive ABI state mutability from the effective recv-arm effect requirement set.
@@ -844,9 +1134,19 @@ mod tests {
         let url = url::Url::from_file_path(&file_path).expect("file path to url");
         let mut db = DriverDataBase::default();
         let file = db.workspace().touch(&mut db, url, Some(code.to_string()));
-        let top_mod = db.top_mod(file);
-        generate_contract_abi(&db, top_mod, contract_name)?
-            .ok_or_else(|| format!("contract `{contract_name}` not found"))
+        let prepared = driver::generation::prepare_file(&db, file)
+            .map_err(|error| format!("generation failed: {error:?}"))?;
+        if let Some(output) = prepared {
+            let output_file = output
+                .workspace()
+                .get(&output, &file.url(&db).unwrap())
+                .unwrap();
+            generate_contract_abi(&output, output.top_mod(output_file), contract_name)?
+                .ok_or_else(|| format!("contract `{contract_name}` not found"))
+        } else {
+            generate_contract_abi(&db, db.top_mod(file), contract_name)?
+                .ok_or_else(|| format!("contract `{contract_name}` not found"))
+        }
     }
 
     fn generate_test_abi(code: &str, contract_name: &str) -> Result<String, String> {
@@ -1831,6 +2131,462 @@ pub contract Foo {
         assert_eq!(function["inputs"][1]["type"], "int24");
         assert_eq!(function["inputs"][1]["name"], "value");
     }
+    const APPLIED_ERROR_SOURCE: &str = r#"
+use core::abi::{AbiFrame, AbiSize, Encode, abi_field_head_size, dynamic_payload_size, encode_field}
+use core::error::ErrorVariant
+use std::abi::{Sol, sol}
+use std::evm::revert_error
+
+struct Failure<T> { value: T }
+impl<T: AbiSize> AbiSize for Failure<T> {
+    const HEAD_SIZE: u256 = abi_field_head_size<T>()
+    const IS_DYNAMIC: bool = <T as AbiSize>::IS_DYNAMIC
+    fn payload_size(self) -> u256 { Self::HEAD_SIZE + dynamic_payload_size(self.value) }
+}
+impl<T: AbiSize + Encode<Sol>> Encode<Sol> for Failure<T> {
+    fn encode(own self, _ out: AbiFrame) {
+        let tails = out.tail(<Self as AbiSize>::HEAD_SIZE)
+        let _ = encode_field<Sol, T>(self.value, out, head_pos: 0, tails: tails)
+    }
+}
+impl ErrorVariant<Sol> for Failure<u256> {
+    const SELECTOR: u32 = sol("Failure(uint256)")
+}
+impl ErrorVariant<Sol> for Failure<bool> {
+    const SELECTOR: u32 = sol("Failure(bool)")
+}
+struct NonError { value: u256 }
+mod lookalike {
+    pub fn revert_error<T>(_ value: own T) { let _ = value }
+}
+fn fail<T: ErrorVariant<Sol> + Encode<Sol>>(_ error: own T) { revert_error(error) }
+msg M {
+    #[selector = sol("fail(bool)")]
+    Fail { boolean: bool }
+}
+pub contract C {
+    recv M {
+        Fail { boolean } {
+            lookalike::revert_error(NonError { value: 7 })
+            if boolean { fail(Failure<bool> { value: true }) }
+            else { fail(Failure<u256> { value: 7 }) }
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn handwritten_errors_retain_applied_fields_through_generic_calls() {
+        let entries = abi_entries(APPLIED_ERROR_SOURCE, "C");
+        let errors = entries
+            .iter()
+            .filter(|entry| entry["type"] == "error")
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 2, "{entries:?}");
+        assert!(errors.iter().all(|entry| entry["name"] == "Failure"));
+        assert!(
+            errors
+                .iter()
+                .any(|entry| entry["inputs"]
+                    == serde_json::json!([{"name":"value","type":"uint256"}]))
+        );
+        assert!(errors.iter().any(|entry| entry["inputs"] == serde_json::json!([{"name":"value","type":"bool"}])));
+        assert!(!entries.iter().any(|entry| entry["name"] == "NonError"));
+    }
+
+    #[test]
+    fn handwritten_error_noncanonical_selector_is_refused() {
+        let source = APPLIED_ERROR_SOURCE.replace("sol(\"Failure(bool)\")", "0");
+        let error = generate_test_abi_result(&source, "C")
+            .err()
+            .expect("noncanonical error selector");
+        assert!(
+            error.contains("error SELECTOR does not match canonical signature `Failure(bool)`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn generated_error_uses_checked_selector_and_reachability() {
+        let source = r#"
+use std::abi::sol
+use std::derive::error_struct
+use std::evm::revert_error
+#[generate(error_struct)]
+struct GeneratedFailure { first: u256, second: u256 }
+#[generate(error_struct)]
+struct UnusedFailure { first: u256 }
+msg M {
+    #[selector = sol("fail()")]
+    Fail {}
+}
+pub contract C {
+    recv M { Fail {} { revert_error(GeneratedFailure { first: 1, second: 2 }) } }
+}
+"#;
+        let entries = abi_entries(source, "C");
+        let errors = entries
+            .iter()
+            .filter(|entry| entry["type"] == "error")
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1, "{entries:?}");
+        assert_eq!(errors[0]["name"], "GeneratedFailure");
+        assert_eq!(
+            errors[0]["inputs"],
+            serde_json::json!([
+                {"name":"first","type":"uint256"}, {"name":"second","type":"uint256"}
+            ])
+        );
+    }
+
+    #[test]
+    fn error_discovery_respects_unused_invoked_and_nested_closure_regions() {
+        for (body, expected) in [
+            (
+                "let f = || revert_error(ClosureFailure {})\nlet _ = f",
+                false,
+            ),
+            ("let f = || revert_error(ClosureFailure {})\nf()", true),
+            (
+                "let outer = || { let inner = || revert_error(ClosureFailure {})\nlet _ = inner }\nouter()",
+                false,
+            ),
+            (
+                "let outer = || { let inner = || revert_error(ClosureFailure {})\ninner() }\nouter()",
+                true,
+            ),
+        ] {
+            let code = format!(
+                r#"
+use std::abi::sol
+use std::evm::revert_error
+#[error]
+struct ClosureFailure {{}}
+msg M {{
+    #[selector = sol("fail()")]
+    Fail {{}}
+}}
+pub contract C {{ recv M {{ Fail {{}} {{ {body} }} }} }}
+"#
+            );
+            let entries = abi_entries(&code, "C");
+            let errors = entries
+                .iter()
+                .filter(|entry| entry["type"] == "error")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                errors.len(),
+                usize::from(expected),
+                "body={body} entries={entries:?}"
+            );
+            if expected {
+                assert_eq!(errors[0]["name"], "ClosureFailure");
+            }
+        }
+    }
+
+    #[test]
+    fn error_discovery_includes_collection_protocol_calls_and_direct_controls() {
+        for (start, next, direct, name) in [
+            (
+                "revert_error(StartFailure {})",
+                "c + 1",
+                "xs.start()",
+                "StartFailure",
+            ),
+            (
+                "0",
+                "revert_error(NextFailure {})",
+                "xs.next(0)",
+                "NextFailure",
+            ),
+        ] {
+            for body in [
+                "for x in xs { let _ = x }".to_string(),
+                format!("let _ = {direct}"),
+            ] {
+                let code = format!(
+                    r#"
+use core::iter::Collection
+use std::abi::sol
+use std::evm::revert_error
+#[error]
+struct StartFailure {{}}
+#[error]
+struct NextFailure {{}}
+struct ErrorCollection {{}}
+impl Collection for ErrorCollection {{
+    type Cursor = usize
+    type Item = u256
+    fn start(self) -> usize {{ {start} }}
+    fn has(self, _ c: usize) -> bool {{ c < 1 }}
+    fn next(self, _ c: usize) -> usize {{ {next} }}
+    fn at(self, _ c: usize) -> ref u256 {{
+        let value: u256 = 7
+        yield ref value
+    }}
+}}
+msg M {{
+    #[selector = sol("fail()")]
+    Fail {{}}
+}}
+pub contract C {{ recv M {{ Fail {{}} {{
+    let xs = ErrorCollection {{}}
+    {body}
+}} }} }}
+"#
+                );
+                let entries = abi_entries(&code, "C");
+                let errors = entries
+                    .iter()
+                    .filter(|entry| entry["type"] == "error")
+                    .collect::<Vec<_>>();
+                assert_eq!(errors.len(), 1, "body={body} entries={entries:?}");
+                assert_eq!(errors[0]["name"], name);
+            }
+        }
+    }
+
+    #[test]
+    fn error_protocol_identity_ignores_nested_core_and_std_lookalikes() {
+        for shadows in [
+            "",
+            "mod core { pub mod error { pub trait ErrorVariant<A> {} } }\nmod std { pub mod abi { pub struct Sol {} } }",
+        ] {
+            let source = format!(
+                r#"
+use std::abi::sol
+use std::evm::revert_error
+#[error]
+struct Failure {{ code: u256 }}
+msg M {{
+    #[selector = sol("fail()")]
+    Fail {{}}
+}}
+mod client {{
+    use super::{{revert_error, M, Failure}}
+    {shadows}
+    pub contract C {{ recv M {{ Fail {{}} {{ revert_error(Failure {{ code: 7 }}) }} }} }}
+}}
+"#
+            );
+            let entries = abi_entries(&source, "C");
+            let errors = entries
+                .iter()
+                .filter(|entry| entry["type"] == "error")
+                .collect::<Vec<_>>();
+            assert_eq!(errors.len(), 1, "shadows={shadows} entries={entries:?}");
+            assert_eq!(errors[0]["name"], "Failure");
+            assert_eq!(
+                errors[0]["inputs"],
+                serde_json::json!([{"name":"code","type":"uint256"}])
+            );
+        }
+    }
+
+    #[test]
+    fn abi_error_runtime_and_json_match_literal_two_word_oracle() {
+        use contract_harness::{ExecutionOptions, FeContractHarness, HarnessError, U256};
+
+        let declarations = [
+            r#"#[generate(std::derive::error_struct)]
+struct InsufficientBalance { available: u256, required: u256 }"#,
+            r#"#[error]
+struct InsufficientBalance { available: u256, required: u256 }"#,
+            r#"struct InsufficientBalance { available: u256, required: u256 }
+impl core::abi::AbiSize for InsufficientBalance {
+    const HEAD_SIZE: u256 = 64
+    const IS_DYNAMIC: bool = false
+}
+impl core::abi::Encode<std::abi::Sol> for InsufficientBalance {
+    fn encode(own self, _ out: core::abi::AbiFrame) {
+        out.store_word(at: 0, value: self.available)
+        out.store_word(at: 32, value: self.required)
+    }
+}
+impl core::error::ErrorVariant<std::abi::Sol> for InsufficientBalance {
+    const SELECTOR: u32 = 0xcf479181
+}"#,
+        ];
+        // Literal selector and two big-endian words are independent of both
+        // the generator and the compiler's legacy error construction.
+        let mut expected = vec![0xcf, 0x47, 0x91, 0x81];
+        let mut payload = [0u8; 64];
+        payload[31] = 10;
+        payload[63] = 25;
+        expected.extend_from_slice(&payload);
+        assert_eq!(expected.len(), 68);
+        assert_eq!(
+            selector_for_signature("InsufficientBalance(uint256,uint256)"),
+            0xcf479181
+        );
+        for declaration in declarations {
+            let source = format!(
+                r#"
+use std::abi::sol
+use std::evm::revert_error
+{declaration}
+msg M {{
+    #[selector = sol("fail()")]
+    Fail {{}},
+    #[selector = sol("headSize()")]
+    HeadSize {{}} -> u256,
+}}
+pub contract C {{
+    recv M {{
+        Fail {{}} {{ revert_error(InsufficientBalance {{ available: 10, required: 25 }}) }}
+        HeadSize {{}} -> u256 {{ <InsufficientBalance as core::abi::AbiSize>::HEAD_SIZE }}
+    }}
+}}
+"#
+            );
+            let entries = abi_entries(&source, "C");
+            let errors = entries
+                .iter()
+                .filter(|entry| entry["type"] == "error")
+                .collect::<Vec<_>>();
+            assert_eq!(errors.len(), 1, "{entries:?}");
+            assert_eq!(errors[0]["name"], "InsufficientBalance");
+            assert_eq!(
+                errors[0]["inputs"],
+                serde_json::json!([
+                    {"name":"available","type":"uint256"},
+                    {"name":"required","type":"uint256"}
+                ])
+            );
+            let harness = FeContractHarness::compile("C", &source).expect("compile oracle twin");
+            let mut instance = harness.deploy_instance().expect("deploy oracle twin");
+            let options = ExecutionOptions::default();
+            let head = instance
+                .call_function("headSize()", &[], options)
+                .expect("head size");
+            assert_eq!(U256::from_be_slice(&head.return_data), U256::from(64u64));
+            let failure = instance
+                .call_function("fail()", &[], options)
+                .expect_err("custom error revert");
+            let HarnessError::Revert(bytes) = failure else {
+                panic!("{failure:?}")
+            };
+            assert_eq!(bytes.0, expected);
+        }
+    }
+
+    #[test]
+    fn error_selector_evaluation_keeps_division_fault() {
+        let source = APPLIED_ERROR_SOURCE
+            .replace("sol(\"Failure(bool)\")", "{ let zero: u32 = 0\n1 / zero }");
+        let error = generate_test_abi_result(&source, "C")
+            .err()
+            .expect("selector evaluation fault");
+        assert!(error.contains("SELECTOR evaluation failed"), "{error}");
+        assert!(error.contains("DivisionByZero"), "{error}");
+    }
+
+    #[test]
+    fn error_abi_discovery_keeps_shared_growing_instance_refusal() {
+        let source = r#"
+use std::abi::sol
+fn recur<T: Copy>(_ value: T, _ n: u256) -> u256 {
+    if n == 0 { 0 } else { 1 + recur(value, n - 1) }
+}
+msg M {
+    #[selector = sol("run()")]
+    Run {} -> u256
+}
+pub contract C { recv M { Run {} -> u256 { recur(1 as u256, 0) } } }
+"#;
+        generate_test_abi_result(source, "C")
+            .expect("same-instance recursion is bounded by key identity");
+        let growing = source.replace("recur(value, n - 1)", "recur((value, value), n - 1)");
+        let error = generate_test_abi_result(&growing, "C")
+            .err()
+            .expect("shared instance growth refusal");
+        assert!(
+            error.contains("cannot admit error ABI call graph"),
+            "{error}"
+        );
+        assert!(error.contains("InstanceLimit"), "{error}");
+    }
+
+    #[test]
+    fn abi_runtime_payloads_match_empty_nested_and_dynamic_literal_oracles() {
+        use contract_harness::{ExecutionOptions, FeContractHarness, HarnessError};
+        let mut nested = vec![0u8; 96];
+        nested[31] = 1;
+        nested[63] = 2;
+        nested[95] = 3;
+        let mut dynamic = vec![0u8; 128];
+        dynamic[31] = 7;
+        dynamic[63] = 64;
+        dynamic[95] = 3;
+        dynamic[96..99].copy_from_slice(&[0xaa, 0xbb, 0xcc]);
+        let cases = [
+            ("", "Payload {}", 0, false, "let _ = out", Vec::new()),
+            (
+                "pair: (u256, u256), third: u256",
+                "Payload { pair: (1, 2), third: 3 }",
+                96,
+                false,
+                "out.store_word(at: 0, value: self.pair.0)\nout.store_word(at: 32, value: self.pair.1)\nout.store_word(at: 64, value: self.third)",
+                nested,
+            ),
+            (
+                "id: u256, bytes: Bytes",
+                "Payload { id: 7, bytes: std::abi::bytes_from_words_prefix<3, 1>([0xaabbcc0000000000000000000000000000000000000000000000000000000000]) }",
+                64,
+                true,
+                "out.store_word(at: 0, value: self.id)\nout.store_word(at: 32, value: 64)\nself.bytes.encode(out.tail(64))",
+                dynamic,
+            ),
+        ];
+        for (fields, value, head, is_dynamic, handwritten_encode, expected) in cases {
+            let record = format!("struct Payload {{ {fields} }}");
+            let handwritten_size = if is_dynamic {
+                "Self::HEAD_SIZE + self.bytes.payload_size()"
+            } else {
+                "Self::HEAD_SIZE"
+            };
+            let manual = format!(
+                r#"
+{record}
+impl AbiSize for Payload {{
+    const HEAD_SIZE: u256 = {head}
+    const IS_DYNAMIC: bool = {is_dynamic}
+    fn payload_size(self) -> u256 {{ {handwritten_size} }}
+}}
+impl Encode<Sol> for Payload {{
+    fn encode(own self, _ out: AbiFrame) {{ {handwritten_encode} }}
+}}
+"#
+            );
+            for declaration in [
+                format!(
+                    "#[generate(std::derive::abi_size)]\n#[generate(std::derive::abi_encode)]\n{record}"
+                ),
+                format!("#[abi]\n{record}"),
+                manual,
+            ] {
+                let source =
+                    include_str!("../../driver/tests/fixtures/four_clients_runtime_payload.fe.in")
+                        .replace("DECLARATION", &declaration)
+                        .replace("VALUE", value);
+                let harness =
+                    FeContractHarness::compile("C", &source).expect("compile payload twin");
+                let mut instance = harness.deploy_instance().expect("deploy payload twin");
+                let error = instance
+                    .call_function("payload()", &[], ExecutionOptions::default())
+                    .expect_err("raw encoded payload revert");
+                let HarnessError::Revert(bytes) = error else {
+                    panic!("{error:?}")
+                };
+                assert_eq!(
+                    bytes.0, expected,
+                    "fields={fields} declaration={declaration}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn custom_errors_include_reachable_reverts_only() {
         let code = r#"
@@ -2112,5 +2868,983 @@ pub contract EncodeMsgAbiProbe {
             "EncodeMsgAbiProbe",
         );
         assert!(entries.iter().any(|e| e["name"] == "probe"));
+    }
+
+    const EVENT_TOPIC_TRANSFER: &str =
+        "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    const EVENT_TOPIC_PAUSED: &str =
+        "9e87fac88ff661f02d44f95383c817fece4bce600a3dab7a54406878b965e752";
+    const EVENT_TOPIC_NOTE: &str =
+        "91314f3d0f410da7dc2d8bd091ec2d373bdd4d9e26f30ada1a7131407c996b03";
+    const EVENT_TOPIC_MOVED: &str =
+        "a7782439b83e57044d60e67405bf17689b58e4edba6110dd5a0b65d532972d87";
+    const EVENT_TOPIC_LEDGER: &str =
+        "dbd8ea414a07837829ae10d7902b1399b3279692fe22434c3b62ea7b45cf594e";
+
+    /// Event contract shared by the generated, compiler and handwritten twins.
+    /// `INDEX(x)` wraps a value for an indexed field of the generated twin.
+    fn event_contract(declarations: &str, indexed_wrapper: bool) -> String {
+        let idx = |value: &str| {
+            if indexed_wrapper {
+                format!("std::evm::Indexed::new({value})")
+            } else {
+                value.to_string()
+            }
+        };
+        format!(
+            r#"
+use std::abi::{{Bytes, sol}}
+use std::evm::{{Address, Log, TopicValue}}
+{declarations}
+msg M {{
+    #[selector = sol("emitPaused()")]
+    EmitPaused {{}},
+    #[selector = sol("emitTransfer()")]
+    EmitTransfer {{}},
+    #[selector = sol("emitNote()")]
+    EmitNote {{}},
+    #[selector = sol("emitMoved()")]
+    EmitMoved {{}},
+    #[selector = sol("emitLedger()")]
+    EmitLedger {{}},
+}}
+pub contract C uses (log: mut Log) {{
+    recv M {{
+        EmitPaused {{}} uses (mut log) {{ log.emit(Paused {{}}) }}
+        EmitTransfer {{}} uses (mut log) {{
+            log.emit(Transfer {{ from: {from}, to: {to}, value: 500 }})
+        }}
+        EmitNote {{}} uses (mut log) {{
+            log.emit(Note {{
+                sender: {from},
+                id: 7,
+                body: std::abi::bytes_from_words_prefix<3, 1>([0xaabbcc0000000000000000000000000000000000000000000000000000000000]),
+            }})
+        }}
+        EmitMoved {{}} uses (mut log) {{
+            log.emit(Moved {{ who: {from}, n: 1, to: Point {{ x: 2, y: 3 }} }})
+        }}
+        EmitLedger {{}} uses (mut log) {{
+            log.emit(Ledger {{ a: {from}, b: {to}, c: {third}, amount: 9 }})
+        }}
+    }}
+}}
+"#,
+            from = idx("Address::new(0x11)"),
+            to = idx("Address::new(0x22)"),
+            third = idx("Address::new(0x33)"),
+        )
+    }
+
+    const GENERATED_EVENTS: &str = r#"
+#[abi]
+struct Point { x: u256, y: u256 }
+#[generate(std::derive::event_struct)]
+struct Paused {}
+#[generate(std::derive::event_struct)]
+struct Transfer { from: std::evm::Indexed<Address>, to: std::evm::Indexed<Address>, value: u256 }
+#[generate(std::derive::event_struct)]
+struct Note { sender: std::evm::Indexed<Address>, id: u256, body: Bytes }
+#[generate(std::derive::event_struct)]
+struct Moved { who: std::evm::Indexed<Address>, n: u256, to: Point }
+#[generate(std::derive::event_struct)]
+struct Ledger {
+    a: std::evm::Indexed<Address>,
+    b: std::evm::Indexed<Address>,
+    c: std::evm::Indexed<Address>,
+    amount: u256,
+}
+"#;
+
+    const COMPILER_EVENTS: &str = r#"
+#[abi]
+struct Point { x: u256, y: u256 }
+#[event]
+struct Paused {}
+#[event]
+struct Transfer {
+    #[indexed]
+    from: Address,
+    #[indexed]
+    to: Address,
+    value: u256,
+}
+#[event]
+struct Note {
+    #[indexed]
+    sender: Address,
+    id: u256,
+    body: Bytes,
+}
+#[event]
+struct Moved {
+    #[indexed]
+    who: Address,
+    n: u256,
+    to: Point,
+}
+#[event]
+struct Ledger {
+    #[indexed]
+    a: Address,
+    #[indexed]
+    b: Address,
+    #[indexed]
+    c: Address,
+    amount: u256,
+}
+"#;
+
+    // Every topic0 and data word is written out directly; nothing here uses
+    // the generator, the `#[event]` desugaring or the ABI encoder. Indexing is
+    // declared the way the JSON reads it: by the field's `Indexed` type.
+    fn handwritten_events() -> String {
+        format!(
+            r#"
+#[abi]
+struct Point {{ x: u256, y: u256 }}
+struct Paused {{}}
+impl std::evm::Event for Paused {{
+    const TOPIC0: u256 = 0x{EVENT_TOPIC_PAUSED}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        log.log1(data: core::ptr::MemBuffer::empty().span(), topic0: Self::TOPIC0)
+    }}
+}}
+struct Transfer {{ from: std::evm::Indexed<Address>, to: std::evm::Indexed<Address>, value: u256 }}
+impl std::evm::Event for Transfer {{
+    const TOPIC0: u256 = 0x{EVENT_TOPIC_TRANSFER}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        let buf = core::ptr::MemBuffer::alloc(32)
+        unsafe {{ core::abi::store_word(ptr: buf.ptr(), value: self.value) }}
+        log.log3(data: buf.span(), topic0: Self::TOPIC0, topic1: self.from.as_topic(), topic2: self.to.as_topic())
+    }}
+}}
+struct Note {{ sender: std::evm::Indexed<Address>, id: u256, body: Bytes }}
+impl std::evm::Event for Note {{
+    const TOPIC0: u256 = 0x{EVENT_TOPIC_NOTE}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        let buf = core::ptr::MemBuffer::alloc(128)
+        unsafe {{
+            core::abi::store_word(ptr: buf.ptr(), value: self.id)
+            core::abi::store_word(ptr: core::ptr::offset_bytes(buf.ptr(), 32), value: 64)
+            core::abi::store_word(ptr: core::ptr::offset_bytes(buf.ptr(), 64), value: 3)
+            core::abi::store_word(ptr: core::ptr::offset_bytes(buf.ptr(), 96), value: 0xaabbcc0000000000000000000000000000000000000000000000000000000000)
+        }}
+        log.log2(data: buf.span(), topic0: Self::TOPIC0, topic1: self.sender.as_topic())
+    }}
+}}
+struct Moved {{ who: std::evm::Indexed<Address>, n: u256, to: Point }}
+impl std::evm::Event for Moved {{
+    const TOPIC0: u256 = 0x{EVENT_TOPIC_MOVED}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        let buf = core::ptr::MemBuffer::alloc(96)
+        unsafe {{
+            core::abi::store_word(ptr: buf.ptr(), value: self.n)
+            core::abi::store_word(ptr: core::ptr::offset_bytes(buf.ptr(), 32), value: self.to.x)
+            core::abi::store_word(ptr: core::ptr::offset_bytes(buf.ptr(), 64), value: self.to.y)
+        }}
+        log.log2(data: buf.span(), topic0: Self::TOPIC0, topic1: self.who.as_topic())
+    }}
+}}
+struct Ledger {{ a: std::evm::Indexed<Address>, b: std::evm::Indexed<Address>, c: std::evm::Indexed<Address>, amount: u256 }}
+impl std::evm::Event for Ledger {{
+    const TOPIC0: u256 = 0x{EVENT_TOPIC_LEDGER}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        let buf = core::ptr::MemBuffer::alloc(32)
+        unsafe {{ core::abi::store_word(ptr: buf.ptr(), value: self.amount) }}
+        log.log4(
+            data: buf.span(),
+            topic0: Self::TOPIC0,
+            topic1: self.a.as_topic(),
+            topic2: self.b.as_topic(),
+            topic3: self.c.as_topic(),
+        )
+    }}
+}}
+"#
+        )
+    }
+
+    fn event_json_inputs(entries: &[Value], name: &str) -> Value {
+        let matching = entries
+            .iter()
+            .filter(|entry| entry["type"] == "event" && entry["name"] == name)
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1, "event `{name}` in {entries:?}");
+        assert_eq!(matching[0]["anonymous"], false);
+        matching[0]["inputs"].clone()
+    }
+
+    fn address_word(low: u8) -> Vec<u8> {
+        let mut word = vec![0u8; 32];
+        word[31] = low;
+        word
+    }
+
+    fn u256_word(value: u8) -> Vec<u8> {
+        address_word(value)
+    }
+
+    #[test]
+    fn abi_event_runtime_and_json_match_literal_oracles() {
+        use contract_harness::{ExecutionOptions, FeContractHarness};
+
+        let handwritten = handwritten_events();
+        let twins = [
+            ("generated", event_contract(GENERATED_EVENTS, true)),
+            ("compiler", event_contract(COMPILER_EVENTS, false)),
+            ("handwritten", event_contract(&handwritten, true)),
+        ];
+        let topic = |hex_text: &str| hex::decode(hex_text).unwrap();
+        let mut note_data = Vec::new();
+        for word in [7u8, 64, 3] {
+            note_data.extend(u256_word(word));
+        }
+        let mut tail = vec![0u8; 32];
+        tail[..3].copy_from_slice(&[0xaa, 0xbb, 0xcc]);
+        note_data.extend(tail);
+        let moved_data = [1u8, 2, 3]
+            .iter()
+            .flat_map(|w| u256_word(*w))
+            .collect::<Vec<_>>();
+        // (call, topics, data), each written out from `cast keccak`/`cast abi-encode`.
+        struct ExpectedLog {
+            call: &'static str,
+            topics: Vec<Vec<u8>>,
+            data: Vec<u8>,
+        }
+        let log = |call, topics, data| ExpectedLog { call, topics, data };
+        let expected = vec![
+            log("emitPaused()", vec![topic(EVENT_TOPIC_PAUSED)], Vec::new()),
+            log(
+                "emitTransfer()",
+                vec![
+                    topic(EVENT_TOPIC_TRANSFER),
+                    address_word(0x11),
+                    address_word(0x22),
+                ],
+                u256_word_u16(500),
+            ),
+            log(
+                "emitNote()",
+                vec![topic(EVENT_TOPIC_NOTE), address_word(0x11)],
+                note_data,
+            ),
+            log(
+                "emitMoved()",
+                vec![topic(EVENT_TOPIC_MOVED), address_word(0x11)],
+                moved_data,
+            ),
+            log(
+                "emitLedger()",
+                vec![
+                    topic(EVENT_TOPIC_LEDGER),
+                    address_word(0x11),
+                    address_word(0x22),
+                    address_word(0x33),
+                ],
+                u256_word(9),
+            ),
+        ];
+        let expected_json = serde_json::json!({
+            "Paused": [],
+            "Transfer": [
+                {"name":"from","type":"address","indexed":true},
+                {"name":"to","type":"address","indexed":true},
+                {"name":"value","type":"uint256","indexed":false}
+            ],
+            "Note": [
+                {"name":"sender","type":"address","indexed":true},
+                {"name":"id","type":"uint256","indexed":false},
+                {"name":"body","type":"bytes","indexed":false}
+            ],
+            "Moved": [
+                {"name":"who","type":"address","indexed":true},
+                {"name":"n","type":"uint256","indexed":false},
+                {"name":"to","type":"tuple","indexed":false,"components":[
+                    {"name":"x","type":"uint256"},{"name":"y","type":"uint256"}
+                ]}
+            ],
+            "Ledger": [
+                {"name":"a","type":"address","indexed":true},
+                {"name":"b","type":"address","indexed":true},
+                {"name":"c","type":"address","indexed":true},
+                {"name":"amount","type":"uint256","indexed":false}
+            ],
+        });
+        for (label, source) in &twins {
+            let entries = abi_entries(source, "C");
+            assert_eq!(
+                entries.iter().filter(|e| e["type"] == "event").count(),
+                5,
+                "{label}: {entries:?}"
+            );
+            for (name, inputs) in expected_json.as_object().unwrap() {
+                assert_eq!(
+                    &event_json_inputs(&entries, name),
+                    inputs,
+                    "{label}: event {name}"
+                );
+            }
+            let harness = FeContractHarness::compile("C", source)
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            let mut instance = harness.deploy_instance().expect("deploy event twin");
+            for ExpectedLog { call, topics, data } in &expected {
+                let calldata = selector_for_signature(call).to_be_bytes();
+                let outcome = instance
+                    .call_raw_with_logs(&calldata, ExecutionOptions::default())
+                    .unwrap_or_else(|error| panic!("{label} {call}: {error:?}"));
+                assert_eq!(outcome.raw_logs.len(), 1, "{label} {call}");
+                let log = &outcome.raw_logs[0];
+                let actual_topics = log
+                    .data
+                    .topics()
+                    .iter()
+                    .map(|topic| topic.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+                assert_eq!(&actual_topics, topics, "{label} {call} topics");
+                assert_eq!(
+                    log.data.data.as_ref(),
+                    data.as_slice(),
+                    "{label} {call} data"
+                );
+            }
+        }
+    }
+
+    fn u256_word_u16(value: u16) -> Vec<u8> {
+        let mut word = vec![0u8; 32];
+        word[30..].copy_from_slice(&value.to_be_bytes());
+        word
+    }
+
+    fn event_names(entries: &[Value]) -> Vec<String> {
+        entries
+            .iter()
+            .filter(|entry| entry["type"] == "event")
+            .map(|entry| entry["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    const GENERATED_EMIT_SOURCE: &str = r#"
+use std::abi::sol
+use std::evm::{Address, Event, Indexed, Log}
+#[generate(std::derive::event_struct)]
+struct Direct { who: Indexed<Address>, value: u256 }
+#[generate(std::derive::event_struct)]
+struct ViaLog { value: u256 }
+#[generate(std::derive::event_struct)]
+struct ViaHelper { value: u256 }
+#[generate(std::derive::event_struct)]
+struct Never { value: u256 }
+#[generate(std::derive::event_struct)]
+struct Constructed { value: u256 }
+fn emit_event<E: Event>(_ event: own E) uses (log: mut Log) { log.emit(event) }
+fn construct_only() { let _ = Constructed { value: 1 } }
+msg M {
+    #[selector = sol("go()")]
+    Go {},
+}
+pub contract C uses (log: mut Log) {
+    recv M {
+        Go {} uses (mut log) {
+            construct_only()
+            Direct { who: Indexed::new(Address::new(1)), value: 2 }.emit(mut log)
+            log.emit(ViaLog { value: 3 })
+            emit_event(ViaHelper { value: 4 })
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn event_abi_discovery_uses_proofs_for_generated_direct_log_and_generic_emits() {
+        let entries = abi_entries(GENERATED_EMIT_SOURCE, "C");
+        assert_eq!(
+            event_names(&entries),
+            ["Direct", "ViaLog", "ViaHelper"],
+            "{entries:?}"
+        );
+        assert_eq!(
+            event_json_inputs(&entries, "Direct"),
+            serde_json::json!([
+                {"name":"who","type":"address","indexed":true},
+                {"name":"value","type":"uint256","indexed":false}
+            ])
+        );
+    }
+
+    #[test]
+    fn event_topic0_that_disagrees_with_the_signature_is_refused() {
+        let source = format!(
+            r#"
+use std::abi::sol
+use std::evm::{{Address, Log}}
+struct Transfer {{ value: u256 }}
+impl std::evm::Event for Transfer {{
+    const TOPIC0: u256 = 0x{EVENT_TOPIC_TRANSFER}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        log.log1(data: core::ptr::MemBuffer::empty().span(), topic0: Self::TOPIC0)
+    }}
+}}
+msg M {{
+    #[selector = sol("go()")]
+    Go {{}},
+}}
+pub contract C uses (log: mut Log) {{
+    recv M {{ Go {{}} uses (mut log) {{ log.emit(Transfer {{ value: 1 }}) }} }}
+}}
+"#
+        );
+        let error = generate_test_abi_result(&source, "C")
+            .err()
+            .expect("noncanonical event topic");
+        assert!(
+            error.contains("event TOPIC0 does not match canonical signature `Transfer(uint256)`"),
+            "{error}"
+        );
+        // The same body with the matching hash is accepted.
+        let accepted = source.replace(EVENT_TOPIC_TRANSFER, &cast_topic("Transfer(uint256)"));
+        let entries = abi_entries(&accepted, "C");
+        assert_eq!(event_names(&entries), ["Transfer"]);
+    }
+
+    fn cast_topic(signature: &str) -> String {
+        let mut hasher = Keccak::v256();
+        let mut output = [0u8; 32];
+        hasher.update(signature.as_bytes());
+        hasher.finalize(&mut output);
+        hex::encode(output)
+    }
+
+    #[test]
+    fn event_discovery_ignores_lookalike_emit_traits_and_unindexed_lookalike_wrappers() {
+        let source = r#"
+use std::abi::sol
+use std::evm::{Address, Log}
+mod lookalike {
+    pub trait Event { fn emit<L>(own self, _ log: mut L) }
+    pub struct Indexed<T> { pub value: T }
+}
+use lookalike::Event
+struct Fake { value: u256 }
+impl Event for Fake { fn emit<L>(own self, _ log: mut L) { let _ = self.value } }
+msg M {
+    #[selector = sol("go()")]
+    Go {},
+}
+pub contract C uses (log: mut Log) {
+    recv M { Go {} uses (mut log) { Fake { value: 1 }.emit(mut log) } }
+}
+"#;
+        assert!(event_names(&abi_entries(source, "C")).is_empty());
+
+        // A same-named wrapper does not become the canonical indexed owner:
+        // its field stays an ordinary tuple-shaped data field.
+        let wrapper = format!(
+            r#"
+use std::abi::sol
+use std::evm::{{Address, Log}}
+mod lookalike {{ pub struct Indexed<T> {{ pub value: T }} }}
+struct Trade {{ who: lookalike::Indexed<u256> }}
+impl std::evm::Event for Trade {{
+    const TOPIC0: u256 = 0x{}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        log.log1(data: core::ptr::MemBuffer::empty().span(), topic0: Self::TOPIC0)
+    }}
+}}
+msg M {{
+    #[selector = sol("go()")]
+    Go {{}},
+}}
+pub contract C uses (log: mut Log) {{
+    recv M {{ Go {{}} uses (mut log) {{ log.emit(Trade {{ who: lookalike::Indexed {{ value: 1 }} }}) }} }}
+}}
+"#,
+            cast_topic("Trade((uint256))")
+        );
+        let entries = abi_entries(&wrapper, "C");
+        let inputs = event_json_inputs(&entries, "Trade");
+        assert_eq!(inputs[0]["type"], "tuple", "{inputs}");
+        assert_eq!(inputs[0]["indexed"], false, "{inputs}");
+    }
+
+    #[test]
+    fn event_field_proof_is_sealed_against_user_claims_of_indexing() {
+        let source = r#"
+use std::derive::EventField
+struct Claim { value: u256 }
+impl EventField for Claim {
+    const IS_INDEXED: bool = true
+    const DATA_HEAD_SIZE: u256 = 0
+    fn data_dynamic_size(self) -> u256 { 0 }
+    fn emit_field(
+        own self,
+        _ out: core::abi::AbiFrame,
+        head_pos: u256,
+        tails: own core::abi::AbiFrame,
+    ) -> (core::abi::AbiFrame, u256) {
+        let _ = out
+        let _ = head_pos
+        (tails, self.value)
+    }
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = url::Url::parse("file:///tmp/event-field-seal.fe").unwrap();
+        let file = db.workspace().touch(&mut db, url, Some(source.to_string()));
+        let diagnostics = db.run_on_top_mod(db.top_mod(file));
+        let rendered = diagnostics.format_diags(&db);
+        assert!(
+            rendered.contains("`Claim` doesn't implement `EventFieldSeal`"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn event_discovery_respects_unused_and_invoked_closure_regions() {
+        for (body, expected) in [
+            ("let f = || log.emit(Quiet { value: 1 })\nlet _ = f", false),
+            ("let f = || log.emit(Quiet { value: 1 })\nf()", true),
+        ] {
+            let code = format!(
+                r#"
+use std::abi::sol
+use std::evm::Log
+#[generate(std::derive::event_struct)]
+struct Quiet {{ value: u256 }}
+msg M {{
+    #[selector = sol("go()")]
+    Go {{}},
+}}
+pub contract C uses (log: mut Log) {{
+    recv M {{ Go {{}} uses (mut log) {{ {body} }} }}
+}}
+"#
+            );
+            let entries = abi_entries(&code, "C");
+            assert_eq!(
+                event_names(&entries),
+                if expected {
+                    vec!["Quiet"]
+                } else {
+                    Vec::<&str>::new()
+                },
+                "body={body} entries={entries:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn event_json_refuses_more_than_three_indexed_fields() {
+        let source = format!(
+            r#"
+use std::abi::sol
+use std::evm::{{Indexed, Log}}
+struct Four {{
+    a: Indexed<u256>,
+    b: Indexed<u256>,
+    c: Indexed<u256>,
+    d: Indexed<u256>,
+}}
+impl std::evm::Event for Four {{
+    const TOPIC0: u256 = 0x{}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        log.log1(data: core::ptr::MemBuffer::empty().span(), topic0: Self::TOPIC0)
+    }}
+}}
+msg M {{
+    #[selector = sol("go()")]
+    Go {{}},
+}}
+pub contract C uses (log: mut Log) {{
+    recv M {{
+        Go {{}} uses (mut log) {{
+            log.emit(Four {{
+                a: Indexed::new(1),
+                b: Indexed::new(2),
+                c: Indexed::new(3),
+                d: Indexed::new(4),
+            }})
+        }}
+    }}
+}}
+"#,
+            cast_topic("Four(uint256,uint256,uint256,uint256)")
+        );
+        let error = generate_test_abi_result(&source, "C")
+            .err()
+            .expect("four indexed fields have no log encoding");
+        assert!(error.contains("has 4 indexed fields; at most 3"), "{error}");
+    }
+
+    /// The message set shared by the generated, `msg` and handwritten twins.
+    /// `ENCODE` is the expression that builds the `Sum` variant to encode.
+    fn msg_contract(declarations: &str, grouped: bool, sum_path: &str) -> String {
+        let (open, close) = if grouped {
+            ("recv M {", "}")
+        } else {
+            ("recv {", "}")
+        };
+        format!(
+            r#"
+use std::abi::{{Bytes, sol}}
+use std::evm::{{Address, encode_msg_calldata, revert_bytes}}
+{declarations}
+pub contract C {{
+    {open}
+        Probe {{}} {{
+            revert_bytes(encode_msg_calldata({sum_path} {{ a: 3, b: 4 }}).span())
+        }}
+        Quiet {{}} {{}}
+        Sum {{ a, b }} -> u256 {{ a + b }}
+        Transfer {{ to, amount }} -> bool {{
+            let _ = to
+            amount == 500
+        }}
+        Note {{ id, body }} -> u256 {{ id + body.len() as u256 }}
+    {close}
+}}
+"#
+        )
+    }
+
+    // The record-init field-list splice a generated `Decode` needs does not
+    // exist yet, so each decode half is written out; size, encoding and the
+    // message identity are generated.
+    const GENERATED_MSGS: &str = r#"
+use core::abi::{AbiDecoder, ByteInput, Decode, decode_field}
+use core::meta::{Code, Item, Record}
+use std::abi::Sol
+use std::derive::{msg_variant, sol_selector}
+const fn returning_u256(_ record: Record) -> Code<Item> {
+    let selector = sol_selector(record)
+    quote {
+        impl core::message::MsgVariant<std::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ${selector}
+            type Return = u256
+        }
+    }
+}
+const fn returning_bool(_ record: Record) -> Code<Item> {
+    let selector = sol_selector(record)
+    quote {
+        impl core::message::MsgVariant<std::abi::Sol> for ${record} {
+            const SELECTOR: u32 = ${selector}
+            type Return = bool
+        }
+    }
+}
+#[generate(std::derive::abi_size)]
+#[generate(std::derive::abi_encode)]
+#[generate(msg_variant)]
+struct Probe {}
+impl Decode<Sol> for Probe {
+    fn decode_payload<D: AbiDecoder<Sol>, I: ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let _ = d
+        let _ = input
+        Self {}
+    }
+}
+#[generate(std::derive::abi_size)]
+#[generate(std::derive::abi_encode)]
+#[generate(msg_variant)]
+struct Quiet {}
+impl Decode<Sol> for Quiet {
+    fn decode_payload<D: AbiDecoder<Sol>, I: ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let _ = d
+        let _ = input
+        Self {}
+    }
+}
+#[generate(std::derive::abi_size)]
+#[generate(std::derive::abi_encode)]
+#[generate(returning_u256)]
+struct Sum { a: u256, b: u256 }
+impl Decode<Sol> for Sum {
+    fn decode_payload<D: AbiDecoder<Sol>, I: ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let a = decode_field<Sol, u256, D, I>(mut d, input)
+        let b = decode_field<Sol, u256, D, I>(mut d, input)
+        Self { a, b }
+    }
+}
+#[generate(std::derive::abi_size)]
+#[generate(std::derive::abi_encode)]
+#[generate(returning_bool)]
+struct Transfer { to: Address, amount: u256 }
+impl Decode<Sol> for Transfer {
+    fn decode_payload<D: AbiDecoder<Sol>, I: ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let to = decode_field<Sol, Address, D, I>(mut d, input)
+        let amount = decode_field<Sol, u256, D, I>(mut d, input)
+        Self { to, amount }
+    }
+}
+#[generate(std::derive::abi_size)]
+#[generate(std::derive::abi_encode)]
+#[generate(returning_u256)]
+struct Note { id: u256, body: Bytes }
+impl Decode<Sol> for Note {
+    fn decode_payload<D: AbiDecoder<Sol>, I: ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let id = decode_field<Sol, u256, D, I>(mut d, input)
+        let body = decode_field<Sol, Bytes, D, I>(mut d, input)
+        Self { id, body }
+    }
+}
+"#;
+
+    const LEGACY_MSGS: &str = r#"
+msg M {
+    #[selector = sol("Probe()")]
+    Probe {},
+    #[selector = sol("Quiet()")]
+    Quiet {},
+    #[selector = sol("Sum(uint256,uint256)")]
+    Sum { a: u256, b: u256 } -> u256,
+    #[selector = sol("Transfer(address,uint256)")]
+    Transfer { to: Address, amount: u256 } -> bool,
+    #[selector = sol("Note(uint256,bytes)")]
+    Note { id: u256, body: Bytes } -> u256,
+}
+"#;
+
+    // Selectors are literals from `cast sig`. The empty and two-word variants
+    // carry a fully handwritten codec; the others use the compiler's `#[abi]`
+    // codec with a handwritten `MsgVariant`.
+    const HANDWRITTEN_MSGS: &str = r#"
+struct Probe {}
+impl core::abi::AbiSize for Probe {
+    const HEAD_SIZE: u256 = 0
+    const IS_DYNAMIC: bool = false
+}
+impl core::abi::Encode<std::abi::Sol> for Probe {
+    fn encode(own self, _ out: core::abi::AbiFrame) { let _ = out }
+}
+impl core::abi::Decode<std::abi::Sol> for Probe {
+    fn decode_payload<D: core::abi::AbiDecoder<std::abi::Sol>, I: core::abi::ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let _ = d
+        let _ = input
+        Self {}
+    }
+}
+impl core::message::MsgVariant<std::abi::Sol> for Probe {
+    const SELECTOR: u32 = 0xab5dd677
+    type Return = ()
+}
+struct Quiet {}
+impl core::abi::AbiSize for Quiet {
+    const HEAD_SIZE: u256 = 0
+    const IS_DYNAMIC: bool = false
+}
+impl core::abi::Encode<std::abi::Sol> for Quiet {
+    fn encode(own self, _ out: core::abi::AbiFrame) { let _ = out }
+}
+impl core::abi::Decode<std::abi::Sol> for Quiet {
+    fn decode_payload<D: core::abi::AbiDecoder<std::abi::Sol>, I: core::abi::ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let _ = d
+        let _ = input
+        Self {}
+    }
+}
+impl core::message::MsgVariant<std::abi::Sol> for Quiet {
+    const SELECTOR: u32 = 0x018c59c6
+    type Return = ()
+}
+struct Sum { a: u256, b: u256 }
+impl core::abi::AbiSize for Sum {
+    const HEAD_SIZE: u256 = 64
+    const IS_DYNAMIC: bool = false
+}
+impl core::abi::Encode<std::abi::Sol> for Sum {
+    fn encode(own self, _ out: core::abi::AbiFrame) {
+        out.store_word(at: 0, value: self.a)
+        out.store_word(at: 32, value: self.b)
+    }
+}
+impl core::abi::Decode<std::abi::Sol> for Sum {
+    fn decode_payload<D: core::abi::AbiDecoder<std::abi::Sol>, I: core::abi::ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let a = u256::decode_payload(mut d, input)
+        let b = u256::decode_payload(mut d, input)
+        Self { a, b }
+    }
+}
+impl core::message::MsgVariant<std::abi::Sol> for Sum {
+    const SELECTOR: u32 = 0x17ef4e4b
+    type Return = u256
+}
+#[abi]
+struct Transfer { to: Address, amount: u256 }
+impl core::message::MsgVariant<std::abi::Sol> for Transfer {
+    const SELECTOR: u32 = 0x69ca02dd
+    type Return = bool
+}
+#[abi]
+struct Note { id: u256, body: Bytes }
+impl core::message::MsgVariant<std::abi::Sol> for Note {
+    const SELECTOR: u32 = 0x475da781
+    type Return = u256
+}
+"#;
+
+    #[test]
+    fn abi_msg_runtime_and_json_match_literal_oracles() {
+        use contract_harness::{ExecutionOptions, FeContractHarness, HarnessError};
+
+        let twins = [
+            ("generated", msg_contract(GENERATED_MSGS, false, "Sum")),
+            ("msg", msg_contract(LEGACY_MSGS, true, "M::Sum")),
+            ("handwritten", msg_contract(HANDWRITTEN_MSGS, false, "Sum")),
+        ];
+        let call =
+            |selector: &str, payload: &str| hex::decode(format!("{selector}{payload}")).unwrap();
+        let sum_payload = concat!(
+            "0000000000000000000000000000000000000000000000000000000000000003",
+            "0000000000000000000000000000000000000000000000000000000000000004"
+        );
+        let transfer_payload = |amount: &str| {
+            format!("0000000000000000000000000000000000000000000000000000000000000022{amount}")
+        };
+        let amount_500 = "00000000000000000000000000000000000000000000000000000000000001f4";
+        let amount_501 = "00000000000000000000000000000000000000000000000000000000000001f5";
+        let note_payload = concat!(
+            "0000000000000000000000000000000000000000000000000000000000000007",
+            "0000000000000000000000000000000000000000000000000000000000000040",
+            "0000000000000000000000000000000000000000000000000000000000000003",
+            "aabbcc0000000000000000000000000000000000000000000000000000000000"
+        );
+        let word = |value: u8| {
+            let mut word = vec![0u8; 32];
+            word[31] = value;
+            word
+        };
+        let expected_json = serde_json::json!({
+            "Probe": [[], []],
+            "Quiet": [[], []],
+            "Sum": [
+                [{"name":"a","type":"uint256"},{"name":"b","type":"uint256"}],
+                [{"name":"","type":"uint256"}]
+            ],
+            "Transfer": [
+                [{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],
+                [{"name":"","type":"bool"}]
+            ],
+            "Note": [
+                [{"name":"id","type":"uint256"},{"name":"body","type":"bytes"}],
+                [{"name":"","type":"uint256"}]
+            ],
+        });
+        for (label, source) in &twins {
+            let entries = abi_entries(source, "C");
+            let functions = entries
+                .iter()
+                .filter(|entry| entry["type"] == "function")
+                .collect::<Vec<_>>();
+            assert_eq!(functions.len(), 5, "{label}: {entries:?}");
+            for (name, io) in expected_json.as_object().unwrap() {
+                let function = functions
+                    .iter()
+                    .find(|function| function["name"] == *name)
+                    .unwrap_or_else(|| panic!("{label}: function {name} in {entries:?}"));
+                assert_eq!(function["inputs"], io[0], "{label}: {name} inputs");
+                assert_eq!(function["outputs"], io[1], "{label}: {name} outputs");
+            }
+            let harness = FeContractHarness::compile("C", source)
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            let mut instance = harness.deploy_instance().expect("deploy message twin");
+            let options = ExecutionOptions::default();
+
+            // encode_msg_calldata: selector and payload bytes.
+            let probe = instance
+                .call_raw(&call("ab5dd677", ""), options)
+                .expect_err("probe reverts with the encoded calldata");
+            let HarnessError::Revert(bytes) = probe else {
+                panic!("{label}: {probe:?}")
+            };
+            assert_eq!(
+                bytes.0,
+                call("17ef4e4b", sum_payload),
+                "{label} encoded Sum"
+            );
+
+            // Unit return, then decoded arguments and returned words.
+            let quiet = instance
+                .call_raw(&call("018c59c6", ""), options)
+                .unwrap_or_else(|error| panic!("{label} Quiet: {error:?}"));
+            assert!(quiet.return_data.is_empty(), "{label} Quiet");
+            for (selector, payload, expected) in [
+                ("17ef4e4b", sum_payload.to_string(), word(7)),
+                ("69ca02dd", transfer_payload(amount_500), word(1)),
+                ("69ca02dd", transfer_payload(amount_501), word(0)),
+                ("475da781", note_payload.to_string(), word(10)),
+            ] {
+                let result = instance
+                    .call_raw(&call(selector, &payload), options)
+                    .unwrap_or_else(|error| panic!("{label} {selector}: {error:?}"));
+                assert_eq!(result.return_data, expected, "{label} {selector}");
+            }
+        }
+    }
+
+    #[test]
+    fn msg_json_emits_only_verified_canonical_selectors() {
+        let base = |selector: &str, ty: &str| {
+            format!(
+                r#"
+use std::abi::sol
+struct Sum {{ a: {ty}, b: {ty} }}
+impl core::abi::AbiSize for Sum {{
+    const HEAD_SIZE: u256 = 64
+    const IS_DYNAMIC: bool = false
+}}
+impl core::abi::Encode<std::abi::Sol> for Sum {{
+    fn encode(own self, _ out: core::abi::AbiFrame) {{ let _ = out }}
+}}
+impl core::abi::Decode<std::abi::Sol> for Sum {{
+    fn decode_payload<D: core::abi::AbiDecoder<std::abi::Sol>, I: core::abi::ByteInput>(_ d: mut D, _ input: I) -> Self {{
+        let a = {ty}::decode_payload(mut d, input)
+        let b = {ty}::decode_payload(mut d, input)
+        Self {{ a, b }}
+    }}
+}}
+impl core::message::MsgVariant<std::abi::Sol> for Sum {{
+    const SELECTOR: u32 = {selector}
+    type Return = ()
+}}
+pub contract C {{
+    recv {{
+        Sum {{ a, b }} {{
+            let _ = a
+            let _ = b
+        }}
+    }}
+}}
+"#
+            )
+        };
+        let functions = |source: &str| {
+            let result = generate_test_abi_result(source, "C").expect("abi");
+            let entries: Vec<Value> = serde_json::from_str(&result.json).unwrap();
+            (
+                entries.iter().filter(|e| e["type"] == "function").count(),
+                result.warnings,
+            )
+        };
+        // The canonical selector of the declared name and field types is emitted.
+        let (count, warnings) = functions(&base("0x17ef4e4b", "u256"));
+        assert_eq!((count, warnings.len()), (1, 0), "{warnings:?}");
+        // The same hash does not describe other field types: name and hash are
+        // only bytes, so the entry is withheld with the existing warning.
+        let (count, warnings) = functions(&base("0x17ef4e4b", "bool"));
+        assert_eq!(count, 0);
+        assert!(
+            warnings[0].contains("manual `MsgVariant` impls"),
+            "{warnings:?}"
+        );
+        // A selector for another name is withheld too.
+        let (count, warnings) = functions(&base("sol(\"sum(uint256,uint256)\")", "u256"));
+        assert_eq!(count, 0);
+        assert!(
+            warnings[0].contains("manual `MsgVariant` impls"),
+            "{warnings:?}"
+        );
     }
 }

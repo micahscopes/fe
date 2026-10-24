@@ -1,0 +1,19 @@
+use core::abi::{AbiFrame, AbiSize, Bytes, Encode}
+use std::abi::{Sol, sol}
+use std::evm::{encode_abi_payload, revert_bytes}
+
+DECLARATION
+
+msg M {
+    #[selector = sol("payload()")]
+    Payload {}
+}
+pub contract C {
+    recv M {
+        Payload {} {
+            let value = VALUE
+            let encoded = encode_abi_payload(value)
+            revert_bytes(encoded.span())
+        }
+    }
+}

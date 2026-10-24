@@ -422,6 +422,42 @@ impl<'db> Expr<'db> {
     ) -> ExprId {
         use common::generation::{FrozenCode, FrozenCodeKind};
         match code {
+            FrozenCode::RecordName { name, .. } => {
+                let db = ctxt.f_ctxt.db();
+                let chunks = super::signature_name_chunks(name);
+                let mut elems = chunks
+                    .into_iter()
+                    .map(|chunk| {
+                        ctxt.push_expr(
+                            Self::Lit(LitKind::String(crate::hir_def::StringId::new(
+                                db,
+                                chunk.to_string(),
+                            ))),
+                            HirOrigin::raw(origin_ast),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                while elems.len() > 16 {
+                    elems = elems
+                        .chunks(16)
+                        .map(|chunk| {
+                            if let [single] = chunk {
+                                *single
+                            } else {
+                                ctxt.push_expr(
+                                    Self::Tuple(chunk.to_vec()),
+                                    HirOrigin::raw(origin_ast),
+                                )
+                            }
+                        })
+                        .collect();
+                }
+                if let [single] = elems.as_slice() {
+                    *single
+                } else {
+                    ctxt.push_expr(Self::Tuple(elems), HirOrigin::raw(origin_ast))
+                }
+            }
             FrozenCode::VariantBinderField {
                 record,
                 group,

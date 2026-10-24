@@ -2214,3 +2214,275 @@ const fn make(_ record: Record) -> Code<Item> {
     );
     assert!(db.generation_inputs().functions(&db).is_empty());
 }
+
+#[test]
+fn generated_abi_size_has_independent_empty_two_word_and_nested_layouts() {
+    let (db, file) = input(include_str!("fixtures/four_clients_layout.fe"));
+    let output = prepare_file(&db, file).unwrap().unwrap();
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    let module = output.top_mod(output_file);
+    assert!(output.run_on_top_mod(module).is_empty());
+    let function = module
+        .all_funcs(&output)
+        .iter()
+        .find(|f| {
+            f.name(&output)
+                .to_opt()
+                .is_some_and(|name| name.data(&output) == "check_layout")
+        })
+        .unwrap();
+    let owner = BodyOwner::Func(*function, None);
+    let result = eval_body_owner_const(
+        &output,
+        owner,
+        GenericSubst::for_body_owner(&output, owner, vec![]),
+    );
+    let EvalOutcome::Ready(value) = result else {
+        panic!("{result:?}")
+    };
+    assert!(matches!(
+        value.value(&output),
+        SemConstValue::Scalar {
+            value: SemConstScalar::Bool(true),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn generated_error_selector_and_layout_match_independent_signatures() {
+    let (db, file) = input(include_str!("fixtures/four_clients_error.fe"));
+    let output = prepare_file(&db, file).unwrap().unwrap();
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    let module = output.top_mod(output_file);
+    assert!(output.run_on_top_mod(module).is_empty());
+    let function = module
+        .all_funcs(&output)
+        .iter()
+        .find(|f| {
+            f.name(&output)
+                .to_opt()
+                .is_some_and(|name| name.data(&output) == "check_error")
+        })
+        .unwrap();
+    let owner = BodyOwner::Func(*function, None);
+    let result = eval_body_owner_const(
+        &output,
+        owner,
+        GenericSubst::for_body_owner(&output, owner, vec![]),
+    );
+    let EvalOutcome::Ready(value) = result else {
+        panic!("{result:?}")
+    };
+    assert!(matches!(
+        value.value(&output),
+        SemConstValue::Scalar {
+            value: SemConstScalar::Bool(true),
+            ..
+        }
+    ));
+}
+
+fn prepared_check(source: &str, function_name: &str) -> bool {
+    let (db, file) = input(source);
+    let output = prepare_file(&db, file).unwrap().unwrap();
+    let output_file = output
+        .workspace()
+        .get(&output, &file.url(&db).unwrap())
+        .unwrap();
+    let module = output.top_mod(output_file);
+    assert!(!output.run_on_top_mod(module).has_errors(&output));
+    let function = module
+        .all_funcs(&output)
+        .iter()
+        .find(|f| {
+            f.name(&output)
+                .to_opt()
+                .is_some_and(|name| name.data(&output) == function_name)
+        })
+        .unwrap();
+    let owner = BodyOwner::Func(*function, None);
+    let result = eval_body_owner_const(
+        &output,
+        owner,
+        GenericSubst::for_body_owner(&output, owner, vec![]),
+    );
+    let EvalOutcome::Ready(value) = result else {
+        panic!("{result:?}")
+    };
+    matches!(
+        value.value(&output),
+        SemConstValue::Scalar {
+            value: SemConstScalar::Bool(true),
+            ..
+        }
+    )
+}
+
+#[test]
+fn generated_event_topic0_matches_independent_signatures() {
+    // The literals come from foundry `cast keccak`, not from Fe or this crate.
+    assert!(prepared_check(
+        include_str!("fixtures/four_clients_event.fe"),
+        "check_event"
+    ));
+}
+
+#[test]
+fn event_generation_refuses_before_publishing_and_accepts_the_limit() {
+    let event = |fields: &str| {
+        format!(
+            "use std::abi::Bytes\nuse std::derive::event_struct\nuse std::evm::Indexed\n#[generate(event_struct)]\nstruct E {{ {fields} }}\n"
+        )
+    };
+    let three = event("a: Indexed<u256>, b: Indexed<u256>, c: Indexed<u256>, d: u256");
+    let (db, file) = input(&three);
+    prepare_file(&db, file)
+        .unwrap()
+        .expect("three indexed fields are the limit and are accepted");
+    for (label, fields, cause) in [
+        (
+            "four indexed",
+            "a: Indexed<u256>, b: Indexed<u256>, c: Indexed<u256>, d: Indexed<u256>",
+            "Panicked",
+        ),
+        (
+            "dynamic topic",
+            "a: Indexed<Bytes>",
+            "query_field requires a satisfied FieldQuery::evaluate implementation",
+        ),
+        (
+            "pointer field",
+            "a: *u8",
+            "query_field requires a satisfied FieldQuery::evaluate implementation",
+        ),
+    ] {
+        let source = event(fields);
+        let (db, file) = input(&source);
+        let error = prepare_file(&db, file)
+            .err()
+            .unwrap_or_else(|| panic!("{label} must refuse generation"));
+        assert!(
+            error.cause.contains(cause),
+            "{label}: unexpected cause {}",
+            error.cause
+        );
+        assert!(
+            db.generation_inputs().functions(&db).is_empty(),
+            "{label} must publish nothing"
+        );
+    }
+}
+
+#[test]
+fn generated_msg_selectors_match_independent_signatures() {
+    // The literals come from foundry `cast sig`, not from Fe or this crate.
+    assert!(prepared_check(
+        include_str!("fixtures/four_clients_msg.fe"),
+        "check_msg"
+    ));
+}
+
+#[test]
+fn msg_generation_requires_the_ordinary_codec_and_composes_with_other_returns() {
+    let provider = "use core::meta::{Code, Item, Record}\nuse std::derive::sol_selector\nconst fn returning_bool(_ record: Record) -> Code<Item> {\n    let selector = sol_selector(record)\n    quote {\n        impl core::message::MsgVariant<std::abi::Sol> for ${record} {\n            const SELECTOR: u32 = ${selector}\n            type Return = bool\n        }\n    }\n}\n";
+    let decode = "impl core::abi::Decode<std::abi::Sol> for Check {\n    fn decode_payload<D: core::abi::AbiDecoder<std::abi::Sol>, I: core::abi::ByteInput>(_ d: mut D, _ input: I) -> Self {\n        let value = core::abi::decode_field<std::abi::Sol, u256, D, I>(mut d, input)\n        Self { value }\n    }\n}\n";
+    let check = "const fn check_ret() -> bool { <Check as core::message::MsgVariant<std::abi::Sol>>::SELECTOR == 0xcce3a419 }\n";
+    let ok = format!(
+        "{provider}#[generate(std::derive::abi_size)]\n#[generate(std::derive::abi_encode)]\n#[generate(returning_bool)]\nstruct Check {{ value: u256 }}\n{decode}{check}"
+    );
+    assert!(prepared_check(&ok, "check_ret"));
+    // Without Decode the complete generated implementation is refused: the
+    // selector and return are only a message once the codec exists.
+    let undecodable = format!(
+        "{provider}#[generate(std::derive::abi_size)]\n#[generate(std::derive::abi_encode)]\n#[generate(returning_bool)]\nstruct Check {{ value: u256 }}\n"
+    );
+    let (db, file) = input(&undecodable);
+    let error = prepare_file(&db, file)
+        .err()
+        .expect("no Decode, no message");
+    assert!(
+        error
+            .cause
+            .contains("`Check` doesn't implement `Decode<Sol>`"),
+        "{}",
+        error.cause
+    );
+    assert!(db.generation_inputs().functions(&db).is_empty());
+    // A desugared `#[abi]` record is not an authored input for a generator.
+    let abi =
+        format!("{provider}#[abi]\n#[generate(returning_bool)]\nstruct Check {{ value: u256 }}\n");
+    let (db, file) = input(&abi);
+    let error = prepare_file(&db, file)
+        .err()
+        .expect("abi record is not authored");
+    assert!(error.cause.contains("NotAuthored"), "{}", error.cause);
+}
+
+#[test]
+fn record_init_field_list_splice_is_not_expressible_yet() {
+    // A generated `Decode` builds `Self { f0: .., f1: .. }` from a fold over the
+    // fields. The fold can only carry a `Code<Expr>`, and the grammar accepts
+    // one `label: expr` per record-init entry, so an accumulated field list
+    // cannot be spliced back. This documents the gap; it is expected to change
+    // when a field-list splice exists.
+    let source = r#"use core::meta::{Code, Expr, Field, Item, Record, field_type}
+use std::derive::{FieldStep, fold_fields}
+struct Build {}
+impl FieldStep for Build {
+    const fn unit() -> Code<Expr> {
+        quote { Pair {} }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        quote { Pair { ${acc}, ${field}: 1 } }
+    }
+}
+const fn make(_ record: Record) -> Code<Item> {
+    let built = fold_fields<Build>(record)
+    quote { const fn built() -> u256 { let value = ${built}\n 0 } }
+}
+#[generate(make)]
+struct Pair { first: u256, second: u256 }
+"#;
+    let (db, file) = input(source);
+    let error = prepare_file(&db, file).err().expect("field-list splice");
+    assert!(
+        error.cause.contains("authored parse errors"),
+        "{}",
+        error.cause
+    );
+}
+
+#[test]
+fn generated_event_keeps_user_names_apart_from_generated_locals() {
+    // Field and type names that equal the generated locals and the generic
+    // parameter must not capture or be captured. The hash is from `cast keccak`
+    // of ten `uint256` fields.
+    let source = r#"use std::derive::event_struct
+use std::evm::{Event, Indexed}
+type L = u256
+#[generate(event_struct)]
+struct E {
+    log: Indexed<u256>,
+    out: u256,
+    tails: u256,
+    head_pos: u256,
+    data_buf: u256,
+    total: u256,
+    head_size: u256,
+    topic1: Indexed<u256>,
+    indexed_count: u256,
+    x: L,
+}
+const fn check_hygiene() -> bool {
+    <E as Event>::TOPIC0 == 0x7d6861bb0fe47458a65a413d857f050057227d2eb948eadb167c7a778a3f9779
+}
+"#;
+    assert!(prepared_check(source, "check_hygiene"));
+}

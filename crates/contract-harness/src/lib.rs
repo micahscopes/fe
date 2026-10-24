@@ -1198,6 +1198,22 @@ pub struct FeContractHarness {
     contract: ContractBytecode,
 }
 
+/// Prepare standalone memory input through the driver's shared immutable
+/// boundary before any diagnostics or backend consumes the program.
+fn prepare_memory_source(source: &str) -> Result<(DriverDataBase, Url), HarnessError> {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse(MEMORY_SOURCE_URL).expect("static URL is valid");
+    let file = db
+        .workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let db = match driver::generation::prepare_file(&db, file) {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) => db,
+        Err(error) => return Err(HarnessError::CompilerDiagnostics(error.to_string())),
+    };
+    Ok((db, url))
+}
+
 impl FeContractHarness {
     /// Convenience helper that uses default [`CompileOptions`].
     pub fn compile(contract_name: &str, source: &str) -> Result<Self, HarnessError> {
@@ -1210,17 +1226,14 @@ impl FeContractHarness {
         source: &str,
         options: CompileOptions,
     ) -> Result<Self, HarnessError> {
-        let mut db = DriverDataBase::default();
-        let url = Url::parse(MEMORY_SOURCE_URL).expect("static URL is valid");
-        db.workspace()
-            .touch(&mut db, url.clone(), Some(source.to_string()));
+        let (db, url) = prepare_memory_source(source)?;
         let file = db
             .workspace()
             .get(&db, &url)
             .expect("file should exist in workspace");
         let top_mod = db.top_mod(file);
         let diags = db.run_on_top_mod(top_mod);
-        if !diags.is_empty() {
+        if diags.has_errors(&db) {
             return Err(HarnessError::CompilerDiagnostics(diags.format_diags(&db)));
         }
         let bytecode =
@@ -1299,17 +1312,14 @@ impl FeContractHarness {
 
 /// Compiles the provided Fe source to Sonatina-generated runtime bytecode (hex-encoded).
 pub fn compile_runtime_sonatina_from_source(source: &str) -> Result<String, HarnessError> {
-    let mut db = DriverDataBase::default();
-    let url = Url::parse(MEMORY_SOURCE_URL).expect("static URL is valid");
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let (db, url) = prepare_memory_source(source)?;
     let file = db
         .workspace()
         .get(&db, &url)
         .expect("file should exist in workspace");
     let top_mod = db.top_mod(file);
     let diags = db.run_on_top_mod(top_mod);
-    if !diags.is_empty() {
+    if diags.has_errors(&db) {
         return Err(HarnessError::CompilerDiagnostics(diags.format_diags(&db)));
     }
 
@@ -1373,6 +1383,95 @@ pub fn bytes_to_string(bytes: &[u8]) -> Result<String, HarnessError> {
 #[allow(clippy::print_stderr)]
 mod tests {
     use super::*;
+
+    const GENERATED_MEMORY_SOURCE: &str = r#"
+use core::meta::{Code, Item, Record}
+use std::abi::sol
+const fn make(_ record: Record) -> Code<Item> {
+    quote { fn generated() -> u256 { 42 } }
+}
+#[generate(make)]
+struct Marker {}
+msg M {
+    #[selector = sol("answer()")]
+    Answer {} -> u256
+}
+pub contract C { recv M { Answer {} -> u256 { generated() } } }
+"#;
+
+    #[test]
+    fn standalone_harness_entrypoints_consume_the_same_prepared_view() {
+        let harness = FeContractHarness::compile("C", GENERATED_MEMORY_SOURCE)
+            .expect("prepare contract source");
+        let runtime = compile_runtime_sonatina_from_source(GENERATED_MEMORY_SOURCE)
+            .expect("prepare runtime source");
+        assert_eq!(harness.contract.runtime_bytecode, runtime);
+        let mut instance = harness
+            .deploy_instance()
+            .expect("deploy generated helper contract");
+        let result = instance
+            .call_function("answer()", &[], ExecutionOptions::default())
+            .expect("run generated helper");
+        assert_eq!(U256::from_be_slice(&result.return_data), U256::from(42u64));
+    }
+
+    #[test]
+    fn standalone_harness_preparation_preserves_provider_faults() {
+        let source = GENERATED_MEMORY_SOURCE.replace(
+            "quote { fn generated() -> u256 { 42 } }",
+            "let zero: u256 = 0\nlet n = 1 / zero\nquote { fn generated() -> u256 { ${n} } }",
+        );
+        for error in [
+            FeContractHarness::compile("C", &source)
+                .err()
+                .expect("contract provider fault"),
+            compile_runtime_sonatina_from_source(&source).expect_err("runtime provider fault"),
+        ] {
+            let HarnessError::CompilerDiagnostics(message) = error else {
+                panic!("{error:?}")
+            };
+            assert!(message.contains("division by zero"), "{message}");
+        }
+    }
+
+    #[test]
+    fn standalone_harness_warnings_succeed_and_ordinary_errors_refuse() {
+        let ordinary = GENERATED_MEMORY_SOURCE
+            .replace("#[generate(make)]", "")
+            .replace(
+                "struct Marker {}",
+                "struct Marker {}\nfn generated() -> u256 { 42 }",
+            );
+        let warning = format!(
+            "{ordinary}\nstruct Cell {{ word: u256 }}\nimpl Cell {{ fn get_mut(mut self) -> mut u256 {{ mut self.word }} }}\nfn var_of_mut(_ cell: mut Cell) {{ var w = cell.get_mut()\n w += 1 }}\n"
+        );
+        let (db, url) = prepare_memory_source(&warning).expect("ordinary warning input");
+        assert!(db.generation_inputs().requests(&db).is_empty());
+        let file = db.workspace().get(&db, &url).unwrap();
+        let diagnostics = db.run_on_top_mod(db.top_mod(file));
+        assert!(!diagnostics.has_errors(&db));
+        assert!(diagnostics.format_diags(&db).contains("warning[8-0121]"));
+        FeContractHarness::compile("C", &warning)
+            .expect("warnings do not reject contract compilation");
+        compile_runtime_sonatina_from_source(&warning)
+            .expect("warnings do not reject runtime compilation");
+        let invalid = ordinary.replace(
+            "fn generated() -> u256 { 42 }",
+            "fn generated() -> u256 { true }",
+        );
+        for error in [
+            FeContractHarness::compile("C", &invalid)
+                .err()
+                .expect("ordinary contract type error"),
+            compile_runtime_sonatina_from_source(&invalid)
+                .expect_err("ordinary runtime type error"),
+        ] {
+            let HarnessError::CompilerDiagnostics(message) = error else {
+                panic!("{error:?}")
+            };
+            assert!(message.contains("type mismatch"), "{message}");
+        }
+    }
 
     #[test]
     fn runtime_executes_osaka_clz() {

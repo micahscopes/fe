@@ -55,7 +55,7 @@ mod use_tree;
 
 // Signature names can exceed the supported inline-string width. Hashing accepts
 // tuples of fragments, so split names without changing their concatenated bytes.
-fn signature_name_chunks(name: &str) -> Vec<&str> {
+pub(crate) fn signature_name_chunks(name: &str) -> Vec<&str> {
     let mut chunks = Vec::new();
     let mut start = 0;
     for (offset, ch) in name.char_indices() {
@@ -1063,5 +1063,29 @@ impl<'db> IntegerId<'db> {
         };
 
         Self::new(ctxt.db(), int)
+    }
+}
+
+#[cfg(test)]
+mod signature_name_chunk_tests {
+    use super::signature_name_chunks;
+    use crate::analysis::ty::ty_def::MAX_INLINE_STRING_BYTES;
+
+    #[test]
+    fn chunks_preserve_utf8_at_inline_byte_boundaries() {
+        for value in [
+            "x".repeat(31),
+            "x".repeat(32),
+            format!("{}éSuffix", "x".repeat(30)),
+            format!("{}🦀Suffix", "x".repeat(29)),
+        ] {
+            let chunks = signature_name_chunks(&value);
+            assert_eq!(chunks.concat(), value);
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| chunk.len() <= MAX_INLINE_STRING_BYTES)
+            );
+        }
     }
 }

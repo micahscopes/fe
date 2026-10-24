@@ -1335,7 +1335,9 @@ impl ProviderResolutionMode {
     }
 }
 
-pub(crate) fn resolve_semantic_const_ref<'db>(
+/// Prepare an existing checked constant reference for the common evaluator.
+/// Associated constants retain their selected proof and prerequisite evidence.
+pub fn resolve_semantic_const_ref<'db>(
     db: &'db dyn HirAnalysisDb,
     const_ref: ConstRef<'db>,
     ty: TyId<'db>,
