@@ -2671,4 +2671,481 @@ pub contract EncodeMsgAbiProbe {
         );
         assert!(entries.iter().any(|e| e["name"] == "probe"));
     }
+
+    const EVENT_TOPIC_TRANSFER: &str =
+        "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    const EVENT_TOPIC_PAUSED: &str =
+        "9e87fac88ff661f02d44f95383c817fece4bce600a3dab7a54406878b965e752";
+    const EVENT_TOPIC_NOTE: &str =
+        "91314f3d0f410da7dc2d8bd091ec2d373bdd4d9e26f30ada1a7131407c996b03";
+    const EVENT_TOPIC_MOVED: &str =
+        "a7782439b83e57044d60e67405bf17689b58e4edba6110dd5a0b65d532972d87";
+    const EVENT_TOPIC_LEDGER: &str =
+        "dbd8ea414a07837829ae10d7902b1399b3279692fe22434c3b62ea7b45cf594e";
+
+    /// Event contract shared by the generated, compiler and handwritten twins.
+    /// `INDEX(x)` wraps a value for an indexed field of the generated twin.
+    fn event_contract(declarations: &str, indexed_wrapper: bool) -> String {
+        let idx = |value: &str| {
+            if indexed_wrapper {
+                format!("std::evm::Indexed::new({value})")
+            } else {
+                value.to_string()
+            }
+        };
+        format!(
+            r#"
+use std::abi::{{Bytes, sol}}
+use std::evm::{{Address, Log, TopicValue}}
+{declarations}
+msg M {{
+    #[selector = sol("emitPaused()")]
+    EmitPaused {{}},
+    #[selector = sol("emitTransfer()")]
+    EmitTransfer {{}},
+    #[selector = sol("emitNote()")]
+    EmitNote {{}},
+    #[selector = sol("emitMoved()")]
+    EmitMoved {{}},
+    #[selector = sol("emitLedger()")]
+    EmitLedger {{}},
+}}
+pub contract C uses (log: mut Log) {{
+    recv M {{
+        EmitPaused {{}} uses (mut log) {{ log.emit(Paused {{}}) }}
+        EmitTransfer {{}} uses (mut log) {{
+            log.emit(Transfer {{ from: {from}, to: {to}, value: 500 }})
+        }}
+        EmitNote {{}} uses (mut log) {{
+            log.emit(Note {{
+                sender: {from},
+                id: 7,
+                body: std::abi::bytes_from_words_prefix<3, 1>([0xaabbcc0000000000000000000000000000000000000000000000000000000000]),
+            }})
+        }}
+        EmitMoved {{}} uses (mut log) {{
+            log.emit(Moved {{ who: {from}, n: 1, to: Point {{ x: 2, y: 3 }} }})
+        }}
+        EmitLedger {{}} uses (mut log) {{
+            log.emit(Ledger {{ a: {from}, b: {to}, c: {third}, amount: 9 }})
+        }}
+    }}
+}}
+"#,
+            from = idx("Address::new(0x11)"),
+            to = idx("Address::new(0x22)"),
+            third = idx("Address::new(0x33)"),
+        )
+    }
+
+    const GENERATED_EVENTS: &str = r#"
+#[abi]
+struct Point { x: u256, y: u256 }
+#[generate(std::derive::event_struct)]
+struct Paused {}
+#[generate(std::derive::event_struct)]
+struct Transfer { from: std::evm::Indexed<Address>, to: std::evm::Indexed<Address>, value: u256 }
+#[generate(std::derive::event_struct)]
+struct Note { sender: std::evm::Indexed<Address>, id: u256, body: Bytes }
+#[generate(std::derive::event_struct)]
+struct Moved { who: std::evm::Indexed<Address>, n: u256, to: Point }
+#[generate(std::derive::event_struct)]
+struct Ledger {
+    a: std::evm::Indexed<Address>,
+    b: std::evm::Indexed<Address>,
+    c: std::evm::Indexed<Address>,
+    amount: u256,
+}
+"#;
+
+    const COMPILER_EVENTS: &str = r#"
+#[abi]
+struct Point { x: u256, y: u256 }
+#[event]
+struct Paused {}
+#[event]
+struct Transfer { #[indexed] from: Address, #[indexed] to: Address, value: u256 }
+#[event]
+struct Note { #[indexed] sender: Address, id: u256, body: Bytes }
+#[event]
+struct Moved { #[indexed] who: Address, n: u256, to: Point }
+#[event]
+struct Ledger { #[indexed] a: Address, #[indexed] b: Address, #[indexed] c: Address, amount: u256 }
+"#;
+
+    // Every topic0 and data word is written out directly; nothing here uses
+    // the generator, the `#[event]` desugaring or the ABI encoder.
+    fn handwritten_events() -> String {
+        format!(
+            r#"
+#[abi]
+struct Point {{ x: u256, y: u256 }}
+struct Paused {{}}
+impl std::evm::Event for Paused {{
+    const TOPIC0: u256 = 0x{EVENT_TOPIC_PAUSED}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        log.log1(data: core::ptr::MemBuffer::empty().span(), topic0: Self::TOPIC0)
+    }}
+}}
+struct Transfer {{ from: Address, to: Address, value: u256 }}
+impl std::evm::Event for Transfer {{
+    const TOPIC0: u256 = 0x{EVENT_TOPIC_TRANSFER}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        let buf = core::ptr::MemBuffer::alloc(32)
+        unsafe {{ core::abi::store_word(ptr: buf.ptr(), value: self.value) }}
+        log.log3(data: buf.span(), topic0: Self::TOPIC0, topic1: self.from.as_topic(), topic2: self.to.as_topic())
+    }}
+}}
+struct Note {{ sender: Address, id: u256, body: Bytes }}
+impl std::evm::Event for Note {{
+    const TOPIC0: u256 = 0x{EVENT_TOPIC_NOTE}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        let buf = core::ptr::MemBuffer::alloc(128)
+        unsafe {{
+            core::abi::store_word(ptr: buf.ptr(), value: self.id)
+            core::abi::store_word(ptr: core::ptr::offset_bytes(buf.ptr(), 32), value: 64)
+            core::abi::store_word(ptr: core::ptr::offset_bytes(buf.ptr(), 64), value: 3)
+            core::abi::store_word(ptr: core::ptr::offset_bytes(buf.ptr(), 96), value: 0xaabbcc0000000000000000000000000000000000000000000000000000000000)
+        }}
+        log.log2(data: buf.span(), topic0: Self::TOPIC0, topic1: self.sender.as_topic())
+    }}
+}}
+struct Moved {{ who: Address, n: u256, to: Point }}
+impl std::evm::Event for Moved {{
+    const TOPIC0: u256 = 0x{EVENT_TOPIC_MOVED}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        let buf = core::ptr::MemBuffer::alloc(96)
+        unsafe {{
+            core::abi::store_word(ptr: buf.ptr(), value: self.n)
+            core::abi::store_word(ptr: core::ptr::offset_bytes(buf.ptr(), 32), value: self.to.x)
+            core::abi::store_word(ptr: core::ptr::offset_bytes(buf.ptr(), 64), value: self.to.y)
+        }}
+        log.log2(data: buf.span(), topic0: Self::TOPIC0, topic1: self.who.as_topic())
+    }}
+}}
+struct Ledger {{ a: Address, b: Address, c: Address, amount: u256 }}
+impl std::evm::Event for Ledger {{
+    const TOPIC0: u256 = 0x{EVENT_TOPIC_LEDGER}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        let buf = core::ptr::MemBuffer::alloc(32)
+        unsafe {{ core::abi::store_word(ptr: buf.ptr(), value: self.amount) }}
+        log.log4(
+            data: buf.span(),
+            topic0: Self::TOPIC0,
+            topic1: self.a.as_topic(),
+            topic2: self.b.as_topic(),
+            topic3: self.c.as_topic(),
+        )
+    }}
+}}
+"#
+        )
+    }
+
+    fn event_json_inputs(entries: &[Value], name: &str) -> Value {
+        let matching = entries
+            .iter()
+            .filter(|entry| entry["type"] == "event" && entry["name"] == name)
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1, "event `{name}` in {entries:?}");
+        assert_eq!(matching[0]["anonymous"], false);
+        matching[0]["inputs"].clone()
+    }
+
+    fn address_word(low: u8) -> Vec<u8> {
+        let mut word = vec![0u8; 32];
+        word[31] = low;
+        word
+    }
+
+    fn u256_word(value: u8) -> Vec<u8> {
+        address_word(value)
+    }
+
+    #[test]
+    fn abi_event_runtime_and_json_match_literal_oracles() {
+        use contract_harness::{ExecutionOptions, FeContractHarness};
+
+        let handwritten = handwritten_events();
+        let twins = [
+            ("generated", event_contract(GENERATED_EVENTS, true)),
+            ("compiler", event_contract(COMPILER_EVENTS, false)),
+            ("handwritten", event_contract(&handwritten, false)),
+        ];
+        let topic = |hex_text: &str| hex::decode(hex_text).unwrap();
+        let mut note_data = Vec::new();
+        for word in [7u8, 64, 3] {
+            note_data.extend(u256_word(word));
+        }
+        let mut tail = vec![0u8; 32];
+        tail[..3].copy_from_slice(&[0xaa, 0xbb, 0xcc]);
+        note_data.extend(tail);
+        let moved_data = [1u8, 2, 3].iter().flat_map(|w| u256_word(*w)).collect::<Vec<_>>();
+        // (call, topics, data), each written out from `cast keccak`/`cast abi-encode`.
+        let expected: Vec<(&str, Vec<Vec<u8>>, Vec<u8>)> = vec![
+            ("emitPaused()", vec![topic(EVENT_TOPIC_PAUSED)], Vec::new()),
+            (
+                "emitTransfer()",
+                vec![
+                    topic(EVENT_TOPIC_TRANSFER),
+                    address_word(0x11),
+                    address_word(0x22),
+                ],
+                u256_word_u16(500),
+            ),
+            (
+                "emitNote()",
+                vec![topic(EVENT_TOPIC_NOTE), address_word(0x11)],
+                note_data,
+            ),
+            (
+                "emitMoved()",
+                vec![topic(EVENT_TOPIC_MOVED), address_word(0x11)],
+                moved_data,
+            ),
+            (
+                "emitLedger()",
+                vec![
+                    topic(EVENT_TOPIC_LEDGER),
+                    address_word(0x11),
+                    address_word(0x22),
+                    address_word(0x33),
+                ],
+                u256_word(9),
+            ),
+        ];
+        let expected_json = serde_json::json!({
+            "Paused": [],
+            "Transfer": [
+                {"name":"from","type":"address","indexed":true},
+                {"name":"to","type":"address","indexed":true},
+                {"name":"value","type":"uint256","indexed":false}
+            ],
+            "Note": [
+                {"name":"sender","type":"address","indexed":true},
+                {"name":"id","type":"uint256","indexed":false},
+                {"name":"body","type":"bytes","indexed":false}
+            ],
+            "Moved": [
+                {"name":"who","type":"address","indexed":true},
+                {"name":"n","type":"uint256","indexed":false},
+                {"name":"to","type":"tuple","indexed":false,"components":[
+                    {"name":"x","type":"uint256"},{"name":"y","type":"uint256"}
+                ]}
+            ],
+            "Ledger": [
+                {"name":"a","type":"address","indexed":true},
+                {"name":"b","type":"address","indexed":true},
+                {"name":"c","type":"address","indexed":true},
+                {"name":"amount","type":"uint256","indexed":false}
+            ],
+        });
+        for (label, source) in &twins {
+            let entries = abi_entries(source, "C");
+            assert_eq!(
+                entries.iter().filter(|e| e["type"] == "event").count(),
+                5,
+                "{label}: {entries:?}"
+            );
+            for (name, inputs) in expected_json.as_object().unwrap() {
+                assert_eq!(
+                    &event_json_inputs(&entries, name),
+                    inputs,
+                    "{label}: event {name}"
+                );
+            }
+            let harness = FeContractHarness::compile("C", source)
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            let mut instance = harness.deploy_instance().expect("deploy event twin");
+            for (call, topics, data) in &expected {
+                let calldata = selector_for_signature(call).to_be_bytes();
+                let outcome = instance
+                    .call_raw_with_logs(&calldata, ExecutionOptions::default())
+                    .unwrap_or_else(|error| panic!("{label} {call}: {error:?}"));
+                assert_eq!(outcome.raw_logs.len(), 1, "{label} {call}");
+                let log = &outcome.raw_logs[0];
+                let actual_topics = log
+                    .data
+                    .topics()
+                    .iter()
+                    .map(|topic| topic.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+                assert_eq!(&actual_topics, topics, "{label} {call} topics");
+                assert_eq!(log.data.data.as_ref(), data.as_slice(), "{label} {call} data");
+            }
+        }
+    }
+
+    fn u256_word_u16(value: u16) -> Vec<u8> {
+        let mut word = vec![0u8; 32];
+        word[30..].copy_from_slice(&value.to_be_bytes());
+        word
+    }
+
+    fn event_names(entries: &[Value]) -> Vec<String> {
+        entries
+            .iter()
+            .filter(|entry| entry["type"] == "event")
+            .map(|entry| entry["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    const GENERATED_EMIT_SOURCE: &str = r#"
+use std::abi::sol
+use std::evm::{Address, Event, Indexed, Log}
+#[generate(std::derive::event_struct)]
+struct Direct { who: Indexed<Address>, value: u256 }
+#[generate(std::derive::event_struct)]
+struct ViaLog { value: u256 }
+#[generate(std::derive::event_struct)]
+struct ViaHelper { value: u256 }
+#[generate(std::derive::event_struct)]
+struct Never { value: u256 }
+#[generate(std::derive::event_struct)]
+struct Constructed { value: u256 }
+fn emit_event<E: Event>(_ event: own E) uses (log: mut Log) { log.emit(event) }
+fn construct_only() { let _ = Constructed { value: 1 } }
+msg M {
+    #[selector = sol("go()")]
+    Go {},
+}
+pub contract C uses (log: mut Log) {
+    recv M {
+        Go {} uses (mut log) {
+            construct_only()
+            Direct { who: Indexed::new(Address::new(1)), value: 2 }.emit(mut log)
+            log.emit(ViaLog { value: 3 })
+            emit_event(ViaHelper { value: 4 })
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn event_abi_discovery_uses_proofs_for_generated_direct_log_and_generic_emits() {
+        let entries = abi_entries(GENERATED_EMIT_SOURCE, "C");
+        assert_eq!(
+            event_names(&entries),
+            ["Direct", "ViaLog", "ViaHelper"],
+            "{entries:?}"
+        );
+        assert_eq!(
+            event_json_inputs(&entries, "Direct"),
+            serde_json::json!([
+                {"name":"who","type":"address","indexed":true},
+                {"name":"value","type":"uint256","indexed":false}
+            ])
+        );
+    }
+
+    #[test]
+    fn event_topic0_that_disagrees_with_the_signature_is_refused() {
+        let source = format!(
+            r#"
+use std::abi::sol
+use std::evm::{{Address, Log}}
+struct Transfer {{ value: u256 }}
+impl std::evm::Event for Transfer {{
+    const TOPIC0: u256 = 0x{EVENT_TOPIC_TRANSFER}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        log.log1(data: core::ptr::MemBuffer::empty().span(), topic0: Self::TOPIC0)
+    }}
+}}
+msg M {{
+    #[selector = sol("go()")]
+    Go {{}},
+}}
+pub contract C uses (log: mut Log) {{
+    recv M {{ Go {{}} uses (mut log) {{ log.emit(Transfer {{ value: 1 }}) }} }}
+}}
+"#
+        );
+        let error = generate_test_abi_result(&source, "C")
+            .err()
+            .expect("noncanonical event topic");
+        assert!(
+            error.contains("event TOPIC0 does not match canonical signature `Transfer(uint256)`"),
+            "{error}"
+        );
+        // The same body with the matching hash is accepted.
+        let accepted = source.replace(EVENT_TOPIC_TRANSFER, &cast_topic("Transfer(uint256)"));
+        let entries = abi_entries(&accepted, "C");
+        assert_eq!(event_names(&entries), ["Transfer"]);
+    }
+
+    fn cast_topic(signature: &str) -> String {
+        let mut hasher = Keccak::v256();
+        let mut output = [0u8; 32];
+        hasher.update(signature.as_bytes());
+        hasher.finalize(&mut output);
+        hex::encode(output)
+    }
+
+    #[test]
+    fn event_discovery_ignores_lookalike_emit_traits_and_unindexed_lookalike_wrappers() {
+        let source = r#"
+use std::abi::sol
+use std::evm::{Address, Log}
+mod lookalike {
+    pub trait Event { fn emit<L>(own self, _ log: mut L) }
+    pub struct Indexed<T> { pub value: T }
+}
+use lookalike::Event
+struct Fake { value: u256 }
+impl Event for Fake { fn emit<L>(own self, _ log: mut L) { let _ = self.value } }
+msg M {
+    #[selector = sol("go()")]
+    Go {},
+}
+pub contract C uses (log: mut Log) {
+    recv M { Go {} uses (mut log) { Fake { value: 1 }.emit(mut log) } }
+}
+"#;
+        assert!(event_names(&abi_entries(source, "C")).is_empty());
+
+        // A same-named wrapper does not become the canonical indexed owner:
+        // its field stays an ordinary tuple-shaped data field.
+        let wrapper = format!(
+            r#"
+use std::abi::sol
+use std::evm::{{Address, Log}}
+mod lookalike {{ pub struct Indexed<T> {{ pub value: T }} }}
+struct Trade {{ who: lookalike::Indexed<u256> }}
+impl std::evm::Event for Trade {{
+    const TOPIC0: u256 = 0x{}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        log.log1(data: core::ptr::MemBuffer::empty().span(), topic0: Self::TOPIC0)
+    }}
+}}
+msg M {{
+    #[selector = sol("go()")]
+    Go {{}},
+}}
+pub contract C uses (log: mut Log) {{
+    recv M {{ Go {{}} uses (mut log) {{ log.emit(Trade {{ who: lookalike::Indexed {{ value: 1 }} }}) }} }}
+}}
+"#,
+            cast_topic("Trade((uint256))")
+        );
+        let entries = abi_entries(&wrapper, "C");
+        let inputs = event_json_inputs(&entries, "Trade");
+        assert_eq!(inputs[0]["type"], "tuple", "{inputs}");
+        assert_eq!(inputs[0]["indexed"], false, "{inputs}");
+    }
+
+    #[test]
+    fn event_field_proof_is_sealed_against_user_claims_of_indexing() {
+        let source = r#"
+use std::derive::EventField
+struct Claim { value: u256 }
+impl EventField for Claim {
+    const IS_INDEXED: bool = true
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = url::Url::parse("file:///tmp/event-field-seal.fe").unwrap();
+        let file = db.workspace().touch(&mut db, url, Some(source.to_string()));
+        let diagnostics = db.run_on_top_mod(db.top_mod(file));
+        assert!(diagnostics.has_errors(&db), "{}", diagnostics.format_diags(&db));
+    }
 }
