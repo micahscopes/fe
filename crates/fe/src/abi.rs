@@ -2977,7 +2977,8 @@ struct Ledger {
 "#;
 
     // Every topic0 and data word is written out directly; nothing here uses
-    // the generator, the `#[event]` desugaring or the ABI encoder.
+    // the generator, the `#[event]` desugaring or the ABI encoder. Indexing is
+    // declared the way the JSON reads it: by the field's `Indexed` type.
     fn handwritten_events() -> String {
         format!(
             r#"
@@ -2990,7 +2991,7 @@ impl std::evm::Event for Paused {{
         log.log1(data: core::ptr::MemBuffer::empty().span(), topic0: Self::TOPIC0)
     }}
 }}
-struct Transfer {{ from: Address, to: Address, value: u256 }}
+struct Transfer {{ from: std::evm::Indexed<Address>, to: std::evm::Indexed<Address>, value: u256 }}
 impl std::evm::Event for Transfer {{
     const TOPIC0: u256 = 0x{EVENT_TOPIC_TRANSFER}
     fn emit<L: Log>(own self, _ log: mut L) {{
@@ -2999,7 +3000,7 @@ impl std::evm::Event for Transfer {{
         log.log3(data: buf.span(), topic0: Self::TOPIC0, topic1: self.from.as_topic(), topic2: self.to.as_topic())
     }}
 }}
-struct Note {{ sender: Address, id: u256, body: Bytes }}
+struct Note {{ sender: std::evm::Indexed<Address>, id: u256, body: Bytes }}
 impl std::evm::Event for Note {{
     const TOPIC0: u256 = 0x{EVENT_TOPIC_NOTE}
     fn emit<L: Log>(own self, _ log: mut L) {{
@@ -3013,7 +3014,7 @@ impl std::evm::Event for Note {{
         log.log2(data: buf.span(), topic0: Self::TOPIC0, topic1: self.sender.as_topic())
     }}
 }}
-struct Moved {{ who: Address, n: u256, to: Point }}
+struct Moved {{ who: std::evm::Indexed<Address>, n: u256, to: Point }}
 impl std::evm::Event for Moved {{
     const TOPIC0: u256 = 0x{EVENT_TOPIC_MOVED}
     fn emit<L: Log>(own self, _ log: mut L) {{
@@ -3026,7 +3027,7 @@ impl std::evm::Event for Moved {{
         log.log2(data: buf.span(), topic0: Self::TOPIC0, topic1: self.who.as_topic())
     }}
 }}
-struct Ledger {{ a: Address, b: Address, c: Address, amount: u256 }}
+struct Ledger {{ a: std::evm::Indexed<Address>, b: std::evm::Indexed<Address>, c: std::evm::Indexed<Address>, amount: u256 }}
 impl std::evm::Event for Ledger {{
     const TOPIC0: u256 = 0x{EVENT_TOPIC_LEDGER}
     fn emit<L: Log>(own self, _ log: mut L) {{
@@ -3073,7 +3074,7 @@ impl std::evm::Event for Ledger {{
         let twins = [
             ("generated", event_contract(GENERATED_EVENTS, true)),
             ("compiler", event_contract(COMPILER_EVENTS, false)),
-            ("handwritten", event_contract(&handwritten, false)),
+            ("handwritten", event_contract(&handwritten, true)),
         ];
         let topic = |hex_text: &str| hex::decode(hex_text).unwrap();
         let mut note_data = Vec::new();
@@ -3361,6 +3362,83 @@ impl EventField for Claim {
         let url = url::Url::parse("file:///tmp/event-field-seal.fe").unwrap();
         let file = db.workspace().touch(&mut db, url, Some(source.to_string()));
         let diagnostics = db.run_on_top_mod(db.top_mod(file));
-        assert!(diagnostics.has_errors(&db), "{}", diagnostics.format_diags(&db));
+        let rendered = diagnostics.format_diags(&db);
+        assert!(
+            rendered.contains("`Claim` doesn't implement `EventFieldSeal`"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn event_discovery_respects_unused_and_invoked_closure_regions() {
+        for (body, expected) in [
+            ("let f = || log.emit(Quiet { value: 1 })\nlet _ = f", false),
+            ("let f = || log.emit(Quiet { value: 1 })\nf()", true),
+        ] {
+            let code = format!(
+                r#"
+use std::abi::sol
+use std::evm::Log
+#[generate(std::derive::event_struct)]
+struct Quiet {{ value: u256 }}
+msg M {{
+    #[selector = sol("go()")]
+    Go {{}},
+}}
+pub contract C uses (log: mut Log) {{
+    recv M {{ Go {{}} uses (mut log) {{ {body} }} }}
+}}
+"#
+            );
+            let entries = abi_entries(&code, "C");
+            assert_eq!(
+                event_names(&entries),
+                if expected { vec!["Quiet"] } else { Vec::<&str>::new() },
+                "body={body} entries={entries:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn event_json_refuses_more_than_three_indexed_fields() {
+        let source = format!(
+            r#"
+use std::abi::sol
+use std::evm::{{Indexed, Log}}
+struct Four {{
+    a: Indexed<u256>,
+    b: Indexed<u256>,
+    c: Indexed<u256>,
+    d: Indexed<u256>,
+}}
+impl std::evm::Event for Four {{
+    const TOPIC0: u256 = 0x{}
+    fn emit<L: Log>(own self, _ log: mut L) {{
+        log.log1(data: core::ptr::MemBuffer::empty().span(), topic0: Self::TOPIC0)
+    }}
+}}
+msg M {{
+    #[selector = sol("go()")]
+    Go {{}},
+}}
+pub contract C uses (log: mut Log) {{
+    recv M {{
+        Go {{}} uses (mut log) {{
+            log.emit(Four {{
+                a: Indexed::new(1),
+                b: Indexed::new(2),
+                c: Indexed::new(3),
+                d: Indexed::new(4),
+            }})
+        }}
+    }}
+}}
+"#,
+            cast_topic("Four(uint256,uint256,uint256,uint256)")
+        );
+        let error = generate_test_abi_result(&source, "C")
+            .err()
+            .expect("four indexed fields have no log encoding");
+        assert!(error.contains("has 4 indexed fields; at most 3"), "{error}");
     }
 }
