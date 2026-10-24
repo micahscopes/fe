@@ -16,9 +16,9 @@ use crate::{
         get_or_build_runtime_instance,
     },
     runtime::{
-        EnumLayoutKey, EnumVariantLayout, LayoutId, LayoutKey, LowerError, RBlock, RBlockId, RExpr,
-        RLocal, RLocalId, RStmt, RTerminator, RuntimeBody, RuntimeCarrier, RuntimeClass,
-        RuntimeLocalRoot, RuntimeParam, RuntimeSyntheticSpec, VariantId,
+        EnumLayoutKey, EnumVariantLayout, Layout, LayoutId, LayoutKey, LowerError, RBlock,
+        RBlockId, RExpr, RLocal, RLocalId, RStmt, RTerminator, RuntimeBody, RuntimeCarrier,
+        RuntimeClass, RuntimeLocalRoot, RuntimeParam, RuntimeSyntheticSpec, VariantId,
     },
     verify::verify_runtime_body,
 };
@@ -122,15 +122,75 @@ pub fn build_native_scalar_segments<'db>(
         }),
     );
     let entry = segment(db, source, &cuts, step_layout, None)?;
-    let resumes = (0..cuts.len())
+    let resumes: Vec<_> = (0..cuts.len())
         .map(|cut| segment(db, source, &cuts, step_layout, Some(cut)))
         .collect::<Result<_, _>>()?;
+    check_native_step_protocol(db, step_layout, &entry, &resumes)?;
     Ok(NativeScalarSegments {
         step_layout,
         cuts,
         entry,
         resumes,
     })
+}
+
+/// The frame protocol between the segments and the physical adapter: Step has
+/// one variant for Complete and one per resume, and resume `i` takes the
+/// captures stored by variant `i + 1` (its fields after the pending identity)
+/// followed by the delivered outcome. The adapter sizes the frame from the
+/// variants and loads resume arguments from it by index without a bounds
+/// check, so this agreement is what keeps those loads inside the frame. The
+/// layout and the segments are derived from the same cuts, and this states
+/// that derivation rather than leaving it implicit.
+pub fn check_native_step_protocol<'db>(
+    db: &'db dyn MirDb,
+    step_layout: LayoutId<'db>,
+    entry: &RuntimeBody<'db>,
+    resumes: &[RuntimeBody<'db>],
+) -> Result<(), LowerError> {
+    let invalid =
+        |message: String| LowerError::Unsupported(format!("invalid native Step: {message}"));
+    let Layout::Enum(step) = step_layout.data(db) else {
+        return Err(invalid("not an enum".into()));
+    };
+    if step.variants.len() != resumes.len() + 1 {
+        return Err(invalid(format!(
+            "{} variants for {} resume segments",
+            step.variants.len(),
+            resumes.len()
+        )));
+    }
+    let step_class = RuntimeClass::AggregateValue {
+        layout: step_layout,
+    };
+    for (index, segment) in std::iter::once(entry).chain(resumes).enumerate() {
+        if segment.signature.ret.as_ref() != Some(&step_class) {
+            return Err(invalid(format!("segment {index} does not return Step")));
+        }
+    }
+    for (index, resume) in resumes.iter().enumerate() {
+        let Some((_, saved)) = step.variants[index + 1].fields.split_first() else {
+            return Err(invalid(format!(
+                "variant {} has no pending identity",
+                index + 1
+            )));
+        };
+        let Some((_, captures)) = resume.signature.params.split_last() else {
+            return Err(invalid(format!("resume {index} has no delivered outcome")));
+        };
+        if captures.len() != saved.len()
+            || captures
+                .iter()
+                .zip(saved)
+                .any(|(param, field)| param.class != *field)
+        {
+            return Err(invalid(format!(
+                "resume {index} captures differ from the fields of variant {}",
+                index + 1
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn value_class<'db>(

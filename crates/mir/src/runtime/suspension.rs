@@ -7,7 +7,7 @@ mod segments;
 pub use abi::{NativeScalarAbiPlan, plan_native_scalar_abi};
 pub use segments::{
     NativeScalarSegments, NativeScalarTaskPlan, build_native_scalar_segments,
-    plan_native_scalar_task,
+    check_native_step_protocol, plan_native_scalar_task,
 };
 
 use std::collections::BTreeSet;

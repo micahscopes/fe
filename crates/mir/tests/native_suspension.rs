@@ -1,34 +1,30 @@
 use common::{InputDb, stdlib::HasBuiltinCore};
 use driver::DriverDataBase;
 use fe_mir::{
-    RuntimeInstanceKey,
+    RuntimeInstance, RuntimeInstanceKey,
     instance::{RuntimeInstanceSource, get_or_build_runtime_instance},
     runtime::{
         RExpr, RStmt, RuntimeClass,
         suspension::{
-            ScalarCapture, build_native_scalar_segments, compose_native_scalar_task,
+            NativeScalarTaskPlan, ScalarCapture, build_native_scalar_segments,
+            check_native_step_protocol, compose_native_scalar_task, plan_native_scalar_abi,
             plan_native_scalar_task, prepare_native_scalar_cuts,
         },
     },
 };
-use hir::analysis::{
-    semantic::{get_or_build_semantic_instance, root_semantic_instance_key},
-    ty::ty_check::BodyOwner,
+use hir::{
+    analysis::{
+        semantic::{get_or_build_semantic_instance, root_semantic_instance_key},
+        ty::ty_check::BodyOwner,
+    },
+    hir_def::TopLevelMod,
 };
 use url::Url;
 
-#[test]
-fn composed_native_cut_retains_the_callers_scalar_and_delivery_origin() {
-    let mut db = DriverDataBase::default();
-    db.initialize_builtin_core();
-    let file = db.workspace().touch(
-        &mut db,
-        Url::parse("file:///native_suspension.fe").unwrap(),
-        Some(
-            r#"
-use core::task::{Native, Pending, Suspend, TaskOutcome}
 // A trusted fixture source of a pending identity. This fixture tests MIR
 // construction, not a host ABI or runtime delivery.
+const FIXTURE: &str = r#"
+use core::task::{Native, Pending, Suspend, TaskOutcome}
 extern { unsafe fn fixture_pending() -> Pending<Native, u64> }
 fn hop(_ cap: mut Native, _ pending: own Pending<Native, u64>) -> TaskOutcome<u64, u64> {
     cap.suspend(pending)
@@ -72,9 +68,16 @@ fn entry_loop(_ native: own Native) -> u64 {
     }
     total
 }
-"#
-            .into(),
-        ),
+"#;
+
+#[test]
+fn composed_native_cut_retains_the_callers_scalar_and_delivery_origin() {
+    let mut db = DriverDataBase::default();
+    db.initialize_builtin_core();
+    let file = db.workspace().touch(
+        &mut db,
+        Url::parse("file:///native_suspension.fe").unwrap(),
+        Some(FIXTURE.into()),
     );
     let module = db.top_mod(file);
     let func = module
@@ -231,5 +234,77 @@ fn entry_loop(_ native: own Native) -> u64 {
                 RStmt::Assign { expr: RExpr::EnumMake { layout, variant, .. }, .. }
                     if *layout == loop_plan.step_layout(&db) && variant.index == 1
             ))
+    );
+}
+
+fn fixture_instance<'db>(
+    db: &'db DriverDataBase,
+    module: TopLevelMod<'db>,
+    name: &str,
+) -> RuntimeInstance<'db> {
+    let func = module
+        .all_funcs(db)
+        .iter()
+        .copied()
+        .find(|func| {
+            func.name(db)
+                .to_opt()
+                .is_some_and(|func| func.data(db) == name)
+        })
+        .unwrap_or_else(|| panic!("fixture function {name}"));
+    let semantic = get_or_build_semantic_instance(
+        db,
+        root_semantic_instance_key(db, BodyOwner::Func(func, None)).expect("closed entry"),
+    );
+    get_or_build_runtime_instance(
+        db,
+        RuntimeInstanceKey::new(db, RuntimeInstanceSource::Semantic(semantic), vec![]),
+    )
+}
+
+#[test]
+fn step_variants_and_segment_captures_must_agree_before_a_frame_is_planned() {
+    let mut db = DriverDataBase::default();
+    db.initialize_builtin_core();
+    let file = db.workspace().touch(
+        &mut db,
+        Url::parse("file:///native_suspension.fe").unwrap(),
+        Some(FIXTURE.into()),
+    );
+    let module = db.top_mod(file);
+    for name in ["entry", "entry_twice", "entry_loop"] {
+        let plan = plan_native_scalar_task(&db, fixture_instance(&db, module, name)).unwrap();
+        let segments = plan.segments(&db);
+        check_native_step_protocol(&db, plan.step_layout(&db), &segments[0], &segments[1..])
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        plan_native_scalar_abi(&db, plan).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+    }
+
+    // The adapters read resume arguments from the frame by index, and the
+    // frame is sized from the Step variants. A plan whose segments disagree
+    // with the variants must be refused rather than read out of bounds.
+    let plan = plan_native_scalar_task(&db, fixture_instance(&db, module, "entry")).unwrap();
+    let with = |segments| {
+        NativeScalarTaskPlan::new(&db, plan.source(&db), plan.step_layout(&db), segments)
+    };
+    let mut extra_capture = plan.segments(&db).clone();
+    let params = &mut extra_capture[1].signature.params;
+    assert!(params.len() >= 2, "the fixture retains a scalar");
+    params.insert(0, params[0].clone());
+    assert!(
+        plan_native_scalar_abi(&db, with(extra_capture)).is_err(),
+        "a resume capture beyond its variant's fields"
+    );
+    let mut missing_capture = plan.segments(&db).clone();
+    missing_capture[1].signature.params.remove(0);
+    assert!(
+        plan_native_scalar_abi(&db, with(missing_capture)).is_err(),
+        "a variant field no resume takes"
+    );
+    let mut missing_resume = plan.segments(&db).clone();
+    missing_resume.truncate(1);
+    assert!(
+        plan_native_scalar_abi(&db, with(missing_resume)).is_err(),
+        "a Step variant without a segment"
     );
 }
