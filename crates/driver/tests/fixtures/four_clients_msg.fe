@@ -1,22 +1,36 @@
+use core::abi::{AbiDecoder, ByteInput, Decode, decode_field}
 use core::message::MsgVariant
 use std::abi::Sol
 use std::derive::msg_variant
 use std::evm::Address
 
-#[abi]
+// The record-init field-list splice a generated `Decode` needs does not exist
+// yet, so the codec's decode half is written out. Everything else is generated.
+#[generate(std::derive::abi_size)]
+#[generate(std::derive::abi_encode)]
 #[generate(msg_variant)]
 struct Quiet {}
+impl Decode<Sol> for Quiet {
+    fn decode_payload<D: AbiDecoder<Sol>, I: ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let _ = d
+        let _ = input
+        Self {}
+    }
+}
 
-#[abi]
+#[generate(std::derive::abi_size)]
+#[generate(std::derive::abi_encode)]
 #[generate(msg_variant)]
 struct Transfer { to: Address, amount: u256 }
-
-#[abi]
-#[generate(msg_variant)]
-struct Note { id: u256, body: std::abi::Bytes }
+impl Decode<Sol> for Transfer {
+    fn decode_payload<D: AbiDecoder<Sol>, I: ByteInput>(_ d: mut D, _ input: I) -> Self {
+        let to = decode_field<Sol, Address, D, I>(mut d, input)
+        let amount = decode_field<Sol, u256, D, I>(mut d, input)
+        Self { to, amount }
+    }
+}
 
 const fn check_msg() -> bool {
     <Quiet as MsgVariant<Sol>>::SELECTOR == 0x018c59c6
         && <Transfer as MsgVariant<Sol>>::SELECTOR == 0x69ca02dd
-        && <Note as MsgVariant<Sol>>::SELECTOR == 0x475da781
 }

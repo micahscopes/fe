@@ -2323,13 +2323,35 @@ fn generated_msg_selectors_match_independent_signatures() {
 #[test]
 fn msg_generation_requires_the_ordinary_codec_and_composes_with_other_returns() {
     let provider = "use core::meta::{Code, Item, Record}\nuse std::derive::sol_selector\nconst fn returning_bool(_ record: Record) -> Code<Item> {\n    let selector = sol_selector(record)\n    quote {\n        impl core::message::MsgVariant<std::abi::Sol> for ${record} {\n            const SELECTOR: u32 = ${selector}\n            type Return = bool\n        }\n    }\n}\n";
+    let decode = "impl core::abi::Decode<std::abi::Sol> for Check {\n    fn decode_payload<D: core::abi::AbiDecoder<std::abi::Sol>, I: core::abi::ByteInput>(_ d: mut D, _ input: I) -> Self {\n        let value = core::abi::decode_field<std::abi::Sol, u256, D, I>(mut d, input)\n        Self { value }\n    }\n}\n";
+    let check = "const fn check_ret() -> bool { <Check as core::message::MsgVariant<std::abi::Sol>>::SELECTOR == 0xcce3a419 }\n";
     let ok = format!(
-        "{provider}#[abi]\n#[generate(returning_bool)]\nstruct Check {{ value: u256 }}\nconst fn check_ret() -> bool {{ <Check as core::message::MsgVariant<std::abi::Sol>>::SELECTOR == 0xcce3a419 }}\n"
+        "{provider}#[generate(std::derive::abi_size)]\n#[generate(std::derive::abi_encode)]\n#[generate(returning_bool)]\nstruct Check {{ value: u256 }}\n{decode}{check}"
     );
     assert!(prepared_check(&ok, "check_ret"));
-    // Without Encode and Decode the complete generated implementation is refused.
-    let bare = format!("{provider}#[generate(returning_bool)]\nstruct Check {{ value: u256 }}\n");
-    let (db, file) = input(&bare);
-    assert!(prepare_file(&db, file).is_err());
+    // Without Decode the complete generated implementation is refused: the
+    // selector and return are only a message once the codec exists.
+    let undecodable = format!(
+        "{provider}#[generate(std::derive::abi_size)]\n#[generate(std::derive::abi_encode)]\n#[generate(returning_bool)]\nstruct Check {{ value: u256 }}\n"
+    );
+    let (db, file) = input(&undecodable);
+    let error = prepare_file(&db, file)
+        .err()
+        .expect("no Decode, no message");
+    assert!(
+        error
+            .cause
+            .contains("`Check` doesn't implement `Decode<Sol>`"),
+        "{}",
+        error.cause
+    );
     assert!(db.generation_inputs().functions(&db).is_empty());
+    // A desugared `#[abi]` record is not an authored input for a generator.
+    let abi =
+        format!("{provider}#[abi]\n#[generate(returning_bool)]\nstruct Check {{ value: u256 }}\n");
+    let (db, file) = input(&abi);
+    let error = prepare_file(&db, file)
+        .err()
+        .expect("abi record is not authored");
+    assert!(error.cause.contains("NotAuthored"), "{}", error.cause);
 }
