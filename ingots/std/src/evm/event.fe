@@ -24,3 +24,34 @@ pub trait Event {
 pub trait TopicValue {
     fn as_topic(self) -> u256
 }
+
+/// Marks an event field as an indexed log topic. In an event generated with
+/// `std::derive::event_struct` the field's value becomes one of the up to
+/// three topics after `topic0`; its Solidity type is that of `T`.
+///
+/// `Indexed` carries no ABI encoding: an indexed value never enters the data
+/// payload. `T` must be representable as one topic word (`TopicValue`).
+pub struct Indexed<T> {
+    pub value: T,
+}
+
+impl<T> Indexed<T> {
+    #[inline(always)]
+    pub const fn new(_ value: T) -> Self {
+        Indexed { value }
+    }
+}
+
+impl<T: core::Copy> core::Copy for Indexed<T> {}
+
+impl<T: TopicValue> TopicValue for Indexed<T> {
+    #[inline(always)]
+    fn as_topic(self) -> u256 {
+        self.value.as_topic()
+    }
+}
+
+impl<T: ingot::abi::SolCompat> ingot::abi::SolCompat for Indexed<T> {
+    type S = T::S
+    const SOL_TYPE: Self::S = T::SOL_TYPE
+}

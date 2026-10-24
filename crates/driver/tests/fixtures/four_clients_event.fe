@@ -14,9 +14,6 @@ struct Mixed { provider: Indexed<Address>, values: DynArray<u256>, extra: Bytes,
 #[generate(event_struct)]
 struct Legacy { from: Indexed<Address>, to: Address }
 
-#[event]
-struct CompilerLegacy { #[indexed] from: Address, to: Address }
-
 const fn check_event() -> bool {
     <Paused as Event>::TOPIC0 == 0x9e87fac88ff661f02d44f95383c817fece4bce600a3dab7a54406878b965e752
         && <Transfer as Event>::TOPIC0 == 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef

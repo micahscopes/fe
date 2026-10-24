@@ -156,8 +156,8 @@ pub fn generate_contract_abi(
     // Error discovery admits the contract's call graph and checks each
     // reachable selector before any event or error entry is emitted.
     let error_types = collect_contract_error_types(db, contract)?;
-    for struct_ in collect_contract_event_structs(db, contract)? {
-        entries.push(event_struct_to_abi_entry(db, struct_)?);
+    for event_ty in collect_contract_event_types(db, contract)? {
+        entries.push(event_type_to_abi_entry(db, contract.scope(), event_ty)?);
     }
 
     for error_ty in error_types {
@@ -280,28 +280,85 @@ fn recv_arm_to_abi_entry(
     }))
 }
 
-fn event_struct_to_abi_entry(db: &DriverDataBase, struct_: Struct<'_>) -> Result<AbiEntry, String> {
-    let event_name = struct_
+/// The inputs of an event in declaration order. A field is indexed when it
+/// carries the compiler's `#[indexed]` mark or has the canonical
+/// `std::evm::Indexed<T>` type, whose Solidity type is that of `T`. The owner
+/// is identified by its resolved declaration, never by spelling.
+fn event_param_descs<'db>(
+    db: &'db DriverDataBase,
+    scope: ScopeId<'db>,
+    struct_: Struct<'db>,
+    ty: TyId<'db>,
+) -> Result<Vec<NamedAbiParamDesc>, String> {
+    let indexed_owner = hir::analysis::ty::corelib::resolve_lib_type_path(
+        db,
+        scope,
+        "std::evm::event::Indexed",
+    )
+    .and_then(|owner| owner.adt_def(db))
+    .ok_or("cannot resolve canonical `std::evm::Indexed` type")?;
+    let hir_fields = struct_.hir_fields(db).data(db);
+    let field_tys = ty.field_types(db);
+    if hir_fields.len() != field_tys.len() {
+        return Err(format!(
+            "field count mismatch: {} HIR fields vs {} semantic fields",
+            hir_fields.len(),
+            field_tys.len()
+        ));
+    }
+    let mut params = Vec::with_capacity(field_tys.len());
+    for (field, field_ty) in hir_fields.iter().zip(field_tys) {
+        let wrapped = field_ty.adt_def(db) == Some(indexed_owner);
+        let value_ty = if wrapped {
+            *field_ty.generic_args(db).first().ok_or(
+                "canonical `Indexed` type is missing its value type",
+            )?
+        } else {
+            field_ty
+        };
+        params.push(NamedAbiParamDesc {
+            name: field
+                .name
+                .to_opt()
+                .map(|ident| ident.data(db).to_string())
+                .unwrap_or_default(),
+            indexed: Some(wrapped || field.is_event_indexed),
+            desc: semantic_ty_to_abi_desc(db, value_ty)?,
+        });
+    }
+    let indexed = params.iter().filter(|param| param.indexed == Some(true)).count();
+    if indexed > MAX_INDEXED_EVENT_FIELDS {
+        return Err(format!(
+            "event `{}` has {indexed} indexed fields; at most {MAX_INDEXED_EVENT_FIELDS} fit in a log",
+            ty.pretty_print(db)
+        ));
+    }
+    Ok(params)
+}
+
+/// Solidity allows three indexed topics after `topic0` in a non-anonymous event.
+const MAX_INDEXED_EVENT_FIELDS: usize = 3;
+
+fn event_type_to_abi_entry<'db>(
+    db: &'db DriverDataBase,
+    scope: ScopeId<'db>,
+    ty: TyId<'db>,
+) -> Result<AbiEntry, String> {
+    let struct_ = struct_from_ty(db, ty).ok_or("event type is not a struct")?;
+    let name = struct_
         .name(db)
         .to_opt()
-        .map(|name| name.data(db).to_string())
-        .ok_or_else(|| "event struct is missing a name".to_string())?;
-    let field_tys: Vec<_> = struct_
-        .field_tys(db)
-        .into_iter()
-        .map(|ty| ty.instantiate_identity())
-        .collect();
-    let inputs = named_field_param_descs(db, struct_.hir_fields(db), &field_tys, |field| {
-        Some(field.is_event_indexed)
-    })?
-    .into_iter()
-    .map(NamedAbiParamDesc::into_param)
-    .collect();
-
+        .ok_or("event struct is missing a name")?;
+    let inputs = event_param_descs(db, scope, struct_, ty)?;
     Ok(AbiEntry {
         entry_type: "event".to_string(),
-        name: Some(event_name),
-        inputs: Some(inputs),
+        name: Some(name.data(db).to_string()),
+        inputs: Some(
+            inputs
+                .into_iter()
+                .map(NamedAbiParamDesc::into_param)
+                .collect(),
+        ),
         outputs: None,
         state_mutability: None,
         anonymous: Some(false),
@@ -353,6 +410,43 @@ fn contract_root_instances<'db>(
         .into_iter()
         .map(|owner| root_semantic_instance_key(db, owner).map_err(|error| format!("{error:?}")))
         .collect()
+}
+
+/// Evaluate the associated constant `name` of a goal the checker has already
+/// proved, through that proof, as execution does. `what` names the constant
+/// and `subject` the declaration it belongs to in diagnostics.
+#[allow(clippy::too_many_arguments)]
+fn eval_proved_trait_const<'db>(
+    db: &'db DriverDataBase,
+    body: hir::hir_def::Body<'db>,
+    typed: &hir::analysis::ty::ty_check::TypedBody<'db>,
+    expr: hir::hir_def::ExprId,
+    goal: TraitInstId<'db>,
+    proof: hir::analysis::ty::evidence::EvidenceId<'db>,
+    name: &str,
+    ty: TyId<'db>,
+    what: &str,
+    subject: &str,
+) -> Result<hir::analysis::semantic::SemConstId<'db>, String> {
+    let mut evidence = UseEvidence::default();
+    evidence.record_dispatch(goal, Some(proof));
+    let reference = ConstRef::TraitConst {
+        use_: AssocConstUse::new(
+            body.scope(),
+            typed.assumptions(),
+            goal,
+            IdentId::new(db, name.to_string()),
+        ),
+        evidence,
+    };
+    let reference = resolve_semantic_const_ref(db, reference, ty, SemOrigin::Expr(expr))
+        .ok_or_else(|| format!("missing checked {what} for `{subject}`"))?;
+    match eval_const_ref(db, reference) {
+        EvalOutcome::Ready(value) => Ok(value),
+        failure => Err(format!(
+            "{what} evaluation failed for `{subject}`: {failure:?}"
+        )),
+    }
 }
 
 /// Error reachability follows the same applied instances and proof transport
@@ -474,33 +568,18 @@ fn collect_contract_error_types<'db>(
                         .collect::<Vec<_>>()
                         .join(",")
                 );
-                let mut evidence = UseEvidence::default();
-                evidence.record_dispatch(goal, Some(proved.proof));
-                let reference = ConstRef::TraitConst {
-                    use_: AssocConstUse::new(
-                        body.scope(),
-                        typed.assumptions(),
-                        goal,
-                        IdentId::new(db, "SELECTOR".to_string()),
-                    ),
-                    evidence,
-                };
-                let selector_ty = TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::U32)));
-                let reference = resolve_semantic_const_ref(
+                let value = eval_proved_trait_const(
                     db,
-                    reference,
-                    selector_ty,
-                    SemOrigin::Expr(expr),
-                )
-                .ok_or_else(|| format!("missing checked error SELECTOR for `{signature}`"))?;
-                let value = match eval_const_ref(db, reference) {
-                    EvalOutcome::Ready(value) => value,
-                    failure => {
-                        return Err(format!(
-                            "error SELECTOR evaluation failed for `{signature}`: {failure:?}"
-                        ));
-                    }
-                };
+                    body,
+                    typed,
+                    expr,
+                    goal,
+                    proved.proof,
+                    "SELECTOR",
+                    TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::U32))),
+                    "error SELECTOR",
+                    &signature,
+                )?;
                 let selector = match value.value(db) {
                     SemConstValue::Scalar {
                         value: SemConstScalar::Int { value },
@@ -528,10 +607,15 @@ fn collect_contract_error_types<'db>(
 /// error reachability does, so instance identity and the shared admission
 /// limits bound it. Each body contributes its events in expression order,
 /// before the instances its calls at that expression reach.
-fn collect_contract_event_structs<'db>(
+///
+/// An emitted type is reported only with the checked `Event` proof of the call
+/// that emits it. Its `TOPIC0` is evaluated through that proof and must be the
+/// hash of the signature the JSON entry states, so a name or a hash written in
+/// the source never decides what the ABI says.
+fn collect_contract_event_types<'db>(
     db: &'db DriverDataBase,
     contract: hir::hir_def::Contract<'db>,
-) -> Result<Vec<Struct<'db>>, String> {
+) -> Result<Vec<TyId<'db>>, String> {
     let mut events = Vec::new();
     let mut seen = HashSet::new();
     let mut visited = HashSet::new();
@@ -539,8 +623,9 @@ fn collect_contract_event_structs<'db>(
     let roots = contract_root_instances(db, contract)
         .map_err(|error| format!("cannot prepare event ABI reachability: {error}"))?;
     for root in roots {
-        collect_instance_event_structs(
+        collect_instance_event_types(
             db,
+            contract.scope(),
             root,
             &emit_traits,
             &mut events,
@@ -551,12 +636,13 @@ fn collect_contract_event_structs<'db>(
     Ok(events)
 }
 
-fn collect_instance_event_structs<'db>(
+fn collect_instance_event_types<'db>(
     db: &'db DriverDataBase,
+    contract_scope: ScopeId<'db>,
     key: SemanticInstanceKey<'db>,
     emit_traits: &EventEmitTraits<'db>,
-    out: &mut Vec<Struct<'db>>,
-    seen: &mut HashSet<Struct<'db>>,
+    out: &mut Vec<TyId<'db>>,
+    seen: &mut HashSet<TyId<'db>>,
     visited: &mut HashSet<SemanticInstanceKey<'db>>,
 ) -> Result<(), String> {
     if !visited.insert(key) {
@@ -592,17 +678,41 @@ fn collect_instance_event_structs<'db>(
             let hir::hir_def::Partial::Present(_) = partial_expr else {
                 continue;
             };
-            if let Some(struct_) = emitted_event_struct(db, typed_body, body, expr_id, emit_traits)
+            // Only calls this admitted instance performs can emit; a call in
+            // an uninvoked closure region has no callee here.
+            let Some(callees) = expression_callees.get(&expr_id) else {
+                continue;
+            };
+            if let Some(&callee) = callees.first()
+                && let Some(ty) =
+                    checked_emitted_event(db, contract_scope, typed_body, body, expr_id, callee, emit_traits)?
+                && seen.insert(ty)
             {
-                push_event_struct(db, out, seen, struct_);
+                out.push(ty);
             }
-            for &callee in expression_callees.get(&expr_id).into_iter().flatten() {
-                collect_instance_event_structs(db, callee, emit_traits, out, seen, visited)?;
+            for &callee in callees {
+                collect_instance_event_types(
+                    db,
+                    contract_scope,
+                    callee,
+                    emit_traits,
+                    out,
+                    seen,
+                    visited,
+                )?;
             }
         }
     }
     for callee in protocol_callees {
-        collect_instance_event_structs(db, callee, emit_traits, out, seen, visited)?;
+        collect_instance_event_types(
+            db,
+            contract_scope,
+            callee,
+            emit_traits,
+            out,
+            seen,
+            visited,
+        )?;
     }
     Ok(())
 }
@@ -622,13 +732,20 @@ fn resolve_event_emit_traits<'db>(
     }
 }
 
-fn emitted_event_struct<'db>(
+/// The event type a call emits, once its `Event` proof is checked, or `None`
+/// when the call is not the canonical `Log::emit` or `Event::emit`.
+///
+/// `Log::emit<E: Event>` carries the proof as its declaration-owned bound for
+/// `E`; a direct `Event::emit` call carries it as its dispatch proof.
+fn checked_emitted_event<'db>(
     db: &'db DriverDataBase,
+    contract_scope: ScopeId<'db>,
     typed_body: &hir::analysis::ty::ty_check::TypedBody<'db>,
     body: hir::hir_def::Body<'db>,
     expr_id: hir::hir_def::ExprId,
+    callee: SemanticInstanceKey<'db>,
     emit_traits: &EventEmitTraits<'db>,
-) -> Option<Struct<'db>> {
+) -> Result<Option<TyId<'db>>, String> {
     let hir::hir_def::Partial::Present(hir::hir_def::Expr::MethodCall(
         receiver,
         method_name,
@@ -636,58 +753,120 @@ fn emitted_event_struct<'db>(
         args,
     )) = expr_id.data(db, body)
     else {
-        return None;
+        return Ok(None);
     };
-    let method_name = method_name.to_opt()?;
+    let Some(method_name) = method_name.to_opt() else {
+        return Ok(None);
+    };
     if method_name.data(db) != "emit" {
-        return None;
+        return Ok(None);
     }
-
-    let callable = typed_body.callable_expr(expr_id)?;
-    let hir::hir_def::CallableDef::Func(func) = callable.callable_def else {
-        return None;
+    let Some(callable) = typed_body.callable_expr(expr_id) else {
+        return Ok(None);
     };
-    if func.name(db).to_opt()? != method_name {
-        return None;
+    let hir::hir_def::CallableDef::Func(func) = callable.callable_def else {
+        return Ok(None);
+    };
+    if func.name(db).to_opt() != Some(method_name) {
+        return Ok(None);
     }
-
-    let trait_def = callable.trait_inst()?.def(db);
-    if emit_traits
+    let Some(trait_inst) = callable.trait_inst() else {
+        return Ok(None);
+    };
+    let trait_def = trait_inst.def(db);
+    let through_log = emit_traits
         .log_trait
-        .is_some_and(|log_trait| trait_def == log_trait)
-    {
-        let event_expr = args.first()?.expr;
-        let struct_ = struct_from_ty(db, typed_body.expr_ty(db, event_expr))?;
-        return is_event_struct(db, struct_).then_some(struct_);
-    }
-    if emit_traits
+        .is_some_and(|log_trait| trait_def == log_trait);
+    let through_event = emit_traits
         .event_trait
-        .is_some_and(|event_trait| trait_def == event_trait)
-    {
-        let struct_ = struct_from_ty(db, typed_body.expr_ty(db, *receiver))?;
-        return is_event_struct(db, struct_).then_some(struct_);
+        .is_some_and(|event_trait| trait_def == event_trait);
+    let emitted = if through_log {
+        let Some(arg) = args.first() else {
+            return Ok(None);
+        };
+        arg.expr
+    } else if through_event {
+        *receiver
+    } else {
+        return Ok(None);
+    };
+    let mut ty = typed_body.expr_ty(db, emitted);
+    while let Some((_, inner)) = ty.as_capability(db) {
+        ty = inner;
     }
-
-    None
+    let Some(struct_) = struct_from_ty(db, ty) else {
+        return Ok(None);
+    };
+    let event_trait = emit_traits
+        .event_trait
+        .ok_or("missing canonical Event declaration")?;
+    let goal = TraitInstId::new_simple(db, event_trait, vec![ty]);
+    let proof = if through_log {
+        let instance_scope = callee.impl_env(db).normalization_scope(db);
+        callable
+            .proved_bound(db, instance_scope, goal)
+            .map(|proved| proved.proof)
+    } else {
+        callable
+            .use_evidence()
+            .dispatch
+            .filter(|dispatch| dispatch.goal == goal)
+            .map(|dispatch| dispatch.proof)
+    }
+    .ok_or_else(|| {
+        format!(
+            "missing declaration-owned checked Event proof for `{}`",
+            ty.pretty_print(db)
+        )
+    })?;
+    if !proof.is_closed(db) || proof.answering(db, goal).is_none() {
+        return Err(format!(
+            "event ABI requires a closed checked Event proof for `{}`",
+            ty.pretty_print(db)
+        ));
+    }
+    let name = struct_
+        .name(db)
+        .to_opt()
+        .ok_or("event struct is missing a name")?;
+    let inputs = event_param_descs(db, contract_scope, struct_, ty)?;
+    let signature = canonical_function_signature(name.data(db), &inputs);
+    let value = eval_proved_trait_const(
+        db,
+        body,
+        typed_body,
+        expr_id,
+        goal,
+        proof,
+        "TOPIC0",
+        TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::U256))),
+        "event TOPIC0",
+        &signature,
+    )?;
+    let topic0 = match value.value(db) {
+        SemConstValue::Scalar {
+            value: SemConstScalar::Int { value },
+            ..
+        } => Some(value.to_str_radix(16)),
+        _ => None,
+    }
+    .ok_or_else(|| format!("event TOPIC0 is not u256 for `{signature}`"))?;
+    if topic0 != keccak_hex_without_leading_zeros(&signature) {
+        return Err(format!(
+            "event TOPIC0 does not match canonical signature `{signature}`"
+        ));
+    }
+    Ok(Some(ty))
 }
 
-fn push_event_struct<'db>(
-    db: &'db DriverDataBase,
-    out: &mut Vec<Struct<'db>>,
-    seen: &mut HashSet<Struct<'db>>,
-    struct_: Struct<'db>,
-) {
-    if !seen.insert(struct_) || !is_event_struct(db, struct_) {
-        return;
-    }
-    out.push(struct_);
-}
-
-fn is_event_struct(db: &DriverDataBase, struct_: Struct<'_>) -> bool {
-    matches!(
-        hir::span::struct_ast(db, struct_),
-        hir::span::HirOrigin::Desugared(hir::span::DesugaredOrigin::Event(_))
-    )
+fn keccak_hex_without_leading_zeros(signature: &str) -> String {
+    let mut hasher = Keccak::v256();
+    let mut output = [0u8; 32];
+    hasher.update(signature.as_bytes());
+    hasher.finalize(&mut output);
+    let hex: String = output.iter().map(|byte| format!("{byte:02x}")).collect();
+    let trimmed = hex.trim_start_matches('0');
+    if trimmed.is_empty() { "0" } else { trimmed }.to_string()
 }
 
 fn variant_has_canonical_json_abi_shape(db: &DriverDataBase, struct_: Struct<'_>) -> bool {
@@ -2764,13 +2943,37 @@ struct Point { x: u256, y: u256 }
 #[event]
 struct Paused {}
 #[event]
-struct Transfer { #[indexed] from: Address, #[indexed] to: Address, value: u256 }
+struct Transfer {
+    #[indexed]
+    from: Address,
+    #[indexed]
+    to: Address,
+    value: u256,
+}
 #[event]
-struct Note { #[indexed] sender: Address, id: u256, body: Bytes }
+struct Note {
+    #[indexed]
+    sender: Address,
+    id: u256,
+    body: Bytes,
+}
 #[event]
-struct Moved { #[indexed] who: Address, n: u256, to: Point }
+struct Moved {
+    #[indexed]
+    who: Address,
+    n: u256,
+    to: Point,
+}
 #[event]
-struct Ledger { #[indexed] a: Address, #[indexed] b: Address, #[indexed] c: Address, amount: u256 }
+struct Ledger {
+    #[indexed]
+    a: Address,
+    #[indexed]
+    b: Address,
+    #[indexed]
+    c: Address,
+    amount: u256,
+}
 "#;
 
     // Every topic0 and data word is written out directly; nothing here uses
@@ -3140,6 +3343,18 @@ use std::derive::EventField
 struct Claim { value: u256 }
 impl EventField for Claim {
     const IS_INDEXED: bool = true
+    const DATA_HEAD_SIZE: u256 = 0
+    fn data_dynamic_size(self) -> u256 { 0 }
+    fn emit_field(
+        own self,
+        _ out: core::abi::AbiFrame,
+        head_pos: u256,
+        tails: own core::abi::AbiFrame,
+    ) -> (core::abi::AbiFrame, u256) {
+        let _ = out
+        let _ = head_pos
+        (tails, self.value)
+    }
 }
 "#;
         let mut db = DriverDataBase::default();
