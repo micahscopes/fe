@@ -194,23 +194,32 @@ const vec = (items) => [...leb(items.length), ...items.flat()];
 /**
  * A module with the given function imports (`env` names, each `() -> ()`, or
  * `(i32) -> ()` when the name ends in `_i32`), a memory exported as `memory`,
- * and one exported function `run` that calls nothing and returns 7.
+ * and two exported functions: `run`, which returns 7, and `twice`, which
+ * returns its i32 argument times two.
  */
 function assemble(importNames = []) {
   const types = [
     [0x60, 0, 0], // () -> ()
     [0x60, 1, 0x7f, 0], // (i32) -> ()
     [0x60, 0, 1, 0x7f], // () -> i32
+    [0x60, 1, 0x7f, 1, 0x7f], // (i32) -> i32
   ];
   const imports = importNames.map((name) => [...text("env"), ...text(name), 0, name.endsWith("_i32") ? 1 : 0]);
   const bytes = [
     0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0,
     ...section(1, vec(types)),
     ...(imports.length ? section(2, vec(imports)) : []),
-    ...section(3, vec([[2]])),
+    ...section(3, vec([[2], [3]])),
     ...section(5, vec([[0, 1]])),
-    ...section(7, vec([[...text("memory"), 2, 0], [...text("run"), 0, importNames.length]])),
-    ...section(10, vec([[...leb(4), 0, 0x41, 7, 0x0b]])),
+    ...section(
+      7,
+      vec([
+        [...text("memory"), 2, 0],
+        [...text("run"), 0, importNames.length],
+        [...text("twice"), 0, importNames.length + 1],
+      ]),
+    ),
+    ...section(10, vec([[...leb(4), 0, 0x41, 7, 0x0b], [...leb(7), 0, 0x20, 0, 0x41, 2, 0x6c, 0x0b]])),
   ];
   return new Uint8Array(bytes);
 }
@@ -226,6 +235,12 @@ async function manifestFor(bytes, { imports = [], exports = null, ...patch } = {
     exports: exports ?? [
       { name: "memory", kind: "memory" },
       { name: "run", kind: "function", params: [], result: { type: "i32", wasm: ["i32"] } },
+      {
+        name: "twice",
+        kind: "function",
+        params: [{ name: "x", type: "u32", wasm: ["i32"] }],
+        result: { type: "u32", wasm: ["i32"] },
+      },
     ],
     ...patch,
   };
@@ -271,6 +286,12 @@ test("a module that matches its manifest runs, and the call is checked against t
   assert.equal(guest.call("run"), 7);
   assert.throws(() => guest.call("run", 1), /`run` takes 0 argument\(s\), but 1 were given/);
   assert.throws(() => guest.call("memory"), /does not export a function/);
+  assert.equal(guest.call("twice", 21), 42);
+  assert.throws(() => guest.call("twice"), /`twice` takes 1 argument\(s\) \(x: u32\), but 0 were given/);
+  assert.throws(() => guest.call("twice", "text"), /argument `x` of `twice` must be a number of type u32/);
+  // Without a manifest the host cannot tell, and passes the arguments as they are.
+  const bare = await instantiate(bytes);
+  assert.equal(bare.call("twice", 4), 8);
 });
 
 test("a module that differs from its manifest is refused", async () => {
@@ -299,6 +320,7 @@ test("a module that differs from its manifest is refused", async () => {
     exports: [
       { name: "memory", kind: "memory" },
       { name: "run", kind: "function" },
+      { name: "twice", kind: "function" },
       { name: "ghost", kind: "function" },
     ],
   });
