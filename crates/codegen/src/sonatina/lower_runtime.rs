@@ -23,7 +23,7 @@ use hir::{
 use mir::runtime::RefKind;
 use mir::{
     ArrayLayout, ConstNode, ConstRegionId, ConstScalar, FieldPlacement, IntrinsicArithBinOp,
-    Layout, LayoutId, RBlockId, RExpr, RLocalId, RStmt, RTerminator, ResolvedPlaceElem,
+    Layout, LayoutId, RBlock, RBlockId, RExpr, RLocalId, RStmt, RTerminator, ResolvedPlaceElem,
     ResolvedPlaceRootKind, RuntimeBody, RuntimeBuiltin, RuntimeClass, RuntimeFunction,
     RuntimeInlineHint, RuntimeInstance, RuntimeLinkage, RuntimeLocalRoot, RuntimeMemoryLayout,
     RuntimePackage, RuntimePlace, RuntimeSyntheticSpec, SaturatingBinOp, ScalarClass, ScalarRepr,
@@ -1202,7 +1202,12 @@ impl<'ctx, 'db, 'a, I: LoweringInstSet + 'static> FunctionLowerer<'ctx, 'db, 'a,
             self.fb
                 .switch_to_block(self.block_id(RBlockId::from_u32(idx as u32))?);
             let mut terminated = false;
-            for (stmt_idx, stmt) in block.stmts.iter().enumerate() {
+            let lowered_stmts = if self.module.is_native_target() {
+                &block.stmts[..revert_payload_start(block)]
+            } else {
+                &block.stmts[..]
+            };
+            for (stmt_idx, stmt) in lowered_stmts.iter().enumerate() {
                 let block_id = RBlockId::from_u32(idx as u32);
                 let watermark = self.inst_watermark();
                 let lowered = self.lower_stmt(stmt).map_err(|err| {
@@ -6543,6 +6548,44 @@ trait Pipe: Sized {
 }
 
 impl<T> Pipe for T {}
+
+/// Where the statements that only build the data of a revert begin, or the
+/// length of the block when it does not end in a revert.
+///
+/// Native and WebAssembly targets have no revert data: the revert is lowered
+/// to a trap, which ignores its operands. The statements before it that
+/// compute the payload, a run of constants, allocations and stores, then do
+/// nothing the program can observe, and they are not lowered. This keeps a
+/// failed assertion from needing an allocation. The run ends at the first
+/// statement that can do anything else, so a call or a load before the revert
+/// keeps everything up to and including it.
+fn revert_payload_start(block: &RBlock<'_>) -> usize {
+    if !matches!(
+        block.terminator,
+        RTerminator::Revert { .. } | RTerminator::RevertEmpty
+    ) {
+        return block.stmts.len();
+    }
+    let is_payload_stmt = |stmt: &RStmt<'_>| {
+        matches!(
+            stmt,
+            RStmt::Assign {
+                expr: RExpr::ConstScalar(_)
+                    | RExpr::Builtin(
+                        RuntimeBuiltin::Malloc { .. }
+                            | RuntimeBuiltin::Mstore { .. }
+                            | RuntimeBuiltin::StoreConstBytes { .. }
+                    ),
+                ..
+            }
+        )
+    };
+    block
+        .stmts
+        .iter()
+        .rposition(|stmt| !is_payload_stmt(stmt))
+        .map_or(0, |last| last + 1)
+}
 
 fn linkage_for_runtime(linkage: RuntimeLinkage) -> Linkage {
     match linkage {
