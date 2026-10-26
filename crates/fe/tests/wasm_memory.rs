@@ -7,9 +7,9 @@
 //! below gives the result of each call, or says that it traps. The reference
 //! restates the program in `i128` arithmetic, and a call traps where the
 //! program overflows, divides by zero or indexes outside an array. Every
-//! program is built at two optimization levels and run with wasmtime, and the
-//! same functions are also built for the host and compared (see
-//! `tests/wasm_support`).
+//! program is built at the four optimization levels (0, 1, 2 and s) and run with
+//! wasmtime, and the same functions are also built for the host and compared
+//! (see `tests/wasm_support`).
 
 mod wasm_support;
 
