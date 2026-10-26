@@ -26,18 +26,18 @@ use trace_facts::{TraceBundle, TraceMetadata, TraceSnapshot};
 use url::Url;
 
 /// Source locators by test display name.
-pub(super) type Locators = HashMap<String, Locator>;
+pub(crate) type Locators = HashMap<String, Locator>;
 
 /// Either a locator for the executed bytecode or the reason none exists.
 #[derive(Debug, Clone)]
-pub(super) enum Locator {
+pub(crate) enum Locator {
     Ready(Arc<FailureLocator>),
     Unavailable(String),
 }
 
 impl Locator {
     /// Extra lines to print under a failed test, without indentation.
-    pub(super) fn describe(&self, path: &PcPath) -> Vec<String> {
+    pub(crate) fn describe(&self, path: &PcPath) -> Vec<String> {
         match self {
             Self::Ready(locator) => locator.describe(path),
             Self::Unavailable(reason) => vec![format!("source location unavailable: {reason}")],
@@ -46,7 +46,7 @@ impl Locator {
 }
 
 #[derive(Debug)]
-pub(super) struct FailureLocator {
+pub(crate) struct FailureLocator {
     /// Runtime instructions in program-counter order.
     instructions: Vec<LocatedInstruction>,
     /// Compiled functions by program-counter range, in program-counter order.
@@ -115,7 +115,7 @@ impl FailureLocator {
                 continue;
             }
             let source = (instruction.classification == InstructionClassification::SourceMapped)
-                .then(|| instruction.primary_source.as_ref())
+                .then_some(instruction.primary_source.as_ref())
                 .flatten()
                 .and_then(|origin| spans.get(origin))
                 .and_then(|span| {
@@ -307,6 +307,7 @@ impl FailureLocator {
 }
 
 /// Builds locators for the tests of one module.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn locators_for_module(
     db: &DriverDataBase,
     top_mod: TopLevelMod<'_>,

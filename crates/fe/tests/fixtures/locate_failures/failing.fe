@@ -1,0 +1,35 @@
+fn triple(_ x: u32) -> u32 {
+    let doubled: u32 = x + x
+    doubled + x
+}
+
+fn check_total(_ a: u32, _ b: u32) {
+    let total: u32 = triple(a) + b
+    assert(total == 10)
+}
+
+#[test]
+fn passing_case() {
+    check_total(2, 4)
+}
+
+#[test]
+fn failing_assert_two_frames_deep() {
+    check_total(3, 4)
+}
+
+#[test]
+fn failing_overflow() {
+    let big: u8 = 255
+    let one: u8 = 1
+    let sum: u8 = big + one
+    assert(sum == 0)
+}
+
+#[test(should_revert, panic = 0x12)]
+fn wrong_panic_code_expected() {
+    let big: u8 = 255
+    let one: u8 = 1
+    let sum: u8 = big - one + one + one
+    assert(sum == 0)
+}

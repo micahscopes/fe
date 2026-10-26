@@ -3080,7 +3080,7 @@ fn execute_test(
                     TestResult {
                         name: name.to_string(),
                         passed: false,
-                        error_message: Some(msg),
+                        error_message: Some(explain(msg)),
                     },
                     Vec::new(),
                     trace,
@@ -3092,10 +3092,10 @@ fn execute_test(
             TestResult {
                 name: name.to_string(),
                 passed: false,
-                error_message: Some(format!(
+                error_message: Some(explain(format!(
                     "Expected test to revert, but it failed with: {}",
                     format_harness_error(err)
-                )),
+                ))),
             },
             Vec::new(),
             trace,

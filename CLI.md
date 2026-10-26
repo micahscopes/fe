@@ -504,7 +504,7 @@ Runs Fe tests via the test harness (revm-based execution).
 ### Synopsis
 
 ```
-fe test [--filter <pattern>] [--jobs <n>] [--grouped] [--show-logs] [--optimize <level>] [--trace-evm] [--trace-evm-keep <n>] [--trace-evm-stack-n <n>] [--debug-dir <dir>] [--report [--report-out <out>]] [--report-dir <dir> [--report-failed-only]] [--call-trace] [path]...
+fe test [--filter <pattern>] [--jobs <n>] [--grouped] [--show-logs] [--optimize <level>] [--trace-evm] [--trace-evm-keep <n>] [--trace-evm-stack-n <n>] [--debug-dir <dir>] [--report [--report-out <out>]] [--report-dir <dir> [--report-failed-only]] [--call-trace] [--locate-failures] [path]...
 ```
 
 ### Inputs
@@ -529,6 +529,14 @@ fe test [--filter <pattern>] [--jobs <n>] [--grouped] [--show-logs] [--optimize 
 - `--trace-evm`, `--trace-evm-keep`, `--trace-evm-stack-n` enable EVM opcode tracing.
 - `--debug-dir <dir>` writes debug outputs (traces) into a directory.
 - `--call-trace` prints a normalized call trace for each test.
+- `--locate-failures` explains each failed test with the Fe source of the instruction
+  that failed and the call stack that reached it. The failed call is replayed to collect
+  the program counters it executed, and the test module is compiled a second time with
+  source tracing. The traced init code must equal the bytecode that ran, byte for byte;
+  otherwise the test reports that no location is available. The stack is rebuilt from the
+  executed jumps and the compiled function ranges, so functions the optimizer inlined have
+  no frame, and an optimized test may fold away the source of the failure (use `-O 0` to
+  keep more). Values and local variables are not shown. Passing tests are not replayed.
 
 ### Output
 

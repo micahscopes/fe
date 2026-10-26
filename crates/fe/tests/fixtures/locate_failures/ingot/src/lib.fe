@@ -1,0 +1,11 @@
+use math::scaled_total
+
+#[test]
+fn total_in_range() {
+    assert(scaled_total(2, 3) == 25)
+}
+
+#[test]
+fn total_out_of_range_fails_in_other_module() {
+    assert(scaled_total(60, 50) == 550)
+}
