@@ -330,7 +330,8 @@ the problem. The host also supplies the log, clock and abort imports of `std::wa
 given the manifest of a module it refuses the module, naming the cause, when the SHA-256
 differs, when the imports or exports differ from the manifest's, or when the host lacks an
 import. `examples/wasm/lines.fe` and `examples/wasm/lines.mjs` are a small program and a
-script that runs it, `examples/wasm/verify.mjs` checks a module against its manifest.
+script that runs it, `examples/wasm/verify.mjs` checks a module against its manifest, and
+`examples/wasm/README.md` describes the whole target.
 
 The `metadata.json` artifact follows the Solidity Contract Metadata schema (`version: 1`), adapted to Fe. It is a complete, deterministic recompilation input: rebuilding with the same compiler version, `sources`, and `settings` reproduces the same bytecode. Its shape:
 
