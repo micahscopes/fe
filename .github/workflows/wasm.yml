@@ -68,6 +68,6 @@ jobs:
         run: examples/wasm/check.sh target/release/fe
       - name: Run the WebAssembly tests of the compiler
         run: >-
-          cargo test --locked --profile test-release -p fe --features wasm,cranelift
+          cargo test --locked --profile test-release -p fe --all-features
           --test wasm_backend --test wasm_memory --test wasm_imports --test wasm_files
           --test wasm_manifest --test wasm_reproducible --test wasm_test_command
