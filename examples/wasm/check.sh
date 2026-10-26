@@ -68,7 +68,8 @@ echo "== reproducibility"
 
 echo "== fe test --backend wasm"
 "$fe" test --backend wasm --color never "$here/tests.fe"
-if "$fe" build --help | grep -q native && [ "$(uname -s)-$(uname -m)" = "Linux-x86_64" ]; then
+build_help=$("$fe" build --help)
+if [[ "$build_help" == *native* && "$(uname -s)-$(uname -m)" == "Linux-x86_64" ]]; then
   echo "== the same tests on the native backend"
   "$fe" test --backend native --color never "$here/tests.fe"
 fi
