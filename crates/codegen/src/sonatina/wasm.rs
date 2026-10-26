@@ -69,7 +69,7 @@ pub struct WasmArtifacts {
     pub exports: Vec<WasmExportInfo>,
 }
 
-fn create_wasm32_isa() -> Wasm32 {
+pub(super) fn create_wasm32_isa() -> Wasm32 {
     Wasm32::new(TargetTriple::new(
         Architecture::Wasm32,
         Vendor::Unknown,
@@ -79,7 +79,7 @@ fn create_wasm32_isa() -> Wasm32 {
 
 /// Joins the errors of the backend. Input that it does not translate is the
 /// user's to change; any other failure is a compiler fault.
-fn lower_wasm_errors(errors: Vec<WasmError>) -> LowerError {
+pub(super) fn lower_wasm_errors(errors: Vec<WasmError>) -> LowerError {
     let unsupported = errors
         .iter()
         .all(|error| matches!(error, WasmError::Unsupported(_)));
