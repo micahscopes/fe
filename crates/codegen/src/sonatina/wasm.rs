@@ -1,14 +1,18 @@
-//! WebAssembly output for programs whose exports are scalar functions.
+//! WebAssembly output for programs whose exports are functions of numbers and
+//! text.
 //!
 //! The module is lowered by the same lowerer as host-native and SP1 output,
 //! for the `wasm32-unknown-native` target: one linear address space and
-//! 32-bit pointers. The exports are the scalar `pub fn` items of the file; their
+//! 32-bit pointers. The exports are the `pub fn` items of the file; their
 //! bodies may use aggregates, constants and dynamic memory, which the backend
-//! keeps in the linear memory.
+//! keeps in the linear memory. An export may take `std::wasm::HostText` parameters
+//! and return a `std::wasm::Reply`; a wrapper converts them to and from the
+//! numbers of the boundary, and a module with a text parameter exports the
+//! allocator through which the host places the text.
 
 use driver::DriverDataBase;
 use hir::hir_def::TopLevelMod;
-use mir::{WasmExportPackage, build_wasm_export_package};
+use mir::{WasmExport, WasmExportPackage, build_wasm_export_package};
 use sonatina_codegen::{
     Compile,
     isa::wasm::{WasmBackend, WasmError},
@@ -63,13 +67,27 @@ pub fn emit_module_wasm_artifacts(
     opt_level: OptLevel,
     outputs: WasmOutputSelection,
 ) -> Result<WasmArtifacts, LowerError> {
-    let WasmExportPackage { package, .. } = build_wasm_export_package(db, top_mod)?;
+    let WasmExportPackage { package, exports } = build_wasm_export_package(db, top_mod)?;
     let isa = create_wasm32_isa();
-    let (module, _) =
-        lower_runtime::compile_runtime_package_sonatina_for_isa(db, &package, &isa, false, None)?;
+    let adapters = exports
+        .iter()
+        .filter(|export| export.needs_adapter())
+        .map(|export| lower_runtime::WasmAdapter {
+            instance: export.instance,
+            name: export.name.clone(),
+            params: export.params.clone(),
+            result: export.result,
+        })
+        .collect::<Vec<_>>();
+    let module = lower_runtime::compile_wasm_package_sonatina(db, &package, &isa, &adapters)?;
+    let backend = if exports.iter().any(WasmExport::takes_text) {
+        WasmBackend::new().with_host_allocator()
+    } else {
+        WasmBackend::new()
+    };
 
     let mut compile =
-        Compile::new(module, WasmBackend::new()).with_opt_level(to_sonatina_opt_level(opt_level));
+        Compile::new(module, backend).with_opt_level(to_sonatina_opt_level(opt_level));
     compile.optimize();
     ensure_module_sonatina_ir_valid(compile.module())?;
     let ir = outputs

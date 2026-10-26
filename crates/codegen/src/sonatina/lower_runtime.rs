@@ -27,8 +27,8 @@ use mir::{
     ResolvedPlaceRootKind, RuntimeBody, RuntimeBuiltin, RuntimeClass, RuntimeFunction,
     RuntimeInlineHint, RuntimeInstance, RuntimeLinkage, RuntimeLocalRoot, RuntimeMemoryLayout,
     RuntimePackage, RuntimePlace, RuntimeSyntheticSpec, SaturatingBinOp, ScalarClass, ScalarRepr,
-    VariantId, instance::RuntimeInstanceSource, resolve_runtime_place,
-    scalar_raw_memory_size_bytes,
+    VariantId, WasmParamShape, WasmResultShape, instance::RuntimeInstanceSource,
+    resolve_runtime_place, scalar_raw_memory_size_bytes,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec1::{SmallVec, smallvec};
@@ -217,11 +217,53 @@ where
     I: Isa,
     I::InstSet: LoweringInstSet,
 {
+    compile_package_with_adapters(db, package, isa, declare_objects, fixed_symbol, &[])
+}
+
+/// An exported function whose parameters or result are not all scalars. The
+/// function itself becomes private, under another symbol, and a public wrapper
+/// with the scalar signature of the WebAssembly boundary takes its name.
+pub(super) struct WasmAdapter<'db> {
+    pub(super) instance: RuntimeInstance<'db>,
+    /// The name the host calls.
+    pub(super) name: String,
+    pub(super) params: Vec<WasmParamShape>,
+    pub(super) result: WasmResultShape,
+}
+
+/// Lowers the package, and adds the wrapper of each adapter.
+pub(super) fn compile_wasm_package_sonatina<'db, I>(
+    db: &'db DriverDataBase,
+    package: &RuntimePackage<'db>,
+    isa: &I,
+    adapters: &[WasmAdapter<'db>],
+) -> Result<Module, LowerError>
+where
+    I: Isa,
+    I::InstSet: LoweringInstSet,
+{
+    compile_package_with_adapters(db, package, isa, false, None, adapters).map(|(module, _)| module)
+}
+
+fn compile_package_with_adapters<'db, I>(
+    db: &'db DriverDataBase,
+    package: &RuntimePackage<'db>,
+    isa: &I,
+    declare_objects: bool,
+    fixed_symbol: Option<(RuntimeInstance<'db>, &str)>,
+    adapters: &[WasmAdapter<'db>],
+) -> Result<(Module, FxHashMap<RuntimeInstance<'db>, FuncRef>), LowerError>
+where
+    I: Isa,
+    I::InstSet: LoweringInstSet,
+{
     let builder = ModuleBuilder::new(ModuleCtx::new(isa));
     let mut lowerer = ModuleLowerer::new(db, builder, isa.inst_set(), package, fixed_symbol);
+    lowerer.adapt_exports(adapters);
     lowerer.declare_functions()?;
     lowerer.lower_const_regions()?;
     lowerer.lower_bodies()?;
+    lowerer.lower_wasm_adapters(adapters)?;
     if declare_objects {
         lowerer.declare_objects()?;
     }
@@ -245,6 +287,8 @@ struct ModuleLowerer<'db, 'a, I: 'static> {
     external_code: FxHashMap<(String, mir::RuntimeSectionName), GlobalVariableRef>,
     /// The constant byte strings code copies, one global each.
     const_bytes: FxHashMap<Box<[u8]>, GlobalVariableRef>,
+    /// Exports that a wrapper stands in for: private, under their own symbol.
+    adapted: FxHashSet<mir::RuntimeInstance<'db>>,
 }
 
 impl<'db, 'a, I: LoweringInstSet + 'static> ModuleLowerer<'db, 'a, I> {
@@ -277,7 +321,135 @@ impl<'db, 'a, I: LoweringInstSet + 'static> ModuleLowerer<'db, 'a, I> {
             explicit_code_region_sections: FxHashSet::default(),
             external_code: FxHashMap::default(),
             const_bytes: FxHashMap::default(),
+            adapted: FxHashSet::default(),
         }
+    }
+
+    /// Gives each adapted export the symbol of its body, so that the wrapper
+    /// can take the name of the export.
+    fn adapt_exports(&mut self, adapters: &[WasmAdapter<'db>]) {
+        for adapter in adapters {
+            self.func_symbols
+                .insert(adapter.instance, format!("{}$export", adapter.name));
+            self.adapted.insert(adapter.instance);
+        }
+    }
+
+    /// The public function of each adapter: it takes the parameters of the
+    /// WebAssembly boundary, builds the arguments of the exported function, calls
+    /// it and converts the result.
+    fn lower_wasm_adapters(&mut self, adapters: &[WasmAdapter<'db>]) -> Result<(), LowerError> {
+        for adapter in adapters {
+            self.lower_wasm_adapter(adapter)?;
+        }
+        Ok(())
+    }
+
+    fn lower_wasm_adapter(&mut self, adapter: &WasmAdapter<'db>) -> Result<(), LowerError> {
+        let body_ref = self.func_ref(adapter.instance)?;
+        let (body_params, body_ret) = self.builder.ctx.func_sig(body_ref, |sig| {
+            (sig.args().to_vec(), sig.ret_tys().first().copied())
+        });
+        let internal = |detail: &str| {
+            LowerError::Internal(format!(
+                "WebAssembly adapter of `{}`: {detail}",
+                adapter.name
+            ))
+        };
+        if adapter.params.len() != body_params.len() {
+            return Err(internal("the parameters do not match the function"));
+        }
+        let mut params = Vec::new();
+        for (shape, ty) in adapter.params.iter().zip(&body_params) {
+            match shape {
+                WasmParamShape::Scalar => params.push(*ty),
+                WasmParamShape::Text => params.extend([Type::I32, Type::I32]),
+            }
+        }
+        let ret = match adapter.result {
+            WasmResultShape::Unit => None,
+            WasmResultShape::Scalar => body_ret,
+            WasmResultShape::Reply => Some(Type::I64),
+        };
+        let signature = match ret {
+            Some(ret) => Signature::new_single(&adapter.name, Linkage::Public, &params, ret),
+            None => Signature::new_unit(&adapter.name, Linkage::Public, &params),
+        };
+        let wrapper = self
+            .builder
+            .declare_function(signature)
+            .map_err(|err| LowerError::Internal(format!("failed to declare function: {err}")))?;
+
+        let object_pointee = |ty: Type| match ty.resolve_compound(&self.builder.ctx) {
+            Some(CompoundType::ObjRef(inner)) => Some(inner),
+            _ => None,
+        };
+        let text_types = body_params
+            .iter()
+            .map(|ty| (object_pointee(*ty), *ty))
+            .collect::<Vec<_>>();
+        let ret_pointee = body_ret.and_then(object_pointee);
+        let is = self.inst_set;
+        let mut fb = self.builder.func_builder::<InstInserter>(wrapper);
+        let block = fb.append_block();
+        fb.switch_to_block(block);
+        let incoming = fb.func.arg_values.to_vec();
+        let mut incoming = incoming.into_iter();
+        let mut args = SmallVec::new();
+        for (shape, (pointee, ty)) in adapter.params.iter().zip(text_types) {
+            let mut next = || incoming.next().ok_or_else(|| internal("missing parameter"));
+            match shape {
+                WasmParamShape::Scalar => args.push(next()?),
+                WasmParamShape::Text => {
+                    // A `HostText` is a struct of the address and the length, held
+                    // in an object when the function takes it by reference.
+                    let value_ty = pointee.unwrap_or(ty);
+                    let mut text = fb.make_undef_value(value_ty);
+                    for field in 0..2u64 {
+                        let part = next()?;
+                        let index = fb.make_imm_value(I256::from(field));
+                        text = fb.insert_inst(InsertValue::new(is, text, index, part), value_ty);
+                    }
+                    if pointee.is_some() {
+                        let object = fb.insert_inst(ObjAlloc::new(is, value_ty), ty);
+                        fb.insert_inst_no_result(ObjStore::new(is, object, text));
+                        args.push(object);
+                    } else {
+                        args.push(text);
+                    }
+                }
+            }
+        }
+        match (body_ret, adapter.result) {
+            (None, _) => {
+                fb.insert_inst_no_result(Call::new(is, body_ref, args));
+                fb.insert_inst_no_result(Return::new_unit(is));
+            }
+            (Some(ret_ty), WasmResultShape::Reply) => {
+                let mut reply = fb.insert_inst(Call::new(is, body_ref, args), ret_ty);
+                if let Some(inner) = ret_pointee {
+                    reply = fb.insert_inst(ObjLoad::new(is, reply), inner);
+                }
+                // The reply is a struct of the tag and the payload, both `u32`.
+                let mut words = Vec::new();
+                for field in 0..2u64 {
+                    let index = fb.make_imm_value(I256::from(field));
+                    let word = fb.insert_inst(ExtractValue::new(is, reply, index), Type::I32);
+                    words.push(fb.insert_inst(Zext::new(is, word, Type::I64), Type::I64));
+                }
+                let shift = fb.make_imm_value(Immediate::I64(32));
+                let high = fb.insert_inst(Shl::new(is, shift, words[1]), Type::I64);
+                let packed = fb.insert_inst(Or::new(is, words[0], high), Type::I64);
+                fb.insert_inst_no_result(Return::new_single(is, packed));
+            }
+            (Some(ret_ty), _) => {
+                let value = fb.insert_inst(Call::new(is, body_ref, args), ret_ty);
+                fb.insert_inst_no_result(Return::new_single(is, value));
+            }
+        }
+        fb.seal_all();
+        fb.finish();
+        Ok(())
     }
 
     fn finish(self) -> (Module, FxHashMap<RuntimeInstance<'db>, FuncRef>) {
@@ -398,18 +570,14 @@ impl<'db, 'a, I: LoweringInstSet + 'static> ModuleLowerer<'db, 'a, I> {
             self.argument_packs.insert(instance, pack);
             args = vec![self.builder.objref_type(pack)];
         }
+        let linkage = if self.adapted.contains(&instance) {
+            Linkage::Private
+        } else {
+            linkage_for_runtime(function.linkage(self.db))
+        };
         Ok(match ret {
-            Some(ret) => Signature::new_single(
-                &symbol,
-                linkage_for_runtime(function.linkage(self.db)),
-                &args,
-                ret,
-            ),
-            None => Signature::new_unit(
-                &symbol,
-                linkage_for_runtime(function.linkage(self.db)),
-                &args,
-            ),
+            Some(ret) => Signature::new_single(&symbol, linkage, &args, ret),
+            None => Signature::new_unit(&symbol, linkage, &args),
         })
     }
 
