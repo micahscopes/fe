@@ -265,7 +265,8 @@ With the optional `wasm` Cargo feature, `fe build --backend wasm <file.fe>` comp
 a standalone `.fe` file to a WebAssembly module (32-bit pointers, one linear memory).
 Every non-generic `pub fn` in the root of the file is exported under its own name,
 and the module also exports its memory as `memory`. Parameters and results must be
-`bool` or integers of at most 64 bits; any other type, including `usize`, `u256` and
+`bool` or integers of at most 64 bits, with two exceptions described below (text
+parameters and a reply result); any other type, including `usize`, `u256` and
 structs, is an error that names the function and the type. Inside functions, structs,
 tuples, enums, arrays, constants, `usize` and the dynamic arrays of `core::ptr` work.
 Overflow, division by zero, a failed `assert!` and an index outside an array trap, as
@@ -291,6 +292,33 @@ the provider where it starts, for example
 `with (Log = host(), Clock = host()) { ... }` inside an exported function, since an
 export cannot itself need effects. If the host does not supply an import, the engine
 refuses to instantiate the module and names it.
+
+An export may also take `std::wasm::HostText` parameters and return a
+`std::wasm::Reply`; nothing else beyond the scalars is accepted, and each other type is
+an error that names it. A `HostText` is two `i32` parameters, the address and the length
+in bytes of text that the host placed in the module's memory, valid for the call only.
+A `Reply` is one `i64`: the tag in the low 32 bits and the payload in the high 32 bits,
+where tag 0 is success with a value and any other tag is an error number of the contract
+(the payload is then 0). A module with a `HostText` parameter also exports an allocator:
+`alloc(size) -> address` returns zeroed memory, `arena_mark() -> address` reads the arena
+top, and `arena_release(mark)` frees everything allocated after `mark` and clears it. A
+host places the texts with `alloc`, makes the call, reads what it needs, and calls
+`arena_release` with the mark it took first. The three names are then reserved. Safe Fe
+code cannot make a `HostText`; only the host and the generated wrapper of the export do.
+
+`std::wasm::files` is a contract built on these shapes, with four operations: `open(name)`
+(the name is borrowed text), `size(handle)`, `read_byte(handle, index)` and
+`close(handle)`, which takes the handle by value, so the compiler rejects a second use.
+Each can fail with `NotFound` (1), `OutOfRange` (2) or `BadName` (3); no other number is
+valid. `host()` calls the imports `sys_wasm_files_open(addr, len)`, `sys_wasm_files_size`,
+`sys_wasm_files_read_byte` and `sys_wasm_files_close`, which return a reply word (close
+returns nothing), and `mock()` is Fe code that holds files in memory. The compiler does not
+require a handle to be closed; the host counts the handles that stay open. The module
+`examples/wasm/host.mjs` is a host for Node with no dependencies: it supplies the imports,
+places texts, decodes replies, and refuses a forged or closed handle, text outside the
+memory or longer than 64 KiB, and an unknown error number, each with an error that names
+the problem. `examples/wasm/lines.fe` and `examples/wasm/lines.mjs` are a small program
+and a script that runs it.
 
 The `metadata.json` artifact follows the Solidity Contract Metadata schema (`version: 1`), adapted to Fe. It is a complete, deterministic recompilation input: rebuilding with the same compiler version, `sources`, and `settings` reproduces the same bytecode. Its shape:
 
