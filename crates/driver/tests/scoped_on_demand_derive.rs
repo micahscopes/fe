@@ -796,12 +796,12 @@ const fn run() -> u256 {
         .copied()
         .find(|func| func.name(&db).to_opt().map(|id| id.data(&db).as_str()) == Some("run"))
         .expect("expected `run` function");
-    let (diags, _) = hir::analysis::ty::ty_check::check_func_body(&db, func);
-    let pending = hir::analysis::ty::ty_check::check_func_body::accumulated::<
-        hir::analysis::ty::trait_resolution::generation::GenerationDemand,
-    >(&db, func);
+    let (diags, typed) = hir::analysis::ty::ty_check::check_func_body(&db, func);
     assert!(
-        pending.iter().any(|request| request.demand.is_ok()),
+        typed
+            .generation_demands()
+            .iter()
+            .any(|request| request.demand.is_ok()),
         "raw checking must preserve the actual preparation request"
     );
     assert!(
@@ -1132,6 +1132,37 @@ const fn run() -> u256 { with (A) { Pair::score() } }
 "#,
     )
     .expect("provider dependencies should prepare before evaluation");
+    assert_eq!(eval_const_fn_u256(&output, "run"), "42");
+}
+
+#[test]
+fn provider_constant_dependency_is_prepared_before_its_body_executes() {
+    let output = prepare(
+        r#"
+use core::derive::Derive
+use core::meta::{Record, Code, Item}
+trait Score { const fn score() -> u256 }
+trait Seed { const fn seed() -> u256 }
+struct Pair {}
+struct Token {}
+struct A {}
+struct B {}
+impl Derive<Score> for A {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n = SEEDED
+        quote { const fn score() -> u256 { ${n} } }
+    }
+}
+const SEEDED: u256 = with (B) { Token::seed() }
+impl Derive<Seed> for B {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { const fn seed() -> u256 { 42 } }
+    }
+}
+const fn run() -> u256 { with (A) { Pair::score() } }
+"#,
+    )
+    .expect("a constant a provider reads is prepared before the provider executes");
     assert_eq!(eval_const_fn_u256(&output, "run"), "42");
 }
 
