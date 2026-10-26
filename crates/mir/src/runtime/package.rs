@@ -524,7 +524,7 @@ fn build_test_package<'db>(
         }
     }
     let primary = (objects.len() == 1).then(|| objects[0].0.clone());
-    let package = build_sectioned_package(db, top_mod, roots, objects, primary.as_deref())?;
+    let package = build_sectioned_package(db, top_mod, roots, objects, primary.as_deref(), &[])?;
     verify_runtime_package(db, package)
         .map_err(|err| LowerError::Unsupported(format!("invalid runtime package: {err:?}")))?;
     Ok(package)
@@ -548,7 +548,7 @@ fn build_contract_package<'db>(
     }
 
     let primary = (objects.len() == 1).then(|| objects[0].0.clone());
-    let package = build_sectioned_package(db, top_mod, roots, objects, primary.as_deref())?;
+    let package = build_sectioned_package(db, top_mod, roots, objects, primary.as_deref(), &[])?;
     verify_runtime_package(db, package)
         .map_err(|err| LowerError::Unsupported(format!("invalid runtime package: {err:?}")))?;
     Ok(package)
@@ -591,10 +591,180 @@ pub fn build_native_executable_package<'db>(
             vec![(RuntimeSectionName::Main, instance)],
         )],
         Some("main"),
+        &[],
     )?;
     verify_runtime_package(db, package)
         .map_err(|err| LowerError::Unsupported(format!("invalid native package: {err:?}")))?;
     Ok(package)
+}
+
+/// The name of the linear memory that every WebAssembly module exports. A
+/// function cannot be exported under it.
+pub const WASM_MEMORY_EXPORT: &str = "memory";
+
+/// A function the host can call by name.
+#[derive(Clone, Copy, Debug)]
+pub struct WasmExport<'db> {
+    pub func: Func<'db>,
+    pub instance: RuntimeInstance<'db>,
+}
+
+#[derive(Debug)]
+pub struct WasmExportPackage<'db> {
+    pub package: RuntimePackage<'db>,
+    /// In name order.
+    pub exports: Vec<WasmExport<'db>>,
+}
+
+/// Build the package of a WebAssembly module. Its exports are the `pub fn`
+/// items of the root scope that are not generic, not `extern` and not tests.
+/// Each is rooted with its own signature, which must consist of `bool` and
+/// integers of at most 64 bits. An export that is not scalar is an error that
+/// names it, and so is a module with no exports.
+pub fn build_wasm_export_package<'db>(
+    db: &'db dyn MirDb,
+    top_mod: TopLevelMod<'db>,
+) -> Result<WasmExportPackage<'db>, LowerError> {
+    let mut exports = Vec::new();
+    for item in top_mod.children_non_nested(db) {
+        let ItemKind::Func(func) = item else {
+            continue;
+        };
+        if func.is_extern(db)
+            || func.is_associated_func(db)
+            || is_test_func(db, func)
+            || !func.vis(db).is_pub()
+        {
+            continue;
+        }
+        if let Some(export) = wasm_export_for_func(db, func)? {
+            exports.push(export);
+        }
+    }
+    exports.sort_by_cached_key(|export| func_display_name(db, export.func));
+    if exports.is_empty() {
+        return Err(LowerError::Unsupported(
+            "WebAssembly output needs at least one exported function: a non-generic `pub fn` in the root of the file".to_string(),
+        ));
+    }
+
+    let instances = exports
+        .iter()
+        .map(|export| export.instance)
+        .collect::<Vec<_>>();
+    let objects = exports
+        .iter()
+        .map(|export| {
+            (
+                sanitize_object_name(&format!("export_{}", func_display_name(db, export.func))),
+                vec![(RuntimeSectionName::Main, export.instance)],
+            )
+        })
+        .collect();
+    let package =
+        build_sectioned_package(db, top_mod, instances.clone(), objects, None, &instances)?;
+    verify_runtime_package(db, package)
+        .map_err(|err| LowerError::Unsupported(format!("invalid WebAssembly package: {err:?}")))?;
+    Ok(WasmExportPackage { package, exports })
+}
+
+fn wasm_export_for_func<'db>(
+    db: &'db dyn MirDb,
+    func: Func<'db>,
+) -> Result<Option<WasmExport<'db>>, LowerError> {
+    let name = func_display_name(db, func);
+    let semantic = match root_semantic_instance_key(db, BodyOwner::Func(func, None)) {
+        Ok(key) => SemanticInstance::new(db, key),
+        // A generic function has no WebAssembly form until a caller picks
+        // its arguments, so it is not an export.
+        Err(RootSemanticInstanceError::UnsupportedGenericParam { offending_ty, .. })
+            if !is_implicit_layout_const_param(db, offending_ty) =>
+        {
+            return Ok(None);
+        }
+        Err(err) => {
+            return Err(LowerError::Unsupported(
+                format_root_semantic_instance_rejection(db, &name, &err),
+            ));
+        }
+    };
+    if name == WASM_MEMORY_EXPORT {
+        return Err(LowerError::Unsupported(format!(
+            "cannot export `{name}` to WebAssembly: the name is reserved for the linear memory"
+        )));
+    }
+    let entry_args =
+        entry_semantic_args_plan(db, EntryEffectContext::StandaloneFunc { func }, semantic)
+            .map_err(|err| {
+                LowerError::Unsupported(format!("cannot export `{name}` to WebAssembly: {err}"))
+            })?;
+    if !entry_args.effects.is_empty() {
+        return Err(LowerError::Unsupported(format!(
+            "cannot export `{name}` to WebAssembly: it needs effect providers (`uses`) that the host cannot supply"
+        )));
+    }
+
+    let instance = runtime_instance_for_semantic(db, semantic);
+    let signature = instance.interface_signature(db);
+    let hir_params = func.params(db).count();
+    for (idx, param) in signature.params.iter().enumerate() {
+        if let Some(reason) = wasm_scalar_rejection(&param.class) {
+            let what = if signature.params.len() == hir_params {
+                let param_name = func
+                    .params(db)
+                    .nth(idx)
+                    .and_then(|view| view.name(db))
+                    .map_or_else(|| format!("{idx}"), |ident| ident.data(db).to_string());
+                let ty = func.arg_ty(db, idx).map_or_else(String::new, |ty| {
+                    format!(": {}", ty.instantiate_identity().pretty_print(db))
+                });
+                format!("parameter `{param_name}{ty}`")
+            } else {
+                format!("parameter {idx}")
+            };
+            return Err(LowerError::Unsupported(format!(
+                "cannot export `{name}` to WebAssembly: {what} {reason}"
+            )));
+        }
+    }
+    if let Some(reason) = signature.ret.as_ref().and_then(wasm_scalar_rejection) {
+        return Err(LowerError::Unsupported(format!(
+            "cannot export `{name}` to WebAssembly: the result type `{}` {reason}",
+            func.return_ty(db).pretty_print(db)
+        )));
+    }
+    Ok(Some(WasmExport { func, instance }))
+}
+
+/// Why `class` cannot cross the WebAssembly boundary by value, or `None` for
+/// `bool` and the integers of at most 64 bits.
+fn wasm_scalar_rejection(class: &RuntimeClass<'_>) -> Option<String> {
+    match class {
+        RuntimeClass::Scalar(ScalarClass {
+            repr: ScalarRepr::Bool,
+            ..
+        }) => None,
+        RuntimeClass::Scalar(ScalarClass {
+            repr: ScalarRepr::Int { bits, .. },
+            ..
+        }) if *bits <= 64 => None,
+        RuntimeClass::Scalar(ScalarClass {
+            repr: ScalarRepr::Int { bits, .. },
+            ..
+        }) => Some(format!(
+            "is a {bits}-bit integer; exports take only `bool` and integers of at most 64 bits"
+        )),
+        RuntimeClass::Scalar(_) => Some(
+            "is a fixed-size byte value or address; exports take only `bool` and integers of at most 64 bits"
+                .to_string(),
+        ),
+        RuntimeClass::AggregateValue { .. } | RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => {
+            Some(
+                "is not a scalar (a struct, tuple, array, enum, reference or pointer); exports take only `bool` and integers of at most 64 bits"
+                    .to_string(),
+            )
+        }
+    }
 }
 
 fn manual_contract_objects<'db>(
@@ -1051,22 +1221,27 @@ fn build_non_contract_package<'db>(
             .map(|(name, section, entry)| (name, vec![(section, entry)]))
             .collect(),
         primary_object_name,
+        &[],
     )
 }
 
+/// `exported` lists the instances the host can call by name. They receive
+/// `RuntimeLinkage::Internal` and keep their source names as symbols.
 fn build_sectioned_package<'db>(
     db: &'db dyn MirDb,
     top_mod: TopLevelMod<'db>,
     roots: Vec<RuntimeInstance<'db>>,
     object_specs: Vec<(String, Vec<(RuntimeSectionName, RuntimeInstance<'db>)>)>,
     primary_object_name: Option<&str>,
+    exported: &[RuntimeInstance<'db>],
 ) -> Result<RuntimePackage<'db>, LowerError> {
     let root_object_names = object_specs
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<FxHashSet<_>>();
     let mut graph = RuntimeGraphBuilder::new(db, roots, object_specs).build()?;
-    let functions = collect_runtime_functions(db, &graph);
+    let exported = exported.iter().copied().collect::<FxHashSet<_>>();
+    let functions = collect_runtime_functions(db, &graph, &exported);
     let functions_by_instance = functions
         .iter()
         .map(|function| (function.instance(db), *function))
@@ -1793,6 +1968,7 @@ const RUNTIME_SYMBOL_DISAMBIG_FINGERPRINT_LEN: usize = 4;
 fn collect_runtime_functions<'db>(
     db: &'db dyn MirDb,
     graph: &RuntimeGraph<'db>,
+    exported: &FxHashSet<RuntimeInstance<'db>>,
 ) -> Vec<RuntimeFunction<'db>> {
     let mut instances = graph.nodes.keys().copied().collect::<Vec<_>>();
     instances.sort_by_cached_key(|instance| {
@@ -1833,6 +2009,7 @@ fn collect_runtime_functions<'db>(
                 db,
                 instance,
                 symbol,
+                exported.contains(&instance),
                 graph
                     .nodes
                     .get(&instance)
@@ -1873,6 +2050,7 @@ fn runtime_function_for_instance<'db>(
     db: &'db dyn MirDb,
     instance: RuntimeInstance<'db>,
     symbol: String,
+    exported: bool,
     referenced_const_regions: Vec<ConstRegionId<'db>>,
 ) -> RuntimeFunction<'db> {
     match instance.key(db).source(db) {
@@ -1882,6 +2060,8 @@ fn runtime_function_for_instance<'db>(
             symbol,
             if instance.is_external_declaration(db) {
                 RuntimeLinkage::External
+            } else if exported {
+                RuntimeLinkage::Internal
             } else {
                 RuntimeLinkage::Private
             },
