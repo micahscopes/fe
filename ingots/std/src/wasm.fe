@@ -2,11 +2,19 @@
 //!
 //! Each operation is an import from the module `env`. A host that instantiates
 //! the module must supply every import that the program reaches. Values cross
-//! by value as WebAssembly `i32` and `i64`; the host sees no Fe memory.
+//! by value as WebAssembly `i32` and `i64`; the operations in this file give the
+//! host no access to Fe memory.
 //!
 //! The operations are effects. A program selects the provider where it starts:
 //! `host()` calls the imports, and `mock()` is a pure Fe stand-in for tests and
 //! for builds that have no host.
+//!
+//! The submodule `files` is a contract for text, handles and errors, and
+//! `HostText` and `Reply` are the shapes that an exported function may take and
+//! return besides numbers.
+
+pub use boundary::{Reply, HostText}
+pub use files::{self}
 
 extern {
     // Adapters that the host supplies. They change host state, and their
