@@ -16,7 +16,10 @@ use hir::{
             ty_def::{TyData, TyId},
         },
     },
-    hir_def::{Contract, Func, IdentId, InlineHint, ItemKind, ManualContractRootAttr, TopLevelMod},
+    hir_def::{
+        Contract, Func, IdentId, InlineHint, ItemKind, ManualContractRootAttr, TopLevelMod,
+        params::FuncParamMode,
+    },
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -602,11 +605,52 @@ pub fn build_native_executable_package<'db>(
 /// function cannot be exported under it.
 pub const WASM_MEMORY_EXPORT: &str = "memory";
 
+/// The names of the exports that give the host an allocator. A module has them
+/// when an export takes text, and no function of the module may use them.
+pub const WASM_ALLOCATOR_EXPORTS: [&str; 3] = ["alloc", "arena_mark", "arena_release"];
+
+/// How a parameter of an export crosses the WebAssembly boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WasmParamShape {
+    /// `bool` or an integer of at most 64 bits, by value.
+    Scalar,
+    /// `std::wasm::HostText`: an address and a length, two `i32` parameters.
+    Text,
+}
+
+/// How the result of an export crosses the WebAssembly boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WasmResultShape {
+    /// No result.
+    Unit,
+    /// `bool` or an integer of at most 64 bits, by value.
+    Scalar,
+    /// `std::wasm::Reply`: the tag in the low half and the payload in the high
+    /// half of one `i64`.
+    Reply,
+}
+
 /// A function the host can call by name.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct WasmExport<'db> {
+    /// The name the host calls.
+    pub name: String,
     pub func: Func<'db>,
     pub instance: RuntimeInstance<'db>,
+    pub params: Vec<WasmParamShape>,
+    pub result: WasmResultShape,
+}
+
+impl WasmExport<'_> {
+    /// Whether the exported signature differs from the signature of the Fe
+    /// function, so that a wrapper converts between them.
+    pub fn needs_adapter(&self) -> bool {
+        self.params.contains(&WasmParamShape::Text) || self.result == WasmResultShape::Reply
+    }
+
+    pub fn takes_text(&self) -> bool {
+        self.params.contains(&WasmParamShape::Text)
+    }
 }
 
 #[derive(Debug)]
@@ -646,6 +690,18 @@ pub fn build_wasm_export_package<'db>(
         return Err(LowerError::Unsupported(
             "WebAssembly output needs at least one exported function: a non-generic `pub fn` in the root of the file".to_string(),
         ));
+    }
+
+    if exports.iter().any(WasmExport::takes_text) {
+        for export in &exports {
+            let name = func_display_name(db, export.func);
+            if WASM_ALLOCATOR_EXPORTS.contains(&name.as_str()) {
+                return Err(LowerError::Unsupported(format!(
+                    "cannot export `{name}` to WebAssembly: the name is reserved for the allocator that a module with text parameters exports (`{}`)",
+                    WASM_ALLOCATOR_EXPORTS.join("`, `")
+                )));
+            }
+        }
     }
 
     let instances = exports
@@ -695,7 +751,15 @@ fn check_wasm_imports<'db>(
         };
         let name = func_display_name(db, func);
         let signature = instance.interface_signature(db);
-        if let Some(reason) = wasm_signature_rejection(db, func, &signature, WasmBoundary::Import) {
+        let scalar = vec![WasmParamShape::Scalar; signature.params.len()];
+        let result = if signature.ret.is_some() {
+            WasmResultShape::Scalar
+        } else {
+            WasmResultShape::Unit
+        };
+        if let Some(reason) =
+            wasm_signature_rejection(db, func, &signature, WasmBoundary::Import, &scalar, result)
+        {
             return Err(LowerError::Unsupported(format!(
                 "cannot import `{name}` from the WebAssembly host: {reason}"
             )));
@@ -712,38 +776,81 @@ enum WasmBoundary {
 }
 
 impl WasmBoundary {
-    fn plural(self) -> &'static str {
+    /// What the boundary accepts, for the end of a message.
+    fn rule(self) -> String {
         match self {
-            Self::Export => "exports",
-            Self::Import => "imports",
+            Self::Import => "imports take only `bool` and integers of at most 64 bits".to_string(),
+            Self::Export => "exports take `bool` and integers of at most 64 bits, `std::wasm::HostText` parameters and a `std::wasm::Reply` result".to_string(),
         }
     }
 }
 
-/// Why the signature of `func` cannot cross the WebAssembly boundary by
-/// value, naming the first parameter or the result that breaks the rule.
+/// The two types of `std::wasm` that cross the boundary besides numbers.
+struct WasmBoundaryTypes<'db> {
+    text: Option<TyId<'db>>,
+    reply: Option<TyId<'db>>,
+}
+
+impl<'db> WasmBoundaryTypes<'db> {
+    fn resolve(db: &'db dyn MirDb, func: Func<'db>) -> Self {
+        let scope = func.scope();
+        Self {
+            text: resolve_lib_type_path(db, scope, "std::wasm::HostText"),
+            reply: resolve_lib_type_path(db, scope, "std::wasm::Reply"),
+        }
+    }
+
+    fn is_text(&self, ty: TyId<'db>) -> bool {
+        self.text == Some(ty)
+    }
+
+    fn is_reply(&self, ty: TyId<'db>) -> bool {
+        self.reply == Some(ty)
+    }
+}
+
+/// Why the signature of `func` cannot cross the WebAssembly boundary, naming
+/// the first parameter or the result that breaks the rule. On the export side
+/// the parameters in `text_params` and a result that `reply_result` marks are
+/// the shapes the rule allows besides numbers.
 fn wasm_signature_rejection<'db>(
     db: &'db dyn MirDb,
     func: Func<'db>,
     signature: &RuntimeInterfaceSignature<'db>,
     boundary: WasmBoundary,
+    shapes: &[WasmParamShape],
+    result: WasmResultShape,
 ) -> Option<String> {
     let hir_params = func.params(db).count();
+    let types = WasmBoundaryTypes::resolve(db, func);
     // Fe holds a raw pointer in a 256-bit integer, which would be reported as
     // a wide integer. The host sees no Fe memory, so name it for what it is.
-    let pointer_reason = || {
-        format!(
-            "is a pointer into Fe memory; {} take only `bool` and integers of at most 64 bits",
-            boundary.plural()
-        )
-    };
+    let pointer_reason = || format!("is a pointer into Fe memory; {}", boundary.rule());
     for (idx, param) in signature.params.iter().enumerate() {
-        let declared_pointer = signature.params.len() == hir_params
-            && func
-                .arg_ty(db, idx)
-                .is_some_and(|ty| ty.instantiate_identity().as_ptr(db).is_some());
-        let rejection = if declared_pointer {
+        let declared = (signature.params.len() == hir_params)
+            .then(|| func.arg_ty(db, idx))
+            .flatten()
+            .map(|ty| ty.instantiate_identity());
+        let rejection = if shapes.get(idx) == Some(&WasmParamShape::Text) {
+            None
+        } else if declared.is_some_and(|ty| ty.as_ptr(db).is_some()) {
             Some(pointer_reason())
+        } else if declared.is_some_and(|ty| types.is_text(ty)) {
+            Some(match boundary {
+                WasmBoundary::Export => format!(
+                    "is a `HostText` that is not passed by value (a `mut` parameter cannot be built from an address and a length); {}",
+                    boundary.rule()
+                ),
+                WasmBoundary::Import => format!(
+                    "is a `HostText`, which only an export can take (pass an address and a length as two `u32`); {}",
+                    boundary.rule()
+                ),
+            })
+        } else if declared.is_some_and(|ty| types.is_reply(ty)) {
+            Some(format!(
+                "is a `Reply`, which can only be the result of an export; {}",
+                boundary.rule()
+            ))
         } else {
             wasm_scalar_rejection(&param.class, boundary)
         };
@@ -765,15 +872,78 @@ fn wasm_signature_rejection<'db>(
         }
     }
     let ret_class = signature.ret.as_ref()?;
-    let reason = if func.return_ty(db).as_ptr(db).is_some() {
+    let return_ty = func.return_ty(db);
+    let reason = if result == WasmResultShape::Reply {
+        return None;
+    } else if return_ty.as_ptr(db).is_some() {
         pointer_reason()
+    } else if types.is_text(return_ty) {
+        format!(
+            "is a `HostText`, which can only be a parameter of an export; {}",
+            boundary.rule()
+        )
+    } else if types.is_reply(return_ty) {
+        format!(
+            "is a `Reply`, which only an export can return (an import returns the reply word as a `u64`); {}",
+            boundary.rule()
+        )
     } else {
         wasm_scalar_rejection(ret_class, boundary)?
     };
     Some(format!(
         "the result type `{}` {reason}",
-        func.return_ty(db).pretty_print(db)
+        return_ty.pretty_print(db)
     ))
+}
+
+/// The shapes of the parameters and the result of an export, as far as the
+/// types say. `HostText` and `Reply` are the types of `std::wasm`; a `HostText` must be
+/// a plain view or owned parameter, which the wrapper can build.
+fn wasm_export_shapes<'db>(
+    db: &'db dyn MirDb,
+    func: Func<'db>,
+    signature: &RuntimeInterfaceSignature<'db>,
+) -> (Vec<WasmParamShape>, WasmResultShape) {
+    let types = WasmBoundaryTypes::resolve(db, func);
+    let by_hir = signature.params.len() == func.params(db).count();
+    let params = signature
+        .params
+        .iter()
+        .enumerate()
+        .map(|(idx, param)| {
+            let is_text = by_hir
+                && func
+                    .arg_ty(db, idx)
+                    .is_some_and(|ty| types.is_text(ty.instantiate_identity()))
+                && !func
+                    .params(db)
+                    .nth(idx)
+                    .and_then(|view| view.hir(db))
+                    .is_some_and(|param| param.mode == FuncParamMode::Mut);
+            // An entry function reads a view of a struct through a reference
+            // to memory; `own` takes the struct itself.
+            let by_value = match &param.class {
+                RuntimeClass::AggregateValue { .. } => true,
+                RuntimeClass::Ref { pointee, .. } => {
+                    matches!(**pointee, RuntimeClass::AggregateValue { .. })
+                }
+                _ => false,
+            };
+            if is_text && by_value {
+                WasmParamShape::Text
+            } else {
+                WasmParamShape::Scalar
+            }
+        })
+        .collect();
+    let result = match &signature.ret {
+        None => WasmResultShape::Unit,
+        Some(RuntimeClass::AggregateValue { .. }) if types.is_reply(func.return_ty(db)) => {
+            WasmResultShape::Reply
+        }
+        Some(_) => WasmResultShape::Scalar,
+    };
+    (params, result)
 }
 
 fn wasm_export_for_func<'db>(
@@ -814,21 +984,27 @@ fn wasm_export_for_func<'db>(
 
     let instance = runtime_instance_for_semantic(db, semantic);
     let signature = instance.interface_signature(db);
-    if let Some(reason) = wasm_signature_rejection(db, func, &signature, WasmBoundary::Export) {
+    let (params, result) = wasm_export_shapes(db, func, &signature);
+    if let Some(reason) =
+        wasm_signature_rejection(db, func, &signature, WasmBoundary::Export, &params, result)
+    {
         return Err(LowerError::Unsupported(format!(
             "cannot export `{name}` to WebAssembly: {reason}"
         )));
     }
-    Ok(Some(WasmExport { func, instance }))
+    Ok(Some(WasmExport {
+        name,
+        func,
+        instance,
+        params,
+        result,
+    }))
 }
 
 /// Why `class` cannot cross the WebAssembly boundary by value, or `None` for
 /// `bool` and the integers of at most 64 bits.
 fn wasm_scalar_rejection(class: &RuntimeClass<'_>, boundary: WasmBoundary) -> Option<String> {
-    let rule = format!(
-        "{} take only `bool` and integers of at most 64 bits",
-        boundary.plural()
-    );
+    let rule = boundary.rule();
     match class {
         RuntimeClass::Scalar(ScalarClass {
             repr: ScalarRepr::Bool,
