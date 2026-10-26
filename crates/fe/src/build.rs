@@ -1656,7 +1656,16 @@ fn build_wasm_top_mod(
         write_named_ir_artifact(out_dir, report_dir, ir_file_stem, "wasm.sona", &ir)?;
     }
     if let Some(wasm) = artifacts.wasm {
-        let name = format!("{}.wasm", sanitize_name_with_default(ir_file_stem, "main"));
+        let stem = sanitize_name_with_default(ir_file_stem, "main");
+        let name = format!("{stem}.wasm");
+        let manifest = crate::wasm_manifest::render(&crate::wasm_manifest::ManifestInput {
+            module_file: &name,
+            module: &wasm,
+            optimization: &opt_level.to_string(),
+            compiler: &format!("fe {}", crate::cli_version()),
+            exports: &artifacts.exports,
+        })
+        .map_err(|err| format!("Failed to describe the WebAssembly module: {err}"))?;
         let file = out_dir.join(&name);
         fs::write(&file, &wasm)
             .map_err(|err| format!("Failed to write WebAssembly module {file}: {err}"))?;
@@ -1664,6 +1673,14 @@ fn build_wasm_top_mod(
             let _ = fs::write(report_dir.join(&name), &wasm);
         }
         println!("Wrote {file}");
+        let manifest_name = format!("{stem}.manifest.json");
+        let manifest_file = out_dir.join(&manifest_name);
+        fs::write(&manifest_file, &manifest)
+            .map_err(|err| format!("Failed to write build manifest {manifest_file}: {err}"))?;
+        if let Some(report_dir) = report_dir {
+            let _ = fs::write(report_dir.join(&manifest_name), &manifest);
+        }
+        println!("Wrote {manifest_file}");
     }
     Ok(())
 }

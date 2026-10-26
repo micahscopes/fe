@@ -25,5 +25,8 @@ pub use sonatina::{
     emit_test_suite_native,
 };
 #[cfg(feature = "wasm")]
-pub use sonatina::{WasmArtifacts, WasmOutputSelection, emit_module_wasm_artifacts};
+pub use sonatina::{
+    WASM_HOST_CONTRACT_VERSION, WASM_REPLY_TYPE, WASM_TEXT_TYPE, WasmArtifacts, WasmExportInfo,
+    WasmOutputSelection, WasmParamInfo, emit_module_wasm_artifacts,
+};
 pub use test_output::{ExpectedRevert, TestMetadata, TestModuleOutput, parse_expected_revert};
