@@ -392,7 +392,10 @@ impl<'db> ImportResolver<'db> {
                 }
                 let segments = use_path(db, use_)?;
                 let idx = segments.len() - 1;
-                let domain = NameDomain::TYPE | NameDomain::VALUE;
+                // Every domain that a use can import, as `NameRes::is_importable`
+                // lists them, so that an ambiguity or a blocker in any of them
+                // is seen here and not at the first use of the name.
+                let domain = NameDomain::TYPE | NameDomain::VALUE | NameDomain::IMPL;
                 let mut bucket = self.lookup(use_, target, idx, &segments[idx], domain, forced)?;
                 bucket.set_derivation(NameDerivation::NamedImported(use_));
                 Ok(Resolved::Bucket(bucket))

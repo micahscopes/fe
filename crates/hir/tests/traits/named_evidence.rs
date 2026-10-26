@@ -592,6 +592,39 @@ const fn chosen() -> u256 { with (Imported) { Item::value() } }
 }
 
 #[test]
+fn a_public_name_is_chosen_through_every_import_form() {
+    values(
+        r#"
+struct Item {}
+trait Pick { const fn value() -> u256 }
+impl Pick for Item { const fn value() -> u256 { 100 } }
+mod choices {
+    use super::{Item, Pick}
+    pub impl Pick for Item as Public { const fn value() -> u256 { 7 } }
+}
+mod relay { pub use super::choices::Public }
+mod globbed { pub use super::choices::* }
+use choices::Public
+use choices::Public as Renamed
+use relay::Public as Relayed
+use globbed::Public as Globbed
+const fn named() -> u256 { with (Public) { Item::value() } }
+const fn renamed() -> u256 { with (Renamed) { Item::value() } }
+const fn relayed() -> u256 { with (Relayed) { Item::value() } }
+const fn globbed() -> u256 { with (Globbed) { Item::value() } }
+const fn qualified() -> u256 { with (choices::Public) { Item::value() } }
+"#,
+        &[
+            ("named", 7),
+            ("renamed", 7),
+            ("relayed", 7),
+            ("globbed", 7),
+            ("qualified", 7),
+        ],
+    );
+}
+
+#[test]
 fn associated_output_errors_blame_only_the_nonconforming_declaration() {
     for declarations in [
         "impl Output for Item as Good { type Out = u256 }\nimpl Output for Item as Bad { type Out = bool }",
