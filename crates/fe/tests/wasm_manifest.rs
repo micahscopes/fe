@@ -1,16 +1,22 @@
 #![cfg(feature = "wasm")]
 
-//! The build manifest of `fe build --backend wasm`.
+//! The build manifest of `fe build --backend wasm`, and the Node host that
+//! checks a module against it.
 //!
 //! The manifest is compared with three independent sources: the module's own
 //! import and export sections as `wasmtime` reads them, a SHA-256 computed here
-//! from the file, and `fe --version`.
+//! from the file, and `fe --version`. The Node host (`examples/wasm/host.mjs`)
+//! must run a module that matches its manifest, and must refuse, with a message
+//! that names the cause, a module that does not match or that imports something
+//! it does not provide. Node must be installed: the tests fail without it.
 
 mod wasm_support;
 
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 
 use serde_json::{Value, json};
@@ -356,4 +362,225 @@ fn a_failed_build_writes_no_manifest() {
     assert!(!output.status.success());
     assert!(!out.join("bad.manifest.json").exists());
     assert!(!out.join("bad.wasm").exists());
+}
+
+// ---------------------------------------------------------------------------
+// The Node host.
+// ---------------------------------------------------------------------------
+
+fn node_driver(request: &Value) -> Value {
+    let driver = manifest_dir().join("tests/wasm_support/manifest_driver.mjs");
+    let mut child = Command::new("node")
+        .arg(driver)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("node must be installed to run these tests");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(request.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("the driver prints JSON")
+}
+
+fn refusal(request: &Value) -> String {
+    let answer = node_driver(request);
+    let error = answer
+        .get("error")
+        .unwrap_or_else(|| panic!("the host should refuse the module, but answered {answer}"));
+    assert_eq!(error["name"], "ContractError", "{answer}");
+    error["message"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn the_node_host_runs_a_module_that_matches_its_manifest() {
+    let temp = tempdir().unwrap();
+    let built = build_source(
+        &fixture("wasm_manifest", "shapes"),
+        "shapes",
+        "1",
+        temp.path(),
+    );
+    let answer = node_driver(&json!({
+        "wasm": built.wasm(),
+        "manifest": built.manifest(),
+        "files": { "present.txt": "x" },
+        "calls": [
+            { "export": "add", "args": [40, { "u64": "4294967296" }] },
+            { "export": "is_even", "args": [-4] },
+            { "export": "ping", "args": [-7] },
+            { "export": "has_file", "args": ["present.txt"], "reply": true },
+            { "export": "has_file", "args": ["absent.txt"], "reply": true },
+        ],
+    }));
+    assert_eq!(
+        answer["results"],
+        json!([
+            { "value": "4294967336" },
+            { "value": "1" },
+            { "value": null },
+            { "reply": { "ok": true, "value": 1 } },
+            { "reply": { "ok": false, "code": 1, "error": "NotFound" } },
+        ]),
+        "{answer}"
+    );
+    assert_eq!(answer["logs"], json!([{ "type": "i32", "value": "-7" }]));
+}
+
+#[test]
+fn the_node_host_names_the_import_it_cannot_supply() {
+    let temp = tempdir().unwrap();
+    let built = build_source(
+        &fixture("wasm_manifest", "custom_import"),
+        "custom_import",
+        "1",
+        temp.path(),
+    );
+    let manifest = built.manifest();
+    assert_eq!(manifest["imports"][0]["name"], "custom_import");
+    // With the manifest, and without it: the message names `env.custom_import`.
+    let with_manifest = refusal(&json!({ "wasm": built.wasm(), "manifest": manifest }));
+    assert!(
+        with_manifest.contains("env.custom_import") && with_manifest.contains("does not provide"),
+        "{with_manifest}"
+    );
+    let without = refusal(&json!({ "wasm": built.wasm(), "manifest": null }));
+    assert!(
+        without.contains("env.custom_import") && without.contains("does not provide"),
+        "{without}"
+    );
+}
+
+#[test]
+fn the_node_host_refuses_a_module_that_differs_from_its_manifest() {
+    let temp = tempdir().unwrap();
+    let built = build_source(
+        &fixture("wasm_manifest", "shapes"),
+        "shapes",
+        "1",
+        temp.path(),
+    );
+    let manifest = built.manifest();
+
+    // A changed byte: the hash no longer matches.
+    let mut bytes = fs::read(built.wasm()).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    let tampered = temp.path().join("tampered.wasm");
+    fs::write(&tampered, &bytes).unwrap();
+    let message = refusal(&json!({ "wasm": tampered, "manifest": manifest }));
+    assert!(
+        message.contains("SHA-256")
+            && message.contains(manifest["module"]["sha256"].as_str().unwrap()),
+        "{message}"
+    );
+
+    // A manifest for another contract version, and for another format version.
+    let mut other = manifest.clone();
+    other["contract_version"] = json!(2);
+    let message = refusal(&json!({ "wasm": built.wasm(), "manifest": other }));
+    assert!(
+        message.contains("contract version 2") && message.contains("implements version 1"),
+        "{message}"
+    );
+    let mut other = manifest.clone();
+    other["manifest_version"] = json!(9);
+    let message = refusal(&json!({ "wasm": built.wasm(), "manifest": other }));
+    assert!(message.contains("format version 9"), "{message}");
+
+    // An import that the manifest does not list, and one that the module lacks.
+    let mut other = manifest.clone();
+    other["imports"].as_array_mut().unwrap().pop();
+    let message = refusal(&json!({ "wasm": built.wasm(), "manifest": other }));
+    assert!(
+        message.contains("env.sys_wasm_log_i32") && message.contains("does not list"),
+        "{message}"
+    );
+    let mut other = manifest.clone();
+    other["imports"].as_array_mut().unwrap().push(json!({
+        "module": "env", "name": "sys_wasm_now_ms", "kind": "function",
+        "type": { "params": [], "results": ["i64"] }
+    }));
+    let message = refusal(&json!({ "wasm": built.wasm(), "manifest": other }));
+    assert!(
+        message.contains("env.sys_wasm_now_ms") && message.contains("does not have"),
+        "{message}"
+    );
+
+    // An export that the manifest lists and the module lacks, and the reverse.
+    let mut other = manifest.clone();
+    other["exports"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "name": "gone", "kind": "function" }));
+    let message = refusal(&json!({ "wasm": built.wasm(), "manifest": other }));
+    assert!(message.contains("`gone`"), "{message}");
+    let mut other = manifest.clone();
+    other["exports"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|e| e["name"] != "ping");
+    let message = refusal(&json!({ "wasm": built.wasm(), "manifest": other }));
+    assert!(
+        message.contains("`ping`") && message.contains("does not list"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_call_must_match_the_function_the_manifest_describes() {
+    let temp = tempdir().unwrap();
+    let built = build_source(
+        &fixture("wasm_manifest", "shapes"),
+        "shapes",
+        "1",
+        temp.path(),
+    );
+    let answer = node_driver(&json!({
+        "wasm": built.wasm(),
+        "manifest": built.manifest(),
+        "calls": [
+            { "export": "add", "args": [1] },
+            { "export": "add", "args": ["text", 2] },
+            { "export": "has_file", "args": [5], "reply": true },
+            { "export": "nothing_like_it", "args": [] },
+        ],
+    }));
+    let messages: Vec<_> = answer["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            r["error"]["message"]
+                .as_str()
+                .unwrap_or("no error")
+                .to_string()
+        })
+        .collect();
+    assert!(
+        messages[0].contains("`add` takes 2 argument(s)")
+            && messages[0].contains("but 1 were given"),
+        "{messages:?}"
+    );
+    assert!(
+        messages[1].contains("argument `a` of `add` must be a number of type u32"),
+        "{messages:?}"
+    );
+    assert!(
+        messages[2].contains("argument `name` of `has_file` must be text"),
+        "{messages:?}"
+    );
+    assert!(
+        messages[3].contains("does not export a function `nothing_like_it`"),
+        "{messages:?}"
+    );
 }

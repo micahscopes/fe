@@ -11,11 +11,11 @@
 // { kind: "trap", message } when the module trapped. `after[i]` is the arena top
 // and the number of open handles after call i.
 import fs from "node:fs";
-import { ContractError, instantiateFiles } from "../../../../examples/wasm/host.mjs";
+import { ContractError, instantiate } from "../../../../examples/wasm/host.mjs";
 
 const request = JSON.parse(fs.readFileSync(0, "utf8"));
 const bytes = fs.readFileSync(request.wasm);
-const guest = await instantiateFiles(bytes, request.files ?? {});
+const guest = await instantiate(bytes, { files: request.files ?? {} });
 const hasAllocator = typeof guest.exports.arena_mark === "function";
 
 const argument = (value) => {
