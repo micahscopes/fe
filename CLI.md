@@ -275,7 +275,16 @@ a call that does not fit traps; dynamic allocation grows the memory without a li
 of the module's own and traps when the host refuses to grow it. 128-bit integers and
 the EVM built-ins are not supported and are errors that name the function and the
 instruction. The default output is `<out>/<file>.wasm`; `--emit ir` writes
-`<out>/<file>.wasm.sona`.
+`<out>/<file>.wasm.sona`, and `--emit wasm,ir` writes both. Whenever the module is
+written, `<out>/<file>.manifest.json` is written with it. The manifest records the
+module's file name, SHA-256 and size, its initial memory in pages, the imports (module,
+name, WebAssembly parameter and result types), the exports (for the program's functions
+the Fe parameter names and types, with `HostText` and `Reply` as named by `std::wasm`,
+and the WebAssembly types they become), the version of the host contract, the
+optimization level and the compiler version. It contains nothing that depends on the
+machine, the time or the location of the sources. Two builds of one program with one
+compiler give identical bytes for the module, its IR and its manifest, at every
+optimization level (`examples/wasm/reproducible.sh` checks this).
 
 An `extern` function that an export reaches becomes an import of the module `env`,
 under the function's name; an `extern` function that nothing reaches is not imported.

@@ -7,7 +7,10 @@ mod wasm;
 #[cfg(feature = "cranelift")]
 pub use native_tests::{NativeTestEntry, NativeTestSuite, emit_test_suite_native};
 #[cfg(feature = "wasm")]
-pub use wasm::{WasmArtifacts, WasmOutputSelection, emit_module_wasm_artifacts};
+pub use wasm::{
+    WASM_HOST_CONTRACT_VERSION, WASM_REPLY_TYPE, WASM_TEXT_TYPE, WasmArtifacts, WasmExportInfo,
+    WasmOutputSelection, WasmParamInfo, emit_module_wasm_artifacts,
+};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 

@@ -9,7 +9,7 @@ doc-server = ["dep:tokio", "dep:axum"]
 lsp = ["dep:language-server", "dep:tokio"]
 cranelift = ["codegen/cranelift", "dep:libc"]
 sp1 = ["cranelift", "codegen/sp1", "dep:sonatina-sp1"]
-wasm = ["codegen/wasm"]
+wasm = ["codegen/wasm", "dep:sha2"]
 
 [dependencies]
 clap.workspace = true
@@ -40,6 +40,7 @@ solc-runner = { path = "../solc-runner", package = "fe-solc-runner" }
 fe-web = { path = "../fe-web" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
+sha2 = { version = "0.10", optional = true }
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 fmt.workspace = true
 walkdir = "2"

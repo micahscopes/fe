@@ -13,8 +13,8 @@
 #     time zone and locale, and (where `setarch` exists) address space
 #     randomization switched off.
 #
-# The module (`.wasm`) and its Sonatina IR (`.wasm.sona`) of both builds must be
-# identical. The script prints one line
+# The module (`.wasm`), its Sonatina IR (`.wasm.sona`) and the manifest
+# (`.manifest.json`) of both builds must be identical. The script prints one line
 # per difference and exits with status 1 if there is any.
 #
 # Set REPRO_PRELOAD to a shared library to load into build 2 (for example a
@@ -66,7 +66,7 @@ check_one() {
     return
   fi
   local bad=""
-  for ext in wasm wasm.sona; do
+  for ext in wasm wasm.sona manifest.json; do
     local a="$first/out/$name.$ext" b="$second/elsewhere/$name.$ext"
     if [ ! -e "$a" ] && [ ! -e "$b" ]; then continue; fi
     cmp -s "$a" "$b" || bad="$bad $name.$ext"

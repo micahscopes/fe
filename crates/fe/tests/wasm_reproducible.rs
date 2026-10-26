@@ -7,9 +7,10 @@
 //! directory, through a source path that differs in length and in every
 //! directory name, with an old modification time on the source, a different
 //! output directory, an environment that holds only `PATH`, `HOME`, `TZ` and
-//! `LC_ALL`, and an output directory that did not exist. The module (`.wasm`)
-//! and its IR (`.wasm.sona`) of the two builds must be equal. A difference fails
-//! the test and names the file, the sizes and the first byte that differs.
+//! `LC_ALL`, and an output directory that did not exist. The module (`.wasm`),
+//! its IR (`.wasm.sona`) and its manifest (`.manifest.json`) of the two builds
+//! must be equal. A difference fails the test and names the file, the sizes and
+//! the first byte that differs.
 //!
 //! The same check, over a larger corpus and with the clock moved, is
 //! `examples/wasm/reproducible.sh`.
@@ -27,7 +28,7 @@ use tempfile::tempdir;
 use wasm_support::render_flavour;
 
 const LEVELS: [&str; 4] = ["0", "1", "2", "s"];
-const OUTPUTS: [&str; 2] = ["wasm", "wasm.sona"];
+const OUTPUTS: [&str; 3] = ["wasm", "wasm.sona", "manifest.json"];
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
