@@ -193,6 +193,12 @@ pub(super) fn compile_runtime_package_sonatina_with_external_code(
 }
 
 fn is_native_architecture(architecture: Architecture) -> bool {
+    // WebAssembly is lowered like the native targets: one linear memory, no
+    // revert data and no EVM instructions.
+    #[cfg(feature = "wasm")]
+    if architecture == Architecture::Wasm32 {
+        return true;
+    }
     matches!(
         architecture,
         Architecture::X86_64 | Architecture::Aarch64 | Architecture::Riscv64im
@@ -283,10 +289,16 @@ impl<'db, 'a, I: LoweringInstSet + 'static> ModuleLowerer<'db, 'a, I> {
 
     fn required_inst<T: InstExt>(&self) -> Result<&'static dyn HasInst<T>, LowerError> {
         T::belongs_to(self.inst_set).ok_or_else(|| {
+            let path = std::any::type_name::<T>();
+            let name = path.rsplit("::").next().unwrap_or(path);
+            let kind = if path.contains("::evm::") {
+                "EVM-only instruction"
+            } else {
+                "instruction"
+            };
             LowerError::Unsupported(format!(
-                "target `{}` does not support instruction `{}`",
+                "target `{}` does not support the {kind} `{name}`",
                 self.builder.ctx.triple,
-                std::any::type_name::<T>()
             ))
         })
     }
@@ -897,13 +909,17 @@ fn assign_sonatina_function_symbols<'db>(
                     let BodyOwner::Func(func, _) = semantic.key(db).owner(db) else {
                         return None;
                     };
-                    func.is_extern(db).then(|| {
-                        func.name(db)
-                            .to_opt()
-                            .expect("extern name")
-                            .data(db)
-                            .to_string()
-                    })
+                    // A host calls an exported function and resolves an
+                    // extern one by its source name.
+                    (func.is_extern(db) || function.linkage(db) == RuntimeLinkage::Internal).then(
+                        || {
+                            func.name(db)
+                                .to_opt()
+                                .expect("function name")
+                                .data(db)
+                                .to_string()
+                        },
+                    )
                 }),
             fallback_symbol: function.symbol(db).clone(),
             variant_suffix: String::new(),
