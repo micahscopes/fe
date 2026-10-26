@@ -1,8 +1,10 @@
-//! WebAssembly output for scalar programs.
+//! WebAssembly output for programs whose exports are scalar functions.
 //!
 //! The module is lowered by the same lowerer as host-native and SP1 output,
 //! for the `wasm32-unknown-native` target: one linear address space and
-//! 32-bit pointers. The exports are the scalar `pub fn` items of the file.
+//! 32-bit pointers. The exports are the scalar `pub fn` items of the file; their
+//! bodies may use aggregates, constants and dynamic memory, which the backend
+//! keeps in the linear memory.
 
 use driver::DriverDataBase;
 use hir::hir_def::TopLevelMod;
