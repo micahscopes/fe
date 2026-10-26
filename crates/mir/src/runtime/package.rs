@@ -50,10 +50,10 @@ use crate::{
         EntryEffectArgPlan, EntrySemanticArgsPlan, InitArgsPlan, LayoutId, LayoutKey, RawPointeeId,
         RefKind, RefView, ResolvedCodeRegion, RuntimeClass, RuntimeCodeRegion,
         RuntimeCodeRegionKey, RuntimeFunction, RuntimeFunctionOwner, RuntimeInlineHint,
-        RuntimeInputPlan, RuntimeLinkage, RuntimeObject, RuntimePackage, RuntimePackagePlan,
-        RuntimeReturnPlan, RuntimeSection, RuntimeSectionName, RuntimeSectionRef,
-        RuntimeSyntheticSpec, ScalarClass, ScalarRepr, ScalarRole, TargetRootProviderBinding,
-        TargetRootProviderMaterialization,
+        RuntimeInputPlan, RuntimeInterfaceSignature, RuntimeLinkage, RuntimeObject, RuntimePackage,
+        RuntimePackagePlan, RuntimeReturnPlan, RuntimeSection, RuntimeSectionName,
+        RuntimeSectionRef, RuntimeSyntheticSpec, ScalarClass, ScalarRepr, ScalarRole,
+        TargetRootProviderBinding, TargetRootProviderMaterialization,
     },
     verify::verify_runtime_package,
 };
@@ -666,7 +666,115 @@ pub fn build_wasm_export_package<'db>(
         build_sectioned_package(db, top_mod, instances.clone(), objects, None, &instances)?;
     verify_runtime_package(db, package)
         .map_err(|err| LowerError::Unsupported(format!("invalid WebAssembly package: {err:?}")))?;
+    check_wasm_imports(db, &package)?;
     Ok(WasmExportPackage { package, exports })
+}
+
+/// The imports of a module are the `extern` functions that its exports reach.
+/// Their signatures cross the boundary by value, so they follow the rule for
+/// exports: `bool` and integers of at most 64 bits.
+fn check_wasm_imports<'db>(
+    db: &'db dyn MirDb,
+    package: &RuntimePackage<'db>,
+) -> Result<(), LowerError> {
+    for function in package.functions(db) {
+        let instance = function.instance(db);
+        if function.linkage(db) != RuntimeLinkage::External || !instance.is_external_declaration(db)
+        {
+            continue;
+        }
+        let Some(func) =
+            instance
+                .key(db)
+                .semantic(db)
+                .and_then(|semantic| match semantic.key(db).owner(db) {
+                    BodyOwner::Func(func, _) => Some(func),
+                    _ => None,
+                })
+        else {
+            continue;
+        };
+        let name = func_display_name(db, func);
+        let signature = instance.interface_signature(db);
+        if let Some(reason) = wasm_signature_rejection(db, func, &signature, WasmBoundary::Import) {
+            return Err(LowerError::Unsupported(format!(
+                "cannot import `{name}` from the WebAssembly host: {reason}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Which side of the module a signature belongs to, for the message.
+#[derive(Clone, Copy)]
+enum WasmBoundary {
+    Export,
+    Import,
+}
+
+impl WasmBoundary {
+    fn plural(self) -> &'static str {
+        match self {
+            Self::Export => "exports",
+            Self::Import => "imports",
+        }
+    }
+}
+
+/// Why the signature of `func` cannot cross the WebAssembly boundary by
+/// value, naming the first parameter or the result that breaks the rule.
+fn wasm_signature_rejection<'db>(
+    db: &'db dyn MirDb,
+    func: Func<'db>,
+    signature: &RuntimeInterfaceSignature<'db>,
+    boundary: WasmBoundary,
+) -> Option<String> {
+    let hir_params = func.params(db).count();
+    // Fe holds a raw pointer in a 256-bit integer, which would be reported as
+    // a wide integer. The host sees no Fe memory, so name it for what it is.
+    let pointer_reason = || {
+        format!(
+            "is a pointer into Fe memory; {} take only `bool` and integers of at most 64 bits",
+            boundary.plural()
+        )
+    };
+    for (idx, param) in signature.params.iter().enumerate() {
+        let declared_pointer = signature.params.len() == hir_params
+            && func
+                .arg_ty(db, idx)
+                .is_some_and(|ty| ty.instantiate_identity().as_ptr(db).is_some());
+        let rejection = if declared_pointer {
+            Some(pointer_reason())
+        } else {
+            wasm_scalar_rejection(&param.class, boundary)
+        };
+        if let Some(reason) = rejection {
+            let what = if signature.params.len() == hir_params {
+                let param_name = func
+                    .params(db)
+                    .nth(idx)
+                    .and_then(|view| view.name(db))
+                    .map_or_else(|| format!("{idx}"), |ident| ident.data(db).to_string());
+                let ty = func.arg_ty(db, idx).map_or_else(String::new, |ty| {
+                    format!(": {}", ty.instantiate_identity().pretty_print(db))
+                });
+                format!("parameter `{param_name}{ty}`")
+            } else {
+                format!("parameter {idx}")
+            };
+            return Some(format!("{what} {reason}"));
+        }
+    }
+    let ret_class = signature.ret.as_ref()?;
+    let reason = if func.return_ty(db).as_ptr(db).is_some() {
+        pointer_reason()
+    } else {
+        wasm_scalar_rejection(ret_class, boundary)?
+    };
+    Some(format!(
+        "the result type `{}` {reason}",
+        func.return_ty(db).pretty_print(db)
+    ))
 }
 
 fn wasm_export_for_func<'db>(
@@ -707,31 +815,9 @@ fn wasm_export_for_func<'db>(
 
     let instance = runtime_instance_for_semantic(db, semantic);
     let signature = instance.interface_signature(db);
-    let hir_params = func.params(db).count();
-    for (idx, param) in signature.params.iter().enumerate() {
-        if let Some(reason) = wasm_scalar_rejection(&param.class) {
-            let what = if signature.params.len() == hir_params {
-                let param_name = func
-                    .params(db)
-                    .nth(idx)
-                    .and_then(|view| view.name(db))
-                    .map_or_else(|| format!("{idx}"), |ident| ident.data(db).to_string());
-                let ty = func.arg_ty(db, idx).map_or_else(String::new, |ty| {
-                    format!(": {}", ty.instantiate_identity().pretty_print(db))
-                });
-                format!("parameter `{param_name}{ty}`")
-            } else {
-                format!("parameter {idx}")
-            };
-            return Err(LowerError::Unsupported(format!(
-                "cannot export `{name}` to WebAssembly: {what} {reason}"
-            )));
-        }
-    }
-    if let Some(reason) = signature.ret.as_ref().and_then(wasm_scalar_rejection) {
+    if let Some(reason) = wasm_signature_rejection(db, func, &signature, WasmBoundary::Export) {
         return Err(LowerError::Unsupported(format!(
-            "cannot export `{name}` to WebAssembly: the result type `{}` {reason}",
-            func.return_ty(db).pretty_print(db)
+            "cannot export `{name}` to WebAssembly: {reason}"
         )));
     }
     Ok(Some(WasmExport { func, instance }))
@@ -739,7 +825,11 @@ fn wasm_export_for_func<'db>(
 
 /// Why `class` cannot cross the WebAssembly boundary by value, or `None` for
 /// `bool` and the integers of at most 64 bits.
-fn wasm_scalar_rejection(class: &RuntimeClass<'_>) -> Option<String> {
+fn wasm_scalar_rejection(class: &RuntimeClass<'_>, boundary: WasmBoundary) -> Option<String> {
+    let rule = format!(
+        "{} take only `bool` and integers of at most 64 bits",
+        boundary.plural()
+    );
     match class {
         RuntimeClass::Scalar(ScalarClass {
             repr: ScalarRepr::Bool,
@@ -752,19 +842,13 @@ fn wasm_scalar_rejection(class: &RuntimeClass<'_>) -> Option<String> {
         RuntimeClass::Scalar(ScalarClass {
             repr: ScalarRepr::Int { bits, .. },
             ..
-        }) => Some(format!(
-            "is a {bits}-bit integer; exports take only `bool` and integers of at most 64 bits"
+        }) => Some(format!("is a {bits}-bit integer; {rule}")),
+        RuntimeClass::Scalar(_) => Some(format!("is a fixed-size byte value or address; {rule}")),
+        RuntimeClass::AggregateValue { .. }
+        | RuntimeClass::Ref { .. }
+        | RuntimeClass::RawAddr { .. } => Some(format!(
+            "is not a scalar (a struct, tuple, array, enum, reference or pointer); {rule}"
         )),
-        RuntimeClass::Scalar(_) => Some(
-            "is a fixed-size byte value or address; exports take only `bool` and integers of at most 64 bits"
-                .to_string(),
-        ),
-        RuntimeClass::AggregateValue { .. } | RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => {
-            Some(
-                "is not a scalar (a struct, tuple, array, enum, reference or pointer); exports take only `bool` and integers of at most 64 bits"
-                    .to_string(),
-            )
-        }
     }
 }
 

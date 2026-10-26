@@ -308,6 +308,17 @@ impl<'db, 'a, I: LoweringInstSet + 'static> ModuleLowerer<'db, 'a, I> {
         is_native_architecture(self.builder.ctx.triple.architecture)
     }
 
+    fn is_wasm_target(&self) -> bool {
+        #[cfg(feature = "wasm")]
+        {
+            self.builder.ctx.triple.architecture == Architecture::Wasm32
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            false
+        }
+    }
+
     fn function_symbol(&self, instance: RuntimeInstance<'db>) -> String {
         self.func_symbols
             .get(&instance)
@@ -353,15 +364,27 @@ impl<'db, 'a, I: LoweringInstSet + 'static> ModuleLowerer<'db, 'a, I> {
                 "native extern symbol `memmove` is reserved for memory copies".to_string(),
             ));
         }
-        if function.linkage(self.db) == RuntimeLinkage::External
-            && (!self.is_native_target()
+        if function.linkage(self.db) == RuntimeLinkage::External {
+            if self.is_wasm_target() {
+                // The host sees `bool` and narrow integers as an `i32` holding
+                // the zero-extended value. The package builder has already
+                // named any other type.
+                if args.iter().chain(ret.iter()).any(|ty| {
+                    !matches!(ty, Type::I1 | Type::I8 | Type::I16 | Type::I32 | Type::I64)
+                }) {
+                    return Err(LowerError::Unsupported(format!(
+                        "extern function `{symbol}` requires bool and integer ABI values of at most 64 bits on WebAssembly"
+                    )));
+                }
+            } else if !self.is_native_target()
                 || args.iter().chain(ret.iter()).any(|ty| {
                     !matches!(ty, Type::I32 | Type::I64) && !ty.is_pointer(&self.builder.ctx)
-                }))
-        {
-            return Err(LowerError::Unsupported(format!(
-                "extern function `{symbol}` requires a native target and i32/i64 or raw-pointer ABI values"
-            )));
+                })
+            {
+                return Err(LowerError::Unsupported(format!(
+                    "extern function `{symbol}` requires a native target and i32/i64 or raw-pointer ABI values"
+                )));
+            }
         }
         // Sonatina may add an out pointer for a compound return value. Reserve
         // that slot before its aggregate ABI legalization runs.
