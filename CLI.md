@@ -281,7 +281,8 @@ under the function's name; an `extern` function that nothing reaches is not impo
 Its parameters and result follow the rule for exports (`bool` and integers of at most
 64 bits; pointers are not allowed). The host sees `bool` and integers of up to 32 bits
 as an `i32` that holds the value zero-extended (an `i8` of -1 arrives as 255) and
-ignores bits above the width in what it returns; 64-bit integers are `i64`. There is
+ignores bits above the width in what it returns (a `bool` is the lowest bit); 64-bit
+integers are `i64`. There is
 no attribute for another module name yet. The module `std::wasm` declares host
 operations as effects (`Log`, `Clock` and `Abort`) with two providers: `host()` calls
 the imports `sys_wasm_log_i32`, `sys_wasm_log_u64`, `sys_wasm_now_ms` and
