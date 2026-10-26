@@ -458,7 +458,8 @@ pub fn build_test_runtime_package<'db>(
     top_mod: TopLevelMod<'db>,
     filter: Option<&str>,
 ) -> Result<RuntimePackage<'db>, LowerError> {
-    build_test_package(db, &[top_mod], filter, |_, name| sanitize_object_name(name))
+    let tests = collect_test_funcs(db, &[top_mod], filter);
+    build_test_package(db, top_mod, &tests, |_, name| sanitize_object_name(name))
 }
 
 /// Build one reachable runtime graph for every selected native test in a suite.
@@ -468,22 +469,31 @@ pub fn build_native_test_runtime_package<'db>(
     top_mods: &[TopLevelMod<'db>],
     filter: Option<&str>,
 ) -> Result<RuntimePackage<'db>, LowerError> {
-    build_test_package(db, top_mods, filter, |index, name| {
+    let &top_mod = top_mods.first().ok_or_else(|| {
+        LowerError::Unsupported("test runtime package needs a source module".into())
+    })?;
+    let tests = collect_test_funcs(db, top_mods, filter);
+    build_test_package(db, top_mod, &tests, |index, name| {
         format!("__native_test_{index}_{}", sanitize_object_name(name))
     })
 }
 
-fn build_test_package<'db>(
+/// A function marked `#[test]` that a run selected, with the name it is
+/// reported under.
+#[derive(Clone, Debug)]
+pub struct TestFunc<'db> {
+    pub func: Func<'db>,
+    pub name: String,
+}
+
+/// The `#[test]` functions of the modules whose names contain `filter`, in
+/// the order of the modules and of the functions in each.
+pub fn collect_test_funcs<'db>(
     db: &'db dyn MirDb,
     top_mods: &[TopLevelMod<'db>],
     filter: Option<&str>,
-    object_name: impl Fn(usize, &str) -> String,
-) -> Result<RuntimePackage<'db>, LowerError> {
-    let &top_mod = top_mods.first().ok_or_else(|| {
-        LowerError::Unsupported("test runtime package needs a source module".into())
-    })?;
-    let mut roots = Vec::new();
-    let mut objects = Vec::new();
+) -> Vec<TestFunc<'db>> {
+    let mut tests = Vec::new();
     for &module in top_mods {
         for &func in module.all_funcs(db) {
             if func.top_mod(db) != module {
@@ -506,26 +516,53 @@ fn build_test_package<'db>(
             {
                 continue;
             }
-
-            let semantic = semantic_instance_for_root_owner(db, BodyOwner::Func(func, None))?;
-            let entry_args =
-                entry_semantic_args_plan(db, EntryEffectContext::TestFunc { func }, semantic)?;
-            let runtime_root = runtime_instance_for_semantic(db, semantic);
-            let root = synthetic_instance(
-                db,
-                RuntimeSyntheticSpec::TestRoot {
-                    name: name.clone(),
-                    callee: runtime_root,
-                    entry_args,
-                },
-                Vec::new(),
-            );
-            roots.push(root);
-            objects.push((
-                object_name(objects.len(), &name),
-                vec![(RuntimeSectionName::Test(name), root)],
-            ));
+            tests.push(TestFunc { func, name });
         }
+    }
+    tests
+}
+
+/// Build the package of one test of a WebAssembly test run: a module with the
+/// test and what it reaches, and nothing else.
+pub fn build_wasm_test_runtime_package<'db>(
+    db: &'db dyn MirDb,
+    test: &TestFunc<'db>,
+) -> Result<RuntimePackage<'db>, LowerError> {
+    build_test_package(
+        db,
+        test.func.top_mod(db),
+        std::slice::from_ref(test),
+        |_, name| format!("__wasm_test_{}", sanitize_object_name(name)),
+    )
+}
+
+fn build_test_package<'db>(
+    db: &'db dyn MirDb,
+    top_mod: TopLevelMod<'db>,
+    tests: &[TestFunc<'db>],
+    object_name: impl Fn(usize, &str) -> String,
+) -> Result<RuntimePackage<'db>, LowerError> {
+    let mut roots = Vec::new();
+    let mut objects = Vec::new();
+    for TestFunc { func, name } in tests {
+        let semantic = semantic_instance_for_root_owner(db, BodyOwner::Func(*func, None))?;
+        let entry_args =
+            entry_semantic_args_plan(db, EntryEffectContext::TestFunc { func: *func }, semantic)?;
+        let runtime_root = runtime_instance_for_semantic(db, semantic);
+        let root = synthetic_instance(
+            db,
+            RuntimeSyntheticSpec::TestRoot {
+                name: name.clone(),
+                callee: runtime_root,
+                entry_args,
+            },
+            Vec::new(),
+        );
+        roots.push(root);
+        objects.push((
+            object_name(objects.len(), name),
+            vec![(RuntimeSectionName::Test(name.clone()), root)],
+        ));
     }
     let primary = (objects.len() == 1).then(|| objects[0].0.clone());
     let package = build_sectioned_package(db, top_mod, roots, objects, primary.as_deref(), &[])?;
