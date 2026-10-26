@@ -30,9 +30,9 @@ This directory holds the pieces a host needs and the scripts that check them:
   ```
 
   In the commands below, `fe` stands for `target/release/fe`.
-- Node.js 20 or later, to run modules, the tests and the checks. The Node.js
-  versions 22 and 24 were used. The host also uses only `WebAssembly`, `BigInt`,
-  `TextEncoder` and `crypto.subtle`, but it has not been run in a browser.
+- Node.js 20 or later, to run modules, the tests and the checks. Version 22 was
+  used. The host itself needs only `WebAssembly`, `BigInt`, `TextEncoder` and
+  `crypto.subtle`, but it has not been run in a browser.
 - `wasm-tools`, to validate modules independently of the engine that runs them
   (optional; `check.sh` needs it). Version 1.247.0 was used.
 
@@ -272,7 +272,7 @@ workflow `.github/workflows/wasm.yml` runs this script and the WebAssembly tests
 the compiler:
 
 ```sh
-cargo test -p fe --features wasm,cranelift \
+cargo test -p fe --all-features \
   --test wasm_backend --test wasm_memory --test wasm_imports --test wasm_files \
   --test wasm_manifest --test wasm_reproducible --test wasm_test_command
 ```
