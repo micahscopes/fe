@@ -9,6 +9,7 @@ doc-server = ["dep:tokio", "dep:axum"]
 lsp = ["dep:language-server", "dep:tokio"]
 cranelift = ["codegen/cranelift", "dep:libc"]
 sp1 = ["cranelift", "codegen/sp1", "dep:sonatina-sp1"]
+wasm = ["codegen/wasm"]
 
 [dependencies]
 clap.workspace = true
@@ -66,6 +67,9 @@ dir-test.workspace = true
 test-utils.workspace = true
 semantic-indexing.workspace = true
 sha2 = "0.10"
+# Runs the WebAssembly modules that `--backend wasm` writes. Only the tests
+# in `tests/wasm_backend.rs` use it.
+wasmtime = { version = "44.0.1", default-features = false, features = ["cranelift", "runtime", "std"] }
 
 [build-dependencies]
 gix = { workspace = true, features = ["sha1"] }
