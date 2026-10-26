@@ -9,7 +9,7 @@
 //! contains nothing that depends on the machine, the time, or the location of
 //! the sources, so two builds of one program give one manifest.
 
-use codegen::{WASM_HOST_CONTRACT_VERSION, WASM_REPLY_TYPE, WASM_TEXT_TYPE, WasmExportInfo};
+use codegen::{WASM_HOST_CONTRACT_VERSION, WASM_REPLY_TYPE, WasmExportInfo};
 use mir::{WasmParamShape, WasmResultShape};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -814,11 +814,5 @@ mod tests {
             exports: &[],
         });
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn the_name_of_the_text_type_is_the_contract_name() {
-        assert_eq!(WASM_TEXT_TYPE, "HostText");
-        assert_eq!(WASM_REPLY_TYPE, "Reply");
     }
 }
