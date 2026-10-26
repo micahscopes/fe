@@ -231,6 +231,7 @@ pub(super) struct WasmAdapter<'db> {
 }
 
 /// Lowers the package, and adds the wrapper of each adapter.
+#[cfg(feature = "wasm")]
 pub(super) fn compile_wasm_package_sonatina<'db, I>(
     db: &'db DriverDataBase,
     package: &RuntimePackage<'db>,
