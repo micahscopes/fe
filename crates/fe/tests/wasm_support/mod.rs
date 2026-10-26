@@ -3,10 +3,10 @@
 //! A Rust reference gives the expected result of every call, or says that the
 //! call traps: the reference computes the exact integer result and the call
 //! traps when the result does not fit the declared type or the operation is
-//! undefined (division by zero). Every program is built at two optimization
-//! levels and run with wasmtime. On x86-64 Linux with the `cranelift` feature,
-//! the same functions are also built for the host and the native executable is
-//! checked against the wasm results.
+//! undefined (division by zero). Every program is built at the four
+//! optimization levels (0, 1, 2 and s) and run with wasmtime. On x86-64 Linux
+//! with the `cranelift` feature, the same functions are also built for the host
+//! and the native executable is checked against the wasm results.
 
 #![allow(dead_code)]
 
@@ -342,7 +342,7 @@ pub fn check_program(file: &str, exports: Vec<Export>) {
     let source = fixture_path(file);
     let temp = tempdir().unwrap();
     let mut observed_results = Vec::new();
-    for level in ["0", "2"] {
+    for level in ["0", "1", "2", "s"] {
         let out = temp.path().join(format!("o{level}"));
         let bytes = build_wasm(&source, level, &out);
         let observed = run_cases(&bytes, &exports, &format!("{file} at O{level}"));

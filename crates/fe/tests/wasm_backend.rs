@@ -6,10 +6,10 @@
 //! reference gives the expected result of every call, or says that the call
 //! traps: the reference computes the exact integer result and the call traps
 //! when the result does not fit the declared type or the operation is
-//! undefined (division by zero). Every program is built at three optimization
-//! levels and run with wasmtime. On x86-64 Linux with the `cranelift`
-//! feature, the same functions are also built for the host and the native
-//! executable is checked against the wasm results.
+//! undefined (division by zero). Every program is built at the four
+//! optimization levels (0, 1, 2 and s) and run with wasmtime. On x86-64 Linux
+//! with the `cranelift` feature, the same functions are also built for the host
+//! and the native executable is checked against the wasm results.
 
 mod wasm_support;
 
