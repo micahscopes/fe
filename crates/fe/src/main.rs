@@ -54,6 +54,7 @@ pub enum BuildEmit {
     Metadata,
     Executable,
     Elf,
+    Wasm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -65,6 +66,9 @@ pub enum BuildBackend {
     #[cfg(feature = "sp1")]
     /// RV64IM SP1 guest IR or ELF executables.
     Sp1,
+    #[cfg(feature = "wasm")]
+    /// WebAssembly modules of scalar functions, or their wasm32 IR.
+    Wasm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -92,6 +96,8 @@ impl BuildBackend {
             Self::Native => "native",
             #[cfg(feature = "sp1")]
             Self::Sp1 => "sp1",
+            #[cfg(feature = "wasm")]
+            Self::Wasm => "wasm",
         }
     }
 
@@ -114,6 +120,8 @@ impl BuildBackend {
             Self::Native => vec![BuildEmit::Executable],
             #[cfg(feature = "sp1")]
             Self::Sp1 => vec![BuildEmit::Elf],
+            #[cfg(feature = "wasm")]
+            Self::Wasm => vec![BuildEmit::Wasm],
         }
     }
 }
