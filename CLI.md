@@ -276,6 +276,21 @@ the EVM built-ins are not supported and are errors that name the function and th
 instruction. The default output is `<out>/<file>.wasm`; `--emit ir` writes
 `<out>/<file>.wasm.sona`.
 
+An `extern` function that an export reaches becomes an import of the module `env`,
+under the function's name; an `extern` function that nothing reaches is not imported.
+Its parameters and result follow the rule for exports (`bool` and integers of at most
+64 bits; pointers are not allowed). The host sees `bool` and integers of up to 32 bits
+as an `i32` that holds the value zero-extended (an `i8` of -1 arrives as 255) and
+ignores bits above the width in what it returns; 64-bit integers are `i64`. There is
+no attribute for another module name yet. The module `std::wasm` declares host
+operations as effects (`Log`, `Clock` and `Abort`) with two providers: `host()` calls
+the imports `sys_wasm_log_i32`, `sys_wasm_log_u64`, `sys_wasm_now_ms` and
+`sys_wasm_abort`, and `mock(now, step)` is Fe code that needs no host. A program picks
+the provider where it starts, for example
+`with (Log = host(), Clock = host()) { ... }` inside an exported function, since an
+export cannot itself need effects. If the host does not supply an import, the engine
+refuses to instantiate the module and names it.
+
 The `metadata.json` artifact follows the Solidity Contract Metadata schema (`version: 1`), adapted to Fe. It is a complete, deterministic recompilation input: rebuilding with the same compiler version, `sources`, and `settings` reproduces the same bytecode. Its shape:
 
 ```
