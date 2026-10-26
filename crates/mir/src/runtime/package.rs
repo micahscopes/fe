@@ -795,7 +795,7 @@ fn check_wasm_imports<'db>(
             WasmResultShape::Unit
         };
         if let Some(reason) =
-            wasm_signature_rejection(db, func, &signature, WasmBoundary::Import, &scalar, result)
+            wasm_signature_rejection(db, func, signature, WasmBoundary::Import, &scalar, result)
         {
             return Err(LowerError::Unsupported(format!(
                 "cannot import `{name}` from the WebAssembly host: {reason}"
@@ -1021,9 +1021,9 @@ fn wasm_export_for_func<'db>(
 
     let instance = runtime_instance_for_semantic(db, semantic);
     let signature = instance.interface_signature(db);
-    let (params, result) = wasm_export_shapes(db, func, &signature);
+    let (params, result) = wasm_export_shapes(db, func, signature);
     if let Some(reason) =
-        wasm_signature_rejection(db, func, &signature, WasmBoundary::Export, &params, result)
+        wasm_signature_rejection(db, func, signature, WasmBoundary::Export, &params, result)
     {
         return Err(LowerError::Unsupported(format!(
             "cannot export `{name}` to WebAssembly: {reason}"
