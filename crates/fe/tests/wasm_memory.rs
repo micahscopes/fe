@@ -47,7 +47,9 @@ fn some_i32() -> Vec<i128> {
 
 /// The element at `index` of a fixed-size array, or a trap.
 fn at<T: Copy>(array: &[T], index: i128) -> Option<T> {
-    usize::try_from(index).ok().and_then(|i| array.get(i).copied())
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| array.get(i).copied())
 }
 
 // ---------------------------------------------------------------------------
@@ -63,11 +65,19 @@ program_test!(struct_basic, "struct_basic", {
             &[("x0", I32), ("y0", I32), ("x1", I32), ("y1", I32)],
             I32,
         )
-        .product(&[coords.clone(), coords.clone(), coords.clone(), coords.clone()], |a| {
-            let width = i32c(a[2] - a[0])?;
-            let height = i32c(a[3] - a[1])?;
-            i32c(width * height)
-        })
+        .product(
+            &[
+                coords.clone(),
+                coords.clone(),
+                coords.clone(),
+                coords.clone(),
+            ],
+            |a| {
+                let width = i32c(a[2] - a[0])?;
+                let height = i32c(a[3] - a[1])?;
+                i32c(width * height)
+            },
+        )
         .calls(
             &[
                 &[i128::from(i32::MIN), 0, i128::from(i32::MAX), 1],
@@ -86,13 +96,21 @@ program_test!(struct_basic, "struct_basic", {
             &[("ax", I32), ("ay", I32), ("bx", I32), ("by", I32)],
             I32,
         )
-        .product(&[some_i32(), vec![0, 2, -3], vec![1, -4, 9], vec![0, 5, 46_000]], |a| {
-            let cx = i32c(a[0] + a[2])?;
-            let cy = i32c(a[1] + a[3])?;
-            let c_dot_a = i32c(i32c(cx * a[0])? + i32c(cy * a[1])?)?;
-            let a_dot_b = i32c(i32c(a[0] * a[2])? + i32c(a[1] * a[3])?)?;
-            i32c(c_dot_a + a_dot_b)
-        }),
+        .product(
+            &[
+                some_i32(),
+                vec![0, 2, -3],
+                vec![1, -4, 9],
+                vec![0, 5, 46_000],
+            ],
+            |a| {
+                let cx = i32c(a[0] + a[2])?;
+                let cy = i32c(a[1] + a[3])?;
+                let c_dot_a = i32c(i32c(cx * a[0])? + i32c(cy * a[1])?)?;
+                let a_dot_b = i32c(i32c(a[0] * a[2])? + i32c(a[1] * a[3])?)?;
+                i32c(c_dot_a + a_dot_b)
+            },
+        ),
         // A copy keeps the old field after the original changes.
         Export::new("copies", &[("x", I32)], I32).product(&[some_i32()], |a| {
             let changed = i32c(a[0] + 100)?;
@@ -109,22 +127,33 @@ program_test!(struct_nested, "struct_nested", {
             &[("a", I32), ("b", I32), ("c", I32), ("d", I32)],
             I32,
         )
-        .product(&[points.clone(), points.clone(), points.clone(), points.clone()], |a| {
-            let dx = i32c(a[2] - a[0])?;
-            let dy = i32c(a[3] - a[1])?;
-            i32c(i32c(dx * 1000)? + dy)
-        }),
+        .product(
+            &[
+                points.clone(),
+                points.clone(),
+                points.clone(),
+                points.clone(),
+            ],
+            |a| {
+                let dx = i32c(a[2] - a[0])?;
+                let dy = i32c(a[3] - a[1])?;
+                i32c(i32c(dx * 1000)? + dy)
+            },
+        ),
         // The segment is swapped through a copy of its old value.
         Export::new(
             "reversed",
             &[("a", I32), ("b", I32), ("c", I32), ("d", I32)],
             I32,
         )
-        .product(&[points.clone(), points.clone(), points.clone(), points], |a| {
-            let dx = i32c(a[0] - a[2])?;
-            let dy = i32c(a[1] - a[3])?;
-            i32c(i32c(dx * 1000)? + dy)
-        }),
+        .product(
+            &[points.clone(), points.clone(), points.clone(), points],
+            |a| {
+                let dx = i32c(a[0] - a[2])?;
+                let dy = i32c(a[1] - a[3])?;
+                i32c(i32c(dx * 1000)? + dy)
+            },
+        ),
         // id + weight * from.x + to.y, where to.y is `a`.
         Export::new("weighted", &[("a", I32), ("b", I32), ("w", I64)], I64).product(
             &[
@@ -150,11 +179,19 @@ program_test!(struct_mut_param, "struct_mut_param", {
             &[("a", I32), ("b", I32), ("c", I32), ("threshold", I32)],
             I32,
         )
-        .product(&[values.clone(), values.clone(), values.clone(), vec![-1, 0, 5]], |a| {
-            let hits = a[..3].iter().filter(|&&v| v >= a[3]).count() as i128;
-            let misses = 3 - hits;
-            i32c(hits * 100 + misses * 10 + a[2])
-        }),
+        .product(
+            &[
+                values.clone(),
+                values.clone(),
+                values.clone(),
+                vec![-1, 0, 5],
+            ],
+            |a| {
+                let hits = a[..3].iter().filter(|&&v| v >= a[3]).count() as i128;
+                let misses = 3 - hits;
+                i32c(hits * 100 + misses * 10 + a[2])
+            },
+        ),
         Export::new("reset_then_count", &[("a", I32)], I32).product(&[values], |a| {
             let (hits, misses) = if a[0] >= 0 { (1, 0) } else { (0, 1) };
             i32c(hits * 100 + misses * 10 + a[0])
@@ -190,24 +227,29 @@ program_test!(struct_complex, "struct_complex", {
                 Some(complex_pow((a[0], a[1]), a[2])?.1)
             })
             // Large components overflow in the first multiplication.
-            .calls(&[&[i128::from(i64::MAX), 1, 2], &[1 << 40, 1 << 40, 1]], |a| {
-                Some(complex_pow((a[0], a[1]), a[2])?.1)
-            }),
-        Export::new("mandel_steps", &[("cre", I64), ("cim", I64), ("limit", U32)], U32)
-            .product(&[parts.clone(), parts, vec![0, 1, 7, 50]], |a| {
-                let c = (a[0], a[1]);
-                let mut z = (0, 0);
-                let mut steps = 0;
-                while steps < a[2] {
-                    if i64c(i64c(z.0 * z.0)? + i64c(z.1 * z.1)?)? > 4 {
-                        return Some(steps);
-                    }
-                    let squared = complex_mul(z, z)?;
-                    z = (i64c(squared.0 + c.0)?, i64c(squared.1 + c.1)?);
-                    steps += 1;
+            .calls(
+                &[&[i128::from(i64::MAX), 1, 2], &[1 << 40, 1 << 40, 1]],
+                |a| Some(complex_pow((a[0], a[1]), a[2])?.1),
+            ),
+        Export::new(
+            "mandel_steps",
+            &[("cre", I64), ("cim", I64), ("limit", U32)],
+            U32,
+        )
+        .product(&[parts.clone(), parts, vec![0, 1, 7, 50]], |a| {
+            let c = (a[0], a[1]);
+            let mut z = (0, 0);
+            let mut steps = 0;
+            while steps < a[2] {
+                if i64c(i64c(z.0 * z.0)? + i64c(z.1 * z.1)?)? > 4 {
+                    return Some(steps);
                 }
-                Some(steps)
-            }),
+                let squared = complex_mul(z, z)?;
+                z = (i64c(squared.0 + c.0)?, i64c(squared.1 + c.1)?);
+                steps += 1;
+            }
+            Some(steps)
+        }),
     ]
 });
 
@@ -238,9 +280,7 @@ program_test!(struct_state, "struct_state", {
             let step = |p: (i128, i128)| Some((p.1, u64c(p.0 + p.1)?));
             let (mut left, mut right) = ((1, 2), (10, 20));
             for _ in 0..a[0] {
-                let saved = left;
-                left = right;
-                right = saved;
+                std::mem::swap(&mut left, &mut right);
                 left = step(left)?;
             }
             u64c(u64c(left.0 * 1000)? + right.0)
@@ -264,10 +304,10 @@ program_test!(struct_vec3, "struct_vec3", {
                 i64c(i64c(i64c(x * wx)? + i64c(y * wy)?)? + i64c(z * wz)?)
             },
         ),
-        Export::new("lincomb", &[("a", I64), ("b", I64)], I64).product(
-            &[vec![-7, 0, 3, 90], vec![-1, 0, 5, 77]],
-            |a| i64c(i64c(i64c(a[0] + 1)? * 10000)? + i64c(i64c(a[1] + 1)? * 100)? + 1),
-        ),
+        Export::new("lincomb", &[("a", I64), ("b", I64)], I64)
+            .product(&[vec![-7, 0, 3, 90], vec![-1, 0, 5, 77]], |a| {
+                i64c(i64c(i64c(a[0] + 1)? * 10000)? + i64c(i64c(a[1] + 1)? * 100)? + 1)
+            }),
         Export::new(
             "cross_z",
             &[("ax", I64), ("ay", I64), ("bx", I64), ("by", I64)],
@@ -291,7 +331,13 @@ program_test!(array_basic, "array_basic", {
             U32,
         )
         .product(
-            &[vec![0, 7], vec![1, 100], vec![2, 9], vec![3, 4_000_000_000], vec![4, 300_000_000]],
+            &[
+                vec![0, 7],
+                vec![1, 100],
+                vec![2, 9],
+                vec![3, 4_000_000_000],
+                vec![4, 300_000_000],
+            ],
             |a| a.iter().try_fold(0, |s, &v| u32c(s + v)),
         ),
         // Index 4 and above are outside the array.
@@ -299,27 +345,29 @@ program_test!(array_basic, "array_basic", {
             .product(&[vec![0, 1, 2, 3, 4, 5, 1000, 4_294_967_295]], |a| {
                 at(&[10, 20, 30, 40], a[0])
             }),
-        Export::new("squares", &[("n", U32)], U32)
-            .product(&[vec![0, 1, 100, 4_294_967_246, 4_294_967_247, 4_294_967_295]], |a| {
+        Export::new("squares", &[("n", U32)], U32).product(
+            &[vec![0, 1, 100, 4_294_967_246, 4_294_967_247, 4_294_967_295]],
+            |a| {
                 let mut all = Vec::new();
                 for i in 0..8i128 {
                     all.push(u32c(i * i + a[0])?);
                 }
                 u32c(all[3] + all[7])
-            }),
-        Export::new("for_sum", &[("n", U32)], U32)
-            .product(&[vec![0, 1, 2, 1000, 204_522_252, 204_522_253, 4_294_967_295]], |a| {
-                (1..=6i128).try_fold(0, |s, x| u32c(s + u32c(x * a[0])?))
-            }),
+            },
+        ),
+        Export::new("for_sum", &[("n", U32)], U32).product(
+            &[vec![0, 1, 2, 1000, 204_522_252, 204_522_253, 4_294_967_295]],
+            |a| (1..=6i128).try_fold(0, |s, x| u32c(s + u32c(x * a[0])?)),
+        ),
     ]
 });
 
 program_test!(array_bounds, "array_bounds", {
     vec![
-        Export::new("read", &[("i", U32)], U8)
-            .product(&[vec![0, 1, 3, 4, 5, 255, 256, 65_536, 4_294_967_295]], |a| {
-                at(&[11, 22, 33, 44], a[0])
-            }),
+        Export::new("read", &[("i", U32)], U8).product(
+            &[vec![0, 1, 3, 4, 5, 255, 256, 65_536, 4_294_967_295]],
+            |a| at(&[11, 22, 33, 44], a[0]),
+        ),
         Export::new("write_then_sum", &[("i", U32), ("v", U8)], U32).product(
             &[vec![0, 1, 5, 6, 7, 100, 4_294_967_295], vec![0, 9, 255]],
             |a| {
@@ -355,12 +403,27 @@ program_test!(array_sort, "array_sort", {
     ];
     let mut kth = Export::new(
         "kth",
-        &[("a", I32), ("b", I32), ("c", I32), ("d", I32), ("e", I32), ("f", I32), ("k", U32)],
+        &[
+            ("a", I32),
+            ("b", I32),
+            ("c", I32),
+            ("d", I32),
+            ("e", I32),
+            ("f", I32),
+            ("k", U32),
+        ],
         I32,
     );
     let mut sorted_flag = Export::new(
         "is_sorted_after",
-        &[("a", I32), ("b", I32), ("c", I32), ("d", I32), ("e", I32), ("f", I32)],
+        &[
+            ("a", I32),
+            ("b", I32),
+            ("c", I32),
+            ("d", I32),
+            ("e", I32),
+            ("f", I32),
+        ],
         Bool,
     );
     for seed in &seeds {
@@ -382,7 +445,7 @@ program_test!(array_sort, "array_sort", {
         Export::new("padded_third", &[("a", I32), ("b", I32), ("c", I32)], I32).product(
             &[vec![-5, 0, 7], vec![-1, 3, 8], vec![-9, 2, 6, 7]],
             |a| {
-                let mut sorted = vec![a[0], a[1], a[2], a[2], a[2], a[2]];
+                let mut sorted = [a[0], a[1], a[2], a[2], a[2], a[2]];
                 sorted.sort_unstable();
                 Some(sorted[2])
             },
@@ -416,17 +479,37 @@ fn matrix_mul(a: &Matrix, b: &Matrix) -> Option<Matrix> {
 }
 
 program_test!(array_matrix, "array_matrix", {
-    let seeds = vec![-20, -1, 0, 1, 3, 100, 1000, 20_000, i128::from(i32::MAX) - 7, i128::from(i32::MAX)];
+    let seeds = vec![
+        -20,
+        -1,
+        0,
+        1,
+        3,
+        100,
+        1000,
+        20_000,
+        i128::from(i32::MAX) - 7,
+        i128::from(i32::MAX),
+    ];
     vec![
-        Export::new("trace_of_square", &[("s", I32)], I32).product(&[seeds.clone()], |a| {
-            let m = seed_matrix(a[0])?;
-            let sq = matrix_mul(&m, &m)?;
-            i32c(i32c(sq[0][0] + sq[1][1])? + sq[2][2])
-        }),
+        Export::new("trace_of_square", &[("s", I32)], I32).product(
+            std::slice::from_ref(&seeds),
+            |a| {
+                let m = seed_matrix(a[0])?;
+                let sq = matrix_mul(&m, &m)?;
+                i32c(i32c(sq[0][0] + sq[1][1])? + sq[2][2])
+            },
+        ),
         Export::new("identity_is_neutral", &[("s", I32)], Bool)
-            .product(&[seeds.clone()], |a| seed_matrix(a[0]).map(|_| 1)),
+            .product(std::slice::from_ref(&seeds), |a| {
+                seed_matrix(a[0]).map(|_| 1)
+            }),
         Export::new("cell", &[("s", I32), ("row", U32), ("col", U32)], I32).product(
-            &[vec![-3, 0, 2, 600], vec![0, 1, 2, 3, 4_000_000_000], vec![0, 1, 2, 3, 99]],
+            &[
+                vec![-3, 0, 2, 600],
+                vec![0, 1, 2, 3, 4_000_000_000],
+                vec![0, 1, 2, 3, 99],
+            ],
             |a| {
                 let m = matrix_mul(&seed_matrix(a[0])?, &seed_matrix(1)?)?;
                 at(m.get(usize::try_from(a[1]).ok()?)?, a[2])
@@ -441,17 +524,33 @@ program_test!(array_matrix, "array_matrix", {
 });
 
 program_test!(array_copy, "array_copy", {
-    let xs = vec![-50, -3, 0, 1, 7, 100_000, 2_147_483_637, 2_147_483_644, i128::from(i32::MAX)];
+    let xs = vec![
+        -50,
+        -3,
+        0,
+        1,
+        7,
+        100_000,
+        2_147_483_637,
+        2_147_483_644,
+        i128::from(i32::MAX),
+    ];
     vec![
         // `bump_all` returns a changed copy and leaves its argument alone.
-        Export::new("value_semantics", &[("x", I32)], I32).product(&[xs.clone()], |a| {
-            let original: Vec<i128> = (0..4).map(|i| i32c(a[0] + i)).collect::<Option<_>>()?;
-            let bumped: Vec<i128> = original.iter().map(|&v| i32c(v + 10)).collect::<Option<_>>()?;
-            i32c(i32c(i32c(original[0] * 1000)? + i32c(bumped[0] * 10)?)? + bumped[3])
-                .and_then(|s| i32c(s - original[3]))
-        }),
+        Export::new("value_semantics", &[("x", I32)], I32).product(
+            std::slice::from_ref(&xs),
+            |a| {
+                let original: Vec<i128> = (0..4).map(|i| i32c(a[0] + i)).collect::<Option<_>>()?;
+                let bumped: Vec<i128> = original
+                    .iter()
+                    .map(|&v| i32c(v + 10))
+                    .collect::<Option<_>>()?;
+                i32c(i32c(i32c(original[0] * 1000)? + i32c(bumped[0] * 10)?)? + bumped[3])
+                    .and_then(|s| i32c(s - original[3]))
+            },
+        ),
         // `add_in_place` changes the caller's array; the saved copy stays.
-        Export::new("in_place", &[("x", I32)], I32).product(&[xs.clone()], |a| {
+        Export::new("in_place", &[("x", I32)], I32).product(std::slice::from_ref(&xs), |a| {
             let before: Vec<i128> = (0..4).map(|i| i32c(a[0] + i)).collect::<Option<_>>()?;
             let after: Vec<i128> = before.iter().map(|&v| i32c(v + 5)).collect::<Option<_>>()?;
             let first = i32c(i32c(after[0] * 1000)? + i32c(before[0] * 100)?)?;
@@ -474,23 +573,35 @@ program_test!(array_of_structs, "array_of_structs", {
     }
     let ns = vec![0, 1, 5, 10, 1000, 2_147_483_648, 4_294_967_288];
     vec![
-        Export::new("total_value", &[("n", U32)], U32).product(&[ns.clone()], |a| {
+        Export::new("total_value", &[("n", U32)], U32).product(std::slice::from_ref(&ns), |a| {
             items(a[0])?.iter().try_fold(0, |s, item| u32c(s + item.1))
         }),
-        Export::new("best_ratio_index", &[("n", U32)], U32).product(&[ns.clone()], |a| {
-            let list = items(a[0])?;
-            let mut best = 0;
-            for i in 1..4 {
-                let left = u32c(list[i].1 * list[best].0)?;
-                let right = u32c(list[best].1 * list[i].0)?;
-                if left > right {
-                    best = i;
+        Export::new("best_ratio_index", &[("n", U32)], U32).product(
+            std::slice::from_ref(&ns),
+            |a| {
+                let list = items(a[0])?;
+                let mut best = 0;
+                for i in 1..4 {
+                    let left = u32c(list[i].1 * list[best].0)?;
+                    let right = u32c(list[best].1 * list[i].0)?;
+                    if left > right {
+                        best = i;
+                    }
                 }
-            }
-            Some(best as i128)
-        }),
-        Export::new("update_one", &[("n", U32), ("which", U32), ("delta", U32)], U32).product(
-            &[vec![0, 5, 100], vec![0, 1, 2, 3, 4, 99], vec![0, 7, 4_000_000_000]],
+                Some(best as i128)
+            },
+        ),
+        Export::new(
+            "update_one",
+            &[("n", U32), ("which", U32), ("delta", U32)],
+            U32,
+        )
+        .product(
+            &[
+                vec![0, 5, 100],
+                vec![0, 1, 2, 3, 4, 99],
+                vec![0, 7, 4_000_000_000],
+            ],
             |a| {
                 let mut list = items(a[0])?;
                 let slot = usize::try_from(a[1]).ok().filter(|&s| s < 4)?;
@@ -528,10 +639,15 @@ program_test!(array_loops, "array_loops", {
                 vec![0, 1, 4],
                 vec![-1, 2, i128::from(i32::MAX) - 5],
             ],
-            |a| [a[0], a[1], a[2], 4, 5].iter().try_fold(0, |s, &x| i32c(s + x)),
+            |a| {
+                [a[0], a[1], a[2], 4, 5]
+                    .iter()
+                    .try_fold(0, |s, &x| i32c(s + x))
+            },
         ),
-        Export::new("for_in_nested", &[("n", U32)], U32)
-            .product(&[vec![0, 1, 7, 100, 4_294_967_000, 4_294_967_295]], |a| {
+        Export::new("for_in_nested", &[("n", U32)], U32).product(
+            &[vec![0, 1, 7, 100, 4_294_967_000, 4_294_967_295]],
+            |a| {
                 let mut s = 0;
                 for x in [1, 2, 3] {
                     for y in [10, 20, 30] {
@@ -539,25 +655,29 @@ program_test!(array_loops, "array_loops", {
                     }
                 }
                 Some(s)
-            }),
+            },
+        ),
         Export::new(
             "prefix_max_and_sum",
             &[("a", I32), ("b", I32), ("c", I32), ("d", I32)],
             I32,
         )
-        .product(&[vec![3, -2], vec![1, 8], vec![4, -9], vec![1, 5, 100]], |a| {
-            let mut run = 0;
-            let mut peak = a[0];
-            let (mut sums, mut maxes) = ([0; 4], [0; 4]);
-            for i in 0..4 {
-                run = i32c(run + a[i])?;
-                peak = peak.max(a[i]);
-                sums[i] = run;
-                maxes[i] = peak;
-            }
-            i32c(i32c(i32c(sums[3] * 1000)? + i32c(maxes[1] * 100)?)? + i32c(maxes[2] * 10)?)
-                .and_then(|s| i32c(s + sums[0]))
-        }),
+        .product(
+            &[vec![3, -2], vec![1, 8], vec![4, -9], vec![1, 5, 100]],
+            |a| {
+                let mut run = 0;
+                let mut peak = a[0];
+                let (mut sums, mut maxes) = ([0; 4], [0; 4]);
+                for i in 0..4 {
+                    run = i32c(run + a[i])?;
+                    peak = peak.max(a[i]);
+                    sums[i] = run;
+                    maxes[i] = peak;
+                }
+                i32c(i32c(i32c(sums[3] * 1000)? + i32c(maxes[1] * 100)?)? + i32c(maxes[2] * 10)?)
+                    .and_then(|s| i32c(s + sums[0]))
+            },
+        ),
         Export::new(
             "first_negative",
             &[("a", I32), ("b", I32), ("c", I32), ("d", I32)],
@@ -591,15 +711,25 @@ program_test!(array_search, "array_search", {
             &[vec![-100, -20, -3, 0, 1, 4, 9, 15, 16, 42, 43]],
             |a| {
                 let lo = SORTED.partition_point(|&v| v < a[0]);
-                Some(if lo < 8 && SORTED[lo] == a[0] { lo as i128 } else { -1 })
+                Some(if lo < 8 && SORTED[lo] == a[0] {
+                    lo as i128
+                } else {
+                    -1
+                })
             },
         ),
-        Export::new("count_equal", &[("key", I32)], U32).product(
-            &[vec![-100, 0, 15, 42, 7]],
-            |a| Some(SORTED.iter().filter(|&&v| v == a[0]).count() as i128),
-        ),
+        Export::new("count_equal", &[("key", I32)], U32)
+            .product(&[vec![-100, 0, 15, 42, 7]], |a| {
+                Some(SORTED.iter().filter(|&&v| v == a[0]).count() as i128)
+            }),
         Export::new("middle_pair_sum", &[("shift", I32)], I32).product(
-            &[vec![-9, 0, 4, i128::from(i32::MAX) - 6, i128::from(i32::MAX) - 5]],
+            &[vec![
+                -9,
+                0,
+                4,
+                i128::from(i32::MAX) - 6,
+                i128::from(i32::MAX) - 5,
+            ]],
             |a| {
                 for i in 1..=6 {
                     i32c(a[0] + i)?;
@@ -619,7 +749,9 @@ program_test!(const_array, "const_array", {
     const SQUARES: [i128; 6] = [0, 1, 4, 9, 16, 25];
     vec![
         Export::new("prime", &[("i", U32)], U32)
-            .product(&[vec![0, 1, 2, 7, 8, 9, 4_294_967_295]], |a| at(&PRIMES, a[0])),
+            .product(&[vec![0, 1, 2, 7, 8, 9, 4_294_967_295]], |a| {
+                at(&PRIMES, a[0])
+            }),
         Export::new("square", &[("i", U32)], U64)
             .product(&[vec![0, 1, 5, 6, 7]], |a| at(&SQUARES, a[0])),
         Export::new("sign_sum", &[("n", U32)], I32).product(&[upto(12)], |a| {
@@ -635,7 +767,16 @@ program_test!(const_array, "const_array", {
         }),
         Export::new("largest_below", &[("x", U32)], U32).product(
             &[vec![0, 2, 3, 4, 12, 19, 20, 4_294_967_295]],
-            |a| Some(PRIMES.iter().copied().filter(|&p| p < a[0]).max().unwrap_or(0)),
+            |a| {
+                Some(
+                    PRIMES
+                        .iter()
+                        .copied()
+                        .filter(|&p| p < a[0])
+                        .max()
+                        .unwrap_or(0),
+                )
+            },
         ),
     ]
 });
@@ -649,21 +790,21 @@ program_test!(const_struct, "const_struct", {
     ];
     const GRID: [[i128; 3]; 2] = [[1, 2, 3], [4, 5, 6]];
     vec![
-        Export::new("find_scale", &[("key", U16)], I32).product(
-            &[vec![0, 7, 8, 9, 10, 300, 301, 65_535]],
-            |a| Some(TABLE.iter().find(|e| e.0 == a[0]).map_or(0, |e| e.2)),
-        ),
+        Export::new("find_scale", &[("key", U16)], I32)
+            .product(&[vec![0, 7, 8, 9, 10, 300, 301, 65_535]], |a| {
+                Some(TABLE.iter().find(|e| e.0 == a[0]).map_or(0, |e| e.2))
+            }),
         Export::new("brightness", &[("i", U32)], U32).product(&[vec![0, 1, 2, 3, 100]], |a| {
             Some(at(&TABLE, a[0])?.1.iter().sum())
         }),
-        Export::new("origin_distance", &[("r", U8), ("g", U8), ("b", U8)], U32).product(
-            &[vec![0, 1, 255], vec![0, 17], vec![0, 200]],
-            |a| Some(a[0] + a[1] + a[2]),
-        ),
-        Export::new("grid", &[("row", U32), ("col", U32)], U8).product(
-            &[vec![0, 1, 2, 3], vec![0, 1, 2, 3, 4]],
-            |a| at(at(&GRID, a[0])?.as_slice(), a[1]),
-        ),
+        Export::new("origin_distance", &[("r", U8), ("g", U8), ("b", U8)], U32)
+            .product(&[vec![0, 1, 255], vec![0, 17], vec![0, 200]], |a| {
+                Some(a[0] + a[1] + a[2])
+            }),
+        Export::new("grid", &[("row", U32), ("col", U32)], U8)
+            .product(&[vec![0, 1, 2, 3], vec![0, 1, 2, 3, 4]], |a| {
+                at(at(&GRID, a[0])?.as_slice(), a[1])
+            }),
     ]
 });
 
@@ -673,7 +814,11 @@ fn crc_table() -> [u32; 256] {
     for (n, entry) in table.iter_mut().enumerate() {
         let mut c = n as u32;
         for _ in 0..8 {
-            c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+            c = if c & 1 != 0 {
+                0xedb8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
         }
         *entry = c;
     }
@@ -683,10 +828,10 @@ fn crc_table() -> [u32; 256] {
 program_test!(const_crc, "const_crc", {
     let table = crc_table();
     vec![
-        Export::new("table_entry", &[("i", U32)], U32).product(
-            &[vec![0, 1, 2, 17, 128, 254, 255, 256, 1000]],
-            move |a| at(&table.map(i128::from), a[0]),
-        ),
+        Export::new("table_entry", &[("i", U32)], U32)
+            .product(&[vec![0, 1, 2, 17, 128, 254, 255, 256, 1000]], move |a| {
+                at(&table.map(i128::from), a[0])
+            }),
         // CRC-32 of a pseudo-random byte stream of `n` bytes.
         Export::new("crc_of_stream", &[("seed", U32), ("n", U32)], U32).product(
             &[vec![0, 1, 77, 4_294_967_295], vec![0, 1, 9, 100, 700]],
@@ -723,7 +868,14 @@ program_test!(string_bytes, "string_bytes", {
             }),
         Export::new("count_byte", &[("target", U8)], U32).product(
             &[vec![0, 105, 109, 112, 115, 255]],
-            |a| Some(b"mississippi".iter().filter(|&&b| i128::from(b) == a[0]).count() as i128),
+            |a| {
+                Some(
+                    b"mississippi"
+                        .iter()
+                        .filter(|&&b| i128::from(b) == a[0])
+                        .count() as i128,
+                )
+            },
         ),
     ]
 });
@@ -792,13 +944,14 @@ program_test!(fib_table, "fib_table", {
         t[n]
     };
     vec![
-        Export::new("fib", &[("n", U32)], U64).product(
-            &[vec![0, 1, 2, 10, 38, 39, 40, 41, 1000]],
-            move |a| (a[0] < 40).then(|| table(a[0] as usize)),
-        ),
-        Export::new("sum_to", &[("n", U32)], U64).product(&[vec![0, 1, 2, 10, 38, 39, 40, 41]], move |a| {
-            (a[0] < 40).then(|| (0..=a[0] as usize).map(table).sum())
-        }),
+        Export::new("fib", &[("n", U32)], U64)
+            .product(&[vec![0, 1, 2, 10, 38, 39, 40, 41, 1000]], move |a| {
+                (a[0] < 40).then(|| table(a[0] as usize))
+            }),
+        Export::new("sum_to", &[("n", U32)], U64)
+            .product(&[vec![0, 1, 2, 10, 38, 39, 40, 41]], move |a| {
+                (a[0] < 40).then(|| (0..=a[0] as usize).map(table).sum())
+            }),
     ]
 });
 
@@ -811,7 +964,11 @@ struct Ring {
 
 impl Ring {
     fn new() -> Self {
-        Ring { items: [0; 4], head: 0, len: 0 }
+        Ring {
+            items: [0; 4],
+            head: 0,
+            len: 0,
+        }
     }
 
     fn push(&mut self, value: i128) -> bool {
@@ -841,31 +998,43 @@ program_test!(ring_buffer, "ring_buffer", {
             &[("a", U32), ("b", U32), ("c", U32), ("d", U32), ("e", U32)],
             U32,
         )
-        .product(&[vec![1, 2, 9], vec![2, 5], vec![3, 6], vec![4, 1, 700], values.clone()], |a| {
-            let mut r = Ring::new();
-            r.push(a[0]);
-            r.push(a[1]);
-            let x = r.pop()?;
-            r.push(a[2]);
-            r.push(a[3]);
-            let rejected = !r.push(a[4]);
-            r.push(a[4]);
-            let y = r.pop()?;
-            let z = r.pop()?;
-            u32c(u32c(u32c(x * 1_000_000)? + u32c(y * 10_000)?)? + u32c(z * 100)?)
-                .and_then(|s| u32c(s + i128::from(rejected)))
-        }),
+        .product(
+            &[
+                vec![1, 2, 9],
+                vec![2, 5],
+                vec![3, 6],
+                vec![4, 1, 700],
+                values.clone(),
+            ],
+            |a| {
+                let mut r = Ring::new();
+                r.push(a[0]);
+                r.push(a[1]);
+                let x = r.pop()?;
+                r.push(a[2]);
+                r.push(a[3]);
+                let rejected = !r.push(a[4]);
+                r.push(a[4]);
+                let y = r.pop()?;
+                let z = r.pop()?;
+                u32c(u32c(u32c(x * 1_000_000)? + u32c(y * 10_000)?)? + u32c(z * 100)?)
+                    .and_then(|s| u32c(s + i128::from(rejected)))
+            },
+        ),
         // Popping an empty buffer underflows its length.
         Export::new("underflow", &[], U32).product(&[], |_| None),
-        Export::new("wraps", &[("n", U32)], U32).product(&[vec![0, 1, 3, 4, 5, 10, 100, 1000, 70_000]], |a| {
-            let mut r = Ring::new();
-            let mut total = 0;
-            for i in 0..a[0] {
-                r.push(i + 1);
-                total = u32c(total + u32c(r.pop()? * (i + 1))?)?;
-            }
-            u32c(total + r.head as i128)
-        }),
+        Export::new("wraps", &[("n", U32)], U32).product(
+            &[vec![0, 1, 3, 4, 5, 10, 100, 1000, 70_000]],
+            |a| {
+                let mut r = Ring::new();
+                let mut total = 0;
+                for i in 0..a[0] {
+                    r.push(i + 1);
+                    total = u32c(total + u32c(r.pop()? * (i + 1))?)?;
+                }
+                u32c(total + r.head as i128)
+            },
+        ),
     ]
 });
 
@@ -877,14 +1046,22 @@ program_test!(bitset, "bitset", {
             &[("a", U32), ("b", U32), ("c", U32), ("d", U32)],
             U32,
         )
-        .product(&[bits.clone(), vec![5, 64, 255], vec![5, 192, 256], vec![0, 5, 64, 192, 300]], |a| {
-            let mut set = [false; 256];
-            for &bit in &a[..3] {
-                *set.get_mut(usize::try_from(bit).ok()?)? = true;
-            }
-            *set.get_mut(usize::try_from(a[3]).ok()?)? = false;
-            Some(set.iter().filter(|&&b| b).count() as i128)
-        }),
+        .product(
+            &[
+                bits.clone(),
+                vec![5, 64, 255],
+                vec![5, 192, 256],
+                vec![0, 5, 64, 192, 300],
+            ],
+            |a| {
+                let mut set = [false; 256];
+                for &bit in &a[..3] {
+                    *set.get_mut(usize::try_from(bit).ok()?)? = true;
+                }
+                *set.get_mut(usize::try_from(a[3]).ok()?)? = false;
+                Some(set.iter().filter(|&&b| b).count() as i128)
+            },
+        ),
         Export::new("has", &[("a", U32), ("b", U32), ("q", U32)], Bool).product(
             &[vec![3, 255], vec![70, 3], bits],
             |a| {
@@ -951,19 +1128,33 @@ fn run_vm(input: i128, steps: i128) -> Option<i128> {
 }
 
 program_test!(stack_vm, "stack_vm", {
-    vec![Export::new("run", &[("input", I32), ("steps", U32)], I32).product(
-        &[
-            vec![-5, 0, 5, 1000, 50_000_000, 2_000_000_000, i128::from(i32::MIN)],
-            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20],
-        ],
-        |a| run_vm(a[0], a[1]),
-    )]
+    vec![
+        Export::new("run", &[("input", I32), ("steps", U32)], I32).product(
+            &[
+                vec![
+                    -5,
+                    0,
+                    5,
+                    1000,
+                    50_000_000,
+                    2_000_000_000,
+                    i128::from(i32::MIN),
+                ],
+                vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20],
+            ],
+            |a| run_vm(a[0], a[1]),
+        ),
+    ]
 });
 
 program_test!(enum_basic, "enum_basic", {
     vec![
         Export::new("area_of", &[("kind", U32), ("a", U32), ("b", U32)], U32).product(
-            &[vec![0, 1, 2, 9], vec![0, 3, 70_000, 4_294_967_295], vec![0, 4, 70_000]],
+            &[
+                vec![0, 1, 2, 9],
+                vec![0, 3, 70_000, 4_294_967_295],
+                vec![0, 4, 70_000],
+            ],
             |a| match a[0] {
                 0 => u32c(u32c(3 * a[1])? * a[1]),
                 1 => u32c(a[1] * a[2]),
@@ -985,12 +1176,20 @@ program_test!(enum_basic, "enum_basic", {
 program_test!(recursion_frames, "recursion_frames", {
     // `descend` adds 1 per level, plus the two pads at the bottom: 4 * limit.
     vec![
-        Export::new("depth_sum", &[("limit", U32)], U32).product(
-            &[vec![0, 1, 2, 10, 40, 300, 1_000_000]],
-            |a| (a[0] < 1_000_000).then(|| 4 * a[0]),
-        ),
+        Export::new("depth_sum", &[("limit", U32)], U32)
+            .product(&[vec![0, 1, 2, 10, 40, 300, 1_000_000]], |a| {
+                (a[0] < 1_000_000).then(|| 4 * a[0])
+            }),
         Export::new("halving_sum", &[("x", U32)], U32).product(
-            &[vec![0, 1, 100, 4_294_967_260, 4_294_967_288, 4_294_967_289, 4_294_967_295]],
+            &[vec![
+                0,
+                1,
+                100,
+                4_294_967_260,
+                4_294_967_288,
+                4_294_967_289,
+                4_294_967_295,
+            ]],
             |a| {
                 let items: Vec<i128> = (0..8).map(|i| u32c(a[0] + i)).collect::<Option<_>>()?;
                 items.iter().try_fold(0, |s, &v| u32c(s + v))
@@ -1008,19 +1207,23 @@ program_test!(frame_sizes, "frame_sizes", {
                     .map(|i| u32c(a[0] + i).map(|v| v as u32))
                     .collect::<Option<_>>()?;
                 let checksum = |values: &[u32]| {
-                    values.iter().fold(0u32, |s, &v| s.wrapping_mul(3).wrapping_add(v))
+                    values
+                        .iter()
+                        .fold(0u32, |s, &v| s.wrapping_mul(3).wrapping_add(v))
                 };
                 let mut changed = filled.clone();
                 changed[10] = 0;
-                Some(i128::from(checksum(&filled).wrapping_sub(checksum(&changed))))
+                Some(i128::from(
+                    checksum(&filled).wrapping_sub(checksum(&changed)),
+                ))
             },
         ),
         // One more copy of a 256-byte array per level; the stack is 1 MiB, so
         // a million levels run out of it, as they run out of the host stack.
-        Export::new("recurse", &[("n", U32)], U32).product(
-            &[vec![0, 1, 2, 10, 100, 400, 1_000_000]],
-            |a| (a[0] < 1_000_000).then(|| 64 + a[0]),
-        ),
+        Export::new("recurse", &[("n", U32)], U32)
+            .product(&[vec![0, 1, 2, 10, 100, 400, 1_000_000]], |a| {
+                (a[0] < 1_000_000).then(|| 64 + a[0])
+            }),
         Export::new("bytes_hash", &[("seed", U8)], U32).product(&[vec![0, 1, 7, 128, 255]], |a| {
             let mut h = 2_166_136_261u32;
             for i in 0..512u32 {
@@ -1043,7 +1246,8 @@ program_test!(phi_aggregates, "phi_aggregates", {
                 left = right;
                 right = next;
             }
-            i32c(i32c(i32c(left.0 * 1000)? + i32c(left.1 * 10)?)? + right.0).and_then(|s| i32c(s - right.1))
+            i32c(i32c(i32c(left.0 * 1000)? + i32c(left.1 * 10)?)? + right.0)
+                .and_then(|s| i32c(s - right.1))
         }),
         Export::new("pick_by_parity", &[("n", U32)], I32).product(&[upto(12)], |a| {
             let mut best = (0, 0);
@@ -1087,7 +1291,10 @@ program_test!(vec_arena, "vec_arena", {
                 (1..=a[0]).try_fold(0, |s, k| u32c(s + u32c((a[0] - k + 1) * k)?))
             }),
         Export::new("zeroed_then_filled", &[("n", U32), ("at", U32)], U32).product(
-            &[vec![0, 3, 1_000_000, 2_147_483_648], vec![0, 2, 7, 8, 4_294_967_295]],
+            &[
+                vec![0, 3, 1_000_000, 2_147_483_648],
+                vec![0, 2, 7, 8, 4_294_967_295],
+            ],
             |a| {
                 let mut cells = [0i128; 8];
                 *cells.get_mut(usize::try_from(a[1]).ok()?)? = a[0];
@@ -1100,11 +1307,18 @@ program_test!(vec_arena, "vec_arena", {
             &[("a", U32), ("b", U32), ("c", U32)],
             U32,
         )
-        .product(&[vec![0, 1, 7, 400_000_000], vec![0, 2, 11], vec![0, 3, 123_456_789]], |a| {
-            let cells = std::iter::repeat_n(a[0], 10)
-                .chain(std::iter::repeat_n(a[1], 20))
-                .chain(std::iter::repeat_n(a[2], 30));
-            cells.fold(Some(0), |s, v| u32c(s? + v))
-        }),
+        .product(
+            &[
+                vec![0, 1, 7, 400_000_000],
+                vec![0, 2, 11],
+                vec![0, 3, 123_456_789],
+            ],
+            |a| {
+                let mut cells = std::iter::repeat_n(a[0], 10)
+                    .chain(std::iter::repeat_n(a[1], 20))
+                    .chain(std::iter::repeat_n(a[2], 30));
+                cells.try_fold(0, |s, v| u32c(s + v))
+            },
+        ),
     ]
 });
