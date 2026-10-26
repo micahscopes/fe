@@ -78,6 +78,9 @@ pub enum TestBackend {
     Sonatina,
     #[cfg(feature = "cranelift")]
     Native,
+    #[cfg(feature = "wasm")]
+    /// Each test is built into a WebAssembly module and run in Node.js.
+    Wasm,
 }
 
 impl From<TestBackend> for BuildBackend {
@@ -86,6 +89,8 @@ impl From<TestBackend> for BuildBackend {
             TestBackend::Sonatina => Self::Sonatina,
             #[cfg(feature = "cranelift")]
             TestBackend::Native => Self::Native,
+            #[cfg(feature = "wasm")]
+            TestBackend::Wasm => Self::Wasm,
         }
     }
 }
@@ -106,6 +111,14 @@ impl BuildBackend {
     pub fn is_native(self) -> bool {
         #[cfg(feature = "cranelift")]
         if matches!(self, Self::Native) {
+            return true;
+        }
+        false
+    }
+
+    pub fn is_wasm(self) -> bool {
+        #[cfg(feature = "wasm")]
+        if matches!(self, Self::Wasm) {
             return true;
         }
         false
