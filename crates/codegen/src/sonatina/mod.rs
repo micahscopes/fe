@@ -2,8 +2,12 @@ mod lower_runtime;
 #[cfg(feature = "cranelift")]
 mod native_tests;
 pub(crate) mod observability;
+#[cfg(feature = "wasm")]
+mod wasm;
 #[cfg(feature = "cranelift")]
 pub use native_tests::{NativeTestEntry, NativeTestSuite, emit_test_suite_native};
+#[cfg(feature = "wasm")]
+pub use wasm::{WasmArtifacts, WasmOutputSelection, emit_module_wasm_artifacts};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
