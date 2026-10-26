@@ -722,12 +722,12 @@ fn the_mock_records_what_the_host_is_given() {
     let temp = tempdir().unwrap();
     let host = Module::new(
         engine(),
-        &build("log_basic", Flavour::Host, "2", temp.path()),
+        build("log_basic", Flavour::Host, "2", temp.path()),
     )
     .unwrap();
     let mock = Module::new(
         engine(),
-        &build("log_basic", Flavour::Mock, "2", temp.path()),
+        build("log_basic", Flavour::Mock, "2", temp.path()),
     )
     .unwrap();
     let mut host = Running::new(&host, &[define_std]);
@@ -924,10 +924,7 @@ fn an_error_from_the_host_reaches_the_caller_and_the_instance_survives() {
             );
             assert_eq!(running.call(&export, &[-4]), Got::Abort(8), "round {round}");
             let fine = round % 100;
-            assert_eq!(
-                running.call(&export, &[fine]),
-                Got::Value(2 * i128::from(fine))
-            );
+            assert_eq!(running.call(&export, &[fine]), Got::Value(2 * fine));
         }
     }
 }
@@ -1199,13 +1196,11 @@ fn reentrant() {
                             None => return traps(call),
                         }
                     }
-                    let mut k = 0;
-                    for _ in 0..8 {
+                    for k in 0..8 {
                         match checked(I32, sum + x * k) {
                             Some(v) => sum = v,
                             None => return traps(call),
                         }
-                        k += 1;
                     }
                     value(sum, call)
                 },
