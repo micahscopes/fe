@@ -40,7 +40,10 @@ pub(super) enum Step {
     },
     /// A constant index, or `None` for a dynamic one.
     Index(Option<usize>),
-    /// Distinct keys are separated only under the same locate dictionary.
+    /// Distinct keys are separated only under the same locate dictionary,
+    /// named by an indexing expression of the body that uses it
+    /// (`EntryDispatch::locate`). The dictionary decides where an element
+    /// lies; a lane codec only encodes it there.
     Entry {
         key: Option<usize>,
         dispatch: ExprId,
@@ -97,7 +100,7 @@ pub(super) fn path_of(path: &NDataPath, constant: impl Fn(NValueId) -> Option<us
             NDataProjection::Index(NIndex::Value(value)) => Step::Index(constant(value)),
             NDataProjection::Entry(value, dispatch) => Step::Entry {
                 key: constant(value),
-                dispatch,
+                dispatch: dispatch.locate,
             },
         })
         .collect()
@@ -163,6 +166,7 @@ impl AbsPlace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis::semantic::EntryDispatch;
     use cranelift_entity::EntityRef;
 
     #[test]
@@ -181,5 +185,29 @@ mod tests {
             &[entry(1, 0), Step::Field(0)],
             &[entry(1, 0), Step::Field(1)],
         ));
+    }
+
+    #[test]
+    fn entry_steps_follow_the_locate_dictionary_not_the_codec() {
+        // Keys 1 and 2 are the literal values of the NValueIds 1 and 2.
+        let literal = |value: NValueId| Some(value.index());
+        let path = |value, call, locate| {
+            path_of(
+                &NDataPath::new(vec![NDataProjection::Entry(
+                    NValueId::new(value),
+                    EntryDispatch {
+                        call: ExprId::new(call),
+                        locate: ExprId::new(locate),
+                    },
+                )]),
+                literal,
+            )
+        };
+        // The same locate dictionary under different lane codecs.
+        assert!(!paths_overlap(&path(1, 0, 0), &path(2, 3, 0)));
+        // The same key overlaps whatever the codecs.
+        assert!(paths_overlap(&path(1, 0, 0), &path(1, 3, 0)));
+        // Different locate dictionaries stay conservative.
+        assert!(paths_overlap(&path(1, 0, 0), &path(2, 3, 3)));
     }
 }

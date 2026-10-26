@@ -5,9 +5,9 @@ use crate::{
     analysis::{
         HirAnalysisDb,
         semantic::{
-            CallSiteId, FieldIndex, Mutability, SConst, SStmtId, SemConstScalar, SemConstValue,
-            SemOrigin, SemanticCalleeRef, SemanticCodeRegionRef, SemanticCodeRegionTarget,
-            SemanticInstance, VariantIndex,
+            CallSiteId, EntryDispatch, FieldIndex, Mutability, SConst, SStmtId, SemConstScalar,
+            SemConstValue, SemOrigin, SemanticCalleeRef, SemanticCodeRegionRef,
+            SemanticCodeRegionTarget, SemanticInstance, VariantIndex,
         },
         ty::{
             provider::AddressSpace,
@@ -329,9 +329,10 @@ pub enum NDataProjection {
     },
     Index(NIndex),
     /// The element at key `value` of a collection whose elements are places
-    /// (`core::ops::StateIndex`), at a slot the collection computes. The ID
-    /// references its recorded call plan, canonical among equal dispatches.
-    Entry(NValueId, ExprId),
+    /// (`core::ops::StateIndex`), at a slot the collection computes. The
+    /// dispatch references its recorded call plan, canonical among equal
+    /// dispatches.
+    Entry(NValueId, EntryDispatch),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -1,0 +1,159 @@
+use core::marker::{Pinned, Storage}
+use core::ops::{LaneCodec, Location, StateIndex}
+use std::evm::{StorageMap, keccak_words}
+
+// Entries at distinct keys are separated only under the same `locate`
+// dictionary. Separate indexing expressions with equal dictionaries are one
+// dictionary, and a lane codec does not change where an element lies.
+
+struct Store {
+    counts: StorageMap<u256, u256>,
+    other: StorageMap<u256, u256>,
+}
+
+// Accepted: two literal keys of one map.
+fn literal_keys() uses (store: mut Store) {
+    let x = mut store.counts[0]
+    store.counts[1] = 3
+    x += 1
+}
+
+// Rejected: one literal key written twice.
+fn same_literal_key() uses (store: mut Store) {
+    let x = mut store.counts[0]
+    store.counts[0] = 3
+    x += 1
+}
+
+struct Words {}
+
+impl Pinned for Words {
+    type Space = Storage
+}
+
+unsafe impl StateIndex for Words {
+    type Key = u256
+    type Entry = u256
+
+    fn locate(self, _ root: u256, _ key: u256) -> Location {
+        Location { slot: keccak_words([key, root]), offset: 0 }
+    }
+}
+
+unsafe impl StateIndex for Words as Shifted {
+    type Key = u256
+    type Entry = u256
+
+    fn locate(self, _ root: u256, _ key: u256) -> Location {
+        Location { slot: keccak_words([key + 1, root]), offset: 0 }
+    }
+}
+
+// Accepted: the ordinary dictionary chosen explicitly is the dictionary of
+// the first access.
+fn explicit_ordinary(words: mut Words) {
+    let a = mut words[2]
+    with (<Words as StateIndex>) {
+        let b = mut words[1]
+        a += 3
+        b += 4
+    }
+}
+
+// Rejected: another dictionary may select the same location for other keys.
+fn other_dictionary(words: mut Words) {
+    let a = mut words[2]
+    with (Shifted) {
+        let b = mut words[1]
+        a += 3
+        b += 4
+    }
+}
+
+struct Codec {}
+
+impl LaneCodec<u32> for Codec {
+    const BITS: u256 = 32
+
+    fn get(_ word: u256, offset: u256) -> u32 {
+        ((word >> offset) & 0xffffffff).downcast_truncate()
+    }
+
+    fn set(_ word: u256, offset: u256, value: own u32) -> u256 {
+        (word & !(0xffffffff << offset)) | ((value as u256) << offset)
+    }
+}
+
+impl LaneCodec<u32> for Codec as Encoded {
+    const BITS: u256 = 32
+
+    fn get(_ word: u256, offset: u256) -> u32 {
+        with (<Codec as LaneCodec<u32>>) { Codec::get(word, offset: offset) + 1 }
+    }
+
+    fn set(_ word: u256, offset: u256, value: own u32) -> u256 {
+        with (<Codec as LaneCodec<u32>>) { Codec::set(word, offset: offset, value: value - 1) }
+    }
+}
+
+struct Counters<C> {}
+
+impl<C> Pinned for Counters<C> {
+    type Space = Storage
+}
+
+unsafe impl<C: LaneCodec<u32>> StateIndex for Counters<C> {
+    type Key = u256
+    type Entry = u32
+    type Lanes = C
+
+    fn locate(self, _ root: u256, _ key: u256) -> Location {
+        Location { slot: keccak_words([key / 8, root]), offset: (key % 8) * 32 }
+    }
+}
+
+// Accepted: one codec, distinct keys.
+fn same_codec(counters: mut Counters<Codec>) {
+    let a = mut counters[1]
+    counters[2] = 3
+    a += 1
+}
+
+// Rejected: the codec is also a prerequisite of this `locate`, so the second
+// access calls another instance of it.
+fn other_codec_generic_locate(counters: mut Counters<Codec>) {
+    let a = mut counters[1]
+    with (Encoded) { counters[2] = 3 }
+    a += 1
+}
+
+struct Fixed {}
+
+impl Pinned for Fixed {
+    type Space = Storage
+}
+
+unsafe impl StateIndex for Fixed {
+    type Key = u256
+    type Entry = u32
+    type Lanes = Codec
+
+    fn locate(self, _ root: u256, _ key: u256) -> Location {
+        Location { slot: keccak_words([key / 8, root]), offset: (key % 8) * 32 }
+    }
+}
+
+// Accepted: the second element is encoded by another codec, and lies at the
+// location the same `locate` dictionary gives it.
+fn other_codec(fixed: mut Fixed) {
+    let a = mut fixed[1]
+    with (Encoded) { fixed[2] = 3 }
+    a += 1
+}
+
+// Rejected: the same key under another codec is the same element.
+fn other_codec_same_key(fixed: mut Fixed) {
+    let a = mut fixed[1]
+    with (Encoded) { fixed[1] = 3 }
+    a += 1
+}

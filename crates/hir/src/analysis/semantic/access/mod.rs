@@ -405,13 +405,13 @@ fn generated_callees<'db>(
                     continue;
                 };
                 let collection = instance.normalized_ty(db, collection);
-                let locate = instance.call_sites(db)[entry.index()]
+                let locate = instance.call_sites(db)[entry.call.index()]
                     .as_ref()
                     .and_then(|site| site.callee)
                     .map(|callee| callee.key);
                 let codec = instance
                     .state_index_lanes(db, collection)
-                    .and_then(|_| instance.entry_codec_callees(db, *entry).ok())
+                    .and_then(|_| instance.entry_codec_callees(db, entry.call).ok())
                     .into_iter()
                     .flatten();
                 callees.extend(

@@ -3,7 +3,7 @@ use cranelift_entity::EntityRef;
 use crate::{
     analysis::{
         place::{Place, PlaceBase, PlaceProjection, projectable_place_ty},
-        semantic::{FieldIndex, SExpr, SOperand, SPlace, SValueId, SemOrigin},
+        semantic::{EntryDispatch, FieldIndex, SExpr, SOperand, SPlace, SValueId, SemOrigin},
         ty::ty_def::TyId,
     },
     hir_def::{Expr, ExprId, Partial, UnOp, expr::BinOp},
@@ -64,7 +64,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                 let mut place = self.try_lower_place_expr(*base, capture)?;
                 let index = self.lower_place_operand(*index, capture);
                 if self.typed_body.is_place_entry(expr) {
-                    place.push_entry(index, self.entry_call_site(expr));
+                    place.push_entry(index, self.entry_dispatch(expr));
                 } else {
                     place.push_dynamic_index(index);
                 }
@@ -78,33 +78,38 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         }
     }
 
-    /// The checked locate call, canonical among equal closed callees in this
-    /// body. Place identity compares the dispatch as well as the key; it must
-    /// not equate two indexing dictionaries, or separate equal dictionaries
-    /// merely because they were written at different source locations.
-    fn entry_call_site(&self, expr: ExprId) -> ExprId {
+    /// The checked dispatch of the indexing expression `expr`. Each of its
+    /// calls is named by the first indexing expression of this body with an
+    /// equal closed callee, so that place identity equates equal dictionaries
+    /// and separates different ones, whatever source locations they were
+    /// written at.
+    fn entry_dispatch(&self, expr: ExprId) -> EntryDispatch {
         let callee = self.call_sites[expr.index()]
             .as_ref()
             .and_then(|site| site.callee)
             .expect("an admitted entry has its locate call");
-        let index = self
-            .call_sites
-            .iter()
-            .enumerate()
-            .find_map(|(index, site)| {
-                (site.as_ref().and_then(|site| site.callee) == Some(callee)
-                    && self
-                        .typed_body
-                        .place_entry_calls(ExprId::new(index))
-                        .map(|calls| &calls.codec)
-                        == self
-                            .typed_body
-                            .place_entry_calls(expr)
-                            .map(|calls| &calls.codec))
-                .then_some(index)
-            })
-            .expect("the entry's call site is present");
-        ExprId::new(index)
+        let codec = |entry: ExprId| {
+            self.typed_body
+                .place_entry_calls(entry)
+                .map(|calls| &calls.codec)
+        };
+        let first = |same_dictionaries: &dyn Fn(ExprId) -> bool| {
+            let index = self
+                .call_sites
+                .iter()
+                .enumerate()
+                .find_map(|(index, site)| {
+                    (site.as_ref().and_then(|site| site.callee) == Some(callee)
+                        && same_dictionaries(ExprId::new(index)))
+                    .then_some(index)
+                })
+                .expect("the entry's call site is present");
+            ExprId::new(index)
+        };
+        EntryDispatch {
+            call: first(&|entry| codec(entry) == codec(expr)),
+            locate: first(&|entry| self.typed_body.is_place_entry(entry)),
+        }
     }
 
     pub(super) fn lower_place_data(&mut self, source_place: &Place<'db>) -> SPlace<'db> {
@@ -143,7 +148,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
                     ..
                 } => {
                     let key = self.lower_place_operand(key_expr, capture);
-                    place.push_entry(key, self.entry_call_site(entry_expr));
+                    place.push_entry(key, self.entry_dispatch(entry_expr));
                 }
             }
             ty = projection.result_ty();

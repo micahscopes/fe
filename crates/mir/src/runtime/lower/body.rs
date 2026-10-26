@@ -5084,7 +5084,7 @@ impl<'db> RmirEmitter<'db> {
                         collection_ty,
                         element_ty,
                         *key,
-                        *entry,
+                        entry.call,
                     ) {
                         EntryPlace::Place(place) => place,
                         EntryPlace::Lane(lane) => RuntimePlace {
@@ -5255,7 +5255,7 @@ impl<'db> RmirEmitter<'db> {
                 ..place.clone()
             },
         )?;
-        match self.lower_entry(bb, collection, collection_ty, place.ty, *key, *entry) {
+        match self.lower_entry(bb, collection, collection_ty, place.ty, *key, entry.call) {
             EntryPlace::Lane(lane) => Some(lane),
             EntryPlace::Place(_) => unreachable!("the collection packs its elements"),
         }

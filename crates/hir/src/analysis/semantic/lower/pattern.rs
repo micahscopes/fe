@@ -6,8 +6,9 @@ use crate::{
     analysis::{
         HirAnalysisDb,
         semantic::{
-            FieldIndex, SBlockId, SConst, SExpr, SLocalId, SOperand, SPlace, SStmtKind,
-            STerminatorKind, SValueId, SemOrigin, VariantIndex, bool_const, bytes_const, int_const,
+            EntryDispatch, FieldIndex, SBlockId, SConst, SExpr, SLocalId, SOperand, SPlace,
+            SStmtKind, STerminatorKind, SValueId, SemOrigin, VariantIndex, bool_const, bytes_const,
+            int_const,
         },
         ty::{
             decision_tree::{
@@ -1029,7 +1030,7 @@ pub(crate) fn enum_tag_ty<'db>(db: &'db dyn HirAnalysisDb, enum_ty: TyId<'db>) -
 /// A decision-tree path step as a place's projection.
 fn semantic_projection<'db>(
     projection: &Projection<'db>,
-) -> crate::projection::Projection<TyId<'db>, VariantIndex, SLocalId, crate::hir_def::ExprId> {
+) -> crate::projection::Projection<TyId<'db>, VariantIndex, SLocalId, EntryDispatch> {
     match projection {
         Projection::Field(field) => crate::projection::Projection::Field(*field),
         Projection::VariantField {

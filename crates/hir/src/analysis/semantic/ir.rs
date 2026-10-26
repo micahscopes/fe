@@ -47,7 +47,25 @@ pub struct SStmtId(u32);
 entity_impl!(SStmtId);
 
 pub type SValueId = SLocalId;
-pub type SemanticProjectionPath<'db> = ProjectionPath<TyId<'db>, VariantIndex, SLocalId, ExprId>;
+pub type SemanticProjectionPath<'db> =
+    ProjectionPath<TyId<'db>, VariantIndex, SLocalId, EntryDispatch>;
+
+/// The dictionaries a checked indexing expression dispatches through, named by
+/// the first expression of the body that uses each.
+///
+/// Both fields are indexing expressions of the same body, canonical among
+/// those with equal closed callees, so that equal dictionaries compare equal
+/// wherever they were written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, SalsaValue)]
+pub struct EntryDispatch {
+    /// The locate call together with the lane codec calls, which a lowering
+    /// of the entry resolves.
+    pub call: ExprId,
+    /// The locate call alone. Entries at distinct keys are separated only
+    /// under the same locate dictionary: the lane codec encodes an element
+    /// at the location the dictionary chose, and cannot move it.
+    pub locate: ExprId,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, SalsaValue)]
 pub struct SemanticBody<'db> {
@@ -333,7 +351,7 @@ impl<'db> SPlace<'db> {
 
     pub fn with_projection(
         local: SLocalId,
-        projection: Projection<TyId<'db>, VariantIndex, SLocalId, ExprId>,
+        projection: Projection<TyId<'db>, VariantIndex, SLocalId, EntryDispatch>,
     ) -> Self {
         let mut place = Self::new(local);
         place.path.push(projection);
@@ -377,7 +395,7 @@ impl<'db> SPlace<'db> {
             .push(Projection::Index(IndexSource::Dynamic(index)));
     }
 
-    pub fn push_entry(&mut self, key: SValueId, entry: ExprId) {
+    pub fn push_entry(&mut self, key: SValueId, entry: EntryDispatch) {
         self.path.push(Projection::Entry(key, entry));
     }
 
