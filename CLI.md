@@ -326,8 +326,11 @@ require a handle to be closed; the host counts the handles that stay open. The m
 `examples/wasm/host.mjs` is a host for Node with no dependencies: it supplies the imports,
 places texts, decodes replies, and refuses a forged or closed handle, text outside the
 memory or longer than 64 KiB, and an unknown error number, each with an error that names
-the problem. `examples/wasm/lines.fe` and `examples/wasm/lines.mjs` are a small program
-and a script that runs it.
+the problem. The host also supplies the log, clock and abort imports of `std::wasm`, and
+given the manifest of a module it refuses the module, naming the cause, when the SHA-256
+differs, when the imports or exports differ from the manifest's, or when the host lacks an
+import. `examples/wasm/lines.fe` and `examples/wasm/lines.mjs` are a small program and a
+script that runs it, `examples/wasm/verify.mjs` checks a module against its manifest.
 
 The `metadata.json` artifact follows the Solidity Contract Metadata schema (`version: 1`), adapted to Fe. It is a complete, deterministic recompilation input: rebuilding with the same compiler version, `sources`, and `settings` reproduces the same bytecode. Its shape:
 

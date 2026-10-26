@@ -3,7 +3,7 @@
 //   node examples/wasm/lines.mjs lines.wasm path/to/file
 import fs from "node:fs";
 import path from "node:path";
-import { instantiateFiles } from "./host.mjs";
+import { instantiate } from "./host.mjs";
 
 const [, , modulePath, filePath] = process.argv;
 if (!modulePath || !filePath) {
@@ -11,8 +11,8 @@ if (!modulePath || !filePath) {
   process.exit(2);
 }
 const name = path.basename(filePath);
-const guest = await instantiateFiles(fs.readFileSync(modulePath), {
-  [name]: fs.readFileSync(filePath),
+const guest = await instantiate(fs.readFileSync(modulePath), {
+  files: { [name]: fs.readFileSync(filePath) },
 });
 const reply = guest.callReply("lines", name);
 guest.host.assertNoOpenHandles();
