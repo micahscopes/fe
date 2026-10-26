@@ -16,6 +16,8 @@ mod test;
 mod trace;
 #[cfg(not(target_arch = "wasm32"))]
 mod tree;
+#[cfg(feature = "wasm")]
+mod wasm_manifest;
 mod workspace_ingot;
 
 use std::fs;
@@ -67,7 +69,7 @@ pub enum BuildBackend {
     /// RV64IM SP1 guest IR or ELF executables.
     Sp1,
     #[cfg(feature = "wasm")]
-    /// WebAssembly modules of scalar functions, or their wasm32 IR.
+    /// WebAssembly modules with a build manifest, or their wasm32 IR.
     Wasm,
 }
 
