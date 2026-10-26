@@ -266,11 +266,15 @@ a standalone `.fe` file to a WebAssembly module (32-bit pointers, one linear mem
 Every non-generic `pub fn` in the root of the file is exported under its own name,
 and the module also exports its memory as `memory`. Parameters and results must be
 `bool` or integers of at most 64 bits; any other type, including `usize`, `u256` and
-structs, is an error that names the function and the type. Overflow, division by zero
-and a failed `assert!` trap, as they do in native executables. The default output is
-`<out>/<file>.wasm`; `--emit ir` writes `<out>/<file>.wasm.sona`. Allocation,
-256-bit integers inside a function body and the EVM built-ins are not supported yet
-and are errors that name the function and the instruction.
+structs, is an error that names the function and the type. Inside functions, structs,
+tuples, enums, arrays, constants, `usize` and the dynamic arrays of `core::ptr` work.
+Overflow, division by zero, a failed `assert!` and an index outside an array trap, as
+they do in native executables. Calls use a stack of 1 MiB in the module's memory, and
+a call that does not fit traps; dynamic allocation grows the memory without a limit
+of the module's own and traps when the host refuses to grow it. 128-bit integers and
+the EVM built-ins are not supported and are errors that name the function and the
+instruction. The default output is `<out>/<file>.wasm`; `--emit ir` writes
+`<out>/<file>.wasm.sona`.
 
 The `metadata.json` artifact follows the Solidity Contract Metadata schema (`version: 1`), adapted to Fe. It is a complete, deterministic recompilation input: rebuilding with the same compiler version, `sources`, and `settings` reproduces the same bytecode. Its shape:
 
