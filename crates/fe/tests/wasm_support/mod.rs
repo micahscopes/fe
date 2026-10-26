@@ -501,3 +501,18 @@ pub fn small(ty: Ty, values: &[i128]) -> Vec<i128> {
 pub fn upto(count: i128) -> Vec<i128> {
     (0..count).collect()
 }
+
+/// `source` with the lines of one flavour kept (without their marker) and the
+/// lines of the other flavour removed. A fixture marks a line `//host: ` or
+/// `//mock: ` when only one of its two builds contains it.
+pub fn render_flavour(source: &str, keep: &str, drop: &str) -> String {
+    let mut out = String::new();
+    for line in source.lines() {
+        if line.starts_with(drop) {
+            continue;
+        }
+        out.push_str(line.strip_prefix(keep).unwrap_or(line));
+        out.push('\n');
+    }
+    out
+}
