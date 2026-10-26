@@ -6,6 +6,8 @@
 #[cfg(feature = "cranelift")]
 mod native;
 
+mod locate;
+
 use crate::dependency_diagnostics::CompilationDiagnostics;
 use crate::report::{
     PanicReportGuard, ReportStaging, copy_input_into_report, create_dir_all_utf8,
@@ -33,6 +35,7 @@ use contract_harness::{EvmTraceOptions, ExecutionOptions, RuntimeInstance, U256}
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use driver::DriverDataBase;
 use hir::hir_def::{HirIngot, TopLevelMod, item::ItemKind};
+use locate::{Locator, Locators};
 use mir::{build_runtime_package, build_test_runtime_package, format_runtime_package};
 use rustc_hash::{FxHashMap, FxHashSet};
 use salsa::Setter;
@@ -159,6 +162,8 @@ struct SingleTestJob {
     case: CompiledTest,
     evm_trace: Option<EvmTraceOptions>,
     report_root: Option<Utf8PathBuf>,
+    /// Resolves the program counters of a failed run to Fe source.
+    locator: Option<Locator>,
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +229,8 @@ struct SuiteState {
 #[derive(Debug)]
 struct DiscoverResult {
     tests: Vec<TestMetadata>,
+    /// By test display name; empty unless `--locate-failures` is given.
+    locators: Locators,
 }
 
 #[derive(Debug)]
@@ -593,6 +600,8 @@ pub struct TestDebugOptions {
     pub trace_evm_keep: usize,
     pub trace_evm_stack_n: usize,
     pub debug_dir: Option<Utf8PathBuf>,
+    /// Explain failed tests with the Fe source the failing instruction came from.
+    pub locate_failures: bool,
 }
 
 impl TestDebugOptions {
@@ -1571,6 +1580,7 @@ fn run_single_test_job(job: SingleTestJob, shared: &WorkerSharedConfig) -> Singl
             job.evm_trace.as_ref(),
             report_ctx.as_ref(),
             shared.call_trace,
+            job.locator.as_ref(),
         ),
         #[cfg(feature = "cranelift")]
         CompiledTest::Native(case) => case.run(report_ctx.as_ref(), shared.native_limits),
@@ -1836,6 +1846,7 @@ fn prepare_tests_single_file(
     prepare_discovered_tests(
         db,
         top_mod,
+        (&file_url, file.text(db)),
         suite,
         suite_key,
         filter,
@@ -2043,6 +2054,7 @@ fn prepare_tests_ingot(
 fn prepare_discovered_tests(
     db: &DriverDataBase,
     top_mod: TopLevelMod<'_>,
+    source: (&Url, &str),
     suite: &str,
     suite_key: &str,
     filter: Option<&str>,
@@ -2055,6 +2067,7 @@ fn prepare_discovered_tests(
     let discovered = match discover_tests(
         db,
         top_mod,
+        debug.locate_failures.then_some(source),
         suite,
         filter,
         opt_level,
@@ -2094,6 +2107,7 @@ fn prepare_ingot_discovered_tests(
         filter,
         opt_level,
         sonatina_options,
+        debug.locate_failures,
         report,
         output,
     ) {
@@ -2141,11 +2155,13 @@ fn suite_preparation_from_discovered(
             }
         };
 
+        let locator = discovered.locators.get(&case.display_name).cloned();
         single_jobs.push(SingleTestJob {
             suite_key: suite_key.to_string(),
             case: CompiledTest::Evm(Box::new(case)),
             evm_trace,
             report_root: report_root.clone(),
+            locator,
         });
     }
 
@@ -2204,6 +2220,7 @@ pub(super) fn emit_with_catch_unwind<T, E: std::fmt::Display>(
 fn discover_tests(
     db: &DriverDataBase,
     top_mod: TopLevelMod<'_>,
+    locate_source: Option<(&Url, &str)>,
     suite: &str,
     filter: Option<&str>,
     opt_level: OptLevel,
@@ -2221,11 +2238,28 @@ fn discover_tests(
     let module_output = emit_result?;
 
     if module_output.tests.is_empty() {
-        return Ok(DiscoverResult { tests: Vec::new() });
+        return Ok(DiscoverResult {
+            tests: Vec::new(),
+            locators: Locators::new(),
+        });
     }
 
+    let mut locators = Locators::new();
+    if let Some((file_url, source_text)) = locate_source {
+        locate::locators_for_module(
+            db,
+            top_mod,
+            file_url,
+            source_text,
+            opt_level,
+            filter,
+            &module_output.tests,
+            &mut locators,
+        );
+    }
     Ok(DiscoverResult {
         tests: module_output.tests,
+        locators,
     })
 }
 
@@ -2237,6 +2271,7 @@ fn discover_ingot_tests(
     filter: Option<&str>,
     opt_level: OptLevel,
     sonatina_options: SonatinaTestOptions,
+    locate_failures: bool,
     report: Option<&ReportContext>,
     output: &mut String,
 ) -> Result<DiscoverResult, Vec<TestResult>> {
@@ -2250,11 +2285,26 @@ fn discover_ingot_tests(
     let module_output = emit_result?;
 
     if module_output.tests.is_empty() {
-        return Ok(DiscoverResult { tests: Vec::new() });
+        return Ok(DiscoverResult {
+            tests: Vec::new(),
+            locators: Locators::new(),
+        });
     }
 
+    let mut locators = Locators::new();
+    if locate_failures {
+        locate::locators_for_ingot(
+            db,
+            ingot,
+            opt_level,
+            filter,
+            &module_output.tests,
+            &mut locators,
+        );
+    }
     Ok(DiscoverResult {
         tests: module_output.tests,
+        locators,
     })
 }
 
@@ -2713,6 +2763,7 @@ pub(super) fn compile_and_run_test(
     evm_trace: Option<&EvmTraceOptions>,
     report: Option<&ReportContext>,
     call_trace: bool,
+    locator: Option<&Locator>,
 ) -> TestOutcome {
     let started = Instant::now();
     let failure = |message: String| TestOutcome {
@@ -2772,6 +2823,7 @@ pub(super) fn compile_and_run_test(
         evm_trace,
         call_trace,
         initial_balance,
+        locator,
     );
     TestOutcome {
         result,
@@ -2898,6 +2950,7 @@ fn execute_test(
     evm_trace: Option<&EvmTraceOptions>,
     call_trace: bool,
     initial_balance: Option<U256>,
+    locator: Option<&Locator>,
 ) -> (TestResult, Vec<String>, Option<contract_harness::CallTrace>) {
     // Deploy the test contract
     let (mut instance, _) = match RuntimeInstance::deploy_tracked(bytecode_hex) {
@@ -2940,6 +2993,21 @@ fn execute_test(
         instance.call_raw(&[], options).map(|_| Vec::new())
     };
 
+    // Explain a failed run from the instructions it executed. The replay runs
+    // on a cloned context, only after a failure, so passing tests pay nothing.
+    let explain = |message: String| match locator {
+        Some(locator) => {
+            let path = instance.call_raw_pc_path(&[], options);
+            let mut message = message;
+            for line in locator.describe(&path) {
+                message.push_str("\n    ");
+                message.push_str(&line);
+            }
+            message
+        }
+        None => message,
+    };
+
     match (call_result, expected_revert) {
         // Normal test: execution succeeded
         (Ok(logs), None) => (
@@ -2956,7 +3024,7 @@ fn execute_test(
             TestResult {
                 name: name.to_string(),
                 passed: false,
-                error_message: Some(format_harness_error(err)),
+                error_message: Some(explain(format_harness_error(err))),
             },
             Vec::new(),
             trace,

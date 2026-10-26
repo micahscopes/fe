@@ -619,6 +619,90 @@ impl<CTX: revm::context_interface::ContextTr, INTR: revm::interpreter::Interpret
     }
 }
 
+// ---------------------------------------------------------------------------
+// Pc-path inspector: records which program counters the called code executed
+// ---------------------------------------------------------------------------
+
+/// Maximum number of trailing steps a [`PcPath`] retains.
+pub const PC_PATH_KEEP: usize = 1 << 16;
+
+/// Program counters executed by the outermost frame of one call, oldest first.
+///
+/// Frames entered through CALL or CREATE are not recorded, so `pcs` describes
+/// the code of the contract that was called. Longer executions keep only the
+/// last [`PC_PATH_KEEP`] steps; `total_steps` counts every step.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PcPath {
+    pub pcs: Vec<u32>,
+    pub total_steps: u64,
+}
+
+#[derive(Default)]
+struct PcPathTracer {
+    depth: usize,
+    steps: VecDeque<u32>,
+    total_steps: u64,
+}
+
+impl PcPathTracer {
+    fn into_path(self) -> PcPath {
+        PcPath {
+            pcs: self.steps.into_iter().collect(),
+            total_steps: self.total_steps,
+        }
+    }
+}
+
+impl<CTX, INTR: revm::interpreter::InterpreterTypes> revm::Inspector<CTX, INTR> for PcPathTracer {
+    fn step(&mut self, interp: &mut revm::interpreter::Interpreter<INTR>, _context: &mut CTX) {
+        use revm::interpreter::interpreter_types::Jumps;
+        if self.depth != 1 {
+            return;
+        }
+        self.total_steps += 1;
+        if self.steps.len() == PC_PATH_KEEP {
+            self.steps.pop_front();
+        }
+        self.steps.push_back(interp.bytecode.pc() as u32);
+    }
+
+    fn call(
+        &mut self,
+        _context: &mut CTX,
+        _inputs: &mut revm::interpreter::CallInputs,
+    ) -> Option<revm::interpreter::CallOutcome> {
+        self.depth += 1;
+        None
+    }
+
+    fn call_end(
+        &mut self,
+        _context: &mut CTX,
+        _inputs: &revm::interpreter::CallInputs,
+        _outcome: &mut revm::interpreter::CallOutcome,
+    ) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    fn create(
+        &mut self,
+        _context: &mut CTX,
+        _inputs: &mut revm::interpreter::CreateInputs,
+    ) -> Option<revm::interpreter::CreateOutcome> {
+        self.depth += 1;
+        None
+    }
+
+    fn create_end(
+        &mut self,
+        _context: &mut CTX,
+        _inputs: &revm::interpreter::CreateInputs,
+        _outcome: &mut revm::interpreter::CreateOutcome,
+    ) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+}
+
 /// Formats raw EVM logs into debug strings for display.
 ///
 /// * `logs` - Logs emitted by the EVM execution.
@@ -951,6 +1035,39 @@ impl RuntimeInstance {
 
         let _ = trace_evm.inspect_tx_commit(tx);
         tracer.into_trace()
+    }
+
+    /// Re-executes a call on a **cloned** EVM context and returns the program
+    /// counters its outermost frame executed.
+    ///
+    /// Intended for a call that already failed: the clone starts from the
+    /// state after that call, and a failed call leaves only its nonce behind,
+    /// so the replay takes the same path. Uses `&self`; real state is untouched.
+    pub fn call_raw_pc_path(&self, calldata: &[u8], options: ExecutionOptions) -> PcPath {
+        let ctx = self.evm.ctx.clone();
+        let mut tracer = PcPathTracer::default();
+        let mut trace_evm = ctx.build_mainnet_with_inspector(&mut tracer);
+
+        let nonce = options.nonce.unwrap_or_else(|| {
+            self.next_nonce_by_caller
+                .get(&options.caller)
+                .copied()
+                .unwrap_or(0)
+        });
+
+        let tx = TxEnv::builder()
+            .caller(options.caller)
+            .gas_limit(options.gas_limit)
+            .gas_price(options.gas_price)
+            .to(self.address)
+            .value(options.value)
+            .data(EvmBytes::copy_from_slice(calldata))
+            .nonce(nonce)
+            .build()
+            .expect("tx builder is valid");
+
+        let _ = trace_evm.inspect_tx_commit(tx);
+        tracer.into_path()
     }
 
     /// Re-executes the call on a cloned EVM context and returns total EVM steps.

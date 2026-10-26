@@ -608,6 +608,7 @@ mod tests {
                 standalone: true,
                 profile: "dev".to_string(),
                 optimize: "1".to_string(),
+                tests: false,
             }),
         })
         .unwrap();

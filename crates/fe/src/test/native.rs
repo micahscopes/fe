@@ -378,6 +378,7 @@ pub(super) fn prepare_tests(
                     }),
                     evm_trace: None,
                     report_root: report.map(|ctx| ctx.root_dir.clone()),
+                    locator: None,
                 })
                 .collect())
         },

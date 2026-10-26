@@ -25,7 +25,11 @@ use crate::{
 
 pub(super) fn run_trace_emit(args: &DevTraceEmitArgs) -> Result<String, String> {
     let opt_level = args.optimize.parse::<codegen::OptLevel>()?;
-    let bundle = emit_real_trace_bundle(&args.path, args.standalone, &args.profile, opt_level)?;
+    let bundle = if args.tests {
+        emit_test_trace_bundle(&args.path, &args.profile, opt_level)?
+    } else {
+        emit_real_trace_bundle(&args.path, args.standalone, &args.profile, opt_level)?
+    };
     let summary = TraceValidator::validate(&bundle.facts)
         .map_err(|err| format!("compiler trace emission produced invalid facts: {err}"))?;
     write_trace_bundle_jsonl(&args.out, &bundle)?;
@@ -63,6 +67,63 @@ pub(super) fn emit_real_trace_bundle(
             emit_ingot_trace_bundle(db, &dir_path, profile, opt_level)
         }
     }
+}
+
+/// Trace bundle for the `#[test]` functions of one standalone file.
+fn emit_test_trace_bundle(
+    path: &Utf8PathBuf,
+    profile: &str,
+    opt_level: codegen::OptLevel,
+) -> Result<TraceBundle, String> {
+    let mut db = DriverDataBase::default();
+    db.compilation_settings()
+        .set_profile(&mut db)
+        .to(profile.into());
+    let (input_path, file_url, content) = standalone_file_input(path)?;
+    let file = db
+        .workspace()
+        .update(&mut db, file_url.clone(), content.clone());
+    let top_mod = db.top_mod(file);
+    ensure_target_compiles(
+        &db,
+        db.run_on_top_mod(top_mod),
+        || db.mir_diagnostics_for_top_mod(top_mod),
+        input_path.as_str(),
+    )?;
+    let source_display_name = input_path
+        .file_name()
+        .map_or(input_path.as_str(), |name| name)
+        .to_string();
+    let observed = codegen::trace::emit_observable_test_trace_facts(
+        &db,
+        codegen::trace::ObservableTestTraceInput {
+            top_mod,
+            input_owner_key: file_url.as_str(),
+            source_uri: file_url.as_str(),
+            source_display_name: &source_display_name,
+            source_text: &content,
+            opt_level,
+            filter: None,
+        },
+    )
+    .map_err(|err| format!("failed to emit observable test trace facts: {err}"))?;
+    let metadata = trace_facts::TraceMetadata::compiler_emitted(
+        super::compiler_commit(),
+        "evm/sonatina",
+        vec![
+            "fe".to_string(),
+            "dev".to_string(),
+            "trace".to_string(),
+            "emit".to_string(),
+            "--tests".to_string(),
+        ],
+        input_path.as_str(),
+        vec![
+            format!("profile={profile}"),
+            format!("optimize={opt_level}"),
+        ],
+    );
+    Ok(TraceBundle::new(metadata, observed.facts))
 }
 
 /// Refuse to emit facts for a target the compiler rejects. A bundle asserts

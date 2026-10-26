@@ -17,7 +17,7 @@ pub(crate) fn read_trace_snapshot_jsonl_from_path(
         .map_err(|err| format!("failed to read validated trace JSONL {path}: {err}"))
 }
 
-fn compiler_commit() -> String {
+pub(crate) fn compiler_commit() -> String {
     // The commit baked in at build time is the only honest answer: asking git
     // at runtime reports whatever the build-directory checkout currently has,
     // not the compiler that produced these facts.

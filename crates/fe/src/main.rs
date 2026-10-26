@@ -392,6 +392,11 @@ pub enum Command {
         /// Print a normalized call trace for each test.
         #[arg(long)]
         call_trace: bool,
+        /// Explain each failed test with the Fe source of the instruction that failed and
+        /// the call stack that reached it. Compiles each test a second time with source
+        /// tracing, so a run takes longer; passing tests are not replayed.
+        #[arg(long)]
+        locate_failures: bool,
         /// Use recovery mode when parsing.
         #[arg(long, default_value = "false")]
         recovery_mode: bool,
@@ -627,6 +632,9 @@ pub struct DevTraceEmitArgs {
     /// Optimization level for emitted bytecode facts.
     #[arg(long = "optimize", short = 'O', default_value = "1", value_parser = ["0", "1", "2", "s"])]
     pub optimize: String,
+    /// Trace the `#[test]` functions of a standalone `.fe` file instead of its contracts.
+    #[arg(long)]
+    pub tests: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -816,6 +824,7 @@ pub fn run(opts: &Options) {
             report_dir,
             report_failed_only,
             call_trace,
+            locate_failures,
             recovery_mode,
         } => {
             let opt_level = match effective_opt_level(optimize.as_deref()) {
@@ -830,6 +839,7 @@ pub fn run(opts: &Options) {
                 trace_evm_keep: *trace_evm_keep,
                 trace_evm_stack_n: *trace_evm_stack_n,
                 debug_dir: debug_dir.clone(),
+                locate_failures: *locate_failures,
             };
             let paths = if paths.is_empty() {
                 vec![default_project_path()]

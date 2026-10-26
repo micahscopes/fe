@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use common::{file::IngotFileKind, graph::ControlFlowAnalysis, origin::OriginExportKey};
 use driver::DriverDataBase;
 use hir::hir_def::TopLevelMod;
-use mir::build_runtime_package;
+use mir::{build_runtime_package, build_test_runtime_package};
 use sonatina_codegen::object::{PcMapEntry, SectionObservability, UnmappedReason};
 use sonatina_ir::{CfgEdgeKind as SonatinaCfgEdgeKind, SonatinaTraceView};
 use trace_facts::{
@@ -56,6 +56,91 @@ pub fn emit_observable_module_trace_facts(
         input.source_text,
         input.opt_level,
     )
+    .map(|(facts, _)| facts)
+}
+
+pub struct ObservableTestTraceInput<'a> {
+    pub top_mod: TopLevelMod<'a>,
+    pub input_owner_key: &'a str,
+    pub source_uri: &'a str,
+    pub source_display_name: &'a str,
+    pub source_text: &'a str,
+    pub opt_level: OptLevel,
+    /// Same substring filter `fe test` applies to test names.
+    pub filter: Option<&'a str>,
+}
+
+/// Trace facts for the `#[test]` functions of one module, plus the bytecode
+/// each test deploys, keyed by test object name.
+///
+/// The bytecode comes from the same lowering as the facts, so a caller that
+/// executes a test can compare its init code with `contracts[..].bytecode.deploy`
+/// before trusting any pc-to-source mapping derived from the facts.
+pub struct ObservedTestTrace {
+    pub facts: Vec<TraceFact>,
+    pub contracts: BTreeMap<String, ObservedContract>,
+}
+
+/// One traced root object: its bytecode and the code object its runtime
+/// instructions are filed under in the facts.
+pub struct ObservedContract {
+    pub bytecode: crate::SonatinaContractBytecode,
+    pub runtime_code_object: OriginExportKey,
+}
+
+impl ObservedContract {
+    /// The compiled function and block each runtime pc range belongs to, in
+    /// program-counter order. Empty when the runtime carries no observability.
+    pub fn runtime_function_ranges(&self) -> Vec<PcFunctionRange> {
+        let mut ranges: Vec<PcFunctionRange> = self
+            .bytecode
+            .runtime_observability
+            .iter()
+            .flat_map(|observability| observability.pc_map.iter())
+            .map(|entry| PcFunctionRange {
+                pc_start: entry.pc_start,
+                pc_end: entry.pc_end,
+                function: entry.func_name.clone(),
+                block: entry.block.0,
+            })
+            .collect();
+        ranges.sort_by_key(|range| range.pc_start);
+        ranges
+    }
+}
+
+/// A runtime pc range inside one compiled (post-inlining) function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PcFunctionRange {
+    pub pc_start: u32,
+    pub pc_end: u32,
+    pub function: String,
+    /// Block index inside the function; block 0 is the entry block.
+    pub block: u32,
+}
+
+pub fn emit_observable_test_trace_facts(
+    db: &DriverDataBase,
+    input: ObservableTestTraceInput<'_>,
+) -> Result<ObservedTestTrace, crate::LowerError> {
+    let package = build_test_runtime_package(db, input.top_mod, input.filter)?;
+    if package.root_objects(db).is_empty() {
+        return Ok(ObservedTestTrace {
+            facts: Vec::new(),
+            contracts: BTreeMap::new(),
+        });
+    }
+    let (facts, contracts) = emit_observable_package_trace_facts(
+        db,
+        package,
+        input.top_mod,
+        input.input_owner_key,
+        input.source_uri,
+        input.source_display_name,
+        input.source_text,
+        input.opt_level,
+    )?;
+    Ok(ObservedTestTrace { facts, contracts })
 }
 
 /// Emit observable trace facts for every runtime module of an ingot as one
@@ -87,7 +172,7 @@ pub fn emit_observable_ingot_trace_facts(
             .filter(|segment| !segment.is_empty())
             .unwrap_or("source.fe")
             .to_string();
-        let module_facts = emit_observable_package_trace_facts(
+        let (module_facts, _) = emit_observable_package_trace_facts(
             db,
             package,
             top_mod,
@@ -124,8 +209,9 @@ fn emit_observable_package_trace_facts(
     source_display_name: impl Into<String>,
     source_text: &str,
     opt_level: OptLevel,
-) -> Result<Vec<TraceFact>, crate::LowerError> {
+) -> Result<(Vec<TraceFact>, BTreeMap<String, ObservedContract>), crate::LowerError> {
     let mut facts = mir::trace::emit_mir_facts(db, package);
+    let mut contracts = BTreeMap::new();
     let source_file = trace_source_file_key(input_owner_key);
     push_standalone_source_file_facts(
         &mut facts,
@@ -149,6 +235,14 @@ fn emit_observable_package_trace_facts(
             owner,
             facts: sonatina_facts,
         } = traced;
+        let owner_key = bytecode_runtime_owner_key(input_owner_key, &module_key, &contract_name);
+        contracts.insert(
+            contract_name.clone(),
+            ObservedContract {
+                bytecode: bytecode.clone(),
+                runtime_code_object: bytecode_code_object_key(&owner_key),
+            },
+        );
         let bytecode = BTreeMap::from([(contract_name.clone(), bytecode)]);
         let observed = emit_observed_bytecode_trace_facts(
             input_owner_key,
@@ -175,7 +269,7 @@ fn emit_observable_package_trace_facts(
             facts.push(TraceFact::SourceSpan(span));
         }
     }
-    Ok(facts)
+    Ok((facts, contracts))
 }
 
 pub fn trace_source_file_key(source_owner: &str) -> OriginExportKey {
