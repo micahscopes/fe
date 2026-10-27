@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/backend/buffer_without_bound.fe
+---
+error[2-0010]: no method named `map` found for B::Buffer `B::Buffer`
+   ┌─ buffer_without_bound.fe:26:7
+   │
+26 │     x.map(f)
+   │       ^^^ method not found in `B::Buffer`

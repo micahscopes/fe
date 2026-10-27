@@ -1,0 +1,27 @@
+// `Functor` on `Buffer` is what lets generic code map over any target's
+// buffer. A trait whose `Buffer` lacks the bound does not offer `map`, and
+// the missing bound is reported at the use.
+use core::Fn
+use core::functional::Functor
+
+trait Mappable {
+    type Buffer: * -> * + Functor
+}
+
+trait Plain {
+    type Buffer: * -> *
+}
+
+fn map_mappable<B: Mappable, X, Y, F: Fn(own X) -> Y>(
+    _ x: own B::Buffer<X>,
+    _ f: F,
+) -> B::Buffer<Y> uses F::E {
+    x.map(f)
+}
+
+fn map_plain<B: Plain, X, Y, F: Fn(own X) -> Y>(
+    _ x: own B::Buffer<X>,
+    _ f: F,
+) -> B::Buffer<Y> uses F::E {
+    x.map(f)
+}

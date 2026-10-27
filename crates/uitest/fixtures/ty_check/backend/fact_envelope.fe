@@ -1,0 +1,26 @@
+// A fact of the target is readable in a `where` condition and decided at
+// compile time. Every library target states a parallel-work envelope of 2^8
+// leaves, so a fused step of depth 8 is accepted and one of depth 9 is not.
+use core::backend::{Backend, Evm, Native, Sp1}
+
+fn fused<B: Backend, const N: usize>() -> usize where N <= B::MAX_PAR_LOG2 {
+    N
+}
+
+fn accepted() {
+    let _ = fused<Evm, 8>()
+    let _ = fused<Native, 8>()
+    let _ = fused<Sp1, 8>()
+}
+
+fn rejected_on_evm() {
+    let _ = fused<Evm, 9>()
+}
+
+fn rejected_on_native() {
+    let _ = fused<Native, 9>()
+}
+
+fn rejected_on_sp1() {
+    let _ = fused<Sp1, 9>()
+}

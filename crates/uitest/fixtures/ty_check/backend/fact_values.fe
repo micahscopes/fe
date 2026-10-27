@@ -1,0 +1,18 @@
+// The facts the library targets state. A condition that holds is accepted
+// and one that does not is reported at the call.
+use core::backend::{Backend, Evm, Native, Sp1}
+
+fn word_bits_are<B: Backend, const N: usize>() where B::WORD_BITS == N {}
+fn overflow_wraps<B: Backend>() where B::OVERFLOW_WRAPS {}
+
+fn accepted() {
+    word_bits_are<Evm, 256>()
+    word_bits_are<Native, 64>()
+    word_bits_are<Sp1, 64>()
+}
+
+fn rejected() {
+    word_bits_are<Evm, 64>()
+    word_bits_are<Sp1, 32>()
+    overflow_wraps<Evm>()
+}

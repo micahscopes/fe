@@ -1,0 +1,20 @@
+// The storage class is part of the type of a reference. A reference into
+// `Global` is not accepted where one into `Shared` is expected, and the
+// reference types of one target differ by class.
+use core::backend::{Backend, EvmRef, Evm, Global, Shared}
+
+fn identity<B: Backend, T, S>(_ r: own B::Ref<T, S>) -> B::Ref<T, S> {
+    r
+}
+
+fn same_class(_ r: own EvmRef<u8, Global>) -> EvmRef<u8, Global> {
+    identity<Evm, u8, Global>(r)
+}
+
+fn wrong_class(_ r: own EvmRef<u8, Global>) -> EvmRef<u8, Shared> {
+    identity<Evm, u8, Global>(r)
+}
+
+fn wrong_argument(_ r: own EvmRef<u8, Shared>) -> EvmRef<u8, Shared> {
+    identity<Evm, u8, Global>(r)
+}

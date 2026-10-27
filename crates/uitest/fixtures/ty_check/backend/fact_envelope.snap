@@ -1,0 +1,31 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/backend/fact_envelope.fe
+---
+error[8-0093]: const requirement is not satisfied
+   ┌─ fact_envelope.fe:17:13
+   │
+ 6 │ fn fused<B: Backend, const N: usize>() -> usize where N <= B::MAX_PAR_LOG2 {
+   │                                                       -------------------- required by this predicate
+   ·
+17 │     let _ = fused<Evm, 9>()
+   │             ^^^^^^^^^^^^^^^ condition evaluated to `false`
+
+error[8-0093]: const requirement is not satisfied
+   ┌─ fact_envelope.fe:21:13
+   │
+ 6 │ fn fused<B: Backend, const N: usize>() -> usize where N <= B::MAX_PAR_LOG2 {
+   │                                                       -------------------- required by this predicate
+   ·
+21 │     let _ = fused<Native, 9>()
+   │             ^^^^^^^^^^^^^^^^^^ condition evaluated to `false`
+
+error[8-0093]: const requirement is not satisfied
+   ┌─ fact_envelope.fe:25:13
+   │
+ 6 │ fn fused<B: Backend, const N: usize>() -> usize where N <= B::MAX_PAR_LOG2 {
+   │                                                       -------------------- required by this predicate
+   ·
+25 │     let _ = fused<Sp1, 9>()
+   │             ^^^^^^^^^^^^^^^ condition evaluated to `false`

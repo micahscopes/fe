@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/backend/supports_shared.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ supports_shared.fe:39:5
+   │
+30 │ fn scratch<B: Backend + Supports<Shared>>(_ cell: own B::Ref<u8, Shared>) -> B::Ref<u8, Shared> {
+   │                         ---------------- required by this bound on `scratch`
+   ·
+39 │     scratch<Evm>(cell)
+   │     ^^^^^^^^^^^^ `Evm` doesn't implement `Supports<Shared>`

@@ -1,0 +1,22 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/backend/word_type.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ word_type.fe:14:5
+   │
+ 4 │ fn word_is_u256<B: Backend<Word = u256>>() {}
+   │                    -------------------- required by this bound on `word_is_u256`
+   ·
+14 │     word_is_u256<Native>()
+   │     ^^^^^^^^^^^^^^^^^^^^ `Native` doesn't implement `Backend<Word = u256>`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ word_type.fe:15:5
+   │
+ 5 │ fn word_is_u64<B: Backend<Word = u64>>() {}
+   │                   ------------------- required by this bound on `word_is_u64`
+   ·
+15 │     word_is_u64<Evm>()
+   │     ^^^^^^^^^^^^^^^^ `Evm` doesn't implement `Backend<Word = u64>`

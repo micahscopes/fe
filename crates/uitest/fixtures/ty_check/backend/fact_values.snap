@@ -1,0 +1,31 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/backend/fact_values.fe
+---
+error[8-0093]: const requirement is not satisfied
+   ┌─ fact_values.fe:15:5
+   │
+ 5 │ fn word_bits_are<B: Backend, const N: usize>() where B::WORD_BITS == N {}
+   │                                                      ----------------- required by this predicate
+   ·
+15 │     word_bits_are<Evm, 64>()
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^ condition evaluated to `false`
+
+error[8-0093]: const requirement is not satisfied
+   ┌─ fact_values.fe:16:5
+   │
+ 5 │ fn word_bits_are<B: Backend, const N: usize>() where B::WORD_BITS == N {}
+   │                                                      ----------------- required by this predicate
+   ·
+16 │     word_bits_are<Sp1, 32>()
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^ condition evaluated to `false`
+
+error[8-0093]: const requirement is not satisfied
+   ┌─ fact_values.fe:17:5
+   │
+ 6 │ fn overflow_wraps<B: Backend>() where B::OVERFLOW_WRAPS {}
+   │                                       ----------------- required by this predicate
+   ·
+17 │     overflow_wraps<Evm>()
+   │     ^^^^^^^^^^^^^^^^^^^^^ condition evaluated to `false`

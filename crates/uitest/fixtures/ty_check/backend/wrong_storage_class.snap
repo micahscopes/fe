@@ -1,0 +1,22 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/backend/wrong_storage_class.fe
+---
+error[8-0000]: type mismatch
+   ┌─ wrong_storage_class.fe:15:5
+   │
+15 │     identity<Evm, u8, Global>(r)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `EvmRef<u8, Shared>`, but `EvmRef<u8, Global>` is given
+
+error[8-0000]: type mismatch
+   ┌─ wrong_storage_class.fe:19:5
+   │
+19 │     identity<Evm, u8, Global>(r)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `EvmRef<u8, Shared>`, but `EvmRef<u8, Global>` is given
+
+error[8-0000]: type mismatch
+   ┌─ wrong_storage_class.fe:19:31
+   │
+19 │     identity<Evm, u8, Global>(r)
+   │                               ^ expected `EvmRef<u8, Global>`, but `EvmRef<u8, Shared>` is given
