@@ -702,7 +702,9 @@ mod tests {
         assert_eq!(broker.now(), u64::MAX);
     }
 
-    fn sleep_script() -> (Vec<(usize, Brief)>, Vec<Entry>, Vec<Vec<usize>>, u64) {
+    /// Steps, code order, the tasks woken by each advance, and the final time.
+    type SleepScript = (Vec<(usize, Brief)>, Vec<Entry>, Vec<Vec<usize>>, u64);
+    fn sleep_script() -> SleepScript {
         reset();
         let (mut broker, ids) = sleepers(&[40, 10, 40, 25]);
         let mut steps = Vec::new();
