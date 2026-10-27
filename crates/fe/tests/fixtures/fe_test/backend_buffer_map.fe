@@ -1,0 +1,46 @@
+// Library code written for any `B: Backend` maps over `B::Buffer<T>`. The
+// buffer of each library target is a `MemArray`, and the facts of a target
+// are ordinary values.
+use core::backend::{Backend, Evm, Native, Sp1}
+use core::functional::Functor
+use core::ptr::MemArray
+
+fn from_values(_ a: u256, _ b: u256, _ c: u256) -> MemArray<u256> {
+    var array: MemArray<u256> = MemArray::new_zeroed(3)
+    array[0] = a
+    array[1] = b
+    array[2] = c
+    array
+}
+
+fn add_one(_ x: own u256) -> u256 {
+    x + 1
+}
+
+fn incremented<B: Backend>(_ buffer: own B::Buffer<u256>) -> B::Buffer<u256> {
+    buffer.map(add_one)
+}
+
+#[test]
+fn map_over_the_buffer_of_each_target() {
+    let evm: MemArray<u256> = incremented<Evm>(from_values(1, 2, 3))
+    assert!(evm.len() == 3)
+    assert!(evm[0] == 2 && evm[1] == 3 && evm[2] == 4)
+
+    let native: MemArray<u256> = incremented<Native>(from_values(10, 20, 30))
+    assert!(native[0] == 11 && native[1] == 21 && native[2] == 31)
+
+    let sp1: MemArray<u256> = incremented<Sp1>(from_values(0, 0, 0))
+    assert!(sp1[0] == 1 && sp1[1] == 1 && sp1[2] == 1)
+}
+
+#[test]
+fn target_facts_are_values() {
+    assert!(Evm::WORD_BITS == 256)
+    assert!(Native::WORD_BITS == 64)
+    assert!(Sp1::WORD_BITS == 64)
+    assert!(!Evm::OVERFLOW_WRAPS)
+    assert!(!Native::OVERFLOW_WRAPS)
+    assert!(!Sp1::OVERFLOW_WRAPS)
+    assert!(Evm::MAX_PAR_LOG2 == 8)
+}
