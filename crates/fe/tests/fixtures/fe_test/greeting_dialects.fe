@@ -1,0 +1,111 @@
+// One trait, one ordinary implementation and several named ones. A `with`
+// block chooses which implementation answers a call, and the choice ends where
+// the block ends.
+//
+// The ordinary implementation is used wherever no block chooses. A named
+// implementation (`impl Trait for Type as Name`) is used only inside a
+// `with (Name)` block. The choice reaches a generic helper through the helper's
+// declared bound, but not a helper that names the concrete type itself.
+
+trait Greeting {
+    fn greet(self) -> u32
+}
+
+struct User { id: u256 }
+
+impl Greeting for User {
+    fn greet(self) -> u32 {
+        1
+    }
+}
+
+impl Greeting for User as Casual {
+    fn greet(self) -> u32 {
+        2
+    }
+}
+
+impl Greeting for User as Formal {
+    fn greet(self) -> u32 {
+        3
+    }
+}
+
+// The caller's choice arrives through the bound `T: Greeting`.
+fn welcome<T: Greeting>(_ t: T) -> u32 {
+    t.greet()
+}
+
+// Declares no bound, so it always uses the ordinary implementation.
+fn plain_welcome(_ user: User) -> u32 {
+    user.greet()
+}
+
+#[test]
+fn the_ordinary_implementation_answers_outside_a_block() {
+    let user = User { id: 7 }
+    assert!(user.greet() == 1)
+}
+
+#[test]
+fn a_block_chooses_a_named_implementation_and_restores_on_exit() {
+    let user = User { id: 7 }
+    assert!(user.greet() == 1)
+
+    let inside: u32 = with (Casual) {
+        user.greet()
+    }
+    assert!(inside == 2)
+
+    assert!(user.greet() == 1)
+}
+
+#[test]
+fn the_choice_reaches_a_helper_through_its_declared_bound() {
+    let user = User { id: 7 }
+    assert!(welcome(user) == 1)
+
+    let inside: u32 = with (Casual) {
+        welcome(user)
+    }
+    assert!(inside == 2)
+
+    assert!(welcome(user) == 1)
+}
+
+#[test]
+fn a_helper_without_the_bound_keeps_the_ordinary_implementation() {
+    let user = User { id: 7 }
+    let inside: u32 = with (Casual) {
+        plain_welcome(user)
+    }
+    assert!(inside == 1)
+}
+
+#[test]
+fn the_innermost_block_wins_and_each_exit_restores_the_outer_choice() {
+    let user = User { id: 7 }
+    var seen: [u32; 7] = [0; 7]
+
+    seen[0] = user.greet()
+    with (Casual) {
+        seen[1] = user.greet()
+        with (Formal) {
+            seen[2] = user.greet()
+            with (<User as Greeting>) {
+                seen[3] = user.greet()
+            }
+            seen[4] = user.greet()
+        }
+        seen[5] = user.greet()
+    }
+    seen[6] = user.greet()
+
+    assert!(seen[0] == 1)
+    assert!(seen[1] == 2)
+    assert!(seen[2] == 3)
+    assert!(seen[3] == 1)
+    assert!(seen[4] == 3)
+    assert!(seen[5] == 2)
+    assert!(seen[6] == 1)
+}
