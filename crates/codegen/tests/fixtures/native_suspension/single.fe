@@ -1,0 +1,33 @@
+// A task that begins one operation, keeps a value across the cut, and
+// continues with whichever outcome the host delivers.
+//
+// `cap.suspend(pending)` is a cut: the compiler splits the function there, the
+// value `keep` is saved in the task frame, and the task resumes with a
+// `TaskOutcome` when the host delivers one. A success adds the kept value to
+// the delivered one, a failure returns its error, and a cancellation returns 0.
+//
+// The host is the Rust driver of `native_suspension.rs`. It defines the two
+// functions declared below: `native_task_probe` runs host code at a chosen
+// moment of the task (for example to deliver or cancel from inside the task),
+// and `native_task_seed` is the value to keep, so the driver can change it
+// between the cut and the delivery. The driver delivers Success(9), Failure(3)
+// and Cancelled to separate tasks, which complete with 14, 3 and 0.
+
+use core::task::{Native, Suspend, TaskOutcome}
+
+extern {
+    unsafe fn native_task_probe() -> u64
+    unsafe fn native_task_seed() -> u64
+}
+
+fn entry(_ native: own Native) -> u64 {
+    var cap = native
+    let _ = unsafe { native_task_probe() }
+    let pending = cap.begin()
+    let keep: u64 = unsafe { native_task_seed() }
+    match cap.suspend(pending) {
+        TaskOutcome::Success(value) => keep + value
+        TaskOutcome::Failure(error) => error
+        TaskOutcome::Cancelled => 0
+    }
+}

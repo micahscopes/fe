@@ -1,0 +1,33 @@
+// A task that sleeps twice for a duration the host chooses, and keeps that
+// duration and a constant across both cuts.
+//
+// A sleep is an ordinary pending operation: `sleep_begin` starts it, `suspend`
+// waits for it, and the host completes it when its clock reaches the deadline.
+// The clock belongs to the host; the Rust driver of `native_suspension.rs`
+// uses a virtual clock that moves only when the test advances it. A sleep
+// succeeds with 0, so a finished task returns 7 plus its duration plus the
+// two zeros: with 30 ms it returns 37, with 20 ms 27, and with 50 ms 57.
+
+use core::task::{Native, Suspend, TaskOutcome, Timer}
+
+extern {
+    unsafe fn native_task_seed() -> u64
+}
+
+fn entry(_ native: own Native) -> u64 {
+    var cap = native
+    let milliseconds: u64 = unsafe { native_task_seed() }
+    let first = cap.sleep_begin(milliseconds)
+    let kept: u64 = 7
+    let subtotal = match cap.suspend(first) {
+        TaskOutcome::Success(value) => kept + value
+        TaskOutcome::Failure(error) => error
+        TaskOutcome::Cancelled => 0
+    }
+    let second = cap.sleep_begin(milliseconds)
+    match cap.suspend(second) {
+        TaskOutcome::Success(value) => subtotal + value + milliseconds
+        TaskOutcome::Failure(error) => error
+        TaskOutcome::Cancelled => 0
+    }
+}

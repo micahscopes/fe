@@ -34,19 +34,10 @@ use core::task::{Native, Suspend, TaskOutcome}
 extern { unsafe fn native_task_probe() -> u64 }
 extern { unsafe fn native_task_seed() -> u64 }
 "#;
-const SINGLE: &str = r#"
-fn entry(_ native: own Native) -> u64 {
-    var cap = native
-    let _ = unsafe { native_task_probe() }
-    let pending = cap.begin()
-    let keep: u64 = unsafe { native_task_seed() }
-    match cap.suspend(pending) {
-        TaskOutcome::Success(value) => keep + value
-        TaskOutcome::Failure(error) => error
-        TaskOutcome::Cancelled => 0
-    }
-}
-"#;
+// Complete programs, each with its own imports and host hooks. They are also
+// accepted by `fe check`.
+const SINGLE: &str = include_str!("fixtures/native_suspension/single.fe");
+const SLEEPS: &str = include_str!("fixtures/native_suspension/sleeps.fe");
 const REPEATED: &str = r#"
 fn entry(_ native: own Native) -> u64 {
     var cap = native
@@ -100,30 +91,6 @@ fn entry(_ native: own Native) -> u64 {
 }
 "#;
 
-// Sleeps twice for the duration the driver sets in SEED before the task
-// starts, and keeps both that duration and a constant across the cuts. A sleep
-// succeeds with 0, so a finished task returns 7 plus its duration.
-const SLEEPS: &str = r#"
-use core::task::Timer
-fn entry(_ native: own Native) -> u64 {
-    var cap = native
-    let milliseconds: u64 = unsafe { native_task_seed() }
-    let first = cap.sleep_begin(milliseconds)
-    let kept: u64 = 7
-    let subtotal = match cap.suspend(first) {
-        TaskOutcome::Success(value) => kept + value
-        TaskOutcome::Failure(error) => error
-        TaskOutcome::Cancelled => 0
-    }
-    let second = cap.sleep_begin(milliseconds)
-    match cap.suspend(second) {
-        TaskOutcome::Success(value) => subtotal + value + milliseconds
-        TaskOutcome::Failure(error) => error
-        TaskOutcome::Cancelled => 0
-    }
-}
-"#;
-
 // Driver helpers for the sleep tests. The expected sequences are written out
 // in each test, and each scenario is replayed on a fresh broker.
 const SLEEP_HELPERS: &str = r#"
@@ -158,7 +125,13 @@ fn all_released(broker: &runtime::Broker<()>, ids: &[runtime::TaskId]) {
 }
 "#;
 
+/// Runs a snippet that needs the common imports and host hooks.
 fn execute(name: &str, source: &str, checks: &str, invalid_tag: bool) {
+    execute_program(name, &format!("{PREFIX}\n{source}"), checks, invalid_tag);
+}
+
+/// Runs a complete program: its source is used as written.
+fn execute_program(name: &str, program: &str, checks: &str, invalid_tag: bool) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = std::path::PathBuf::from(option_env!("CARGO_TARGET_TMPDIR").unwrap_or("/tmp")).join(
         format!(
@@ -173,7 +146,7 @@ fn execute(name: &str, source: &str, checks: &str, invalid_tag: bool) {
     let file = db.workspace().touch(
         &mut db,
         Url::parse(&format!("file:///{name}.fe")).unwrap(),
-        Some(format!("{PREFIX}\n{source}")),
+        Some(program.to_string()),
     );
     let module = db.top_mod(file);
     let entry = module
@@ -310,7 +283,7 @@ fn main() {{
 
 #[test]
 fn emitted_scalar_outcomes_and_delivery_custody() {
-    execute(
+    execute_program(
         "single",
         SINGLE,
         r#"
@@ -453,7 +426,7 @@ assert_eq!(scenario(&code), (steps.clone(), woken.clone()));
 assert_eq!(scenario(&code), (steps, woken));
 "#
     );
-    execute("sleep-clock", SLEEPS, &checks, false);
+    execute_program("sleep-clock", SLEEPS, &checks, false);
 }
 
 #[test]
@@ -486,7 +459,7 @@ assert_eq!(scenario(&code), (steps.clone(), woken.clone()));
 assert_eq!(scenario(&code), (steps, woken));
 "#
     );
-    execute("sleep-order", SLEEPS, &checks, false);
+    execute_program("sleep-order", SLEEPS, &checks, false);
 }
 
 #[test]
@@ -521,5 +494,5 @@ assert_eq!(scenario(&code), (steps.clone(), woken.clone()));
 assert_eq!(scenario(&code), (steps, woken));
 "#
     );
-    execute("sleep-cancel", SLEEPS, &checks, false);
+    execute_program("sleep-cancel", SLEEPS, &checks, false);
 }
