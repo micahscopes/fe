@@ -50,6 +50,8 @@ pub(super) fn verify_contract_storage_seam<'db>(
         RuntimeFunctionOwner::Semantic(_)
         | RuntimeFunctionOwner::Synthetic(
             RuntimeSyntheticSpec::MainRoot { .. }
+            | RuntimeSyntheticSpec::NativeTaskSegment { .. }
+            | RuntimeSyntheticSpec::NativeTaskAdapter { .. }
             | RuntimeSyntheticSpec::TestRoot { .. }
             | RuntimeSyntheticSpec::ManualContractRoot { .. }
             | RuntimeSyntheticSpec::ContractInitRoot { .. }

@@ -8,6 +8,7 @@ pub mod instance;
 pub mod ir;
 pub mod lower;
 pub mod normalized;
+pub mod suspension;
 mod verify;
 
 pub use access::*;
