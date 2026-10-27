@@ -940,3 +940,20 @@ impl Index<usize> for MemBuffer {
 pub(ingot) fn index_out_of_bounds() -> ! {
     panic_code(PANIC_INDEX_OUT_OF_BOUNDS)
 }
+
+use super::functional::{Fn, Functor}
+
+impl Functor for MemArray {
+    /// A new array whose element `i` is `func` applied to element `i`.
+    fn map<T, U, F: Fn(own T) -> U>(self: own MemArray<T>, _ func: F) -> MemArray<U> uses F::E {
+        let len = self.len
+        // Each element is written before anything reads it.
+        var out = unsafe { MemArray<U>::new_uninit(len) }
+        for i in 0..len {
+            // Element `i` of `self` is moved out exactly once, and `self` is
+            // consumed, so no moved-out element is read again.
+            out[i] = func(unsafe { *elem(self.ptr, i) })
+        }
+        out
+    }
+}
