@@ -1,0 +1,46 @@
+//! The record a client reads for a plan, with its ABI layout generated, and a
+//! derived description of its shape.
+
+use core::backend::Backend
+use core::derive::Derive
+use core::meta::{Code, Item, Record, field_count}
+use std::derive::{abi_size, error_struct}
+use ingot::plan::FactorTree
+use ingot::target::words_for_points
+
+#[generate(abi_size)]
+pub struct Receipt { pub points: u256, pub butterflies: u256, pub cost: u256, pub words: u256 }
+
+/// The number of fields of a record, derived.
+pub trait Shape {
+    const FIELDS: usize
+}
+
+pub struct CountFields {}
+
+impl Derive<Shape> for CountFields {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n = field_count(record)
+        quote {
+            const FIELDS: usize = ${n}
+        }
+    }
+}
+
+impl Shape for Receipt with (CountFields)
+
+/// The receipt of plan `T` for target `B`, with the cost the caller computed
+/// under the cost model it chose.
+pub fn receipt<T: FactorTree, B: Backend>(_ cost: usize) -> Receipt {
+    Receipt {
+        points: T::POINTS as u256,
+        butterflies: T::BUTTERFLIES as u256,
+        cost: cost as u256,
+        words: words_for_points<B>(T::POINTS) as u256,
+    }
+}
+
+/// The error a client sees when a plan is over budget. Its selector and
+/// layout are generated from the declaration.
+#[generate(error_struct)]
+pub struct OverBudget { pub limit: u256, pub cost: u256 }

@@ -1,0 +1,39 @@
+//! What a plan costs, under a cost model chosen where the plan is evaluated.
+//!
+//! A butterfly costs 4 by default. `Fused` is a second model in which the
+//! butterfly costs 3. The model is chosen with `with (Fused)` around the code
+//! that evaluates a plan, and nothing else changes.
+
+use ingot::plan::{Comp, Pair, Unit}
+
+pub trait Cost {
+    const fn cost() -> usize
+}
+
+impl Cost for Unit {
+    const fn cost() -> usize {
+        0
+    }
+}
+
+impl Cost for Pair {
+    const fn cost() -> usize {
+        4
+    }
+}
+
+pub impl Cost for Pair as Fused {
+    const fn cost() -> usize {
+        3
+    }
+}
+
+impl<Left: Cost, Right: Cost> Cost for Comp<Left, Right> {
+    const fn cost() -> usize {
+        Left::cost() + Right::cost()
+    }
+}
+
+pub fn cost_of<T: Cost>() -> usize {
+    T::cost()
+}

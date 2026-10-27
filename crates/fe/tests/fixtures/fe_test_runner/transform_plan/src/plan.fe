@@ -1,0 +1,38 @@
+//! Radix-two factor trees named by a depth.
+//!
+//! `Dit<4>` is the left-leaning tree of four `Pair` factors, a sixteen-point
+//! transform. The type is computed from the depth, and the constants of
+//! `FactorTree` are folded over it by trait implementations.
+
+pub struct Unit {}
+pub struct Pair {}
+pub struct Comp<Left, Right> {}
+
+pub recursive type fn Dit<const DEPTH: usize>() -> (*) {
+    match DEPTH {
+        0 => Unit
+        _ => Comp<Dit<{ DEPTH - 1 }>, Pair>
+    }
+}
+
+pub trait FactorTree {
+    /// Number of inputs of the transform.
+    const POINTS: usize
+    /// Radix-two butterflies in the full transform.
+    const BUTTERFLIES: usize
+}
+
+impl FactorTree for Unit {
+    const POINTS: usize = 1
+    const BUTTERFLIES: usize = 0
+}
+
+impl FactorTree for Pair {
+    const POINTS: usize = 2
+    const BUTTERFLIES: usize = 1
+}
+
+impl<Left: FactorTree, Right: FactorTree> FactorTree for Comp<Left, Right> {
+    const POINTS: usize = Left::POINTS * Right::POINTS
+    const BUTTERFLIES: usize = Left::BUTTERFLIES * Right::POINTS + Right::BUTTERFLIES * Left::POINTS
+}

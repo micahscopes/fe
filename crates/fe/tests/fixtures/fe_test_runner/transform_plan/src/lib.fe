@@ -1,0 +1,77 @@
+//! One plan, read in several ways: the factor tree is a computed type, a cost
+//! model is chosen in a block, the target facts decide the word count, and the
+//! receipt a client reads has a generated ABI layout and a derived shape.
+
+use core::abi::AbiSize
+use core::error::ErrorVariant
+use std::abi::{Sol, sol}
+use core::backend::{Evm, Native}
+use ingot::cost::{Fused, cost_of}
+use ingot::plan::{Dit, FactorTree}
+use ingot::receipt::{OverBudget, Receipt, Shape, receipt}
+use ingot::target::{fused_depth, words_for_points}
+
+fn encoded_head<T: AbiSize>(_ value: T) -> u256 {
+    T::HEAD_SIZE
+}
+
+#[test]
+fn the_computed_tree_folds_its_constants() {
+    assert!(<Dit<4> as FactorTree>::POINTS == 16)
+    assert!(<Dit<4> as FactorTree>::BUTTERFLIES == 32)
+}
+
+#[test]
+fn a_block_chooses_the_cost_model_for_the_whole_plan() {
+    assert!(cost_of<Dit<4>>() == 16)
+    with (Fused) {
+        assert!(cost_of<Dit<4>>() == 12)
+    }
+    assert!(cost_of<Dit<4>>() == 16)
+}
+
+#[test]
+fn the_target_facts_decide_the_word_count() {
+    // 256 points, one bit each: one 256-bit word on the EVM, four 64-bit words natively.
+    assert!(words_for_points<Evm>(<Dit<8> as FactorTree>::POINTS) == 1)
+    assert!(
+        words_for_points<Native>(<Dit<8> as FactorTree>::POINTS) == 4,
+    )
+    assert!(fused_depth<Evm, 8>() == 8)
+}
+
+#[test]
+fn the_receipt_combines_the_tree_the_model_and_the_target() {
+    let ordinary = cost_of<Dit<8>>()
+    let fused = with (Fused) {
+        cost_of<Dit<8>>()
+    }
+    assert!(ordinary == 32 && fused == 24)
+
+    let evm = receipt<Dit<8>, Evm>(ordinary)
+    assert!(
+        evm.points == 256 && evm.butterflies == 1024 && evm.cost == 32 && evm.words == 1,
+    )
+
+    let native = receipt<Dit<8>, Native>(fused)
+    assert!(native.cost == 24 && native.words == 4)
+}
+
+#[test]
+fn the_generated_layout_and_the_derived_shape_agree() {
+    assert!(Receipt::HEAD_SIZE == 128)
+    assert!(!Receipt::IS_DYNAMIC)
+    assert!(<Receipt as Shape>::FIELDS == 4)
+    assert!(
+        Receipt::HEAD_SIZE == 32 * (<Receipt as Shape>::FIELDS as u256),
+    )
+    assert!(encoded_head(receipt<Dit<2>, Evm>(0)) == 128)
+}
+
+#[test]
+fn a_generated_error_has_its_selector_and_layout() {
+    assert!(<OverBudget as AbiSize>::HEAD_SIZE == 64)
+    assert!(
+        <OverBudget as ErrorVariant<Sol>>::SELECTOR == sol("OverBudget(uint256,uint256)"),
+    )
+}

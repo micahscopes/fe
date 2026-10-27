@@ -4390,6 +4390,36 @@ fn test_cli_test_ingot_discovers_tests_in_non_root_modules() {
     );
 }
 
+/// One ingot of four modules that combines a choice in a block, a derived
+/// implementation, a computed recursive type, `Backend` facts read on two
+/// targets and generated client types. The names are the tests of `src/lib.fe`.
+#[test]
+fn test_cli_test_transform_plan_ingot_combines_the_metaprogramming_layers() {
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fe_test_runner/transform_plan");
+    let fixture_dir_str = fixture_dir.to_str().expect("fixture dir utf8");
+
+    let (output, exit_code) = run_fe_main(&["test", fixture_dir_str]);
+    assert_eq!(exit_code, 0, "fe test failed:\n{output}");
+    for name in [
+        "a_block_chooses_the_cost_model_for_the_whole_plan",
+        "a_generated_error_has_its_selector_and_layout",
+        "the_computed_tree_folds_its_constants",
+        "the_generated_layout_and_the_derived_shape_agree",
+        "the_receipt_combines_the_tree_the_model_and_the_target",
+        "the_target_facts_decide_the_word_count",
+    ] {
+        assert!(
+            output.contains(&format!("PASS  [<time>] {name}")),
+            "expected {name} to pass, got:\n{output}"
+        );
+    }
+    assert!(
+        output.contains("6 passed"),
+        "expected 6 passed tests, got:\n{output}"
+    );
+}
+
 #[test]
 fn test_cli_test_ingot_reports_mir_diagnostics_in_non_root_modules() {
     let temp = tempdir().expect("tempdir");

@@ -1,0 +1,14 @@
+//! What a plan needs from the target it runs on, read from `Backend` facts.
+
+use core::backend::Backend
+
+/// Machine words needed to hold one bit per point.
+pub fn words_for_points<B: Backend>(_ points: usize) -> usize {
+    (points + B::WORD_BITS - 1) / B::WORD_BITS
+}
+
+/// A fused step of depth `N` must fit in the parallel width of the target.
+pub fn fused_depth<B: Backend, const N: usize>() -> usize where N <= B::MAX_PAR_LOG2
+{
+    N
+}
