@@ -5,8 +5,8 @@
 use core::abi::AbiSize
 use core::error::ErrorVariant
 use std::abi::{Sol, sol}
-use core::backend::{Evm, Native}
-use ingot::cost::{Fused, cost_of}
+use core::backend::{Backend, Evm, Native}
+use ingot::cost::{Cost, Fused, cost_of}
 use ingot::plan::{Dit, FactorTree}
 use ingot::receipt::{OverBudget, Receipt, Shape, receipt}
 use ingot::target::{fused_depth, words_for_points}
@@ -55,6 +55,31 @@ fn the_receipt_combines_the_tree_the_model_and_the_target() {
 
     let native = receipt<Dit<8>, Native>(fused)
     assert!(native.cost == 24 && native.words == 4)
+}
+
+#[test]
+fn a_backend_bounded_call_works_inside_the_block() {
+    // The receipt takes the cost from the model chosen around the call, and
+    // the target from a `Backend` bound, without computing either outside.
+    let fused = with (Fused) {
+        receipt<Dit<8>, Native>(cost_of<Dit<8>>())
+    }
+    assert!(fused.cost == 24 && fused.words == 4)
+
+    let ordinary = receipt<Dit<8>, Native>(cost_of<Dit<8>>())
+    assert!(ordinary.cost == 32 && ordinary.words == 4)
+
+    with (Fused) {
+        assert!(words_for_points<Evm>(<Dit<8> as FactorTree>::POINTS) == 1)
+        assert!(fused_depth<Native, 6>() == 6)
+        assert!(priced<Dit<4>, Evm>().cost == 12)
+    }
+    assert!(priced<Dit<4>, Evm>().cost == 16)
+}
+
+/// A generic function that is bounded by the cost model and by the target.
+fn priced<T: FactorTree + Cost, B: Backend>() -> Receipt {
+    receipt<T, B>(cost_of<T>())
 }
 
 #[test]

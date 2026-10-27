@@ -4402,6 +4402,7 @@ fn test_cli_test_transform_plan_ingot_combines_the_metaprogramming_layers() {
     let (output, exit_code) = run_fe_main(&["test", fixture_dir_str]);
     assert_eq!(exit_code, 0, "fe test failed:\n{output}");
     for name in [
+        "a_backend_bounded_call_works_inside_the_block",
         "a_block_chooses_the_cost_model_for_the_whole_plan",
         "a_generated_error_has_its_selector_and_layout",
         "the_computed_tree_folds_its_constants",
@@ -4415,8 +4416,8 @@ fn test_cli_test_transform_plan_ingot_combines_the_metaprogramming_layers() {
         );
     }
     assert!(
-        output.contains("6 passed"),
-        "expected 6 passed tests, got:\n{output}"
+        output.contains("7 passed"),
+        "expected 7 passed tests, got:\n{output}"
     );
 }
 
