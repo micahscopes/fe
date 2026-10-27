@@ -1,0 +1,40 @@
+// `Shared` scratch needs a target with a group of workers that share memory.
+// `WebGpu` states that it has the class, `Evm` does not, and the missing
+// bound is reported at the call that asked for it.
+use core::Fn
+use core::backend::{Backend, Evm, Global, Shared, Supports}
+use core::functional::Functor
+
+struct Cells<T> { value: T }
+struct Address<T, S> { value: T, class: S }
+
+impl Functor for Cells {
+    fn map<T, U, F: Fn(own T) -> U>(self: own Cells<T>, _ func: F) -> Cells<U> uses F::E {
+        Cells { value: func(self.value) }
+    }
+}
+
+struct WebGpu {}
+
+impl Backend for WebGpu {
+    const WORD_BITS: usize = 32
+    const OVERFLOW_WRAPS: bool = true
+    const MAX_PAR_LOG2: usize = 8
+    type Word = u32
+    type Buffer = Cells
+    type Ref = Address
+}
+impl Supports<Global> for WebGpu {}
+impl Supports<Shared> for WebGpu {}
+
+fn scratch<B: Backend + Supports<Shared>>(_ cell: own B::Ref<u8, Shared>) -> B::Ref<u8, Shared> {
+    cell
+}
+
+fn on_webgpu(_ cell: own Address<u8, Shared>) -> Address<u8, Shared> {
+    scratch<WebGpu>(cell)
+}
+
+fn on_evm(_ cell: own core::backend::EvmRef<u8, Shared>) -> core::backend::EvmRef<u8, Shared> {
+    scratch<Evm>(cell)
+}

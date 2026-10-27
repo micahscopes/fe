@@ -1,0 +1,31 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/backend/supports_library_targets.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ supports_library_targets.fe:26:5
+   │
+ 5 │ fn has<B: Backend + Supports<S>, S>() {}
+   │                     ----------- required by this bound on `has`
+   ·
+26 │     has<Evm, Shared>()
+   │     ^^^^^^^^^^^^^^^^ `Evm` doesn't implement `Supports<Shared>`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ supports_library_targets.fe:30:5
+   │
+ 5 │ fn has<B: Backend + Supports<S>, S>() {}
+   │                     ----------- required by this bound on `has`
+   ·
+30 │     has<Native, Shared>()
+   │     ^^^^^^^^^^^^^^^^^^^ `Native` doesn't implement `Supports<Shared>`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ supports_library_targets.fe:34:5
+   │
+ 5 │ fn has<B: Backend + Supports<S>, S>() {}
+   │                     ----------- required by this bound on `has`
+   ·
+34 │     has<Sp1, Shared>()
+   │     ^^^^^^^^^^^^^^^^ `Sp1` doesn't implement `Supports<Shared>`

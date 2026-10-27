@@ -1,0 +1,15 @@
+// A target whose `Buffer` cannot be mapped over does not implement `Backend`.
+use core::backend::Backend
+
+struct Opaque<T> { value: T }
+struct Handle<T, S> { value: T, class: S }
+struct Odd {}
+
+impl Backend for Odd {
+    const WORD_BITS: usize = 64
+    const OVERFLOW_WRAPS: bool = false
+    const MAX_PAR_LOG2: usize = 8
+    type Word = u64
+    type Buffer = Opaque
+    type Ref = Handle
+}

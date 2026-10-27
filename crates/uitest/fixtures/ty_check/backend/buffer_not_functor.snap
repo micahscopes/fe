@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/backend/buffer_not_functor.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ buffer_not_functor.fe:13:19
+   │
+13 │     type Buffer = Opaque
+   │                   ^^^^^^ `Opaque` doesn't implement `Functor`

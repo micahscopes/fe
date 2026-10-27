@@ -1,0 +1,35 @@
+// The library targets have the storage classes `Global`, `Constant` and
+// `Local`. None has `Shared`, which needs workers that share scratch memory.
+use core::backend::{Backend, Constant, Evm, Global, Local, Native, Shared, Sp1, Supports}
+
+fn has<B: Backend + Supports<S>, S>() {}
+
+fn evm() {
+    has<Evm, Global>()
+    has<Evm, Constant>()
+    has<Evm, Local>()
+}
+
+fn native() {
+    has<Native, Global>()
+    has<Native, Constant>()
+    has<Native, Local>()
+}
+
+fn sp1() {
+    has<Sp1, Global>()
+    has<Sp1, Constant>()
+    has<Sp1, Local>()
+}
+
+fn evm_shared() {
+    has<Evm, Shared>()
+}
+
+fn native_shared() {
+    has<Native, Shared>()
+}
+
+fn sp1_shared() {
+    has<Sp1, Shared>()
+}

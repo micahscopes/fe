@@ -1,0 +1,51 @@
+// `MemArray` is a `Functor`: `map` makes a new array whose element `i` is the
+// function applied to element `i`, and consumes the original.
+use core::functional::Functor
+use core::ptr::MemArray
+
+fn from_values(_ a: u256, _ b: u256, _ c: u256) -> MemArray<u256> {
+    var array: MemArray<u256> = MemArray::new_zeroed(3)
+    array[0] = a
+    array[1] = b
+    array[2] = c
+    array
+}
+
+fn add_one(_ x: own u256) -> u256 {
+    x + 1
+}
+
+#[test]
+fn map_applies_a_function_item_to_each_element() {
+    let mapped = from_values(1, 2, 3).map(add_one)
+    assert!(mapped.len() == 3)
+    assert!(mapped[0] == 2 && mapped[1] == 3 && mapped[2] == 4)
+}
+
+#[test]
+fn map_changes_the_element_type() {
+    let flags: MemArray<bool> = from_values(5, 6, 7).map(|x: u256| -> bool { x > 5 })
+    assert!(flags.len() == 3)
+    assert!(!flags[0] && flags[1] && flags[2])
+}
+
+#[test]
+fn map_moves_owned_elements() {
+    let rows: MemArray<MemArray<u256>> =
+        MemArray::from_fn(2, |i: usize| -> MemArray<u256> { from_values(i as u256, 1, 2) })
+    let lengths: MemArray<usize> =
+        rows.map(|row: MemArray<u256>| -> usize { row.len() + row[0] as usize })
+    assert!(lengths[0] == 3 && lengths[1] == 4)
+}
+
+#[test]
+fn map_of_an_empty_array_is_empty() {
+    let empty: MemArray<u256> = MemArray::new_zeroed(0)
+    assert!(empty.map(add_one).len() == 0)
+}
+
+#[test(should_revert, panic = 0x11)]
+fn map_reverts_when_the_function_reverts() {
+    // `add_one` overflows on the last element.
+    let _ = from_values(1, 2, 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff).map(add_one)
+}

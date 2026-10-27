@@ -1,0 +1,16 @@
+// The word type of a target is an associated type that a bound can name.
+use core::backend::{Backend, Evm, Native, Sp1}
+
+fn word_is_u256<B: Backend<Word = u256>>() {}
+fn word_is_u64<B: Backend<Word = u64>>() {}
+
+fn accepted() {
+    word_is_u256<Evm>()
+    word_is_u64<Native>()
+    word_is_u64<Sp1>()
+}
+
+fn rejected() {
+    word_is_u256<Native>()
+    word_is_u64<Evm>()
+}

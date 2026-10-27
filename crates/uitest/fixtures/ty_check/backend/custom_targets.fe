@@ -1,0 +1,63 @@
+// A program can describe a target of its own. `Buffer` is a type constructor
+// of kind `* -> *` that can be mapped over, and `Ref` is a type constructor
+// of kind `* -> * -> *` whose second argument is the storage class. Generic
+// code reads the facts and the storage types of either target.
+use core::Fn
+use core::backend::{Backend, Global, Local, Shared, Supports}
+use core::functional::Functor
+
+struct Cells<T> { value: T }
+struct Address<T, S> { value: T, class: S }
+
+impl Functor for Cells {
+    fn map<T, U, F: Fn(own T) -> U>(self: own Cells<T>, _ func: F) -> Cells<U> uses F::E {
+        Cells { value: func(self.value) }
+    }
+}
+
+struct Gpu {}
+struct Serial {}
+
+impl Backend for Gpu {
+    const WORD_BITS: usize = 32
+    const OVERFLOW_WRAPS: bool = true
+    const MAX_PAR_LOG2: usize = 8
+    type Word = u32
+    type Buffer = Cells
+    type Ref = Address
+}
+
+impl Backend for Serial {
+    const WORD_BITS: usize = 64
+    const OVERFLOW_WRAPS: bool = false
+    const MAX_PAR_LOG2: usize = 0
+    type Word = u64
+    type Buffer = Cells
+    type Ref = Address
+}
+
+impl Supports<Global> for Gpu {}
+impl Supports<Shared> for Gpu {}
+impl Supports<Local> for Gpu {}
+impl Supports<Global> for Serial {}
+impl Supports<Local> for Serial {}
+
+fn unchanged<B: Backend>(_ x: own B::Buffer<B::Word>) -> B::Buffer<B::Word> {
+    x.map(|word: B::Word| -> B::Word { word })
+}
+
+fn fused<B: Backend, const N: usize>() -> usize where N <= B::MAX_PAR_LOG2 {
+    N
+}
+
+fn scratch<B: Backend + Supports<Shared>>(_ cell: own B::Ref<B::Word, Shared>) -> B::Ref<B::Word, Shared> {
+    cell
+}
+
+fn use_both(_ gpu: own Cells<u32>, _ serial: own Cells<u64>, _ shared: own Address<u32, Shared>) {
+    let _ = unchanged<Gpu>(gpu)
+    let _ = unchanged<Serial>(serial)
+    let _ = fused<Gpu, 8>()
+    let _ = fused<Serial, 0>()
+    let _ = scratch<Gpu>(shared)
+}

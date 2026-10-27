@@ -1,0 +1,150 @@
+//! What a compilation target tells a library that is written once for several
+//! targets.
+//!
+//! A target is a type that implements `Backend`. The trait carries facts as
+//! associated constants, the target's word type, and two storage
+//! constructors, `Buffer` and `Ref`. A library function reads the facts in a
+//! `where` condition, which is decided at compile time:
+//!
+//! ```fe
+//! use core::backend::Backend
+//!
+//! fn fused<B: Backend, const N: usize>() -> usize where N <= B::MAX_PAR_LOG2 {
+//!     N
+//! }
+//! ```
+//!
+//! A reference names its storage class in its type. `Supports<S>` says which
+//! classes a target has, so using a class the target lacks is a missing-bound
+//! error at the use:
+//!
+//! ```fe
+//! use core::backend::{Backend, Shared, Supports}
+//!
+//! fn scratch<B: Backend + Supports<Shared>>(_ x: own B::Ref<u8, Shared>) {}
+//! ```
+//!
+//! The targets that exist are `Evm`, `Native` and `Sp1`. The choice of
+//! target is made by the type argument; the backend flag of `fe build`
+//! selects the code generator and does not change these types.
+
+use super::functional::Functor
+use super::marker::Copy
+use super::ptr::MemArray
+
+/// The facts and storage types of a compilation target.
+pub trait Backend {
+    /// Width of the machine word in bits.
+    const WORD_BITS: usize
+
+    /// Whether the arithmetic operators wrap on overflow. When false, they
+    /// revert or trap, and wrapping is spelled with the `wrapping_*` methods.
+    const OVERFLOW_WRAPS: bool
+
+    /// The base-2 logarithm of the largest number of parallel leaves one
+    /// fused step may combine. A target without parallel hardware states the
+    /// portable default.
+    const MAX_PAR_LOG2: usize
+
+    /// The machine word as a type.
+    type Word
+
+    /// Bulk storage for a run of values. Every target's buffer can be mapped
+    /// over, so code written for any `B: Backend` can call `map` on
+    /// `B::Buffer<T>`.
+    type Buffer: * -> * + Functor
+
+    /// A reference to a value of the first type argument in the storage
+    /// class named by the second. The class is part of the type, so a
+    /// reference into one class cannot be used where another is expected.
+    /// Whether a target has a class is stated by `Supports`, not here.
+    type Ref: * -> * -> *
+}
+
+/// Storage class: data that every part of the program can read and write.
+pub struct Global {}
+
+/// Storage class: read-only data fixed for the whole run, such as
+/// parameters, call data or code.
+pub struct Constant {}
+
+/// Storage class: scratch that a group of cooperating workers share and
+/// synchronize on, such as a GPU workgroup's memory.
+pub struct Shared {}
+
+/// Storage class: data private to one worker for the duration of a call.
+pub struct Local {}
+
+/// A target that has storage class `S`.
+///
+/// `B::Ref<T, S>` is usable only where `B: Supports<S>` holds. A missing
+/// implementation is reported at the use that asked for the class. The trait
+/// has no methods: it states what the target has, and grants no operation.
+pub trait Supports<S>: Backend {}
+
+/// A reference on the EVM, a 256-bit slot or offset. The storage class is
+/// carried by the type and has no runtime representation.
+pub struct EvmRef<T, S> {
+    raw: u256,
+}
+
+/// A reference on a target with 64-bit linear memory, an address. The storage
+/// class is carried by the type and has no runtime representation.
+pub struct LinearRef<T, S> {
+    raw: u64,
+}
+
+impl<T, S> Copy for EvmRef<T, S> {}
+impl<T, S> Copy for LinearRef<T, S> {}
+
+/// The Ethereum Virtual Machine, as compiled by `fe build`.
+pub struct Evm {}
+
+/// The host the compiler runs on, as compiled by `fe build` for the native
+/// target (64-bit x86 Linux and AArch64 macOS).
+pub struct Native {}
+
+/// The SP1 zkVM guest, a 64-bit RISC-V machine.
+pub struct Sp1 {}
+
+impl Backend for Evm {
+    const WORD_BITS: usize = 256
+    const OVERFLOW_WRAPS: bool = false
+    const MAX_PAR_LOG2: usize = 8
+    type Word = u256
+    type Buffer = MemArray
+    type Ref = EvmRef
+}
+
+impl Backend for Native {
+    const WORD_BITS: usize = 64
+    const OVERFLOW_WRAPS: bool = false
+    const MAX_PAR_LOG2: usize = 8
+    type Word = u64
+    type Buffer = MemArray
+    type Ref = LinearRef
+}
+
+impl Backend for Sp1 {
+    const WORD_BITS: usize = 64
+    const OVERFLOW_WRAPS: bool = false
+    const MAX_PAR_LOG2: usize = 8
+    type Word = u64
+    type Buffer = MemArray
+    type Ref = LinearRef
+}
+
+// None of these targets has a group of workers sharing scratch memory, so
+// none supports `Shared`. A target that has one, such as a GPU, implements
+// `Supports<Shared>`.
+impl Supports<Global> for Evm {}
+impl Supports<Constant> for Evm {}
+impl Supports<Local> for Evm {}
+
+impl Supports<Global> for Native {}
+impl Supports<Constant> for Native {}
+impl Supports<Local> for Native {}
+
+impl Supports<Global> for Sp1 {}
+impl Supports<Constant> for Sp1 {}
+impl Supports<Local> for Sp1 {}
