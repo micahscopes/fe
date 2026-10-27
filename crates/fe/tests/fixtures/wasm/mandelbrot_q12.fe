@@ -1,0 +1,33 @@
+// The escape time of one pixel of the Mandelbrot set, in signed Q12 fixed
+// point (1.0 is 4096), with 32-bit integers only.
+//
+// The view is fixed at 512 by 512 pixels: the real part runs over [-2.0, 1.0)
+// and the imaginary part over [-1.5, 1.5), 24 units of Q12 per pixel
+// (3.0 * 4096 / 512). Every intermediate value stays below 2^31 over that
+// view, so the checked arithmetic never traps. The loop stops when the
+// squared magnitude reaches 4.0, which is 67108864 in Q24, and returns the
+// number of iterations done, at most 100.
+//
+// The function takes and returns scalars and allocates nothing, so it is a
+// WebAssembly export as written. The same text runs natively.
+
+pub fn mandel_pixel_q12(px: i32, py: i32) -> u32 {
+    let c_re: i32 = -8192 + px * 24
+    let c_im: i32 = -6144 + py * 24
+    var zr: i32 = 0
+    var zi: i32 = 0
+    var i: u32 = 0
+    while i < 100 {
+        let rr: i32 = zr * zr
+        let ii: i32 = zi * zi
+        if rr + ii >= 67108864 {
+            return i
+        }
+        // The new imaginary part uses the old real part, so it comes first.
+        let next_zi: i32 = ((zr * 2) * zi) >> 12
+        zr = ((rr - ii) >> 12) + c_re
+        zi = next_zi + c_im
+        i += 1
+    }
+    i
+}

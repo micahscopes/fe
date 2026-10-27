@@ -369,6 +369,90 @@ program_test!(collatz, "collatz", {
     ]
 });
 
+/// The escape time of one pixel in signed Q12 fixed point, written again from
+/// the definition in `i64` arithmetic. Over the fixed 512 by 512 view no
+/// intermediate value reaches 2^31, which the assertion checks, so the `i32`
+/// program never traps and agrees with this wider computation.
+fn mandelbrot_oracle(px: i64, py: i64) -> i64 {
+    let (c_re, c_im) = (-8192 + px * 24, -6144 + py * 24);
+    let (mut zr, mut zi) = (0i64, 0i64);
+    for iteration in 0..100 {
+        let (rr, ii) = (zr * zr, zi * zi);
+        assert!(rr.max(ii).max((zr * 2 * zi).abs()) < 1 << 31);
+        if rr + ii >= 67_108_864 {
+            return iteration;
+        }
+        let next_zi = (zr * 2 * zi) >> 12;
+        zr = ((rr - ii) >> 12) + c_re;
+        zi = next_zi + c_im;
+    }
+    100
+}
+
+/// Escape times recorded for the corners and the centre of the view before
+/// the oracle above was written: 1, 2, 1, 2 and 100.
+const MANDELBROT_RECORDED: [(i64, i64, i64); 5] = [
+    (0, 0, 1),
+    (511, 0, 2),
+    (0, 511, 1),
+    (511, 511, 2),
+    (256, 256, 100),
+];
+
+/// FNV-1a over the little-endian bytes of the 512 by 512 frame, row by row,
+/// as recorded for this kernel.
+const MANDELBROT_FRAME_HASH: u32 = 0x2d29_649a;
+
+program_test!(mandelbrot_q12, "mandelbrot_q12", {
+    for (px, py, want) in MANDELBROT_RECORDED {
+        assert_eq!(mandelbrot_oracle(px, py), want, "oracle at ({px}, {py})");
+    }
+    let recorded: Vec<[i128; 2]> = MANDELBROT_RECORDED
+        .iter()
+        .map(|&(px, py, _)| [i128::from(px), i128::from(py)])
+        .collect();
+    let recorded: Vec<&[i128]> = recorded.iter().map(|point| &point[..]).collect();
+    let along: Vec<i128> = (0..512).step_by(31).chain([511]).collect();
+    vec![
+        Export::new("mandel_pixel_q12", &[("px", I32), ("py", I32)], U32)
+            .calls(&recorded, |a| {
+                Some(i128::from(mandelbrot_oracle(a[0] as i64, a[1] as i64)))
+            })
+            .product(&[along.clone(), along], |a| {
+                Some(i128::from(mandelbrot_oracle(a[0] as i64, a[1] as i64)))
+            }),
+    ]
+});
+
+#[test]
+fn mandelbrot_q12_frame_matches_the_recorded_hash() {
+    let temp = tempdir().unwrap();
+    let bytes = build_wasm(&fixture_path("mandelbrot_q12"), "2", temp.path());
+    let export = Export::new("mandel_pixel_q12", &[("px", I32), ("py", I32)], U32);
+    let mut running = Running::new(&bytes);
+    let mut hash = 0x811c_9dc5u32;
+    let mut distinct = std::collections::BTreeSet::new();
+    for py in 0..512 {
+        for px in 0..512 {
+            let got = running
+                .call(&export, &[px, py])
+                .expect("the pixel call should not trap");
+            assert_eq!(
+                got,
+                i128::from(mandelbrot_oracle(px as i64, py as i64)),
+                "({px}, {py})"
+            );
+            distinct.insert(got);
+            for byte in (got as u32).to_le_bytes() {
+                hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
+            }
+        }
+    }
+    assert_eq!(hash, MANDELBROT_FRAME_HASH);
+    // The image is not flat: every escape time from 1 to 100 occurs.
+    assert_eq!(distinct.len(), 100);
+}
+
 fn is_prime(n: i128) -> bool {
     n >= 2 && (2..).take_while(|d| d * d <= n).all(|d| n % d != 0)
 }
