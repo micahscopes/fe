@@ -1228,19 +1228,9 @@ impl<'db> PredicateListId<'db> {
                         hir_trait.scope(),
                         evidence,
                     );
-                    // An equality can make the bound a concrete one,
-                    // `[u256; 3]: Collection` from `H: Holds<Base = [u256; 3]>`.
-                    // An implementation proves that, so it is not assumed: as
-                    // a written bound on a concrete type would be (6-0005), it
-                    // would be a second candidate for every method of the impl.
-                    // A bound still generic in an argument or a binding,
-                    // `Reader: Read<T>`, is evidence no implementation gives.
-                    let concrete = |ty: &TyId<'db>| {
-                        !ty.has_invalid(db) && !ty.has_param(db) && !ty.has_projection(db)
-                    };
-                    let concrete = trait_inst.args(db).iter().all(concrete)
-                        && trait_inst.assoc_type_bindings(db).values().all(concrete);
-                    if concrete || predicate_has_recursive_assoc_projection(db, trait_inst) {
+                    if implied_bound_is_concrete(db, trait_inst)
+                        || predicate_has_recursive_assoc_projection(db, trait_inst)
+                    {
                         continue;
                     }
                     if all_predicates.insert(trait_inst) {
@@ -1252,6 +1242,24 @@ impl<'db> PredicateListId<'db> {
 
         Self::new(db, all_predicates.into_iter().collect::<Vec<_>>())
     }
+}
+
+/// Whether an implied bound names no parameter, projection or invalid type.
+///
+/// An equality can make an implied bound a concrete one,
+/// `[u256; 3]: Collection` from `H: Holds<Base = [u256; 3]>`. An
+/// implementation proves that, so `extend_all_bounds` does not assume it: as a
+/// written bound on a concrete type would be (6-0005), it would be a second
+/// candidate for every method of the impl. A bound still generic in an
+/// argument or a binding, `Reader: Read<T>`, is evidence no implementation
+/// gives.
+pub(crate) fn implied_bound_is_concrete<'db>(
+    db: &'db dyn HirAnalysisDb,
+    inst: TraitInstId<'db>,
+) -> bool {
+    let concrete =
+        |ty: &TyId<'db>| !ty.has_invalid(db) && !ty.has_param(db) && !ty.has_projection(db);
+    inst.args(db).iter().all(concrete) && inst.assoc_type_bindings(db).values().all(concrete)
 }
 
 // Normalizing implied bounds can resolve traits under assumptions that lead

@@ -1,0 +1,19 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/with_associated_bound_unmet.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ with_associated_bound_unmet.fe:22:36
+   │
+19 │ fn on<H: Plain>() where H::T: Marker {}
+   │                               ------ required by this bound on `on`
+   ·
+22 │ fn unmet_inside() { with (Cheap) { on<HostB>() } }
+   │                                    ^^^^^^^^^ `B` doesn't implement `Marker`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ with_associated_bound_unmet.fe:22:36
+   │
+22 │ fn unmet_inside() { with (Cheap) { on<HostB>() } }
+   │                                    ^^^^^^^^^^^ `HostB::T` doesn't implement `Marker`

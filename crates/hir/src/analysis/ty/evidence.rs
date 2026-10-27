@@ -28,7 +28,7 @@ use super::{
     trait_resolution::{
         PredicateListId, Selection, TraitSolveCx, answering_assumption,
         constraint::collect_candidate_constraints, generation::GenerationRequest,
-        normalize_trait_inst_preserving_validity,
+        implied_bound_is_concrete, normalize_trait_inst_preserving_validity,
     },
     ty_check::{BodyOwner, func_declared_bounds, func_signature},
     ty_def::{BorrowKind, TyFlags},
@@ -778,7 +778,9 @@ pub(crate) fn prove_outcome<'db>(
 /// whose goal is closed can be reconstructed ordinarily only when no
 /// lexical choice or supplied dictionary affects it. Resolved effect-provider
 /// arguments supply proofs through these same slots. Implied bounds project from their declared
-/// root dictionaries rather than selecting independently in the caller.
+/// root dictionaries rather than selecting independently in the caller. An
+/// implied bound that an equality makes concrete is in no dictionary; the
+/// implementation that proves it does so outside the use's choices.
 /// The generation requests the proofs stopped on are returned with the slots:
 /// a missing slot that waits on one is not an unsatisfied trait obligation.
 pub(crate) fn declared_bound_evidence_with_pending<'db>(
@@ -790,8 +792,11 @@ pub(crate) fn declared_bound_evidence_with_pending<'db>(
 ) -> (EvidenceList<'db>, Vec<GenerationRequest<'db>>) {
     let assumptions = solve_cx.assumptions().extend_all_bounds(db);
     let mut pending = Vec::new();
-    let mut declared_proof = |goal| {
-        let outcome = prove_outcome(db, solve_cx, goal);
+    // Every proof, whichever context it runs in, reports the generation
+    // request it stopped on, so that a slot left empty for that reason is
+    // served by preparation and not reported as an unmet bound.
+    let mut proof_in = |cx, goal| {
+        let outcome = prove_outcome(db, cx, goal);
         pending.extend(outcome.request());
         outcome.evidence()
     };
@@ -811,7 +816,7 @@ pub(crate) fn declared_bound_evidence_with_pending<'db>(
                     return None;
                 }
                 let mut answer = if directly_declared {
-                    Some(declared_proof(goal)?)
+                    Some(proof_in(solve_cx, goal)?)
                 } else {
                     None
                 };
@@ -827,8 +832,28 @@ pub(crate) fn declared_bound_evidence_with_pending<'db>(
                         continue;
                     }
                     let source_goal = substitute_complete(db, root, subst).ok()?;
-                    let proof = declared_proof(source_goal)?;
-                    let projected = implied_bound_evidence(db, proof, goal, assumptions)?;
+                    let proof = proof_in(solve_cx, source_goal)?;
+                    // A root's implied bounds are stated normalized. The slot's
+                    // goal still names the callee's projection, `H::T: Marker`.
+                    let implied = normalize_trait_inst_preserving_validity(
+                        db,
+                        goal,
+                        solve_cx.normalization_scope_for_trait_inst(db, goal),
+                        assumptions,
+                    );
+                    let projected = match implied_bound_evidence(db, proof, implied, assumptions) {
+                        Some(projected) => projected,
+                        // No dictionary carries a bound that an equality makes
+                        // concrete (`extend_all_bounds` does not imply it): an
+                        // implementation proves it, as it was checked where the
+                        // implementation or the assumption was declared. The
+                        // callee does not declare the bound, so the lexical
+                        // choices of this use do not reach it.
+                        None if implied_bound_is_concrete(db, implied) => {
+                            proof_in(TraitSolveCx::new(db, solve_cx.origin_scope(db)), implied)?
+                        }
+                        None => return None,
+                    };
                     if answer.is_some_and(|previous| previous != projected) {
                         return None;
                     }
