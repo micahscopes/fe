@@ -1081,8 +1081,13 @@ const fn observe() -> u256 {
     );
 }
 
+/// A scoped provider may be a generic type applied to arguments. Which
+/// application a `with` block names is decided where the block is written:
+/// the request is identified by the binding, so two applications of one
+/// generic provider in one function stay two implementations, also when they
+/// are named through aliases.
 #[test]
-fn scoped_derive_refuses_generic_provider_aliases_before_materialization() {
+fn scoped_derive_admits_generic_provider_applications() {
     let source = r#"use core::derive::Derive
 use core::meta::{Code, Item, Record}
 trait Value { const fn value() -> u256 }
@@ -1101,27 +1106,184 @@ impl Derive<Value> for Provider<u256> {
 type P8 = Provider<u8>
 type P256 = Provider<u256>
 const fn observe() -> u256 {
-    with (P8) { Pair::value() } + with (P256) { Pair::value() }
+    with (P8) { Pair::value() } * 100 + with (P256) { Pair::value() }
+}
+const fn spelled() -> u256 {
+    with (Provider<u256>) { Pair::value() } * 100 + with (Provider<u8>) { Pair::value() }
+}
+struct Scaled<const K: u256> {}
+impl<const K: u256> Derive<Value> for Scaled<K> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let k = K
+        quote { const fn value() -> u256 { ${k} } }
+    }
+}
+const fn scaled() -> u256 {
+    with (Scaled<10>) { Pair::value() } * 100 + with (Scaled<20>) { Pair::value() }
 }
 "#;
-    let error = prepare_err(source);
+    let output = prepare(source).unwrap();
+    assert_eq!(eval_const_fn_u256(&output, "observe"), "102");
+    assert_eq!(eval_const_fn_u256(&output, "spelled"), "201");
+    assert_eq!(eval_const_fn_u256(&output, "scaled"), "1020");
+}
+
+/// A type-generic provider applied to a concrete argument, and a constant
+/// generic provider applied through an alias.
+#[test]
+fn scoped_derive_admits_applications_through_type_and_constant_arguments() {
+    let source = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+trait Report { const fn weight() -> u256 }
+struct Pair {}
+struct Weighted<T> {}
+impl<T> Derive<Report> for Weighted<T> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { const fn weight() -> u256 { 7 } }
+    }
+}
+struct Scaled<const K: u256> {}
+impl<const K: u256> Derive<Report> for Scaled<K> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let k = K
+        quote { const fn weight() -> u256 { ${k} } }
+    }
+}
+type Ten = Scaled<10>
+const fn concrete() -> u256 { with (Weighted<u8>) { Pair::weight() } }
+const fn aliased() -> u256 { with (Ten) { Pair::weight() } }
+"#;
+    let output = prepare(source).unwrap();
+    assert_eq!(eval_const_fn_u256(&output, "concrete"), "7");
+    assert_eq!(eval_const_fn_u256(&output, "aliased"), "10");
+}
+
+/// The provider application and the target's arguments are independent
+/// parts of one request: each instance of a generic record gets the output of
+/// the application named for it, and the provider sees that instance.
+#[test]
+fn scoped_derive_combines_generic_provider_and_generic_target() {
+    let source = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record, field, field_type}
+trait Value { const fn value() -> u256 }
+struct Box<T> { value: T }
+struct Scaled<const K: u256> {}
+impl<const K: u256> Derive<Value> for Scaled<K> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let k = K
+        let ty = field_type(field(record, 0))
+        quote { const fn value() -> u256 { let v: ${ty} = 255
+            v as u256 + ${k} } }
+    }
+}
+const fn observe() -> u256 {
+    with (Scaled<10>) { <Box<u8> as Value>::value() } * 1000
+        + with (Scaled<20>) { <Box<u256> as Value>::value() }
+}
+"#;
+    let output = prepare(source).unwrap();
+    assert_eq!(eval_const_fn_u256(&output, "observe"), "265275");
+}
+
+/// A generic provider keeps the private helpers of the module that wrote it.
+#[test]
+fn scoped_generic_provider_keeps_its_producer_helpers() {
+    let source = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+trait Value { const fn value() -> u256 }
+struct Pair {}
+mod author {
+    use super::Value
+    use core::derive::Derive
+    use core::meta::{Code, Item, Record}
+    const fn helper() -> u256 { 7 }
+    pub struct Scaled<const K: u256> {}
+    impl<const K: u256> Derive<Value> for Scaled<K> {
+        const fn derive(_ record: Record) -> Code<Item> {
+            let k = K * helper()
+            quote { const fn value() -> u256 { ${k} + helper() } }
+        }
+    }
+}
+const fn helper() -> u256 { 99 }
+const fn observe() -> u256 {
+    with (author::Scaled<3>) { Pair::value() }
+}
+"#;
+    let output = prepare(source).unwrap();
+    assert_eq!(eval_const_fn_u256(&output, "observe"), "28");
+}
+
+/// An application that has no provider implementation, or whose bound fails,
+/// is refused where it is written, as an explicit header is.
+#[test]
+fn scoped_derive_refuses_unadmitted_generic_provider_applications() {
+    let header = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+trait Value { const fn value() -> u256 }
+struct Pair {}
+struct Provider<T> {}
+impl Derive<Value> for Provider<u8> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { const fn value() -> u256 { 1 } }
+    }
+}
+"#;
+    // `Provider<u16>` has no `Derive` implementation, so the block is not a
+    // provider opening at all and ordinary checking refuses it.
+    let missing =
+        format!("{header}const fn run() -> u256 {{ with (Provider<u16>) {{ Pair::value() }} }}\n");
+    let (db, file) = input(&missing);
     assert!(
-        error.contains(
-            "bounded scoped derive does not yet admit concrete generic provider applications"
-        ),
-        "{error}"
+        db.run_on_top_mod(db.top_mod(file)).has_errors(&db),
+        "an unadmitted application must be refused"
     );
-    // A nongeneric alias still denotes a valid ordinary provider.
-    let positive = source
-        .replace("struct Provider<T> {}", "struct Provider {}")
-        .replace("Provider<u8>", "Provider");
-    let positive = positive[..positive
-        .find("impl Derive<Value> for Provider<u256>")
-        .unwrap()]
-        .to_string()
-        + "type P = Provider\nconst fn observe() -> u256 { with (P) { Pair::value() } }\n";
-    let output = prepare(&positive).unwrap();
-    assert_eq!(eval_const_fn_u256(&output, "observe"), "1");
+
+    let bounded = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+trait Value { const fn value() -> u256 }
+trait Wide {}
+impl Wide for u256 {}
+struct Pair {}
+struct Provider<T> {}
+impl<T: Wide> Derive<Value> for Provider<T> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { const fn value() -> u256 { 1 } }
+    }
+}
+const fn good() -> u256 { with (Provider<u256>) { Pair::value() } }
+"#;
+    let output = prepare(bounded).unwrap();
+    assert_eq!(eval_const_fn_u256(&output, "good"), "1");
+    let bad = prepare_err(&format!(
+        "{bounded}const fn bad() -> u256 {{ with (Provider<u8>) {{ Pair::value() }} }}\n"
+    ));
+    assert!(
+        bad.contains("no ordinary Derive<requested goal> provider implementation was admitted"),
+        "{bad}"
+    );
+}
+
+/// A provider application that names a type parameter of the enclosing
+/// function is not ground; it is refused with the provider's own message and
+/// is not mistaken for an application of the parameter's instances.
+#[test]
+fn scoped_derive_refuses_generic_provider_over_an_enclosing_parameter() {
+    let cause = prepare_err(
+        r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+trait Value { const fn value() -> u256 }
+struct Pair {}
+struct Provider<T> {}
+impl<T> Derive<Value> for Provider<T> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { const fn value() -> u256 { 1 } }
+    }
+}
+fn run<T>() -> u256 { with (Provider<T>) { Pair::value() } }
+"#,
+    );
+    assert!(cause.contains("concrete provider type"), "{cause}");
 }
 
 #[test]

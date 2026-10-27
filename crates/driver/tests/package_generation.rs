@@ -777,3 +777,106 @@ fn a_loop_between_mutually_generated_associated_types_agrees_with_its_handwritte
     );
     assert_authored_unchanged(&db, &generated);
 }
+
+const REPORT: &str = "pub trait Report {\n    const fn weight() -> u256\n}\n";
+
+/// Prepare a three-module package (`score`, `alpha`, `beta` under `app/src`),
+/// check that it is free of errors, and leave the authored text unchanged.
+fn prepared_modules(score: &str, alpha: &str, beta: &str) -> DriverDataBase {
+    let files = [
+        ("app/fe.toml", APP_TOML),
+        ("app/src/lib.fe", ""),
+        ("app/src/score.fe", score),
+        ("app/src/alpha.fe", alpha),
+        ("app/src/beta.fe", beta),
+    ];
+    let db = project(&files);
+    let prepared = prepare(&db, "app/");
+    assert_eq!(ingot_errors(&prepared, "app/"), "");
+    assert_authored_unchanged(&db, &files);
+    prepared
+}
+
+/// A generic provider declared in `beta` and applied in `alpha` to a concrete
+/// type argument, to a constant argument through an alias declared in `alpha`,
+/// and twice in one function with different arguments. Each application is a
+/// separate implementation, so the values do not mix.
+#[test]
+fn scoped_generic_provider_applications_cross_modules() {
+    let prepared = prepared_modules(
+        REPORT,
+        r#"use ingot::beta::{Scaled, Weighted}
+use ingot::score::Report
+
+pub struct Pair {}
+pub type Ten = Scaled<10>
+pub const fn typed() -> u256 { with (Weighted<u8>) { Pair::weight() } }
+pub const fn through_alias() -> u256 { with (Ten) { Pair::weight() } }
+pub const fn both() -> u256 {
+    with (Scaled<10>) { Pair::weight() } * 100 + with (Scaled<20>) { Pair::weight() }
+}
+pub const fn typed_pair() -> u256 {
+    with (Weighted<u8>) { Pair::weight() } * 100 + with (Weighted<u256>) { Pair::weight() }
+}
+"#,
+        r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+use ingot::score::Report
+
+pub struct Weighted<T> {}
+impl<T> Derive<Report> for Weighted<T> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { const fn weight() -> u256 { 7 } }
+    }
+}
+pub struct Scaled<const K: u256> {}
+impl<const K: u256> Derive<Report> for Scaled<K> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let k = K
+        quote { const fn weight() -> u256 { ${k} } }
+    }
+}
+"#,
+    );
+    let alpha = "app/src/alpha.fe";
+    assert_eq!(eval(&prepared, alpha, "typed"), "7");
+    assert_eq!(eval(&prepared, alpha, "through_alias"), "10");
+    assert_eq!(eval(&prepared, alpha, "both"), "1020");
+    assert_eq!(eval(&prepared, alpha, "typed_pair"), "707");
+}
+
+/// Two applications of one provider whose implementations differ per argument
+/// (`Provider<u8>` and `Provider<u256>`), named through aliases of the
+/// other module.
+#[test]
+fn scoped_generic_provider_aliases_pick_their_own_implementation_across_modules() {
+    let prepared = prepared_modules(
+        "pub trait Value {\n    const fn value() -> u256\n}\npub struct Pair {}\n",
+        r#"use ingot::beta::Provider
+use ingot::score::Pair
+
+type P8 = Provider<u8>
+type P256 = Provider<u256>
+pub const fn observe() -> u256 {
+    with (P8) { Pair::value() } * 100 + with (P256) { Pair::value() }
+}
+"#,
+        r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+use ingot::score::Value
+
+pub struct Provider<T> {}
+impl Derive<Value> for Provider<u8> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { const fn value() -> u256 { 1 } }
+    }
+}
+impl Derive<Value> for Provider<u256> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { const fn value() -> u256 { 2 } }
+    }
+}
+"#,
+    );
+    assert_eq!(eval(&prepared, "app/src/alpha.fe", "observe"), "102");
+}

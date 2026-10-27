@@ -1902,12 +1902,11 @@ pub fn freeze_generation_request<'db>(
                 .collect::<Result<Vec<_>, _>>()?,
         )
     };
-    if !opening.provider_ty(db).decompose_ty_app(db).1.is_empty() {
-        return Err(
-            "bounded scoped derive does not yet admit concrete generic provider applications"
-                .into(),
-        );
-    }
+    // The demand does not carry the provider: an opening is identified by the
+    // authored `with` binding, and each view recovers the provider type from
+    // that binding (`provider_opening_at` refuses a binding that yields two).
+    // A provider application, generic or not, is therefore checked where it
+    // is used, by `finalized_derive_provider`, which requires it to be ground.
     let trait_ = goal.def(db);
     let module = trait_.top_mod(db);
     let root = crate::lower::top_mod_ast(db, module);
