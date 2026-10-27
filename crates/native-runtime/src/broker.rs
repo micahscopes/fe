@@ -170,8 +170,9 @@ mod tests {
     // the outcomes seen so far, word 2 the tag of the task. Every segment
     // logs (tag, segment, delivery kind, payload), so a test can state the
     // order in which code ran.
+    type Entry = (u64, u64, u64, u64);
     thread_local! {
-        static LOG: RefCell<Vec<(u64, u64, u64, u64)>> = const { RefCell::new(Vec::new()) };
+        static LOG: RefCell<Vec<Entry>> = const { RefCell::new(Vec::new()) };
         static NEXT_TAG: Cell<u64> = const { Cell::new(0) };
     }
     fn weight(kind: u64, payload: u64) -> u64 {
@@ -219,7 +220,7 @@ mod tests {
         LOG.with_borrow_mut(Vec::clear);
         NEXT_TAG.set(0);
     }
-    fn log() -> Vec<(u64, u64, u64, u64)> {
+    fn log() -> Vec<Entry> {
         LOG.with_borrow(Clone::clone)
     }
 
@@ -441,7 +442,7 @@ mod tests {
         assert!(broker.is_idle());
     }
 
-    fn script() -> (Vec<(usize, Brief)>, Vec<(u64, u64, u64, u64)>) {
+    fn script() -> (Vec<(usize, Brief)>, Vec<Entry>) {
         reset();
         let (mut broker, ids, tickets) = started(4);
         let mut steps = Vec::new();
