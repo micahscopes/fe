@@ -543,7 +543,11 @@ pub fn effect_key_suspension<'db>(
             ) {
                 GoalSatisfiability::Satisfied(_) => SuspensionFootprint::MaySuspend,
                 GoalSatisfiability::UnSat(_) => SuspensionFootprint::Absent,
+                // A provider whose `Suspend` implementation is still to be
+                // generated is no more decided than an unconfirmed proof;
+                // concrete admission sees the generated implementation.
                 GoalSatisfiability::NeedsConfirmation { .. }
+                | GoalSatisfiability::NeedsGeneration(_)
                 | GoalSatisfiability::ContainsInvalid => SuspensionFootprint::Unresolved,
             }
         }
