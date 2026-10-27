@@ -28,6 +28,7 @@ use camino::Utf8PathBuf;
 use check::check;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
+use common::compilation::Target;
 use fmt as fe_fmt;
 use similar::{ChangeTag, TextDiff};
 use walkdir::WalkDir;
@@ -105,6 +106,19 @@ impl BuildBackend {
             Self::Sp1 => "sp1",
             #[cfg(feature = "wasm")]
             Self::Wasm => "wasm",
+        }
+    }
+
+    /// The machine this backend compiles for. SP1 guests are native code.
+    pub fn target(self) -> Target {
+        match self {
+            Self::Sonatina => Target::Evm,
+            #[cfg(feature = "cranelift")]
+            Self::Native => Target::Native,
+            #[cfg(feature = "sp1")]
+            Self::Sp1 => Target::Native,
+            #[cfg(feature = "wasm")]
+            Self::Wasm => Target::Wasm,
         }
     }
 

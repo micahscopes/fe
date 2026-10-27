@@ -56,7 +56,7 @@ impl HostText {
         // The host guarantees that the range holds `len` readable bytes.
         unsafe {
             let source = MemSpan::from_raw_parts(
-                ptr: (self.addr as u256) as *u8,
+                ptr: (self.addr as usize) as *u8,
                 len: self.len as usize,
             )
             DynString::from_payload(source)

@@ -835,7 +835,7 @@ fn other_shapes_are_named_errors() {
 #[test]
 fn a_text_or_a_reply_cannot_cross_an_import() {
     rejected(
-        "use std::wasm::HostText\nextern { fn h(_ t: HostText) -> u32 }\npub fn run(t: HostText) -> u32 { h(t) }\n",
+        "use std::wasm::HostText\nextern { fn h(_ t: HostText) -> u32 }\npub fn run(t: HostText) -> u32 { unsafe { h(t) } }\n",
         &[
             "cannot import `h` from the WebAssembly host",
             "parameter `t: HostText`",
@@ -844,7 +844,7 @@ fn a_text_or_a_reply_cannot_cross_an_import() {
         ],
     );
     rejected(
-        "use std::wasm::Reply\nextern { fn h(_ a: u32) -> Reply }\npub fn run(a: u32) -> u32 { h(a).tag }\n",
+        "use std::wasm::Reply\nextern { fn h(_ a: u32) -> Reply }\npub fn run(a: u32) -> u32 { unsafe { h(a) }.tag }\n",
         &[
             "cannot import `h` from the WebAssembly host",
             "the result type `Reply`",

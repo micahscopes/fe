@@ -14,23 +14,23 @@ extern {
 
 // The reply word of an honest `open`, so that a test learns a real handle.
 pub fn open_text(name: HostText) -> u64 {
-    sys_wasm_files_open(name.addr(), name.len())
+    unsafe { sys_wasm_files_open(name.addr(), name.len()) }
 }
 
 pub fn open_raw(addr: u32, len: u32) -> u64 {
-    sys_wasm_files_open(addr, len)
+    unsafe { sys_wasm_files_open(addr, len) }
 }
 
 pub fn size_raw(handle: u32) -> u64 {
-    sys_wasm_files_size(handle)
+    unsafe { sys_wasm_files_size(handle) }
 }
 
 pub fn read_byte_raw(handle: u32, index: u32) -> u64 {
-    sys_wasm_files_read_byte(handle, index)
+    unsafe { sys_wasm_files_read_byte(handle, index) }
 }
 
 pub fn close_raw(handle: u32) {
-    sys_wasm_files_close(handle)
+    unsafe { sys_wasm_files_close(handle) }
 }
 
 // Replies that a module can make up, since the fields of `Reply` are public.

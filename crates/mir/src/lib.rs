@@ -31,7 +31,8 @@ pub use runtime::{
     build_wasm_export_package, build_wasm_test_runtime_package, collect_test_funcs,
     format_runtime_body, format_runtime_body_excerpt, format_runtime_package,
     format_runtime_verify_failure, native_executable_entry, runtime_instance_stable_key,
-    runtime_instance_symbol_key, scalar_raw_memory_size_bytes, serialize_const_region_bytes,
+    runtime_instance_symbol_key, runtime_param_accesses, scalar_raw_memory_size_bytes,
+    serialize_const_region_bytes,
 };
 pub use verify::{
     VerifyError, resolve_runtime_place, resolve_runtime_place_address_class, verify_const_region,

@@ -1,4 +1,4 @@
-use common::indexmap::IndexMap;
+use common::{compilation::Target, indexmap::IndexMap};
 use hir::analysis::ty::AddressSpace;
 use hir::semantic::{RecvArmAbiInfo, RecvArmView};
 use hir::{
@@ -468,6 +468,7 @@ pub fn build_native_test_runtime_package<'db>(
     top_mods: &[TopLevelMod<'db>],
     filter: Option<&str>,
 ) -> Result<RuntimePackage<'db>, LowerError> {
+    require_target(db, Target::Native)?;
     let &top_mod = top_mods.first().ok_or_else(|| {
         LowerError::Unsupported("test runtime package needs a source module".into())
     })?;
@@ -475,6 +476,19 @@ pub fn build_native_test_runtime_package<'db>(
     build_test_package(db, top_mod, &tests, |index, name| {
         format!("__native_test_{index}_{}", sanitize_object_name(name))
     })
+}
+
+/// Rejects building a package for another machine than the compilation's:
+/// layouts and destruction follow the compilation target.
+fn require_target(db: &dyn MirDb, target: Target) -> Result<(), LowerError> {
+    let actual = db.compilation_settings().target(db);
+    if actual == target {
+        Ok(())
+    } else {
+        Err(LowerError::Unsupported(format!(
+            "a {target:?} package needs the {target:?} compilation target, not {actual:?}"
+        )))
+    }
 }
 
 /// A function marked `#[test]` that a run selected, with the name it is
@@ -527,6 +541,7 @@ pub fn build_wasm_test_runtime_package<'db>(
     db: &'db dyn MirDb,
     test: &TestFunc<'db>,
 ) -> Result<RuntimePackage<'db>, LowerError> {
+    require_target(db, Target::Wasm)?;
     build_test_package(
         db,
         test.func.top_mod(db),
@@ -574,6 +589,7 @@ fn build_contract_package<'db>(
     db: &'db dyn MirDb,
     top_mod: TopLevelMod<'db>,
 ) -> Result<RuntimePackage<'db>, LowerError> {
+    require_target(db, Target::Evm)?;
     let mut roots = Vec::new();
     let mut objects = Vec::new();
     let contracts = top_mod.all_contracts(db);
@@ -615,6 +631,7 @@ pub fn build_native_executable_package<'db>(
     db: &'db dyn MirDb,
     top_mod: TopLevelMod<'db>,
 ) -> Result<RuntimePackage<'db>, LowerError> {
+    require_target(db, Target::Native)?;
     let main = native_executable_entry(db, top_mod).ok_or_else(|| {
         LowerError::Unsupported(
             "native executable output requires `pub fn main() -> i32`".to_string(),
@@ -706,6 +723,7 @@ pub fn build_wasm_export_package<'db>(
     db: &'db dyn MirDb,
     top_mod: TopLevelMod<'db>,
 ) -> Result<WasmExportPackage<'db>, LowerError> {
+    require_target(db, Target::Wasm)?;
     let mut exports = Vec::new();
     for item in top_mod.children_non_nested(db) {
         let ItemKind::Func(func) = item else {
@@ -2124,6 +2142,7 @@ fn resolve_decode_runtime_args_instance<'db>(
     ))
 }
 
+/// The instance of `inst`'s `method` an EVM contract entry calls.
 pub(crate) fn resolve_trait_runtime_instance<'db>(
     db: &'db dyn MirDb,
     scope: hir::hir_def::scope_graph::ScopeId<'db>,
@@ -2740,6 +2759,7 @@ fn scalar_role_sort_key<'db>(db: &'db dyn MirDb, role: &ScalarRole<'db>) -> Stri
         ScalarRole::EnumTag { enum_layout } => {
             format!("enum_tag:{}", layout_sort_key(db, *enum_layout))
         }
+        ScalarRole::Pointer => "pointer".to_string(),
     }
 }
 
@@ -3025,6 +3045,7 @@ fn sanitize_object_name(value: &str) -> String {
 mod tests {
     use common::InputDb;
     use driver::DriverDataBase;
+    use salsa::Setter;
     use url::Url;
 
     use crate::runtime::RuntimeExitBehavior;
@@ -3034,6 +3055,9 @@ mod tests {
     #[test]
     fn native_package_keeps_extern_calls_as_bodyless_declarations() {
         let mut db = DriverDataBase::default();
+        db.compilation_settings()
+            .set_target(&mut db)
+            .to(Target::Native);
         let file = db.workspace().touch(
             &mut db,
             Url::parse("file:///native_extern.fe").unwrap(),

@@ -6,9 +6,9 @@
 //mock: fn host_high(_ a: u64) -> u32 { (a / 4294967296).downcast_truncate() }
 
 pub fn mix(a: i64, b: u64) -> u64 {
-    host_mix(a, b)
+    unsafe { host_mix(a, b) }
 }
 
 pub fn high_word(a: u64) -> u32 {
-    host_high(a)
+    unsafe { host_high(a) }
 }

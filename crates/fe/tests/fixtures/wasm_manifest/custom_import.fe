@@ -5,5 +5,5 @@ extern {
 }
 
 pub fn run(_ value: u32) -> u32 {
-    custom_import(value)
+    unsafe { custom_import(value) }
 }

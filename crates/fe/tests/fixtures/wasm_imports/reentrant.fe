@@ -32,7 +32,7 @@ pub fn outer(x: i32) -> i32 {
         k += 1
     }
     let held = Held { a: x, b: x + 1, c: x + 2 }
-    let reply = host_callback(x)
+    let reply = unsafe { host_callback(x) }
     var sum = reply + held.a + held.b + held.c
     i = 0
     while i < 8 {

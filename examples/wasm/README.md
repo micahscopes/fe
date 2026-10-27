@@ -81,15 +81,17 @@ results are limited to:
 Any other type, including `usize`, `u128`, `u256`, structs and pointers, is an
 error that names the function and the parameter. Exports cannot declare `uses`
 effects; a provider is chosen inside the function with `with`, as `lines.fe` does.
-Inside functions, structs, tuples, enums, arrays, constants, `usize` and 256-bit
-integers work. Overflow, division by zero, a failed `assert!` and an index outside
-an array trap (the WebAssembly instruction `unreachable`).
+Inside functions, structs, tuples, enums, arrays, constants, `usize` (32 bits, the
+width of an address in a module) and 256-bit integers work. Overflow, division by
+zero, a failed `assert!` and an index outside an array trap (the WebAssembly
+instruction `unreachable`).
 
 ### What a program may import
 
 An `extern` function that an export reaches becomes an import of the module
-`env`, under the function's name. Its parameters and result follow the same rule
-as for exports, without `HostText` and `Reply`. `bool` and integers of up to 32
+`env`, under the function's name. Calling it needs an `unsafe` block, as for every
+foreign function outside `core` and `std`. Its parameters and result follow the
+same rule as for exports, without `HostText` and `Reply`. `bool` and integers of up to 32
 bits arrive as an `i32` that holds the value zero-extended (an `i8` of -1 arrives
 as 255); 64-bit integers are `i64`. The module `std::wasm` declares the standard
 imports as effects with a host provider (`host()`) and a provider written in Fe
@@ -290,8 +292,8 @@ cargo test -p fe --all-features \
   passed to an import describe a text; the host does.
 - **Handles are affine, not linear.** The compiler rejects use after `close` but accepts
   a handle that is dropped; the leak shows only in the host's counter.
-- **Safe Fe can forge handles.** A program can declare the four `extern` functions of
-  the files contract itself and call them with made-up numbers. The host refuses
+- **Unsafe Fe can forge handles.** A program can declare the four `extern` functions of
+  the files contract itself and call them in an `unsafe` block with made-up numbers. The host refuses
   every forged or closed handle, so the protection is the host's check, not the type.
 - **Errors thrown inside an import.** When an import throws, or a callback traps and the
   host passes the error on, the module does not run again before the host call ends, so

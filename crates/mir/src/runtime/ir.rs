@@ -451,7 +451,11 @@ pub enum ScalarRepr {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, SalsaValue)]
 pub enum ScalarRole<'db> {
     Plain,
-    EnumTag { enum_layout: LayoutId<'db> },
+    EnumTag {
+        enum_layout: LayoutId<'db>,
+    },
+    /// A memory address, which native targets hold as a pointer.
+    Pointer,
 }
 
 #[salsa::interned]
@@ -1354,6 +1358,10 @@ pub enum RuntimeBuiltin<'db> {
     LeadingZeros {
         value: RValueId,
     },
+    /// Reverses the bytes of a word.
+    SwapBytes {
+        value: RValueId,
+    },
     /// Returns a scalar unchanged while hiding it from the optimizer.
     BlackBox {
         value: RValueId,
@@ -1412,7 +1420,13 @@ pub enum RuntimeBuiltin<'db> {
     Malloc {
         size: RValueId,
     },
-    NativePtrIsNull {
+    /// Like `Malloc`, but yields a null address when the host cannot
+    /// allocate.
+    TryMalloc {
+        size: RValueId,
+    },
+    /// Releases an allocation from `Malloc` or `TryMalloc`.
+    Free {
         ptr: RValueId,
     },
     PtrOffsetBytes {
@@ -1676,6 +1690,10 @@ pub enum RTerminator<'db> {
         len: RValueId,
     },
     RevertEmpty,
+    /// Reverts with Solidity `Panic(uint256)` data for the word `code`.
+    Panic {
+        code: RValueId,
+    },
     SelfDestruct {
         beneficiary: RValueId,
     },
@@ -1710,6 +1728,81 @@ impl<'db> RuntimePlace<'db> {
 }
 
 impl<'db> RuntimeBuiltin<'db> {
+    /// Whether running the builtin can be observed beyond its result: it
+    /// writes memory or state, calls out, logs, frees, can revert, or hides
+    /// its operand from the optimizer.
+    pub fn has_effect(&self) -> bool {
+        match self {
+            Self::Mstore { .. }
+            | Self::Mstore8 { .. }
+            | Self::Mcopy { .. }
+            | Self::ZeroMem { .. }
+            | Self::StoreConstBytes { .. }
+            | Self::Sstore { .. }
+            | Self::ReturnDataCopy { .. }
+            | Self::CallDataCopy { .. }
+            | Self::CodeCopy { .. }
+            | Self::ExtCodeCopy { .. }
+            | Self::BlackBox { .. }
+            | Self::Free { .. }
+            | Self::Call { .. }
+            | Self::StaticCall { .. }
+            | Self::DelegateCall { .. }
+            | Self::Create { .. }
+            | Self::Create2 { .. }
+            | Self::Log0 { .. }
+            | Self::Log1 { .. }
+            | Self::Log2 { .. }
+            | Self::Log3 { .. }
+            | Self::Log4 { .. } => true,
+            Self::IntrinsicArith { checked, .. } => *checked,
+            Self::Mload { .. }
+            | Self::Msize
+            | Self::Sload { .. }
+            | Self::CallValue
+            | Self::ReturnDataSize
+            | Self::CallDataSize
+            | Self::CallDataLoad { .. }
+            | Self::CodeSize
+            | Self::ExtCodeSize { .. }
+            | Self::ExtCodeHash { .. }
+            | Self::Keccak256 { .. }
+            | Self::KeccakWords { .. }
+            | Self::AddMod { .. }
+            | Self::MulMod { .. }
+            | Self::LeadingZeros { .. }
+            | Self::SwapBytes { .. }
+            | Self::Byte { .. }
+            | Self::SignExtend { .. }
+            | Self::Saturating { .. }
+            | Self::Address
+            | Self::Caller
+            | Self::Origin
+            | Self::GasPrice
+            | Self::CoinBase
+            | Self::Balance { .. }
+            | Self::Timestamp
+            | Self::Number
+            | Self::PrevRandao
+            | Self::GasLimit
+            | Self::ChainId
+            | Self::BaseFee
+            | Self::SelfBalance
+            | Self::BlockHash { .. }
+            | Self::BlobHash { .. }
+            | Self::BlobBaseFee
+            | Self::Gas
+            | Self::CurrentCodeRegionLen
+            | Self::CodeRegionOffset { .. }
+            | Self::CodeRegionLen { .. }
+            | Self::Malloc { .. }
+            | Self::TryMalloc { .. }
+            | Self::PtrOffsetBytes { .. }
+            | Self::CallDataSelector
+            | Self::MakeContractFieldRef { .. } => false,
+        }
+    }
+
     pub fn values_mut(&mut self) -> Vec<&mut RValueId> {
         match self {
             Self::Mload { addr }
@@ -1720,11 +1813,13 @@ impl<'db> RuntimeBuiltin<'db> {
             Self::Sload { slot: value }
             | Self::CallDataLoad { offset: value }
             | Self::LeadingZeros { value }
+            | Self::SwapBytes { value }
             | Self::BlackBox { value }
             | Self::BlockHash { block: value }
             | Self::BlobHash { index: value }
             | Self::Malloc { size: value }
-            | Self::NativePtrIsNull { ptr: value } => vec![value],
+            | Self::TryMalloc { size: value }
+            | Self::Free { ptr: value } => vec![value],
             Self::Mstore { addr: a, value: b }
             | Self::Mstore8 { addr: a, value: b }
             | Self::ZeroMem { dst: a, len: b }
@@ -1979,6 +2074,7 @@ impl<'db> RTerminator<'db> {
             | Self::SwitchScalar { discr: value, .. }
             | Self::MatchEnumTag { tag: value, .. }
             | Self::SelfDestruct { beneficiary: value }
+            | Self::Panic { code: value }
             | Self::Return(Some(value))
             | Self::Yield {
                 value: Some(value), ..
@@ -2022,6 +2118,7 @@ impl<'db> RTerminator<'db> {
             | Self::ReturnData { .. }
             | Self::Revert { .. }
             | Self::RevertEmpty
+            | Self::Panic { .. }
             | Self::SelfDestruct { .. }
             | Self::Trap
             | Self::Return(_)

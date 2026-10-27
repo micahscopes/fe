@@ -68,7 +68,7 @@ extern {
 }
 
 fn trigger() {
-    for x in revert() {}
+    for x in unsafe { revert() } {}
 }
 "#,
     );
@@ -412,7 +412,7 @@ extern {
 }
 
 fn pick<T, U: Pick<T>>(_value: U) -> T {
-    todo()
+    unsafe { todo() }
 }
 
 fn probe(subject: Subject) {
@@ -465,7 +465,7 @@ extern {
 }
 
 fn pick<T, U: Pick<T>>(_value: U) -> T {
-    todo()
+    unsafe { todo() }
 }
 
 fn probe(subject: Subject) {
@@ -522,7 +522,7 @@ extern {
 }
 
 fn pick<T, U: Pick<T>>(_value: U) -> T {
-    todo()
+    unsafe { todo() }
 }
 
 fn probe(subject: Subject) {
@@ -579,7 +579,7 @@ extern {
 }
 
 fn pick<T, U: Pick<T>>(_value: U) -> T {
-    todo()
+    unsafe { todo() }
 }
 
 fn probe(subject: Subject) {
@@ -678,12 +678,12 @@ extern {
 }
 
 fn pick<T, U: Pick<T>>(_ value: U) -> T {
-    todo()
+    unsafe { todo() }
 }
 
 impl Picker {
     fn pick<T, U: Pick<T>>(self, _ value: U) -> T {
-        todo()
+        unsafe { todo() }
     }
 }
 
@@ -732,12 +732,12 @@ extern {
 }
 
 fn pick<T: HasOutput, U: Pick<T>>(_ value: U) -> T::Output {
-    todo()
+    unsafe { todo() }
 }
 
 impl Picker {
     fn pick<T: HasOutput, U: Pick<T>>(self, _ value: U) -> T::Output {
-        todo()
+        unsafe { todo() }
     }
 }
 
@@ -833,13 +833,13 @@ trait Foo<M> {
 
 impl Foo<u8> for S {
     fn foo<P: HasOutput, Q: Pick<P>>(self, _ marker: u8, _ value: Q) -> P::Output {
-        todo()
+        unsafe { todo() }
     }
 }
 
 impl Foo<bool> for S {
     fn foo<P: HasOutput, Q: Pick<P>>(self, _ marker: bool, _ value: Q) -> P::Output {
-        todo()
+        unsafe { todo() }
     }
 }
 
@@ -909,7 +909,7 @@ extern {
 }
 
 fn pick<T: HasOutput, U: Pick<T>>(_ value: U) -> T::Output {
-    todo()
+    unsafe { todo() }
 }
 
 fn probe() {
@@ -967,7 +967,7 @@ impl Foo<u8> for S {
         _ marker: u8,
         _ value: Q,
     ) -> P::Output {
-        todo()
+        unsafe { todo() }
     }
 }
 
@@ -977,7 +977,7 @@ impl Foo<bool> for S {
         _ marker: bool,
         _ value: Q,
     ) -> P::Output {
-        todo()
+        unsafe { todo() }
     }
 }
 
@@ -1036,7 +1036,7 @@ impl Foo<u8> for S {
         _ marker: u8,
         _ value: Q,
     ) -> P::Output {
-        todo()
+        unsafe { todo() }
     }
 }
 
@@ -1046,7 +1046,7 @@ impl Foo<bool> for S {
         _ marker: bool,
         _ value: Q,
     ) -> P::Output {
-        todo()
+        unsafe { todo() }
     }
 }
 
@@ -1118,23 +1118,22 @@ fn collect_body_props<'db>(
 }
 
 #[test]
-fn native_byte_buffer_storage_and_allocator_are_private() {
+fn memory_owner_storage_and_allocator_are_private() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "native_byte_buffer_privacy.fe".into(),
+        "memory_owner_privacy.fe".into(),
         r#"
-use core::Option
-use std::native::ByteBuffer
-fn forge(pointer: *u8) -> ByteBuffer {
-    ByteBuffer { allocation: Option::Some(pointer), len: 64, capacity: 64 }
+use core::MemBuffer
+fn forge(pointer: *u8) -> MemBuffer {
+    MemBuffer { ptr: pointer, len: 64, capacity: 64 }
 }
-fn expose(buffer: ByteBuffer) -> Option<*u8> { buffer.allocation }
-fn deallocate(pointer: *u8) { std::native::bytes::free(pointer) }
+fn expose(buffer: MemBuffer) -> *u8 { buffer.ptr }
+fn deallocate(pointer: *u8) { core::ptr::dealloc_raw(pointer) }
 "#,
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
-    for name in ["allocation", "len", "capacity", "free"] {
+    for name in ["ptr", "len", "capacity", "dealloc_raw"] {
         assert!(
             diags
                 .iter()

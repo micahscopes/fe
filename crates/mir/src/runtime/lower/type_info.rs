@@ -5,7 +5,10 @@ use hir::analysis::{
         const_ty::{ConcreteArrayLengthError, demand_concrete_array_length},
         normalize::normalize_ty,
         trait_resolution::PredicateListId,
-        ty_def::{BorrowKind, MAX_INLINE_STRING_BYTES, PrimTy, TyBase, TyData, TyId, TyVarSort},
+        ty_def::{
+            BorrowKind, MAX_INLINE_STRING_BYTES, PrimTy, TyBase, TyData, TyId, TyVarSort,
+            prim_int_bits,
+        },
     },
 };
 use num_traits::ToPrimitive;
@@ -429,65 +432,16 @@ fn scalar_class_from_repr_ty<'db>(db: &'db dyn MirDb, ty: TyId<'db>) -> Option<S
     let repr = match ty.base_ty(db).data(db) {
         TyData::TyBase(TyBase::Prim(prim)) => match prim {
             PrimTy::Bool => ScalarRepr::Bool,
-            PrimTy::U8 => ScalarRepr::Int {
-                bits: 8,
-                signed: false,
-            },
-            PrimTy::U16 => ScalarRepr::Int {
-                bits: 16,
-                signed: false,
-            },
-            PrimTy::U32 => ScalarRepr::Int {
-                bits: 32,
-                signed: false,
-            },
-            PrimTy::U64 => ScalarRepr::Int {
-                bits: 64,
-                signed: false,
-            },
-            PrimTy::U128 => ScalarRepr::Int {
-                bits: 128,
-                signed: false,
-            },
-            // A pointer is the address word.
-            PrimTy::U256 | PrimTy::Usize | PrimTy::Ptr(_) => ScalarRepr::Int {
-                bits: 256,
-                signed: false,
-            },
-            PrimTy::I8 => ScalarRepr::Int {
-                bits: 8,
-                signed: true,
-            },
-            PrimTy::I16 => ScalarRepr::Int {
-                bits: 16,
-                signed: true,
-            },
-            PrimTy::I32 => ScalarRepr::Int {
-                bits: 32,
-                signed: true,
-            },
-            PrimTy::I64 => ScalarRepr::Int {
-                bits: 64,
-                signed: true,
-            },
-            PrimTy::I128 => ScalarRepr::Int {
-                bits: 128,
-                signed: true,
-            },
-            PrimTy::I256 | PrimTy::Isize => ScalarRepr::Int {
-                bits: 256,
-                signed: true,
-            },
+            PrimTy::Ptr(space) => return Some(pointer_class(db, *space)),
             PrimTy::String => ScalarRepr::FixedBytes {
                 // Fixed strings have at most 31 payload bytes, but casts and
                 // `to_word` operate on the full EVM word.
                 len: (MAX_INLINE_STRING_BYTES + 1) as u16,
             },
-            PrimTy::Array
-            | PrimTy::Tuple(_)
-            | PrimTy::View
-            | PrimTy::BorrowMut
-            | PrimTy::BorrowRef => return None,
+            _ => ScalarRepr::Int {
+                bits: prim_int_bits(*prim, db.compilation_settings().target(db))? as u16,
+                signed: prim.is_signed_int(),
+            },
         },
         TyData::TyBase(TyBase::Contract(_)) => ScalarRepr::Address { bits: 256 },
         TyData::TyVar(var) if matches!(var.sort, TyVarSort::Integral) => ScalarRepr::Int {
@@ -501,6 +455,38 @@ fn scalar_class_from_repr_ty<'db>(db: &'db dyn MirDb, ty: TyId<'db>) -> Option<S
         repr,
         role: ScalarRole::Plain,
     })
+}
+
+/// The integer an address in `space` converts to. A memory address is a
+/// `usize`, which takes the target's width; the EVM's other spaces are
+/// addressed by word.
+pub(crate) fn address_int_class<'db>(db: &dyn MirDb, space: AddressSpace) -> ScalarClass<'db> {
+    let bits = if space == AddressSpace::Memory {
+        db.compilation_settings().target(db).usize_bits() as u16
+    } else {
+        256
+    };
+    ScalarClass {
+        repr: ScalarRepr::Int {
+            bits,
+            signed: false,
+        },
+        role: ScalarRole::Plain,
+    }
+}
+
+/// The scalar a pointer into `space` is: its address integer, which for
+/// memory is a pointer.
+pub(crate) fn pointer_class<'db>(db: &dyn MirDb, space: AddressSpace) -> ScalarClass<'db> {
+    let class = address_int_class(db, space);
+    if space == AddressSpace::Memory {
+        ScalarClass {
+            role: ScalarRole::Pointer,
+            ..class
+        }
+    } else {
+        class
+    }
 }
 
 /// The transport a pointer of type `pointer_ty` converts to when
@@ -717,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn pointers_are_address_words() {
+    fn pointers_are_address_scalars() {
         let db = DriverDataBase::default();
         let assumptions = PredicateListId::new(&db, Vec::new());
         let env = RuntimeTypeEnv::new(None, assumptions);
@@ -726,20 +712,29 @@ mod tests {
         let word_ptr_ptr_ty = TyId::ptr_to(&db, word_ptr_ty);
         let slot_ty = TyId::ptr_in(&db, AddressSpace::Storage, TyId::u256(&db));
 
-        for ty in [word_ptr_ty, word_ptr_ptr_ty, slot_ty] {
+        // A memory pointer is a pointer, and a storage pointer its slot.
+        let pointer = RuntimeClass::Scalar(pointer_class(&db, AddressSpace::Memory));
+        for (ty, class) in [
+            (word_ptr_ty, &pointer),
+            (word_ptr_ptr_ty, &pointer),
+            (slot_ty, &word),
+        ] {
             assert_eq!(
-                top_level_class_for_ty_in_env(&db, env, ty, AddressSpace::Memory),
-                Some(word.clone())
+                top_level_class_for_ty_in_env(&db, env, ty, AddressSpace::Memory).as_ref(),
+                Some(class)
             );
         }
-        let memory = RuntimeClass::raw_addr(&db, AddressSpace::Memory, word.clone());
         assert_eq!(
             deref_transport_class_in_env(&db, env, word_ptr_ty),
-            Some(memory.clone())
+            Some(RuntimeClass::raw_addr(
+                &db,
+                AddressSpace::Memory,
+                word.clone()
+            ))
         );
         assert_eq!(
             deref_transport_class_in_env(&db, env, word_ptr_ptr_ty),
-            Some(memory)
+            Some(RuntimeClass::raw_addr(&db, AddressSpace::Memory, pointer))
         );
         assert_eq!(
             deref_transport_class_in_env(&db, env, slot_ty),
@@ -880,14 +875,15 @@ fn shapes(_ a: *A, _ b: *B, _ odd: *Odd) {}
     }
 
     #[test]
-    fn recursive_pointer_fields_are_words() {
+    fn recursive_pointer_fields_are_pointers() {
         with_source(|db, top_mod| {
             let (ptr_ty, env) = param(db, top_mod, "first", 0);
             let node = deref_transport_class_in_env(db, env, ptr_ty)
                 .and_then(|transport| transport.deref_target(db))
                 .expect("pointer parameter");
             let word = stored_class_for_ty_in_env(db, env, TyId::u256(db));
-            assert_eq!(struct_fields(db, &node), vec![word.clone(), word]);
+            let pointer = RuntimeClass::Scalar(pointer_class(db, AddressSpace::Memory));
+            assert_eq!(struct_fields(db, &node), vec![word, pointer]);
         });
     }
 

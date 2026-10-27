@@ -18,6 +18,9 @@ pub use wasm_tests::{WasmTestModule, emit_test_wasm};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
+#[cfg(feature = "cranelift")]
+use lower_runtime::NativePanics;
+
 use common::ingot::Ingot;
 use driver::DriverDataBase;
 #[cfg(feature = "cranelift")]
@@ -29,8 +32,6 @@ use mir::{RuntimePackage, build_runtime_package, build_test_runtime_package};
 use mir::{RuntimeSectionName, build_native_executable_package, native_executable_entry};
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
-#[cfg(feature = "cranelift")]
-use smallvec1::smallvec;
 #[cfg(feature = "cranelift")]
 use sonatina_codegen::{Compile, isa::cranelift::CraneliftObjectBackend};
 use sonatina_codegen::{
@@ -55,11 +56,9 @@ use sonatina_ir::{
     builder::ModuleBuilder,
     func_cursor::InstInserter,
     inst::{
-        arith::{Add, Mul},
-        cast::{PtrToInt, Zext},
-        cmp::{Lt, Slt},
-        control_flow::{Br, Call, Jump, Phi, Return, Unreachable},
-        data::{Gep, MemAllocDynamic, Mload, Mstore, ObjAlloc, ObjStore},
+        cast::Bitcast,
+        control_flow::{Call, Return},
+        data::{ObjAlloc, ObjStore},
     },
     ir_writer::IrWrite,
     isa::{Isa, native::Native},
@@ -764,10 +763,11 @@ fn compile_executable_sonatina_native(
         .ok_or_else(|| LowerError::Internal("native package is missing its main section".into()))?
         .entry
         .instance(db);
-    let isa = match target {
-        NativeTarget::Host => create_native_isa()?,
+    // SP1 guests have no stderr; a failed execution is their report.
+    let (isa, panics) = match target {
+        NativeTarget::Host => (create_native_isa()?, NativePanics::Abort),
         #[cfg(feature = "sp1")]
-        NativeTarget::Sp1 => Native::new(TargetTriple::SP1),
+        NativeTarget::Sp1 => (Native::new(TargetTriple::SP1), NativePanics::Trap),
     };
     let (module, functions) = lower_runtime::compile_runtime_package_sonatina_for_isa(
         db,
@@ -775,6 +775,7 @@ fn compile_executable_sonatina_native(
         &isa,
         false,
         Some((entry, "main")),
+        panics,
     )?;
     let main = functions
         .get(&entry)
@@ -904,12 +905,13 @@ fn prepare_native_main(
         NativeTarget::Sp1 => "SP1 executable `main` must have signature `pub fn main() -> i32`",
     };
     let argc_ref = Type::I32.to_obj_ref(&module.ctx);
+    let byte_ptr = Type::I8.to_ptr(&module.ctx);
     let argc_by_ref = module.ctx.func_sig(main, |signature| {
         signature.args().first() == Some(&argc_ref)
     });
     module.ctx.func_sig(main, |signature| {
         let expected = if with_args {
-            vec![if argc_by_ref { argc_ref } else { Type::I32 }, Type::I256]
+            vec![if argc_by_ref { argc_ref } else { Type::I32 }, byte_ptr]
         } else {
             vec![]
         };
@@ -928,8 +930,8 @@ fn prepare_native_main(
         return Ok(module);
     }
 
-    // Preserve ordinary Fe calls to the entry. Only the exported C entry uses
-    // native pointer widths; Fe raw addresses continue to use the word ABI.
+    // Preserve ordinary Fe calls to the entry. The exported C entry takes the
+    // host's typed pointer vector, which is a `**u8` as Fe lays it out.
     let names = module
         .funcs()
         .into_iter()
@@ -944,7 +946,6 @@ fn prepare_native_main(
     });
     module.ctx.declared_funcs.insert(main, signature);
     let builder = ModuleBuilder::from_module(module);
-    let byte_ptr = builder.ptr_type(Type::I8);
     let argv_ptr = builder.ptr_type(byte_ptr);
     let wrapper = builder
         .declare_function(Signature::new_single(
@@ -958,44 +959,9 @@ fn prepare_native_main(
     let inst_set = isa.inst_set();
     let mut fb = builder.func_builder::<InstInserter>(wrapper);
     let entry = fb.append_block();
-    let invalid = fb.append_block();
-    let allocate = fb.append_block();
-    let copy = fb.append_block();
-    let invoke = fb.append_block();
     fb.switch_to_block(entry);
     let argc = fb.func.arg_values[0];
     let argv = fb.func.arg_values[1];
-    let zero_i32 = fb.make_imm_value(0i32);
-    let negative = fb.insert_inst(Slt::new(inst_set, argc, zero_i32), Type::I1);
-    fb.insert_inst_no_result(Br::new(inst_set, negative, invalid, allocate));
-    fb.switch_to_block(invalid);
-    fb.insert_inst_no_result(Unreachable::new(inst_set));
-    fb.switch_to_block(allocate);
-
-    // Convert the C pointer vector once at the host boundary. Fe pointer slots
-    // occupy a word, so passing the host table unchanged would break ordinary
-    // typed **u8 indexing. Preserve each string's address and the null sentinel.
-    let count = fb.insert_inst(Zext::new(inst_set, argc, Type::I64), Type::I64);
-    let one = fb.make_imm_value(1i64);
-    let count = fb.insert_inst(Add::new(inst_set, count, one), Type::I64);
-    let stride = fb.make_imm_value(32i64);
-    let size = fb.insert_inst(Mul::new(inst_set, count, stride), Type::I64);
-    let table_ty = builder.ptr_type(Type::I256);
-    let table = fb.insert_inst(MemAllocDynamic::new(inst_set, size), table_ty);
-    let zero = fb.make_imm_value(0i64);
-    fb.insert_inst_no_result(Jump::new(inst_set, copy));
-    fb.switch_to_block(copy);
-    let index = fb.insert_inst(Phi::new(inst_set, smallvec![(zero, allocate)]), Type::I64);
-    let source = fb.insert_inst(Gep::new(inst_set, vec![argv, index].into()), argv_ptr);
-    let pointer = fb.insert_inst(Mload::new(inst_set, source, byte_ptr), byte_ptr);
-    let word = fb.insert_inst(PtrToInt::new(inst_set, pointer, Type::I256), Type::I256);
-    let target = fb.insert_inst(Gep::new(inst_set, vec![table, index].into()), table_ty);
-    fb.insert_inst_no_result(Mstore::new(inst_set, target, word, Type::I256));
-    let next = fb.insert_inst(Add::new(inst_set, index, one), Type::I64);
-    fb.append_phi_arg(index, next, copy);
-    let more = fb.insert_inst(Lt::new(inst_set, next, count), Type::I1);
-    fb.insert_inst_no_result(Br::new(inst_set, more, copy, invoke));
-    fb.switch_to_block(invoke);
     let argc = if argc_by_ref {
         let object = fb.insert_inst(ObjAlloc::new(inst_set, Type::I32), argc_ref);
         fb.insert_inst_no_result(ObjStore::new(inst_set, object, argc));
@@ -1003,9 +969,9 @@ fn prepare_native_main(
     } else {
         argc
     };
-    let wide = fb.insert_inst(PtrToInt::new(inst_set, table, Type::I256), Type::I256);
+    let argv = fb.insert_inst(Bitcast::new(inst_set, argv, byte_ptr), byte_ptr);
     let result = fb.insert_inst(
-        Call::new(inst_set, main, vec![argc, wide].into()),
+        Call::new(inst_set, main, vec![argc, argv].into()),
         Type::I32,
     );
     fb.insert_inst_no_result(Return::new_single(inst_set, result));
@@ -2107,7 +2073,17 @@ pub fn emit_test_ingot_sonatina(
 mod tests {
     use super::*;
     use common::InputDb;
+    #[cfg(all(
+        feature = "cranelift",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    use common::compilation::Target;
     use driver::DriverDataBase;
+    #[cfg(all(
+        feature = "cranelift",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    use salsa::Setter;
     use std::{fs, path::PathBuf};
     use url::Url;
 
@@ -2122,6 +2098,9 @@ mod tests {
     ))]
     fn native_pointer_object_ir(name: &str, source: &str) -> String {
         let mut db = DriverDataBase::default();
+        db.compilation_settings()
+            .set_target(&mut db)
+            .to(Target::Native);
         let file = db
             .workspace()
             .touch(&mut db, temp_fixture_url(name), Some(source.to_string()));
@@ -2152,11 +2131,11 @@ mod tests {
         let ir = native_pointer_object_ir(
             "native_memzero.fe",
             r#"
-fn zero_buffer(ptr: *u8, len: u256) {
+fn zero_buffer(ptr: *u8, len: usize) {
     unsafe { core::ptr::zero_bytes(ptr, len) }
 }
 
-pub fn main(ptr: *u8, len: own u256) -> i32 {
+pub fn main(ptr: *u8, len: own usize) -> i32 {
     zero_buffer(ptr, len)
     0
 }

@@ -6,18 +6,18 @@
 //mock: fn host_ping() {}
 
 pub fn report(a: i32, b: i32) -> i32 {
-    host_ping()
-    host_note(1, a, b, 5000000000, -5000000000, a < b)
-    host_ping()
-    host_note(2, b, a, 0, a as i64, a == b)
-    host_ping()
+    unsafe { host_ping() }
+    unsafe { host_note(1, a, b, 5000000000, -5000000000, a < b) }
+    unsafe { host_ping() }
+    unsafe { host_note(2, b, a, 0, a as i64, a == b) }
+    unsafe { host_ping() }
     a + b
 }
 
 pub fn repeat(n: u32) -> u32 {
     var i: u32 = 0
     while i < n {
-        host_note(i, 0, 0, 0, 0, i % 2 == 0)
+        unsafe { host_note(i, 0, 0, 0, 0, i % 2 == 0) }
         i += 1
     }
     i

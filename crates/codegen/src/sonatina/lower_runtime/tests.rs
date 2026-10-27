@@ -1,4 +1,9 @@
 use common::InputDb;
+#[cfg(all(
+    feature = "cranelift",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+use common::compilation::Target;
 use contract_harness::{ExecutionOptions, RuntimeInstance as EvmRuntime};
 use driver::DriverDataBase;
 use mir::{
@@ -11,10 +16,15 @@ use mir::{
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 use mir::{RuntimeLinkage, build_native_executable_package};
+#[cfg(all(
+    feature = "cranelift",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+use salsa::Setter;
 use sonatina_ir::{builder::ModuleBuilder, isa::Isa, module::ModuleCtx};
 use url::Url;
 
-use super::{FunctionLowerer, ModuleLowerer};
+use super::{FunctionLowerer, ModuleLowerer, NativePanics};
 use crate::{
     OptLevel,
     sonatina::{create_evm_isa, emit_runtime_module_sonatina_bytecode_with_options},
@@ -27,6 +37,9 @@ use crate::{
 #[test]
 fn native_extern_cannot_claim_the_memory_copy_symbol() {
     let mut db = DriverDataBase::default();
+    db.compilation_settings()
+        .set_target(&mut db)
+        .to(Target::Native);
     let file = db.workspace().touch(
         &mut db,
         Url::parse("file:///native_memmove_extern_collision.fe").unwrap(),
@@ -59,6 +72,7 @@ pub fn main() -> i32 {
         isa.inst_set(),
         &package,
         Some((host_import.instance(&db), "memmove")),
+        NativePanics::Abort,
     );
     let error = lowerer
         .declare_functions()
@@ -66,7 +80,7 @@ pub fn main() -> i32 {
     assert!(
         error
             .to_string()
-            .contains("native extern symbol `memmove` is reserved for memory copies"),
+            .contains("native extern symbol `memmove` is reserved for the native runtime"),
         "unexpected error: {error}"
     );
 }
@@ -233,6 +247,7 @@ pub contract SlotContract {
             isa.inst_set(),
             &package,
             None,
+            NativePanics::Trap,
         );
         lowerer.declare_functions().unwrap();
         lowerer.lower_const_regions().unwrap();

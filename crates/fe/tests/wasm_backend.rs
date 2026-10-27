@@ -1034,7 +1034,7 @@ fn a_u256_parameter_is_a_named_error() {
 }
 
 #[test]
-fn an_i256_parameter_and_a_usize_parameter_are_named_errors() {
+fn an_i256_parameter_is_a_named_error() {
     rejected(
         "signed_wide",
         "pub fn f(a: u32, b: i256) -> u32 { a }\n",
@@ -1044,14 +1044,54 @@ fn an_i256_parameter_and_a_usize_parameter_are_named_errors() {
             "256-bit integer",
         ],
     );
-    rejected(
+}
+
+#[test]
+fn usize_is_a_32_bit_integer_of_the_module() {
+    let temp = tempdir().unwrap();
+    let source = write_source(
+        temp.path(),
         "usize_param",
-        "pub fn count(n: usize) -> u32 { 1 }\n",
-        &[
-            "cannot export `count`",
-            "parameter `n: usize`",
-            "256-bit integer",
-        ],
+        "pub fn double(n: usize) -> usize { n + n }\n",
+    );
+    let bytes = build_wasm(&source, "1", &temp.path().join("out"));
+    let module = Module::new(engine(), &bytes).unwrap();
+    let export = module
+        .exports()
+        .find(|export| export.name() == "double")
+        .unwrap();
+    let signature = export.ty().unwrap_func().clone();
+    assert_eq!(
+        signature
+            .params()
+            .map(|ty| ty.to_string())
+            .collect::<Vec<_>>(),
+        ["i32"]
+    );
+    assert_eq!(
+        signature
+            .results()
+            .map(|ty| ty.to_string())
+            .collect::<Vec<_>>(),
+        ["i32"]
+    );
+    let mut running = Running::new(&bytes);
+    let double = running
+        .instance
+        .get_func(&mut running.store, "double")
+        .unwrap();
+    let mut result = [Val::I32(0)];
+    double
+        .call(&mut running.store, &[Val::I32(21)], &mut result)
+        .unwrap();
+    assert_eq!(result[0].unwrap_i32(), 42);
+    // The sum of 2^31 and itself does not fit 32 bits.
+    let trap = double
+        .call(&mut running.store, &[Val::I32(i32::MIN)], &mut result)
+        .unwrap_err();
+    assert_eq!(
+        trap.downcast_ref::<Trap>(),
+        Some(&Trap::UnreachableCodeReached)
     );
 }
 

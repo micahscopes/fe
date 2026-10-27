@@ -13,10 +13,11 @@ use crate::{
 };
 use bitflags::bitflags;
 use common::{
+    compilation::Target,
     indexmap::IndexSet,
     ingot::{Ingot, IngotKind},
 };
-use num_bigint::BigInt;
+use num_bigint::{BigInt, BigUint};
 use num_traits::ToPrimitive;
 use ruint::aliases::U256;
 use rustc_hash::FxHashSet;
@@ -515,6 +516,10 @@ impl<'db> TyId<'db> {
         Self::new(db, TyData::TyBase(TyBase::Prim(PrimTy::U256)))
     }
 
+    pub fn usize(db: &'db dyn HirAnalysisDb) -> Self {
+        Self::new(db, TyData::TyBase(TyBase::Prim(PrimTy::Usize)))
+    }
+
     pub(super) fn array(db: &'db dyn HirAnalysisDb, elem: TyId<'db>) -> Self {
         let base = TyBase::Prim(PrimTy::Array);
         let array = Self::new(db, TyData::TyBase(base));
@@ -810,7 +815,14 @@ impl<'db> TyId<'db> {
     }
 
     pub fn is_prim(self, db: &dyn HirAnalysisDb) -> bool {
-        matches!(self.base_ty(db).data(db), TyData::TyBase(TyBase::Prim(_)))
+        self.as_prim(db).is_some()
+    }
+
+    pub fn as_prim(self, db: &dyn HirAnalysisDb) -> Option<PrimTy> {
+        match self.base_ty(db).data(db) {
+            TyData::TyBase(TyBase::Prim(prim)) => Some(*prim),
+            _ => None,
+        }
     }
 
     pub fn is_unit_variant_only_enum(self, db: &'db dyn HirAnalysisDb) -> bool {
@@ -2451,8 +2463,9 @@ impl PrimTy {
     }
 }
 
-/// Returns the width (in bits) for the given primitive integer type, or `None` when unknown.
-pub fn prim_int_bits(prim: PrimTy) -> Option<usize> {
+/// The width in bits of a primitive integer type on `target`, or `None` for
+/// any other type.
+pub fn prim_int_bits(prim: PrimTy, target: Target) -> Option<usize> {
     use PrimTy::*;
     match prim {
         U8 | I8 => Some(8),
@@ -2460,9 +2473,29 @@ pub fn prim_int_bits(prim: PrimTy) -> Option<usize> {
         U32 | I32 => Some(32),
         U64 | I64 => Some(64),
         U128 | I128 => Some(128),
-        U256 | I256 | Usize | Isize => Some(256),
+        U256 | I256 => Some(256),
+        Usize | Isize => Some(target.usize_bits()),
         _ => None,
     }
+}
+
+/// Whether the primitive integer type `prim` holds the literal `value`, or
+/// `-value` if `negated`, on every target.
+pub fn int_literal_fits_prim(prim: PrimTy, value: &BigUint, negated: bool) -> bool {
+    Target::ALL.into_iter().all(|target| {
+        prim_int_bits(prim, target).is_some_and(|bits| {
+            if prim.is_signed_int() {
+                let min_magnitude = BigUint::from(1u8) << (bits - 1);
+                if negated {
+                    value <= &min_magnitude
+                } else {
+                    value < &min_magnitude
+                }
+            } else {
+                !negated && value.bits() <= bits as u64
+            }
+        })
+    })
 }
 
 pub(super) trait HasKind {

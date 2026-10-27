@@ -65,8 +65,14 @@ pub fn emit_test_wasm(
     };
 
     let isa = create_wasm32_isa();
-    let (module, functions) =
-        lower_runtime::compile_runtime_package_sonatina_for_isa(db, &package, &isa, false, None)?;
+    let (module, functions) = lower_runtime::compile_runtime_package_sonatina_for_isa(
+        db,
+        &package,
+        &isa,
+        false,
+        None,
+        lower_runtime::NativePanics::Trap,
+    )?;
     let entry = functions[instance];
     let symbol = module.ctx.func_sig(entry, |signature| {
         if !signature.args().is_empty() || !signature.ret_tys().is_empty() {

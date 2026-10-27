@@ -8,5 +8,5 @@ pub fn double(x: i32) -> i32 {
 }
 
 fn helper(x: i32) -> i32 {
-    never_called(x)
+    unsafe { never_called(x) }
 }

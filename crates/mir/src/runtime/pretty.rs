@@ -632,6 +632,7 @@ fn format_terminator<'db>(db: &'db dyn MirDb, term: &RTerminator<'db>) -> String
             format_local_id(*len)
         ),
         RTerminator::RevertEmpty => "revert_empty".to_string(),
+        RTerminator::Panic { code } => format!("panic {}", format_local_id(*code)),
         RTerminator::SelfDestruct { beneficiary } => {
             format!("selfdestruct {}", format_local_id(*beneficiary))
         }
@@ -757,6 +758,9 @@ fn format_builtin<'db>(db: &'db dyn MirDb, builtin: &RuntimeBuiltin<'db>) -> Str
         RuntimeBuiltin::LeadingZeros { value } => {
             format!("leading_zeros {}", format_local_id(*value))
         }
+        RuntimeBuiltin::SwapBytes { value } => {
+            format!("swap_bytes {}", format_local_id(*value))
+        }
         RuntimeBuiltin::BlackBox { value } => {
             format!("black_box {}", format_local_id(*value))
         }
@@ -808,9 +812,8 @@ fn format_builtin<'db>(db: &'db dyn MirDb, builtin: &RuntimeBuiltin<'db>) -> Str
         RuntimeBuiltin::CodeRegionOffset { region } => format!("code_region_offset {region:?}"),
         RuntimeBuiltin::CodeRegionLen { region } => format!("code_region_len {region:?}"),
         RuntimeBuiltin::Malloc { size } => format!("malloc {}", format_local_id(*size)),
-        RuntimeBuiltin::NativePtrIsNull { ptr } => {
-            format!("native_ptr_is_null {}", format_local_id(*ptr))
-        }
+        RuntimeBuiltin::TryMalloc { size } => format!("try_malloc {}", format_local_id(*size)),
+        RuntimeBuiltin::Free { ptr } => format!("free {}", format_local_id(*ptr)),
         RuntimeBuiltin::PtrOffsetBytes { ptr, offset } => format!(
             "ptr_offset_bytes {}, {}",
             format_local_id(*ptr),
@@ -1022,6 +1025,7 @@ fn format_scalar_class<'db>(db: &'db dyn MirDb, class: &ScalarClass<'db>) -> Str
         ScalarRole::EnumTag { enum_layout } => {
             format!("{repr}<tag {}>", format_layout(db, *enum_layout))
         }
+        ScalarRole::Pointer => format!("{repr}<ptr>"),
     }
 }
 

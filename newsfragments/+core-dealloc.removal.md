@@ -1,0 +1,1 @@
+On native targets, `extern` declarations named `malloc` or `free` are rejected, as `memmove` already was: allocate with `core::ptr::try_alloc_bytes`, release with `core::ptr::dealloc`, and test a pointer for null with `ptr as u256 == 0`.

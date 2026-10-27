@@ -9,13 +9,13 @@
 //mock: fn host_zero() -> i32 { 0 }
 
 pub fn product(a: i32, b: i32) -> i32 {
-    host_mul(a, b)
+    unsafe { host_mul(a, b) }
 }
 
 pub fn negated(a: i64) -> i64 {
-    host_neg(a)
+    unsafe { host_neg(a) }
 }
 
 pub fn combined(a: i32, b: i32, c: i32) -> i32 {
-    host_mul(host_mul(a, b), c) + host_zero()
+    unsafe { host_mul(host_mul(a, b), c) + host_zero() }
 }
