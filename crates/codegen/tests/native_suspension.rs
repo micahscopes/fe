@@ -100,6 +100,64 @@ fn entry(_ native: own Native) -> u64 {
 }
 "#;
 
+// Sleeps twice for the duration the driver sets in SEED before the task
+// starts, and keeps both that duration and a constant across the cuts. A sleep
+// succeeds with 0, so a finished task returns 7 plus its duration.
+const SLEEPS: &str = r#"
+use core::task::Timer
+fn entry(_ native: own Native) -> u64 {
+    var cap = native
+    let milliseconds: u64 = unsafe { native_task_seed() }
+    let first = cap.sleep_begin(milliseconds)
+    let kept: u64 = 7
+    let subtotal = match cap.suspend(first) {
+        TaskOutcome::Success(value) => kept + value
+        TaskOutcome::Failure(error) => error
+        TaskOutcome::Cancelled => 0
+    }
+    let second = cap.sleep_begin(milliseconds)
+    match cap.suspend(second) {
+        TaskOutcome::Success(value) => subtotal + value + milliseconds
+        TaskOutcome::Failure(error) => error
+        TaskOutcome::Cancelled => 0
+    }
+}
+"#;
+
+// Driver helpers for the sleep tests. The expected sequences are written out
+// in each test, and each scenario is replayed on a fresh broker.
+const SLEEP_HELPERS: &str = r#"
+fn brief(steps: &[runtime::Step]) -> Vec<(usize, String)> {
+    steps.iter().map(|step| (step.task.index(), match step.result {
+        Ok(Progress::Suspended(_)) => "suspended".to_string(),
+        Ok(Progress::Cancelling) => "cancelling".to_string(),
+        Ok(Progress::Complete { value, cancelled }) => format!("complete {value} {cancelled}"),
+        Err(error) => format!("{error:?}"),
+    })).collect()
+}
+fn expected(steps: &[(usize, &str)]) -> Vec<(usize, String)> {
+    steps.iter().map(|(task, step)| (*task, step.to_string())).collect()
+}
+fn start(broker: &mut runtime::Broker<()>, code: &Rc<NativeCode<()>>, milliseconds: u64, steps: &mut Vec<runtime::Step>) -> runtime::TaskId {
+    SEED.set(milliseconds);
+    let id = broker.spawn(code.clone()).unwrap();
+    steps.extend(broker.run(100));
+    id
+}
+fn wake(broker: &mut runtime::Broker<()>, milliseconds: u64, steps: &mut Vec<runtime::Step>, woken: &mut Vec<Vec<usize>>) {
+    woken.push(broker.advance(milliseconds).unwrap().iter().map(|id| id.index()).collect());
+    steps.extend(broker.run(100));
+}
+fn all_released(broker: &runtime::Broker<()>, ids: &[runtime::TaskId]) {
+    assert!(broker.is_idle());
+    assert_eq!(broker.sleeping(), 0);
+    for id in ids {
+        assert_eq!(broker.retains_frame(*id), Some(false));
+        assert_eq!(broker.registrations(*id), Some(0));
+    }
+}
+"#;
+
 fn execute(name: &str, source: &str, checks: &str, invalid_tag: bool) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = std::path::PathBuf::from(option_env!("CARGO_TARGET_TMPDIR").unwrap_or("/tmp")).join(
@@ -368,4 +426,100 @@ assert_eq!(scenario(&code), expected);
 "#,
         false,
     );
+}
+
+#[test]
+fn emitted_sleep_completes_when_the_scripted_clock_reaches_its_deadline() {
+    // One task sleeps 30 ms twice. The second deadline counts from the clock
+    // when the second sleep began (30), so it falls at 60.
+    let checks = format!(
+        "{SLEEP_HELPERS}{}",
+        r#"
+fn scenario(code: &Rc<NativeCode<()>>) -> (Vec<(usize, String)>, Vec<Vec<usize>>) {
+    let (mut steps, mut woken) = (Vec::new(), Vec::new());
+    let mut broker = runtime::Broker::new().unwrap();
+    let id = start(&mut broker, code, 30, &mut steps);
+    assert_eq!((broker.now(), broker.sleeping()), (0, 1));
+    for milliseconds in [29, 1, 29, 1] {
+        wake(&mut broker, milliseconds, &mut steps, &mut woken);
+    }
+    assert_eq!(broker.now(), 60);
+    all_released(&broker, &[id]);
+    (brief(&steps), woken)
+}
+let steps = expected(&[(0, "suspended"), (0, "suspended"), (0, "complete 37 false")]);
+let woken = vec![vec![], vec![0], vec![], vec![0]];
+assert_eq!(scenario(&code), (steps.clone(), woken.clone()));
+assert_eq!(scenario(&code), (steps, woken));
+"#
+    );
+    execute("sleep-clock", SLEEPS, &checks, false);
+}
+
+#[test]
+fn emitted_sleeps_complete_in_deadline_order_and_ties_in_start_order() {
+    // Task 0 starts first and sleeps longest. Tasks 1 and 2 have equal
+    // deadlines, so task 1, which began first, wakes first.
+    let checks = format!(
+        "{SLEEP_HELPERS}{}",
+        r#"
+fn scenario(code: &Rc<NativeCode<()>>) -> (Vec<(usize, String)>, Vec<Vec<usize>>) {
+    let (mut steps, mut woken) = (Vec::new(), Vec::new());
+    let mut broker = runtime::Broker::new().unwrap();
+    let ids: Vec<_> = [50, 20, 20].iter().map(|ms| start(&mut broker, code, *ms, &mut steps)).collect();
+    // One advance passes all three first deadlines (50, 20, 20).
+    wake(&mut broker, 50, &mut steps, &mut woken);
+    // The second sleeps began at 50, so they fall at 100, 70 and 70.
+    wake(&mut broker, 20, &mut steps, &mut woken);
+    wake(&mut broker, 30, &mut steps, &mut woken);
+    all_released(&broker, &ids);
+    (brief(&steps), woken)
+}
+let steps = expected(&[
+    (0, "suspended"), (1, "suspended"), (2, "suspended"),
+    (1, "suspended"), (2, "suspended"), (0, "suspended"),
+    (1, "complete 27 false"), (2, "complete 27 false"),
+    (0, "complete 57 false"),
+]);
+let woken = vec![vec![1, 2, 0], vec![1, 2], vec![0]];
+assert_eq!(scenario(&code), (steps.clone(), woken.clone()));
+assert_eq!(scenario(&code), (steps, woken));
+"#
+    );
+    execute("sleep-order", SLEEPS, &checks, false);
+}
+
+#[test]
+fn emitted_cancelled_sleeping_task_never_completes_its_sleep() {
+    // Task 0 is cancelled while it sleeps. Its cleanup begins a second sleep,
+    // which is not registered, and the clock later passes both deadlines
+    // without waking it.
+    let checks = format!(
+        "{SLEEP_HELPERS}{}",
+        r#"
+fn scenario(code: &Rc<NativeCode<()>>) -> (Vec<(usize, String)>, Vec<Vec<usize>>) {
+    let (mut steps, mut woken) = (Vec::new(), Vec::new());
+    let mut broker = runtime::Broker::new().unwrap();
+    let ids: Vec<_> = [40, 40].iter().map(|ms| start(&mut broker, code, *ms, &mut steps)).collect();
+    assert_eq!(broker.sleeping(), 2);
+    assert!(broker.cancel(ids[0]));
+    assert_eq!(broker.sleeping(), 1);
+    steps.extend(broker.run(100));
+    assert_eq!(broker.sleeping(), 1);
+    wake(&mut broker, 40, &mut steps, &mut woken);
+    wake(&mut broker, 40, &mut steps, &mut woken);
+    all_released(&broker, &ids);
+    (brief(&steps), woken)
+}
+let steps = expected(&[
+    (0, "suspended"), (1, "suspended"),
+    (0, "cancelling"), (0, "complete 0 true"),
+    (1, "suspended"), (1, "complete 47 false"),
+]);
+let woken = vec![vec![1], vec![1]];
+assert_eq!(scenario(&code), (steps.clone(), woken.clone()));
+assert_eq!(scenario(&code), (steps, woken));
+"#
+    );
+    execute("sleep-cancel", SLEEPS, &checks, false);
 }
