@@ -209,6 +209,7 @@ pub fn constraints_for<'db>(
             trait_self_predicate(db, t),
         ),
         ItemKind::ImplTrait(i) => collect_constraints(db, i.into()).instantiate_identity(),
+        ItemKind::TypeFn(def) => collect_constraints(db, def.into()).instantiate_identity(),
         _ => PredicateListId::empty_list(db),
     }
 }
@@ -1620,6 +1621,9 @@ impl<'db> FuncParamView<'db> {
             && !expected.has_invalid(db)
         {
             let ty_norm = normalize_ty(db, ty, func.scope(), assumptions);
+            // Compare like with like: a computed target reads as what it
+            // computes, as `self: Self` does.
+            let expected = normalize_ty(db, expected, func.scope(), assumptions);
 
             let matches_expected = |candidate: TyId<'db>| {
                 let (exp_base, exp_args) = expected.decompose_ty_app(db);
@@ -3473,6 +3477,7 @@ impl<'db> WhereClauseView<'db> {
             WhereClauseOwner::Func(f) => f.span().where_clause(),
             WhereClauseOwner::Struct(s) => s.span().where_clause(),
             WhereClauseOwner::Enum(e) => e.span().where_clause(),
+            WhereClauseOwner::TypeFn(def) => def.span().where_clause(),
             WhereClauseOwner::Impl(i) => i.span().where_clause(),
             WhereClauseOwner::Trait(t) => t.span().where_clause(),
             WhereClauseOwner::ImplTrait(i) => i.span().where_clause(),
@@ -4804,7 +4809,8 @@ impl<'db> ImplTrait<'db> {
             | TyBase::Func(_)
             | TyBase::Closure(_)
             | TyBase::TraitDescriptor(_)
-            | TyBase::Shape(_) => false,
+            | TyBase::Shape(_)
+            | TyBase::TypeFn(_) => false,
         })
     }
 

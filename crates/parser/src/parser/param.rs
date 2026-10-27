@@ -406,7 +406,9 @@ impl super::Parse for TypeBoundScope {
     }
 }
 
-fn parse_kind_bound<S: TokenStream>(parser: &mut Parser<S>) -> Result<(), Recovery<ErrProof>> {
+pub(super) fn parse_kind_bound<S: TokenStream>(
+    parser: &mut Parser<S>,
+) -> Result<(), Recovery<ErrProof>> {
     let checkpoint = parser.checkpoint();
     let is_newline_trivia = parser.set_newline_as_trivia(false);
 

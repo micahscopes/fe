@@ -48,11 +48,13 @@ pub fn semantic_tokens_options() -> SemanticTokensServerCapabilities {
 fn item_kind_to_token_type(item: ItemKind) -> Option<u32> {
     match item {
         ItemKind::TopMod(_) | ItemKind::Mod(_) => Some(0), // namespace
-        ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::TypeAlias(_) => Some(1), // type
-        ItemKind::Func(_) => Some(2),                      // function
-        ItemKind::Const(_) => Some(3),                     // variable (constants are variables)
+        ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::TypeAlias(_) | ItemKind::TypeFn(_) => {
+            Some(1) // type
+        }
+        ItemKind::Func(_) => Some(2),  // function
+        ItemKind::Const(_) => Some(3), // variable (constants are variables)
         ItemKind::Trait(_) | ItemKind::Impl(_) | ItemKind::ImplTrait(_) => Some(1), // type
-        ItemKind::Contract(_) => Some(1),                  // type
+        ItemKind::Contract(_) => Some(1), // type
         _ => None,
     }
 }

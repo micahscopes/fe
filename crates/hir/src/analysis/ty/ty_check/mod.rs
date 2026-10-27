@@ -1309,6 +1309,21 @@ pub(crate) fn inference_met_lowering_cycle<'db>(
     )
 }
 
+/// Whether inference of a body met a recursive type fn application whose
+/// computation needs its own result. Evaluating such a body is part of that
+/// computation, so it depends on itself.
+pub(crate) fn inference_met_computed_type_cycle<'db>(
+    db: &'db dyn HirAnalysisDb,
+    (_, typed_body): &(Vec<FuncBodyDiag<'db>>, TypedBody<'db>),
+) -> bool {
+    typed_body.body().is_some_and(|body| {
+        body.exprs(db).iter().any(|(expr, _)| {
+            crate::analysis::ty::ty_error::first_invalid_ty_cause(db, typed_body.expr_ty(db, expr))
+                == Some(InvalidCause::ComputedTypeCycle)
+        })
+    })
+}
+
 /// Forces evaluation of a const item's value and reports failures
 /// (unknowable values, recursion, arithmetic errors). This is deliberately a
 /// separate query from `check_const_body`: forcing evaluates *other* consts
@@ -2410,6 +2425,15 @@ impl<'db> TyChecker<'db> {
                     .bound(bound_idx)
                     .trait_bound()
                     .into(),
+                GenericParamOwner::TypeFn(type_fn) => type_fn
+                    .span()
+                    .generic_params()
+                    .param(param_idx)
+                    .into_type_param()
+                    .bounds()
+                    .bound(bound_idx)
+                    .trait_bound()
+                    .into(),
                 GenericParamOwner::Impl(impl_) => impl_
                     .span()
                     .generic_params()
@@ -2460,6 +2484,14 @@ impl<'db> TyChecker<'db> {
                     .trait_bound()
                     .into(),
                 WhereClauseOwner::Enum(enum_) => enum_
+                    .span()
+                    .where_clause()
+                    .predicate(pred_idx)
+                    .bounds()
+                    .bound(bound_idx)
+                    .trait_bound()
+                    .into(),
+                WhereClauseOwner::TypeFn(type_fn) => type_fn
                     .span()
                     .where_clause()
                     .predicate(pred_idx)

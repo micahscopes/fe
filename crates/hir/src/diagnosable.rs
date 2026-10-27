@@ -764,6 +764,12 @@ impl<'db> Impl<'db> {
         use ty::diagnostics::ImplDiag;
 
         let mut out = self.ty_errors(db);
+        // A computed application is the type it unfolds to, so methods belong
+        // on that type; see `type_fn::impl_header_diagnostic`.
+        if out.is_empty() && ty::type_fn::contains_computed_application(db, self.ty(db)) {
+            out.push(TyLowerDiag::ComputedTypeImplHeader(self.span().target_ty().into()).into());
+            return out;
+        }
         match self.inherent_impl_admissibility(db) {
             InherentImplAdmissibility::Admissible { .. } => {}
             InherentImplAdmissibility::NotAllowed { ty, is_nominal } => {
@@ -2262,6 +2268,9 @@ impl<'db> Diagnosable<'db> for ImplTrait<'db> {
     type Diagnostic = TyDiagCollection<'db>;
 
     fn diags(self, db: &'db dyn HirAnalysisDb) -> Vec<Self::Diagnostic> {
+        if let Some(diag) = ty::type_fn::impl_header_diagnostic(db, self) {
+            return vec![diag];
+        }
         let mut out = self.diags_header_trait_ref_args(db);
 
         // Early path/domain/WF checks; bail out on errors to avoid noisy follow-ups

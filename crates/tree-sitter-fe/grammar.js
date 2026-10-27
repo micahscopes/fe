@@ -36,6 +36,10 @@ module.exports = grammar({
     $._generic_open,
     $._comparison_lt,
     $._quote_keyword,
+    // `recursive` is contextual: the scanner reports it only before `type`,
+    // where the compiler reads it as a keyword, so elsewhere it is an
+    // ordinary identifier.
+    $._recursive_keyword,
   ],
 
   word: $ => $.identifier,
@@ -127,6 +131,7 @@ module.exports = grammar({
       $.impl_block,
       $.impl_trait,
       $.type_alias,
+      $.type_function_definition,
       $.mod_definition,
       $.extern_block,
     ),
@@ -599,6 +604,40 @@ module.exports = grammar({
       optional($.generic_param_list),
       '=',
       field('type', $._type),
+    ),
+
+    // Recursive type function:
+    //   recursive type fn Tree<T, const N: usize>() -> * { match N { 0 => T, _ => .. } }
+    type_function_definition: $ => seq(
+      optional($.attribute_list),
+      optional($.visibility),
+      alias($._recursive_keyword, 'recursive'),
+      'type',
+      'fn',
+      field('name', $.identifier),
+      optional($.generic_param_list),
+      // Reserved for value inputs; it must be empty.
+      '(',
+      ')',
+      '->',
+      field('return_kind', $.kind_bound),
+      optional($.where_clause),
+      field('body', seq('{', $.type_function_match, '}')),
+    ),
+
+    type_function_match: $ => seq(
+      'match',
+      field('subject', $.identifier),
+      '{',
+      repeat($.type_function_arm),
+      '}',
+    ),
+
+    type_function_arm: $ => seq(
+      field('pattern', choice($.integer_literal, '_')),
+      '=>',
+      field('type', $._type),
+      optional(','),
     ),
 
     // Module definition

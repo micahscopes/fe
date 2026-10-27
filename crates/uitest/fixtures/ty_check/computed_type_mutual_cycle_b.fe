@@ -1,0 +1,19 @@
+// The items of computed_type_mutual_cycle_a.fe in the other declaration
+// order; both report the same errors.
+struct Cell<const N: u256> {}
+const fn size_alpha() -> u256 { core::size_of<Alpha<0>>() }
+const fn size_beta() -> u256 { core::size_of<Beta<0>>() }
+recursive type fn Beta<const N: usize>() -> (*) {
+    match N {
+        0 => Cell<{size_alpha()}>
+        _ => Beta<{N - 1}>
+    }
+}
+recursive type fn Alpha<const N: usize>() -> (*) {
+    match N {
+        0 => Cell<{size_beta()}>
+        _ => Alpha<{N - 1}>
+    }
+}
+fn use_beta(x: own Beta<0>) {}
+fn use_alpha(x: own Alpha<0>) {}

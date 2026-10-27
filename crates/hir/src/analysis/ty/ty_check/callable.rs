@@ -42,7 +42,7 @@ use crate::analysis::{
             BorrowKind, InvalidCause, Kind, ShapeCon, StringFallback, TyBase, TyData, TyFlags,
             TyId, TyVarSort,
         },
-        ty_error::emit_invalid_ty_error,
+        ty_error::{emit_invalid_ty_error, normalization_limit_diag},
         ty_lower::{CompleteSubst, collect_generic_params, lower_generic_arg_list},
         visitor::{TyVisitable, TyVisitor, collect_flags},
     },
@@ -776,6 +776,20 @@ impl<'db> Callable<'db> {
             args,
             CallGenericArgPhase::Check,
             |tc, idx, given, current| {
+                // An explicit argument is a written type: a computed type in it
+                // that cannot be unfolded is reported here, not accepted as any
+                // type.
+                if crate::analysis::ty::type_fn::contains_computed_application(tc.db, given)
+                    && let Some(diag) = normalization_limit_diag(
+                        tc.db,
+                        given,
+                        tc.env.scope(),
+                        tc.env.assumptions(),
+                        span.clone().arg(idx).into(),
+                    )
+                {
+                    tc.push_diag(diag);
+                }
                 *current = tc.equate_ty(given, *current, span.clone().arg(idx).into());
                 true
             },

@@ -845,9 +845,12 @@ impl<'db> TyChecker<'db> {
             (None, None, TyId::unit(self.db), false)
         };
 
+        // The declared type can be a projection or a computed type, which the
+        // returned value's type already resolves.
+        let expected = self.normalize_ty(self.expected);
         let ret_ty_ok = !had_child_err
             && !returned_ty.has_invalid(self.db)
-            && self.table.unify(returned_ty, self.expected).is_ok();
+            && self.table.unify(returned_ty, expected).is_ok();
 
         if !had_child_err && !returned_ty.has_invalid(self.db) && !ret_ty_ok {
             let func = self.env.func();

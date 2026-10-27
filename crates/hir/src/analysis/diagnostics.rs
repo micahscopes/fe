@@ -71,6 +71,10 @@ fn pretty_print_ty_for_mismatch<'db>(db: &'db dyn SpannedHirAnalysisDb, ty: TyId
                     .scope()
                     .pretty_path(db)
                     .unwrap_or_else(|| ty.pretty_print(db).to_string()),
+                TyBase::TypeFn(def) => def
+                    .scope()
+                    .pretty_path(db)
+                    .unwrap_or_else(|| ty.pretty_print(db).to_string()),
                 TyBase::Prim(_)
                 | TyBase::Func(_)
                 | TyBase::Closure(_)
@@ -2272,6 +2276,7 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 match revealed_by {
                     RevealedBy::AppliedDefault => "in a default this reference applies",
                     RevealedBy::Evaluation => "while evaluating this",
+                    RevealedBy::ComputedType => "while computing this type",
                 },
                 site,
                 error_code,
@@ -2710,7 +2715,31 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
             Self::TypeNormalizationLimit(span) => primary_diag(
                 Severity::Error,
                 "type normalization limit exceeded",
-                "the associated types here cannot be resolved within the limit",
+                "the types here cannot be resolved within the limit",
+                span.resolve(db),
+                error_code,
+            ),
+
+            Self::ComputedTypeCycle(span) => primary_diag(
+                Severity::Error,
+                "computed type depends on itself",
+                "computing this type requires its own result",
+                span.resolve(db),
+                error_code,
+            ),
+
+            Self::ComputedTypeDeclaration { span, error } => primary_diag(
+                Severity::Error,
+                "invalid recursive type function declaration",
+                error.message(),
+                span.resolve(db),
+                error_code,
+            ),
+
+            Self::ComputedTypeImplHeader(span) => primary_diag(
+                Severity::Error,
+                "computed types are not allowed in implementation headers",
+                "implement the trait for the type it computes instead",
                 span.resolve(db),
                 error_code,
             ),

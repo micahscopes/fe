@@ -384,7 +384,7 @@ fn readable_type_component<'db>(db: &'db DriverDataBase, ty: TyId<'db>) -> Optio
             let component = base.pretty_print(db).to_string();
             (!component.is_empty()).then_some(component)
         }
-        TyData::TyBase(TyBase::Shape(_))
+        TyData::TyBase(TyBase::Shape(_) | TyBase::TypeFn(_))
         | TyData::AssocTy(_)
         | TyData::ConstTy(_)
         | TyData::Never

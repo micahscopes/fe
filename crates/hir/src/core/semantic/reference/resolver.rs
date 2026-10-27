@@ -13,7 +13,7 @@ use crate::{
     analysis::HirAnalysisDb,
     hir_def::{
         Body, Const, Contract, Enum, Func, Impl, ImplTrait, ItemKind, StaticAssert, Struct, Trait,
-        TypeAlias, Use, scope_graph::ScopeId,
+        TypeAlias, TypeFnDef, Use, scope_graph::ScopeId,
     },
     span::DynLazySpan,
 };
@@ -24,7 +24,7 @@ use super::{
         body_references, const_references, contract_references, enum_references,
         func_signature_references, impl_references, impl_trait_references,
         static_assert_references, struct_references, trait_references, type_alias_references,
-        use_references,
+        type_fn_references, use_references,
     },
 };
 
@@ -156,6 +156,14 @@ pub fn resolved_type_alias_scope_targets<'db>(
 }
 
 #[salsa::tracked]
+pub fn resolved_type_fn_scope_targets<'db>(
+    db: &'db dyn HirAnalysisDb,
+    type_fn: TypeFnDef<'db>,
+) -> Vec<ResolvedScopeTarget<'db>> {
+    resolve_references(db, type_fn_references(db, type_fn))
+}
+
+#[salsa::tracked]
 pub fn resolved_impl_scope_targets<'db>(
     db: &'db dyn HirAnalysisDb,
     impl_: Impl<'db>,
@@ -225,6 +233,7 @@ pub fn resolved_item_scope_targets<'db>(
         ItemKind::Struct(s) => resolved_struct_scope_targets(db, s),
         ItemKind::Enum(e) => resolved_enum_scope_targets(db, e),
         ItemKind::TypeAlias(a) => resolved_type_alias_scope_targets(db, a),
+        ItemKind::TypeFn(def) => resolved_type_fn_scope_targets(db, def),
         ItemKind::Impl(i) => resolved_impl_scope_targets(db, i),
         ItemKind::Trait(t) => resolved_trait_scope_targets(db, t),
         ItemKind::ImplTrait(it) => resolved_impl_trait_scope_targets(db, it),
