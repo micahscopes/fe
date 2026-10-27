@@ -554,7 +554,7 @@ func private %downcast_unchecked(v0.i256) -> i256 {
         return v3;
 }
 
-func private %encode(v0.i256, v1.@layout_5) {
+func inline(always) private %encode(v0.i256, v1.@layout_5) {
     block0:
         jump block1;
 

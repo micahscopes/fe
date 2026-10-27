@@ -1341,8 +1341,9 @@ fn build_error(source: &str) -> String {
 
 #[test]
 fn imports_that_are_not_scalar_are_named_errors() {
-    let wide =
-        build_error("extern { fn h(_ a: u256) -> i32 }\npub fn run(x: i32) -> i32 { unsafe { h(1) } }\n");
+    let wide = build_error(
+        "extern { fn h(_ a: u256) -> i32 }\npub fn run(x: i32) -> i32 { unsafe { h(1) } }\n",
+    );
     assert!(
         wide.contains(
             "cannot import `h` from the WebAssembly host: parameter `a: u256` is a 256-bit integer; imports take only `bool` and integers of at most 64 bits"

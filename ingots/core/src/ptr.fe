@@ -1,7 +1,7 @@
 use super::intrinsic::size_of
 use super::marker::{Clearable, Copy}
 use super::mem::{drop, forget, needs_drop}
-use super::num::{from_be, to_be}
+use super::num::{Bounded, IntDowncast, from_be, to_be}
 use super::option::Option
 use super::ops::{Drop, Eq, Index, Len, WrappingAdd, WrappingMul, WrappingSub}
 use super::result::Result
@@ -1154,8 +1154,9 @@ pub fn alloc<T>() -> *T {
     cast<u8, T>(alloc_bytes(size_of<T>()))
 }
 
-/// The largest allocation, as Solidity's.
-pub(ingot) const MAX_ALLOCATION: usize = 0xffffffffffffffff
+/// The largest allocation: the Solidity bound of `2**64 - 1`, or the largest
+/// `usize` where the address space is narrower (WebAssembly).
+pub(ingot) const MAX_ALLOCATION: usize = u64::max().downcast_saturate()
 
 /// Allocates `len` bytes, without initializing them. Reverts with
 /// `Panic(0x41)` above `2**64 - 1` bytes, like Solidity: an allocation is not

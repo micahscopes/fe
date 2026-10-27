@@ -757,7 +757,7 @@ func inline(always) private %encode_alloc(v0.@layout_0) -> @layout_1 {
         return v4;
 }
 
-func private %encode__gf13e(v0.i256, v1.@layout_3) {
+func inline(always) private %encode__gf13e(v0.i256, v1.@layout_3) {
     block0:
         jump block1;
 

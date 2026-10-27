@@ -504,13 +504,13 @@ impl<'db, 'a, I: LoweringInstSet + 'static> ModuleLowerer<'db, 'a, I> {
         T::belongs_to(self.inst_set).ok_or_else(|| {
             let path = std::any::type_name::<T>();
             let name = path.rsplit("::").next().unwrap_or(path);
-            let kind = if path.contains("::evm::") {
-                "EVM-only instruction"
+            let note = if path.contains("::evm::") {
+                " (an EVM-only instruction)"
             } else {
-                "instruction"
+                ""
             };
             LowerError::Unsupported(format!(
-                "target `{}` does not support the {kind} `{name}`",
+                "target `{}` does not support instruction `{name}`{note}",
                 self.builder.ctx.triple,
             ))
         })
