@@ -880,3 +880,123 @@ impl Derive<Value> for Provider<u256> {
     );
     assert_eq!(eval(&prepared, "app/src/alpha.fe", "observe"), "102");
 }
+
+const SEEDS: &str = r#"pub trait Score {
+    const fn score() -> u256
+}
+pub trait Seed {
+    const fn seed() -> u256
+}
+pub struct Pair {}
+"#;
+
+/// `A`, written in `alpha`, reads the scoped output of `B`, written in `beta`;
+/// `B` reads that of `A` when `cyclic`, and is a leaf otherwise.
+fn two_module_providers(cyclic: bool) -> (String, String) {
+    let alpha = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+use ingot::score::{Pair, Score, Seed}
+use ingot::beta::B
+
+pub struct A {}
+impl Derive<Score> for A {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n = with (B) { Pair::seed() }
+        quote { const fn score() -> u256 { ${n} + 1 } }
+    }
+}
+pub const fn run() -> u256 { with (A) { Pair::score() } }
+"#;
+    let seed = if cyclic {
+        "with (A) { Pair::score() }"
+    } else {
+        "41"
+    };
+    let beta = format!(
+        r#"use core::derive::Derive
+use core::meta::{{Code, Item, Record}}
+use ingot::score::{{Pair, Score, Seed}}
+use ingot::alpha::A
+
+pub struct B {{}}
+impl Derive<Seed> for B {{
+    const fn derive(_ record: Record) -> Code<Item> {{
+        let n: u256 = {seed}
+        quote {{ const fn seed() -> u256 {{ ${{n}} + 1 }} }}
+    }}
+}}
+"#
+    );
+    (alpha.to_string(), beta)
+}
+
+/// The shape of a cycle that the loop cannot serve: `A` waits for `B` and `B`
+/// for `A`, in different modules. It is refused before any provider runs, at
+/// the first pending `with` binding (the one in `A`'s provider, which names
+/// `B`), and the same text without the second edge prepares.
+#[test]
+fn a_provider_cycle_across_modules_is_refused_where_it_waits() {
+    let (alpha, beta) = two_module_providers(true);
+    let files = [
+        ("app/fe.toml", APP_TOML),
+        ("app/src/lib.fe", ""),
+        ("app/src/score.fe", SEEDS),
+        ("app/src/alpha.fe", alpha.as_str()),
+        ("app/src/beta.fe", beta.as_str()),
+    ];
+    let db = project(&files);
+    let error = prepare_ingots(&db, &[url("app/")])
+        .err()
+        .expect("a cycle cannot be served");
+    assert!(error.cause.contains("cannot make progress"), "{error}");
+    assert_eq!(error.file, url("app/src/alpha.fe"), "{error}");
+    let start = usize::from(error.range.start());
+    let end = usize::from(error.range.end());
+    assert_eq!(&alpha[start..end], "B", "{error}");
+    assert_authored_unchanged(&db, &files);
+
+    let (alpha, beta) = two_module_providers(false);
+    let prepared = prepared_modules(SEEDS, &alpha, &beta);
+    assert_eq!(eval(&prepared, "app/src/alpha.fe", "run"), "43");
+}
+
+/// More independent scoped requests than the rounds a transaction may build:
+/// one provider written in `alpha` serves 130 records written in `beta`. All
+/// share a round, so the program prepares in two views.
+#[test]
+fn many_independent_scoped_requests_across_modules_share_a_round() {
+    const RECORDS: usize = 130;
+    let mut alpha = String::from(
+        r#"use core::derive::Derive
+use core::meta::{Code, Item, Record, field_count}
+use ingot::score::Score
+use ingot::beta::*
+
+pub struct ProviderA {}
+impl Derive<Score> for ProviderA {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n = field_count(record) as u256
+        quote { const fn score() -> u256 { ${n} } }
+    }
+}
+pub const fn total() -> u256 {
+    with (ProviderA) {
+        0
+"#,
+    );
+    let mut beta = String::new();
+    for record in 0..RECORDS {
+        alpha += &format!("            + R{record}::score()\n");
+        beta += &format!("pub struct R{record} {{ pub a: u8 }}\n");
+    }
+    alpha += "    }\n}\n";
+    let prepared = prepared_modules(
+        "pub trait Score {\n    const fn score() -> u256\n}\n",
+        &alpha,
+        &beta,
+    );
+    assert_eq!(
+        eval(&prepared, "app/src/alpha.fe", "total"),
+        RECORDS.to_string()
+    );
+}

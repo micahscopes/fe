@@ -184,6 +184,15 @@ pub fn prepare_file(
     db: &DriverDataBase,
     file: File,
 ) -> Result<Option<DriverDataBase>, GenerationError> {
+    prepare_file_within(db, file, MAX_PREPARATION_ROUNDS)
+}
+
+/// `prepare_file` with the number of rounds a transaction may build.
+fn prepare_file_within(
+    db: &DriverDataBase,
+    file: File,
+    max_rounds: usize,
+) -> Result<Option<DriverDataBase>, GenerationError> {
     let url = file.url(db).expect("indexed generation input");
     let error = |range, cause| GenerationError {
         file: url.clone(),
@@ -213,6 +222,7 @@ pub fn prepare_file(
         &[url],
         found.requests,
         Some(found.root_range),
+        max_rounds,
     )
     .map(Some)
 }
@@ -284,7 +294,15 @@ pub fn prepare_ingots(
         return Ok(None);
     }
     let modules = files.into_keys().collect::<Vec<_>>();
-    admit_requests(db, &ViewBasis::Package, &modules, requests, None).map(Some)
+    admit_requests(
+        db,
+        &ViewBasis::Package,
+        &modules,
+        requests,
+        None,
+        MAX_PREPARATION_ROUNDS,
+    )
+    .map(Some)
 }
 
 /// Replace an authored database with the prepared view of `roots` when they
@@ -674,6 +692,12 @@ enum ViewBasis {
     Package,
 }
 
+/// The most views one transaction builds. Every round publishes each request
+/// whose provider is ready, so independent requests share a round and the
+/// number of rounds is the length of the longest chain of providers that wait
+/// for one another's output, plus the round that finds nothing pending.
+const MAX_PREPARATION_ROUNDS: usize = 128;
+
 /// One preparation transaction over `modules`. Explicit requests are already
 /// frozen; scoped demands are discovered in the output view. A standalone
 /// transaction also admits the whole output once, as before; a package view
@@ -684,6 +708,7 @@ fn admit_requests(
     modules: &[url::Url],
     mut requests: Vec<common::generation::FrozenGenerationRequest>,
     standalone_root: Option<parser::TextRange>,
+    max_rounds: usize,
 ) -> Result<DriverDataBase, GenerationError> {
     let error_at = |file: &url::Url, range, cause| GenerationError {
         file: file.clone(),
@@ -693,9 +718,11 @@ fn admit_requests(
     let fallback_file = &modules[0];
     let whole_input = standalone_root.unwrap_or_else(|| parser::TextRange::empty(0.into()));
     let mut completed = std::collections::HashSet::new();
+    // Where the last round left a request unserved, for the limit's message.
+    let mut unserved = None;
     // Every retry starts from unchanged authored text and the cumulative plan.
     // A bounded transaction never recursively treats generated output as input.
-    for _ in 0..128 {
+    for _ in 0..max_rounds {
         let output = prepared_view(db, basis, &requests);
         let output_module = |url: &url::Url| {
             let file = output
@@ -780,6 +807,7 @@ fn admit_requests(
         if !pending.is_empty() {
             let mut new_requests = Vec::new();
             let mut batch = std::collections::HashSet::new();
+            let mut examined = Vec::new();
             let first_opening = pending[0].opening.clone();
             // Reject every invalid opening before any provider can run; the
             // order in which demands were found must never grant authority to
@@ -802,6 +830,7 @@ fn admit_requests(
                 if !batch.insert(demand.clone()) {
                     continue;
                 }
+                examined.push(demand.clone());
                 if completed.contains(&demand) {
                     return Err(error_at(
                         &file,
@@ -865,8 +894,6 @@ fn admit_requests(
                     demand,
                 });
                 new_requests.push(plan);
-                // Publish one ready dependency before considering its dependents.
-                break;
             }
             if new_requests.is_empty() {
                 let (file, range) = match standalone_root {
@@ -876,6 +903,11 @@ fn admit_requests(
                 return Err(error_at(&file, range,
                     "scoped derive dependencies cannot make progress (cyclic or unresolved provider bodies)".into()));
             }
+            unserved = examined
+                .iter()
+                .find(|demand| !completed.contains(*demand))
+                .or(examined.first())
+                .map(|demand| (demand.opening.file.clone(), demand.opening.binding_range));
             requests.extend(new_requests);
             continue;
         }
@@ -897,10 +929,15 @@ fn admit_requests(
         }
         return Ok(output);
     }
+    // A round rebuilds the whole view, so the limit bounds the work spent on a
+    // long chain of providers that wait for one another's output.
+    let (file, range) = unserved.unwrap_or_else(|| (fallback_file.clone(), whole_input));
     Err(error_at(
-        fallback_file,
-        whole_input,
-        "scoped generation preparation limit exceeded".into(),
+        &file,
+        range,
+        format!(
+            "scoped generation preparation limit exceeded: {max_rounds} rounds did not serve every scoped request. A chain of providers that each read the next one's output needs one round per link; the first request still in preparation is at this `with` binding"
+        ),
     ))
 }
 
@@ -1232,4 +1269,97 @@ fn evaluate_provider_instance<'db>(
     };
     code.freeze_request(db, file)
         .map_err(|cause| error(range, cause.into()))
+}
+
+#[cfg(test)]
+mod round_limit_tests {
+    use super::*;
+
+    const FILE: &str = "file:///tmp/fe-round-limit.fe";
+
+    fn prepare_within(source: &str, max_rounds: usize) -> Result<DriverDataBase, GenerationError> {
+        let mut db = DriverDataBase::default();
+        let file =
+            db.workspace()
+                .touch(&mut db, url::Url::parse(FILE).unwrap(), Some(source.into()));
+        prepare_file_within(&db, file, max_rounds)
+            .map(|prepared| prepared.expect("the source requests generation"))
+    }
+
+    /// A chain of `links` providers: `P0` reads the output of `P1`, which
+    /// reads that of `P2`, and the last one reads nothing. `run` is `links`.
+    fn chain(links: usize) -> String {
+        let mut source = String::from(
+            "use core::derive::Derive\nuse core::meta::{Code, Item, Record}\nstruct Pair {}\n",
+        );
+        for link in 0..links {
+            let inner = if link + 1 < links {
+                format!("with (P{next}) {{ Pair::f{next}() }}", next = link + 1)
+            } else {
+                "0".to_string()
+            };
+            source += &format!(
+                "trait T{link} {{ const fn f{link}() -> u256 }}\n\
+                 struct P{link} {{}}\n\
+                 impl Derive<T{link}> for P{link} {{\n\
+                 \x20   const fn derive(_ record: Record) -> Code<Item> {{\n\
+                 \x20       let n: u256 = {inner}\n\
+                 \x20       quote {{ const fn f{link}() -> u256 {{ ${{n}} + 1 }} }}\n\
+                 \x20   }}\n}}\n"
+            );
+        }
+        source + "const fn run() -> u256 { with (P0) { Pair::f0() } }\n"
+    }
+
+    /// `targets` records, each served by the same provider in one block.
+    fn breadth(targets: usize) -> String {
+        let mut source = String::from(
+            "use core::derive::Derive\nuse core::meta::{Code, Item, Record}\n\
+             trait Value { const fn value() -> u256 }\n\
+             struct Provider {}\n\
+             impl Derive<Value> for Provider {\n\
+             \x20   const fn derive(_ record: Record) -> Code<Item> {\n\
+             \x20       quote { const fn value() -> u256 { 1 } }\n\
+             \x20   }\n}\n",
+        );
+        for target in 0..targets {
+            source += &format!("struct S{target} {{}}\n");
+        }
+        let sum = (0..targets)
+            .map(|target| format!("S{target}::value()"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        source + &format!("const fn run() -> u256 {{ with (Provider) {{ {sum} }} }}\n")
+    }
+
+    /// A round serves every ready request, so independent requests do not use
+    /// a round each: the targets share one round, and one more finds nothing
+    /// pending. One request per round would need `targets + 1` rounds.
+    #[test]
+    fn independent_requests_share_a_round() {
+        let targets = 12;
+        assert!(prepare_within(&breadth(targets), 2).is_ok());
+        let error = prepare_within(&breadth(targets), 1).err().unwrap();
+        assert!(error.cause.contains("limit exceeded"), "{error}");
+    }
+
+    /// Every link of a chain of providers needs the next link's output first,
+    /// so a chain of `links` takes `links` rounds and one that finds nothing
+    /// pending. The refusal names the rounds and a `with` binding of the source.
+    #[test]
+    fn a_chain_of_dependent_providers_is_bounded_by_rounds() {
+        let links = 4;
+        assert!(prepare_within(&chain(links), links + 1).is_ok());
+        let source = chain(links);
+        let error = prepare_within(&source, links).err().unwrap();
+        assert!(
+            error.cause.contains("limit exceeded")
+                && error.cause.contains(&format!("{links} rounds")),
+            "{error}"
+        );
+        assert_eq!(error.file.as_str(), FILE);
+        let start = usize::from(error.range.start());
+        let end = usize::from(error.range.end());
+        assert_eq!(&source[start..end], "P0", "{error}");
+    }
 }
