@@ -1,6 +1,10 @@
 //! Single-threaded custody for emitted native scalar task segments.
 //! Cancellation is sticky and cooperative. Each poll executes at most one
 //! segment; readiness callbacks enqueue delivery and never execute a task.
+//! `Broker` owns several tasks and fixes the order in which they run.
+
+mod broker;
+pub use broker::{Broker, Step, TaskId};
 
 use std::{
     cell::{Cell, RefCell},
