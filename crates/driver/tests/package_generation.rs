@@ -1000,3 +1000,185 @@ pub const fn total() -> u256 {
         RECORDS.to_string()
     );
 }
+
+const TYPES: &str = r#"pub trait Bits {
+    const BITS: u256
+}
+impl Bits for u8 {
+    const BITS: u256 = 8
+}
+pub struct Wrap<T> {
+    pub item: T,
+}
+impl<T: Bits> Bits for Wrap<T> {
+    const BITS: u256 = 2 * <T as Bits>::BITS
+}
+pub trait Report {
+    const fn bits() -> u256
+}
+"#;
+
+/// Two modules derive for each other's records, and the generated code names
+/// a generic type applied to the other module's type (`Wrap<Right>`,
+/// `Wrap<Left>`), taken from field types. Each value is derived from the
+/// `Bits` implementations alone: `Left` holds `Wrap<Right>` (2 * 16) and
+/// `Other` holds `Wrap<Left>` (2 * 100).
+#[test]
+fn generated_code_names_generic_types_of_the_other_module() {
+    let alpha = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record, field, field_type}
+use ingot::score::{Bits, Report, Wrap}
+use ingot::beta::{ProviderB, Right}
+
+pub struct ProviderA {}
+impl Derive<Report> for ProviderA {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let ty = field_type(field(record, 0))
+        quote { const fn bits() -> u256 { <${ty} as Bits>::BITS } }
+    }
+}
+pub struct Left { pub x: Wrap<Right> }
+impl Bits for Left { const BITS: u256 = 100 }
+impl Report for Left with (ProviderB)
+pub const fn left_bits() -> u256 { Left::bits() }
+"#;
+    let beta = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record, field, field_type}
+use ingot::score::{Bits, Report, Wrap}
+use ingot::alpha::{Left, ProviderA}
+
+pub struct ProviderB {}
+impl Derive<Report> for ProviderB {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let ty = field_type(field(record, 0))
+        quote { const fn bits() -> u256 { <${ty} as Bits>::BITS } }
+    }
+}
+pub struct Right { pub y: Wrap<u8> }
+impl Bits for Right { const BITS: u256 = 16 }
+impl Report for Right with (ProviderA)
+pub struct Other { pub w: Wrap<Left> }
+impl Report for Other with (ProviderA)
+pub const fn right_bits() -> u256 { Right::bits() }
+pub const fn other_bits() -> u256 { Other::bits() }
+"#;
+    let prepared = prepared_modules(TYPES, alpha, beta);
+    assert_eq!(eval(&prepared, "app/src/alpha.fe", "left_bits"), "32");
+    assert_eq!(eval(&prepared, "app/src/beta.fe", "right_bits"), "16");
+    assert_eq!(eval(&prepared, "app/src/beta.fe", "other_bits"), "200");
+}
+
+/// `#[generate(...)]` on one record in each of two modules, each provider
+/// written in the other module, and one output naming the other's.
+#[test]
+fn mutual_whole_item_requests_across_modules() {
+    let score = "pub trait Score {\n    const fn score() -> u256\n}\n";
+    let alpha = r#"use core::meta::{Record, Code, Item}
+use ingot::score::Score
+use ingot::beta::{make_left, Right}
+
+#[generate(make_left)]
+pub struct Left {}
+
+pub const fn make_right(_ record: Record) -> Code<Item> {
+    quote { impl Score for ${record} { const fn score() -> u256 { 2 } } }
+}
+pub const fn left_total() -> u256 { Left::score() }
+"#;
+    let beta = r#"use core::meta::{Record, Code, Item}
+use ingot::score::Score
+use ingot::alpha::make_right
+
+pub const fn make_left(_ record: Record) -> Code<Item> {
+    quote { impl Score for ${record} { const fn score() -> u256 { 1 + Right::score() } } }
+}
+#[generate(make_right)]
+pub struct Right {}
+"#;
+    let prepared = prepared_modules(score, alpha, beta);
+    assert_eq!(eval(&prepared, "app/src/alpha.fe", "left_total"), "3");
+}
+
+/// A chain of scoped providers that alternates between modules: `A` (alpha)
+/// reads `B` (beta), which reads `C` (alpha). Three rounds serve it, one per
+/// link, and the values add up along the chain.
+#[test]
+fn a_scoped_chain_alternates_between_modules() {
+    let score = "pub trait Score {\n    const fn score() -> u256\n}\npub trait Seed {\n    const fn seed() -> u256\n}\npub trait Base {\n    const fn base() -> u256\n}\npub struct Pair {}\n";
+    let alpha = r#"use core::derive::Derive
+use core::meta::{Record, Code, Item}
+use ingot::score::{Score, Seed, Base, Pair}
+use ingot::beta::B
+
+pub struct A {}
+impl Derive<Score> for A {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n = with (B) { Pair::seed() }
+        quote { const fn score() -> u256 { ${n} + 1 } }
+    }
+}
+pub struct C {}
+impl Derive<Base> for C {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { const fn base() -> u256 { 40 } }
+    }
+}
+pub const fn run() -> u256 { with (A) { Pair::score() } }
+"#;
+    let beta = r#"use core::derive::Derive
+use core::meta::{Record, Code, Item}
+use ingot::score::{Seed, Base, Pair}
+use ingot::alpha::C
+
+pub struct B {}
+impl Derive<Seed> for B {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let n = with (C) { Pair::base() }
+        quote { const fn seed() -> u256 { ${n} + 1 } }
+    }
+}
+"#;
+    let prepared = prepared_modules(score, alpha, beta);
+    assert_eq!(eval(&prepared, "app/src/alpha.fe", "run"), "42");
+}
+
+/// A generic header (`impl<T> Report for Box<T>`) whose provider is a generic
+/// type applied to a concrete argument, with the providers written in the
+/// other module, in both directions. Only a provider written over the
+/// header's own parameter is refused.
+#[test]
+fn generic_headers_accept_ground_generic_providers_from_the_other_module() {
+    let alpha = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+use ingot::score::Report
+use ingot::beta::Weighted
+
+pub struct Heavy<T> {}
+impl<T> Derive<Report> for Heavy<T> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { const fn weight() -> u256 { 100 } }
+    }
+}
+pub struct Box<T> { pub value: T }
+impl<T> Report for Box<T> with (Weighted<u8>)
+pub const fn box8() -> u256 { <Box<u8> as Report>::weight() }
+"#;
+    let beta = r#"use core::derive::Derive
+use core::meta::{Code, Item, Record}
+use ingot::score::Report
+use ingot::alpha::Heavy
+
+pub struct Weighted<T> {}
+impl<T> Derive<Report> for Weighted<T> {
+    const fn derive(_ record: Record) -> Code<Item> {
+        quote { const fn weight() -> u256 { 7 } }
+    }
+}
+pub struct Crate<T> { pub value: T }
+impl<T> Report for Crate<T> with (Heavy<u8>)
+pub const fn crate8() -> u256 { <Crate<u8> as Report>::weight() }
+"#;
+    let prepared = prepared_modules(REPORT, alpha, beta);
+    assert_eq!(eval(&prepared, "app/src/alpha.fe", "box8"), "7");
+    assert_eq!(eval(&prepared, "app/src/beta.fe", "crate8"), "100");
+}
