@@ -938,3 +938,145 @@ const fn qualified_name() -> u256 { with (options::Qualified) { Item::value() } 
         ],
     );
 }
+
+const ASSOCIATED_BOUNDS: &str = r#"
+trait Base { const fn base() -> u256 }
+trait Marker: Base { const fn id() -> u256 }
+struct A {}
+impl Base for A { const fn base() -> u256 { 1 } }
+impl Marker for A { const fn id() -> u256 { 100 } }
+impl Base for A as BaseNamed { const fn base() -> u256 { 2 } }
+impl Marker for A as Named { const fn id() -> u256 { 7 } }
+
+trait Has { type T: Marker }
+struct Host {}
+impl Has for Host { type T = A }
+struct Wrap<X> { x: X }
+impl<X: Marker> Has for Wrap<X> { type T = X }
+
+struct Item {}
+trait Price { const fn price() -> u256 }
+impl Price for Item as Cheap { const fn price() -> u256 { 70 } }
+
+const fn read<H: Has>() -> u256 { <H::T as Marker>::id() + <H::T as Base>::base() }
+const fn forward<H: Has>() -> u256 { read<H>() }
+const fn equal<H: Has<T = A>>() -> u256 { with (Cheap) { read<H>() } }
+"#;
+
+#[test]
+fn associated_type_bounds_hold_inside_a_choice_as_outside() {
+    let source = format!(
+        r#"{ASSOCIATED_BOUNDS}
+const fn host_outside() -> u256 {{ read<Host>() }}
+const fn host_inside() -> u256 {{ with (Cheap) {{ read<Host>() }} }}
+const fn wrap_outside() -> u256 {{ read<Wrap<A>>() }}
+const fn wrap_inside() -> u256 {{ with (Cheap) {{ read<Wrap<A>>() }} }}
+const fn forward_outside() -> u256 {{ forward<Host>() }}
+const fn forward_inside() -> u256 {{ with (Cheap) {{ forward<Host>() }} }}
+const fn forward_wrap_inside() -> u256 {{ with (Cheap) {{ forward<Wrap<A>>() }} }}
+const fn equal_inside() -> u256 {{ equal<Host>() }}
+"#
+    );
+    values(
+        &source,
+        &[
+            ("host_outside", 101),
+            ("host_inside", 101),
+            ("wrap_outside", 101),
+            ("wrap_inside", 101),
+            ("forward_outside", 101),
+            ("forward_inside", 101),
+            ("forward_wrap_inside", 101),
+            ("equal_inside", 101),
+        ],
+    );
+}
+
+#[test]
+fn associated_type_bounds_follow_the_choices_of_implementation_conditions() {
+    // The condition `X: Marker` of `Has for Wrap<X>` is proved in the
+    // surrounding context, so the bound `Wrap<A>::T: Marker` it implies holds
+    // by the same chosen implementation, as a bound `M: Marker` written on the
+    // callee does (`direct`). A bound of an implementation with no condition,
+    // `Host::T: Marker`, was proved where that implementation is declared, and
+    // a choice the callee does not declare does not reach it.
+    let source = format!(
+        r#"{ASSOCIATED_BOUNDS}
+const fn direct<M: Marker>() -> u256 {{ M::id() + <M as Base>::base() }}
+const fn direct_named() -> u256 {{ with (Named, BaseNamed) {{ direct<A>() }} }}
+const fn host_named() -> u256 {{ with (Named, BaseNamed) {{ read<Host>() }} }}
+const fn wrap_named() -> u256 {{ with (Named, BaseNamed) {{ read<Wrap<A>>() }} }}
+const fn forward_wrap_named() -> u256 {{ with (Named, BaseNamed) {{ forward<Wrap<A>>() }} }}
+"#
+    );
+    values(
+        &source,
+        &[
+            ("direct_named", 8),
+            ("host_named", 101),
+            ("wrap_named", 8),
+            ("forward_wrap_named", 8),
+        ],
+    );
+}
+
+#[test]
+fn unmet_associated_type_bounds_stay_errors_inside_a_choice() {
+    let program = |impl_ty: &str, body: &str| {
+        format!(
+            r#"
+trait Marker {{}}
+struct A {{}}
+struct B {{}}
+impl Marker for A {{}}
+trait Plain {{ type T }}
+struct Host {{}}
+impl Plain for Host {{ type T = {impl_ty} }}
+struct Item {{}}
+trait Price {{ fn price() -> u256 }}
+impl Price for Item as Cheap {{ fn price() -> u256 {{ 70 }} }}
+fn on<H: Plain>() where H::T: Marker {{}}
+fn call() {{ {body} }}
+"#
+        )
+    };
+    assert_eq!(
+        diagnostics(&program("A", "on<Host>()")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        diagnostics(&program("A", "with (Cheap) { on<Host>() }")),
+        Vec::<String>::new()
+    );
+    let ordinary = diagnostics(&program("B", "on<Host>()"));
+    assert_eq!(ordinary, ["6-0003"]);
+    let chosen = diagnostics(&program("B", "with (Cheap) { on<Host>() }"));
+    assert!(
+        !chosen.is_empty() && chosen.iter().all(|code| code == "6-0003"),
+        "{chosen:?}"
+    );
+}
+
+#[test]
+fn unmet_implied_associated_type_bounds_through_an_equality_stay_errors_inside_a_choice() {
+    // The proof of a bound an equality makes concrete is an implementation's.
+    // Where none exists, the call is still refused.
+    let source = |bound: &str| {
+        format!(
+            r#"
+trait Marker {{}}
+struct A {{}}
+struct B {{}}
+impl Marker for A {{}}
+trait Has {{ type T: Marker }}
+struct Item {{}}
+trait Price {{ fn price() -> u256 }}
+impl Price for Item as Cheap {{ fn price() -> u256 {{ 70 }} }}
+fn on<H: Has>() {{}}
+fn call<H: Has<T = {bound}>>() {{ with (Cheap) {{ on<H>() }} }}
+"#
+        )
+    };
+    assert_eq!(diagnostics(&source("A")), Vec::<String>::new());
+    assert_eq!(diagnostics(&source("B")), ["6-0003"]);
+}
