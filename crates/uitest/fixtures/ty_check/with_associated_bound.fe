@@ -1,0 +1,55 @@
+// A bound a trait states on an associated type is implied by the bound on the
+// trait. A call that passes the trait bound is accepted inside a `with` block
+// as it is outside, whether the implementation fixes the associated type, is
+// generic, or is reached through an equality.
+use core::Fn
+use core::functional::Functor
+
+trait Marker {}
+struct A {}
+impl Marker for A {}
+
+trait Has { type T: Marker }
+struct Host {}
+impl Has for Host { type T = A }
+struct Wrap<X> { x: X }
+impl<X: Marker> Has for Wrap<X> { type T = X }
+
+trait Price { fn price() -> u256 }
+struct Item {}
+impl Price for Item { fn price() -> u256 { 100 } }
+impl Price for Item as Cheap { fn price() -> u256 { 70 } }
+
+fn on<H: Has>() {}
+fn forward<H: Has>() { on<H>() }
+fn equal<H: Has<T = A>>() { with (Cheap) { on<H>() } }
+
+fn fixed_outside() { on<Host>() }
+fn fixed_inside() { with (Cheap) { on<Host>() } }
+fn generic_outside() { on<Wrap<A>>() }
+fn generic_inside() { with (Cheap) { on<Wrap<A>>() } }
+fn forwarded_outside() { forward<Host>() }
+fn forwarded_inside() { with (Cheap) { forward<Wrap<A>>() } }
+fn path_inside() { with (<Item as Price>) { on<Host>() } }
+
+// The same with a constructor of kind `* -> *` bounded by `Functor`.
+struct Cells<T> { value: T }
+
+impl Functor for Cells {
+    fn map<T, U, F: Fn(own T) -> U>(self: own Cells<T>, _ func: F) -> Cells<U> uses F::E {
+        Cells { value: func(self.value) }
+    }
+}
+
+trait HasBuf {
+    type Buf: * -> * + Functor
+}
+
+struct Target {}
+impl HasBuf for Target {
+    type Buf = Cells
+}
+
+fn buffered<B: HasBuf>() {}
+fn buffer_outside() { buffered<Target>() }
+fn buffer_inside() { with (Cheap) { buffered<Target>() } }

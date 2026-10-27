@@ -1,0 +1,22 @@
+// A bound on an associated type that the implementation does not meet is an
+// error inside a `with` block as it is outside, naming the type that lacks
+// the implementation.
+trait Marker {}
+struct A {}
+struct B {}
+impl Marker for A {}
+
+trait Plain { type T }
+struct HostA {}
+impl Plain for HostA { type T = A }
+struct HostB {}
+impl Plain for HostB { type T = B }
+
+trait Price { fn price() -> u256 }
+struct Item {}
+impl Price for Item as Cheap { fn price() -> u256 { 70 } }
+
+fn on<H: Plain>() where H::T: Marker {}
+
+fn met_inside() { with (Cheap) { on<HostA>() } }
+fn unmet_inside() { with (Cheap) { on<HostB>() } }
