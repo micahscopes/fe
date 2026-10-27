@@ -287,3 +287,73 @@ fn abstract_row<C: Effects>() uses C::E {}
         );
     }
 }
+
+#[test]
+fn a_timer_is_a_suspension_capability_and_sleeping_is_checked_like_a_cut() {
+    let mut db = HirAnalysisTestDb::default();
+    db.initialize_builtin_core();
+    let file = db.new_stand_alone(
+        Utf8PathBuf::from("suspension_timer.fe"),
+        r#"
+use core::task::{Native, TaskOutcome, Timer}
+fn declared() uses (cap: mut Timer) {}
+fn generic<C: Timer>(_ cap: mut C) -> TaskOutcome<C::Error, u64> {
+    let pending = cap.sleep_begin(5)
+    cap.suspend(pending)
+}
+fn live() uses (cap: mut Native) {
+    var value: u64 = 5
+    let held = mut value
+    let pending = cap.sleep_begin(5)
+    let _ = cap.suspend(pending)
+    held = 9
+}
+fn ended() uses (cap: mut Native) {
+    var value: u64 = 5
+    let held = mut value
+    held = 9
+    let pending = cap.sleep_begin(5)
+    let _ = cap.suspend(pending)
+}
+fn hidden() {
+    var native = Native {}
+    let pending = native.sleep_begin(5)
+    let _ = native.suspend(pending)
+}
+"#,
+    );
+    let (module, _) = db.top_mod(file);
+    db.assert_no_diags(module);
+    let func = find_func(&db, module, "declared");
+    let requirements = effect_requirements_for_site(&db, EffectParamSite::Func(func, None));
+    assert_eq!(requirements.len(), 1);
+    assert_eq!(
+        effect_key_suspension(
+            &db,
+            func.scope(),
+            PredicateListId::empty_list(&db),
+            requirements[0].key.clone(),
+        ),
+        SuspensionFootprint::MaySuspend
+    );
+    for (name, expected) in [("live", false), ("ended", true), ("hidden", false)] {
+        let func = find_func(&db, module, name);
+        let key = identity_semantic_instance_key(&db, BodyOwner::Func(func, None));
+        let result = check_runtime_semantic_accesses(&db, SemanticInstance::new(&db, key));
+        assert_eq!(result.is_ok(), expected, "{name}: {result:?}");
+        if let Err(error) = result {
+            let diagnostic = error
+                .diagnostic()
+                .expect("access diagnostic, not upstream blockage");
+            assert!(
+                diagnostic.sub_diagnostics.iter().any(|label| {
+                    label.message.contains(match name {
+                        "hidden" => "declares no suspension",
+                        _ => "borrowed data remains live",
+                    })
+                }),
+                "{name}: {diagnostic:?}"
+            );
+        }
+    }
+}
