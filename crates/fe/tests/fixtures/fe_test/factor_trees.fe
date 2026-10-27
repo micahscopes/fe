@@ -1,0 +1,218 @@
+// Radix-two factor trees named by a depth, and constants folded over them.
+//
+// `Pair` is one radix-two factor, `Unit` is the empty factorization and
+// `Comp<Left, Right>` composes two factorizations. `Dit`, `Dif` and `Bush` are
+// computed types: each depth selects the tree that the arms spell out, like a
+// type alias. `FactorTree` folds constants over a tree by implementing the
+// trait for `Unit`, `Pair` and `Comp`. A tree with another association
+// denotes the same transform but has a different `TREE_DEPTH`.
+//
+// The client acceptors at the end make the normal forms a compile-time check:
+// a wrong normal form is a type error, not a wrong number.
+
+mod factor {
+    pub struct Unit {}
+    pub struct Pair {}
+    pub struct Comp<Left, Right> {}
+
+    // Left-associated: Dit<4> is Comp<Comp<Comp<Comp<Unit, Pair>, Pair>, Pair>, Pair>
+    // and denotes sixteen points.
+    pub recursive type fn Dit<const DEPTH: usize>() -> (*) {
+        match DEPTH {
+            0 => Unit
+            _ => Comp<Dit<{ DEPTH - 1 }>, Pair>
+        }
+    }
+
+    // The general builder: the same shape with any factor in place of `Pair`.
+    pub recursive type fn Repeat<F, const DEPTH: usize>() -> (*) {
+        match DEPTH {
+            0 => Unit
+            _ => Comp<Repeat<F, { DEPTH - 1 }>, F>
+        }
+    }
+
+    // Right-associated: the same sixteen points with the opposite association.
+    pub recursive type fn Dif<const DEPTH: usize>() -> (*) {
+        match DEPTH {
+            0 => Unit
+            _ => Comp<Pair, Dif<{ DEPTH - 1 }>>
+        }
+    }
+
+    // Each step composes the previous tree with itself, so Bush<N> denotes
+    // 2^(2^N) points.
+    pub recursive type fn Bush<const DEPTH: usize>() -> (*) {
+        match DEPTH {
+            0 => Pair
+            _ => Comp<Bush<{ DEPTH - 1 }>, Bush<{ DEPTH - 1 }>>
+        }
+    }
+
+    const fn maximum(_ left: usize, _ right: usize) -> usize {
+        if left > right { left } else { right }
+    }
+
+    pub struct Analysis {
+        pub points: u32,
+        pub factors: u32,
+        pub butterflies: u32,
+        pub dependency_depth: u32,
+        pub tree_depth: u32,
+        pub composition_nodes: u32,
+        pub max_fanout: u32,
+    }
+
+    pub trait FactorTree {
+        // Number of inputs of the transform.
+        const POINTS: usize
+        // Number of radix-two factors.
+        const FACTORS: usize
+        // Radix-two butterflies in the full transform: POINTS / 2 per factor.
+        const BUTTERFLIES: usize
+        // Ordered stages on each path from an input to an output.
+        const DEPENDENCY_DEPTH: usize
+        // Depth of the tree, which depends on the association.
+        const TREE_DEPTH: usize
+        const COMPOSITION_NODES: usize
+        const MAX_FANOUT: usize
+
+        fn analysis() -> Analysis {
+            Analysis {
+                points: Self::POINTS.downcast_truncate(),
+                factors: Self::FACTORS.downcast_truncate(),
+                butterflies: Self::BUTTERFLIES.downcast_truncate(),
+                dependency_depth: Self::DEPENDENCY_DEPTH.downcast_truncate(),
+                tree_depth: Self::TREE_DEPTH.downcast_truncate(),
+                composition_nodes: Self::COMPOSITION_NODES.downcast_truncate(),
+                max_fanout: Self::MAX_FANOUT.downcast_truncate(),
+            }
+        }
+    }
+
+    impl FactorTree for Unit {
+        const POINTS: usize = 1
+        const FACTORS: usize = 0
+        const BUTTERFLIES: usize = 0
+        const DEPENDENCY_DEPTH: usize = 0
+        const TREE_DEPTH: usize = 0
+        const COMPOSITION_NODES: usize = 0
+        const MAX_FANOUT: usize = 1
+    }
+
+    impl FactorTree for Pair {
+        const POINTS: usize = 2
+        const FACTORS: usize = 1
+        const BUTTERFLIES: usize = 1
+        const DEPENDENCY_DEPTH: usize = 1
+        const TREE_DEPTH: usize = 0
+        const COMPOSITION_NODES: usize = 0
+        const MAX_FANOUT: usize = 2
+    }
+
+    impl<Left: FactorTree, Right: FactorTree> FactorTree for Comp<Left, Right> {
+        const POINTS: usize = Left::POINTS * Right::POINTS
+        const FACTORS: usize = Left::FACTORS + Right::FACTORS
+        const BUTTERFLIES: usize = Left::BUTTERFLIES * Right::POINTS
+            + Right::BUTTERFLIES * Left::POINTS
+        const DEPENDENCY_DEPTH: usize = Left::DEPENDENCY_DEPTH + Right::DEPENDENCY_DEPTH
+        const TREE_DEPTH: usize = maximum(Left::TREE_DEPTH, Right::TREE_DEPTH) + 1
+        const COMPOSITION_NODES: usize = Left::COMPOSITION_NODES + Right::COMPOSITION_NODES + 1
+        const MAX_FANOUT: usize = maximum(Left::MAX_FANOUT, Right::MAX_FANOUT)
+    }
+}
+
+use factor::{Analysis, Bush, Comp, Dif, Dit, FactorTree, Pair, Repeat, Unit}
+
+// An irregular tiling written out by hand.
+type Irregular16 = Comp<Pair, Comp<Dit<1>, Dit<2>>>
+
+// Acceptors: each parameter type is the normal form that the call must produce.
+fn accept_dit4(_ value: Comp<Comp<Comp<Comp<Unit, Pair>, Pair>, Pair>, Pair>) {}
+fn dit4_is_the_left_leaning_tree(_ value: Dit<4>) {
+    accept_dit4(value)
+}
+
+// `Dit` and the general builder agree, not only in their numbers.
+fn accept_repeat4(_ value: Repeat<Pair, 4>) {}
+fn dit4_is_repeat4(_ value: Dit<4>) {
+    accept_repeat4(value)
+}
+
+fn accept_dif4(_ value: Comp<Pair, Comp<Pair, Comp<Pair, Comp<Pair, Unit>>>>) {}
+fn dif4_is_the_right_leaning_tree(_ value: Dif<4>) {
+    accept_dif4(value)
+}
+
+fn accept_bush2(_ value: Comp<Comp<Pair, Pair>, Comp<Pair, Pair>>) {}
+fn bush2_is_the_balanced_tree(_ value: Bush<2>) {
+    accept_bush2(value)
+}
+
+// What a sixteen-point transform with `factors` radix-two factors must report,
+// from the closed formulas: POINTS / 2 butterflies per factor, one stage per factor.
+fn expect_sixteen_points(_ got: Analysis, tree_depth: u32, composition_nodes: u32) {
+    assert!(got.points == 16)
+    assert!(got.factors == 4)
+    assert!(got.butterflies == 16 / 2 * 4)
+    assert!(got.dependency_depth == 4)
+    assert!(got.tree_depth == tree_depth)
+    assert!(got.composition_nodes == composition_nodes)
+    assert!(got.max_fanout == 2)
+}
+
+#[test]
+fn dit4_is_a_chain_of_four_compositions() {
+    expect_sixteen_points(
+        <Dit<4> as FactorTree>::analysis(),
+        tree_depth: 4,
+        composition_nodes: 4,
+    )
+}
+
+#[test]
+fn dif4_is_a_chain_of_four_compositions() {
+    expect_sixteen_points(
+        <Dif<4> as FactorTree>::analysis(),
+        tree_depth: 4,
+        composition_nodes: 4,
+    )
+}
+
+#[test]
+fn bush2_is_balanced_with_three_compositions() {
+    expect_sixteen_points(
+        <Bush<2> as FactorTree>::analysis(),
+        tree_depth: 2,
+        composition_nodes: 3,
+    )
+}
+
+#[test]
+fn an_irregular_tiling_has_the_same_work_and_five_compositions() {
+    expect_sixteen_points(
+        <Irregular16 as FactorTree>::analysis(),
+        tree_depth: 4,
+        composition_nodes: 5,
+    )
+}
+
+#[test]
+fn association_is_visible_while_size_and_work_agree() {
+    let chain = <Dit<4> as FactorTree>::analysis()
+    let balanced = <Bush<2> as FactorTree>::analysis()
+    assert!(chain.points == balanced.points)
+    assert!(chain.butterflies == balanced.butterflies)
+    assert!(chain.tree_depth != balanced.tree_depth)
+}
+
+#[test]
+fn the_constants_fold_by_trait_over_every_depth() {
+    assert!(<Dit<0> as FactorTree>::POINTS == 1)
+    assert!(<Dit<1> as FactorTree>::POINTS == 2)
+    assert!(<Dit<3> as FactorTree>::POINTS == 8)
+    assert!(<Dif<6> as FactorTree>::POINTS == 64)
+    assert!(<Bush<0> as FactorTree>::POINTS == 2)
+    assert!(<Bush<1> as FactorTree>::POINTS == 4)
+    assert!(<Bush<3> as FactorTree>::POINTS == 256)
+}
