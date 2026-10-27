@@ -1,0 +1,67 @@
+---
+source: crates/uitest/tests/name_resolution.rs
+expression: diags
+input_file: fixtures/name_resolution/import_named_impl.fe
+---
+error[2-0003]: `Private` is not visible
+   ┌─ import_named_impl.fe:59:25
+   │
+ 9 │     impl Pick for Item as Private { fn value() -> u256 { 3 } }
+   │                           ------- `Private` is defined here
+   ·
+59 │     use super::options::Private
+   │                         ^^^^^^^ `Private` is not visible
+
+error[2-0003]: `Private` is not visible
+   ┌─ import_named_impl.fe:65:32
+   │
+ 9 │     impl Pick for Item as Private { fn value() -> u256 { 3 } }
+   │                           ------- `Private` is defined here
+   ·
+65 │     fn named() -> u256 { with (super::options::Private) { read<Item>() } }
+   │                                ^^^^^^^^^^^^^^^^^^^^^^^ `Private` is not visible
+
+error[2-0003]: `Public` is not visible
+   ┌─ import_named_impl.fe:76:23
+   │
+28 │     use super::options::Public
+   │                         ------ `Public` is defined here
+   ·
+76 │     use super::hides::Public
+   │                       ^^^^^^ `Public` is not visible
+
+error[2-0004]: `Same` is ambiguous
+   ┌─ import_named_impl.fe:83:22
+   │
+14 │     pub impl Pick for Item as Same { fn value() -> u256 { 1 } }
+   │                               ---- candidate 1
+   ·
+19 │     pub impl Pick for Item as Same { fn value() -> u256 { 2 } }
+   │                               ---- candidate 2
+   ·
+83 │     use super::both::Same
+   │                      ^^^^ `Same` is ambiguous
+
+error[8-0012]: undefined variable
+   ┌─ import_named_impl.fe:60:32
+   │
+60 │     fn named() -> u256 { with (Private) { read<Item>() } }
+   │                                ^^^^^^^ undefined variable `Private`
+
+error[8-0012]: undefined variable
+   ┌─ import_named_impl.fe:71:32
+   │
+71 │     fn named() -> u256 { with (Private) { read<Item>() } }
+   │                                ^^^^^^^ undefined variable `Private`
+
+error[8-0012]: undefined variable
+   ┌─ import_named_impl.fe:77:32
+   │
+77 │     fn named() -> u256 { with (Public) { read<Item>() } }
+   │                                ^^^^^^ undefined variable `Public`
+
+error[8-0012]: undefined variable
+   ┌─ import_named_impl.fe:84:32
+   │
+84 │     fn named() -> u256 { with (Same) { read<Item>() } }
+   │                                ^^^^ undefined variable `Same`

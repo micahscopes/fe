@@ -1,0 +1,85 @@
+pub struct Item {}
+pub trait Pick { fn value() -> u256 }
+impl Pick for Item { fn value() -> u256 { 100 } }
+fn read<T: Pick>() -> u256 { T::value() }
+
+mod options {
+    use ingot::{Item, Pick}
+    pub impl Pick for Item as Public { fn value() -> u256 { 70 } }
+    impl Pick for Item as Private { fn value() -> u256 { 3 } }
+}
+
+mod left {
+    use ingot::{Item, Pick}
+    pub impl Pick for Item as Same { fn value() -> u256 { 1 } }
+}
+
+mod right {
+    use ingot::{Item, Pick}
+    pub impl Pick for Item as Same { fn value() -> u256 { 2 } }
+}
+
+mod both {
+    pub use super::left::*
+    pub use super::right::*
+}
+
+mod hides {
+    use super::options::Public
+}
+
+// Accepted: a public name through a named import, an alias, a glob and a path.
+mod imported {
+    use ingot::{Item, read}
+    use super::options::Public
+    fn named() -> u256 { with (Public) { read<Item>() } }
+}
+
+mod aliased {
+    use ingot::{Item, read}
+    use super::options::Public as Cheap
+    fn named() -> u256 { with (Cheap) { read<Item>() } }
+}
+
+mod globbed {
+    use ingot::{Item, read}
+    use super::options::*
+    fn named() -> u256 { with (Public) { read<Item>() } }
+}
+
+mod qualified {
+    use ingot::{Item, read}
+    fn named() -> u256 { with (super::options::Public) { read<Item>() } }
+}
+
+// Refused: a private name is not visible through an import, a path, a glob or
+// a re-export that is itself private.
+mod private_import {
+    use ingot::{Item, read}
+    use super::options::Private
+    fn named() -> u256 { with (Private) { read<Item>() } }
+}
+
+mod private_path {
+    use ingot::{Item, read}
+    fn named() -> u256 { with (super::options::Private) { read<Item>() } }
+}
+
+mod private_glob {
+    use ingot::{Item, read}
+    use super::options::*
+    fn named() -> u256 { with (Private) { read<Item>() } }
+}
+
+mod private_reexport {
+    use ingot::{Item, read}
+    use super::hides::Public
+    fn named() -> u256 { with (Public) { read<Item>() } }
+}
+
+// Refused: two globs bring in different implementations under one name.
+mod ambiguous {
+    use ingot::{Item, read}
+    use super::both::Same
+    fn named() -> u256 { with (Same) { read<Item>() } }
+}

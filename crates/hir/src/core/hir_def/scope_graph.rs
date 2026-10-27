@@ -406,6 +406,10 @@ impl<'db> ScopeId<'db> {
 
     pub fn name_span(self, db: &'db dyn HirDb) -> Option<DynLazySpan<'db>> {
         match self {
+            // A named implementation is named by the identifier after `as`.
+            ScopeId::Item(ItemKind::ImplTrait(implementation)) => implementation
+                .selection_name(db)
+                .map(|_| implementation.span().selection_name().into()),
             ScopeId::Item(item) => item.name_span(),
 
             ScopeId::Variant(v) => Some(v.span().name().into()),
