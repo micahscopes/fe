@@ -1,0 +1,149 @@
+// A library written once for every target reads the facts of a target through
+// `core::backend::Backend`. The facts differ by target (the word is 256 bits on
+// the EVM and 64 bits on native and SP1), and so do the reference types, while
+// bulk storage is the same `MemArray` everywhere. Each acceptor below compiles
+// only if the fact resolves to the value of its own target, so a conflation of
+// two targets is a compile error. The tests read the same facts as values.
+
+use core::backend::{Backend, Evm, EvmRef, Global, LinearRef, Local, Native, Sp1, Supports}
+use core::functional::Functor
+use core::ptr::MemArray
+
+// The width of a word is the length of an array of that many bits.
+fn takes_256_bits(_ bits: [u8; 256]) {}
+fn takes_64_bits(_ bits: [u8; 64]) {}
+
+fn evm_word_bits(_ bits: [u8; Evm::WORD_BITS]) {
+    takes_256_bits(bits)
+}
+
+fn native_word_bits(_ bits: [u8; Native::WORD_BITS]) {
+    takes_64_bits(bits)
+}
+
+fn sp1_word_bits(_ bits: [u8; Sp1::WORD_BITS]) {
+    takes_64_bits(bits)
+}
+
+// The reference types differ: a 256-bit handle on the EVM, a 64-bit address on
+// the others. The storage class is part of the type.
+fn takes_evm_ref(_ cell: own EvmRef<u32, Global>) {}
+fn takes_linear_ref(_ cell: own LinearRef<u32, Global>) {}
+
+fn evm_ref(_ cell: own Evm::Ref<u32, Global>) {
+    takes_evm_ref(cell)
+}
+
+fn native_ref(_ cell: own Native::Ref<u32, Global>) {
+    takes_linear_ref(cell)
+}
+
+fn sp1_ref(_ cell: own Sp1::Ref<u32, Global>) {
+    takes_linear_ref(cell)
+}
+
+// The machine word as a type.
+fn takes_u256(_ word: u256) {}
+fn takes_u64(_ word: u64) {}
+
+fn evm_word(_ word: Evm::Word) {
+    takes_u256(word)
+}
+
+fn native_word(_ word: Native::Word) {
+    takes_u64(word)
+}
+
+// Every target has the same bulk storage, and it can be mapped over.
+fn takes_array(_ array: own MemArray<u256>) -> MemArray<u256> {
+    array
+}
+
+fn evm_buffer(_ buffer: own Evm::Buffer<u256>) -> MemArray<u256> {
+    takes_array(buffer)
+}
+
+fn native_buffer(_ buffer: own Native::Buffer<u256>) -> MemArray<u256> {
+    takes_array(buffer)
+}
+
+fn add_one(_ x: own u256) -> u256 {
+    x + 1
+}
+
+fn incremented<B: Backend>(_ buffer: own B::Buffer<u256>) -> B::Buffer<u256> {
+    buffer.map(add_one)
+}
+
+// Generic code states the fact it needs, and the bound is decided at the call.
+fn word_bits<B: Backend>() -> usize {
+    B::WORD_BITS
+}
+
+fn lanes_per_word<B: Backend, const LANE: usize>() -> usize where B::WORD_BITS == 64
+{
+    B::WORD_BITS / LANE
+}
+
+fn scratch_cell<B: Backend + Supports<Local>>(_ cell: own B::Ref<u8, Local>) -> B::Ref<u8, Local> {
+    cell
+}
+
+fn evm_scratch(_ cell: own EvmRef<u8, Local>) -> EvmRef<u8, Local> {
+    scratch_cell<Evm>(cell)
+}
+
+fn native_scratch(_ cell: own LinearRef<u8, Local>) -> LinearRef<u8, Local> {
+    scratch_cell<Native>(cell)
+}
+
+fn filled(_ value: u256) -> MemArray<u256> {
+    var array: MemArray<u256> = MemArray::new_zeroed(3)
+    array[0] = value
+    array[1] = value + 1
+    array[2] = value + 2
+    array
+}
+
+#[test]
+fn the_word_width_differs_by_target() {
+    assert!(Evm::WORD_BITS == 256)
+    assert!(Native::WORD_BITS == 64)
+    assert!(Sp1::WORD_BITS == 64)
+    assert!(word_bits<Evm>() == 256)
+    assert!(word_bits<Native>() == 64)
+}
+
+#[test]
+fn overflow_and_parallel_width_are_stated_per_target() {
+    assert!(!Evm::OVERFLOW_WRAPS)
+    assert!(!Native::OVERFLOW_WRAPS)
+    assert!(!Sp1::OVERFLOW_WRAPS)
+    assert!(Evm::MAX_PAR_LOG2 == 8)
+    assert!(Native::MAX_PAR_LOG2 == 8)
+}
+
+#[test]
+fn a_condition_on_a_fact_holds_on_the_targets_that_satisfy_it() {
+    assert!(lanes_per_word<Native, 8>() == 8)
+    assert!(lanes_per_word<Sp1, 16>() == 4)
+}
+
+#[test]
+fn generic_code_maps_over_the_buffer_of_each_target() {
+    let evm = incremented<Evm>(filled(10))
+    assert!(evm.len() == 3)
+    assert!(evm[0] == 11 && evm[1] == 12 && evm[2] == 13)
+
+    let native = incremented<Native>(filled(20))
+    assert!(native[0] == 21 && native[1] == 22 && native[2] == 23)
+
+    let sp1 = incremented<Sp1>(filled(0))
+    assert!(sp1[0] == 1 && sp1[1] == 2 && sp1[2] == 3)
+}
+
+#[test]
+fn the_buffer_of_each_target_is_the_same_type() {
+    assert!(evm_buffer(filled(1))[2] == 3)
+    assert!(native_buffer(filled(5))[0] == 5)
+}
