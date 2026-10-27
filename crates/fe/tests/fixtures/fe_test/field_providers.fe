@@ -1,0 +1,124 @@
+// Two derive providers written with `quote`, on traits of this file.
+//
+// A provider is an ordinary `const fn` that receives the reflected record and
+// returns the members of the implementation as code. `quote { .. }` builds the
+// code, and `${..}` puts a compile-time value or another fragment into it.
+// `impl Trait for Type with (Provider)` asks for the implementation, and the
+// result is checked like a handwritten one.
+//
+// `BoundCheck` builds an expression from the fields, one `&&` clause per field.
+// `AlwaysAudited` lifts a compile-time `bool` into the generated code.
+
+use core::derive::Derive
+use core::meta::{Code, Expr, Field, Item, Record}
+use std::derive::{FieldStep, fold_fields}
+
+// A wrapper with an inherent comparison, called from the generated code.
+struct Gauge { raw: u256 }
+
+impl Gauge {
+    fn lte(self, _ other: Gauge) -> bool {
+        self.raw <= other.raw
+    }
+}
+
+// Field by field: every field must be at most the limit's field.
+trait Within {
+    fn within(self, _ limit: Self) -> bool
+}
+
+// `true && self.f0.lte(limit.f0) && self.f1.lte(limit.f1) && ..`
+struct EveryFieldWithin {}
+impl FieldStep for EveryFieldWithin {
+    const fn unit() -> Code<Expr> {
+        quote { true }
+    }
+    const fn step(_ acc: Code<Expr>, _ field: Field) -> Code<Expr> {
+        quote(limit) { ${acc} && self.${field}.lte(limit.${field}) }
+    }
+}
+
+struct BoundCheck {}
+impl Derive<Within> for BoundCheck {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let body = fold_fields<EveryFieldWithin>(record)
+        quote(limit) {
+            fn within(self, _ limit: Self) -> bool {
+                ${body}
+            }
+        }
+    }
+}
+
+// A method whose body is a compile-time `bool` lifted into a literal.
+trait Audited {
+    fn audited(self) -> bool
+}
+
+struct AlwaysAudited {}
+impl Derive<Audited> for AlwaysAudited {
+    const fn derive(_ record: Record) -> Code<Item> {
+        let flag = true
+        quote {
+            fn audited(self) -> bool {
+                ${flag}
+            }
+        }
+    }
+}
+
+struct Box2 { w: Gauge, h: Gauge }
+
+impl Within for Box2 with (BoundCheck)
+impl Audited for Box2 with (AlwaysAudited)
+
+// The generated implementation satisfies a generic bound.
+fn fits<T: Within>(_ value: T, _ limit: T) -> bool {
+    value.within(limit)
+}
+
+fn gauge(_ raw: u256) -> Gauge {
+    Gauge { raw }
+}
+
+#[test]
+fn every_field_under_the_limit_is_within() {
+    let small = Box2 { w: gauge(2), h: gauge(3) }
+    let big = Box2 { w: gauge(10), h: gauge(10) }
+    assert!(small.within(big))
+}
+
+#[test]
+fn equal_fields_are_within() {
+    let a = Box2 { w: gauge(4), h: gauge(5) }
+    let b = Box2 { w: gauge(4), h: gauge(5) }
+    assert!(a.within(b))
+}
+
+#[test]
+fn the_first_field_over_the_limit_fails() {
+    let wide = Box2 { w: gauge(11), h: gauge(1) }
+    let limit = Box2 { w: gauge(10), h: gauge(10) }
+    assert!(!wide.within(limit))
+}
+
+#[test]
+fn the_second_field_over_the_limit_fails() {
+    let tall = Box2 { w: gauge(1), h: gauge(11) }
+    let limit = Box2 { w: gauge(10), h: gauge(10) }
+    assert!(!tall.within(limit))
+}
+
+#[test]
+fn a_lifted_bool_becomes_a_literal() {
+    let b = Box2 { w: gauge(0), h: gauge(0) }
+    assert!(b.audited())
+}
+
+#[test]
+fn the_generated_implementation_satisfies_a_generic_bound() {
+    let small = Box2 { w: gauge(1), h: gauge(1) }
+    let big = Box2 { w: gauge(2), h: gauge(2) }
+    assert!(fits(small, big))
+    assert!(!fits(big, small))
+}
