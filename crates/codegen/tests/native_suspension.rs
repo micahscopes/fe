@@ -310,3 +310,62 @@ done(&task,42,true);
         false,
     );
 }
+
+#[test]
+fn emitted_tasks_interleave_in_the_order_the_broker_is_told() {
+    // Three instances of one emitted program, so the object defines its
+    // symbols once. The broker runs them in announcement order, and the same
+    // announcements give the same steps when replayed on a fresh broker.
+    execute(
+        "broker",
+        REPEATED,
+        r#"
+fn brief(steps: &[runtime::Step]) -> Vec<(usize, String)> {
+    steps.iter().map(|step| (step.task.index(), match step.result {
+        Ok(Progress::Suspended(_)) => "suspended".to_string(),
+        Ok(Progress::Cancelling) => "cancelling".to_string(),
+        Ok(Progress::Complete { value, cancelled }) => format!("complete {value} {cancelled}"),
+        Err(error) => format!("{error:?}"),
+    })).collect()
+}
+fn ticket_of(steps: &[runtime::Step], index: usize) -> Ticket {
+    steps.iter().find_map(|step| match step.result {
+        Ok(Progress::Suspended(ticket)) if step.task.index() == index => Some(ticket),
+        _ => None,
+    }).unwrap()
+}
+fn scenario(code: &Rc<NativeCode<()>>) -> Vec<(usize, String)> {
+    let mut broker = runtime::Broker::new().unwrap();
+    let ids: Vec<_> = (0..3).map(|_| broker.spawn(code.clone()).unwrap()).collect();
+    let mut steps = broker.run(100);
+    let first: Vec<Ticket> = (0..3).map(|index| ticket_of(&steps, index)).collect();
+    broker.deliver(ids[1], first[1], Delivery::Success(1)).unwrap();
+    broker.deliver(ids[0], first[0], Delivery::Success(2)).unwrap();
+    assert!(broker.cancel(ids[2]));
+    assert_eq!(broker.deliver(ids[1], first[1], Delivery::Success(1)), Err(Error::Duplicate));
+    let middle = broker.run(100);
+    let second_a = ticket_of(&middle, 0);
+    let second_b = ticket_of(&middle, 1);
+    steps.extend(middle);
+    broker.deliver(ids[0], second_a, Delivery::Success(10)).unwrap();
+    broker.deliver(ids[1], second_b, Delivery::Success(20)).unwrap();
+    steps.extend(broker.run(100));
+    assert!(broker.is_idle());
+    for id in &ids {
+        assert_eq!(broker.retains_frame(*id), Some(false));
+        assert_eq!(broker.registrations(*id), Some(0));
+    }
+    brief(&steps)
+}
+let expected: Vec<(usize, String)> = [
+    (0, "suspended"), (1, "suspended"), (2, "suspended"),
+    (1, "suspended"), (0, "suspended"),
+    (2, "cancelling"), (2, "complete 0 true"),
+    (0, "complete 17 false"), (1, "complete 26 false"),
+].iter().map(|(task, step)| (*task, step.to_string())).collect();
+assert_eq!(scenario(&code), expected);
+assert_eq!(scenario(&code), expected);
+"#,
+        false,
+    );
+}
