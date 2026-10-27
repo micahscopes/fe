@@ -1,7 +1,8 @@
 //! Single-threaded custody for emitted native scalar task segments.
 //! Cancellation is sticky and cooperative. Each poll executes at most one
 //! segment; readiness callbacks enqueue delivery and never execute a task.
-//! `Broker` owns several tasks and fixes the order in which they run.
+//! `Broker` owns several tasks, fixes the order in which they run, and owns
+//! the virtual clock that completes sleeps.
 
 mod broker;
 pub use broker::{Broker, Step, TaskId};
@@ -116,6 +117,9 @@ pub struct Task<G> {
     cancelled: Cell<bool>,
     generation: Cell<u64>,
     operations: RefCell<HashSet<u64>>,
+    /// Durations requested by `native_timer_begin`, as (pending, milliseconds).
+    /// The runtime holds no clock; a host reads a request with `take_sleep`.
+    sleeps: RefCell<Vec<(u64, u64)>>,
 }
 
 static NEXT_IDENTITY: AtomicU64 = AtomicU64::new(1);
@@ -129,6 +133,7 @@ fn identity() -> Result<u64, Error> {
 
 struct Invocation {
     operations: *const RefCell<HashSet<u64>>,
+    sleeps: *const RefCell<Vec<(u64, u64)>>,
     fault: Cell<Option<Error>>,
 }
 thread_local! { static CURRENT: Cell<*const Invocation> = const { Cell::new(std::ptr::null()) }; }
@@ -139,10 +144,10 @@ impl Drop for ContextGuard {
     }
 }
 
-/// Private scalar import of core::task::Native::begin. Calling outside a task
-/// is a runtime contract violation; abort rather than unwind across native FFI.
-#[unsafe(no_mangle)]
-extern "C" fn native_task_begin() -> u64 {
+/// Mint an identity for an operation begun by the running segment and
+/// register it with the task. Calling outside a task is a runtime contract
+/// violation; abort rather than unwind across native FFI.
+fn begin_operation(milliseconds: Option<u64>) -> u64 {
     let context = CURRENT.get();
     if context.is_null() {
         std::process::abort();
@@ -153,6 +158,11 @@ extern "C" fn native_task_begin() -> u64 {
     match identity() {
         Ok(id) => {
             unsafe { &*context.operations }.borrow_mut().insert(id);
+            if let Some(milliseconds) = milliseconds {
+                unsafe { &*context.sleeps }
+                    .borrow_mut()
+                    .push((id, milliseconds));
+            }
             id
         }
         Err(error) => {
@@ -160,6 +170,20 @@ extern "C" fn native_task_begin() -> u64 {
             0
         }
     }
+}
+
+/// Private scalar import of core::task::Native::begin.
+#[unsafe(no_mangle)]
+extern "C" fn native_task_begin() -> u64 {
+    begin_operation(None)
+}
+
+/// Private scalar import of core::task::Timer::sleep_begin for Native. The
+/// operation is an ordinary pending identity that also records the requested
+/// duration for the host, which alone decides when the sleep completes.
+#[unsafe(no_mangle)]
+extern "C" fn native_timer_begin(milliseconds: u64) -> u64 {
+    begin_operation(Some(milliseconds))
 }
 
 impl<G> Task<G> {
@@ -172,6 +196,7 @@ impl<G> Task<G> {
             cancelled: Cell::new(false),
             generation: Cell::new(0),
             operations: RefCell::new(HashSet::new()),
+            sleeps: RefCell::new(Vec::new()),
         })
     }
 
@@ -216,8 +241,7 @@ impl<G> Task<G> {
                 value: 0,
                 cancelled: true,
             };
-            self.frame.borrow_mut().take();
-            self.operations.borrow_mut().clear();
+            self.release_operations();
         }
         changed
     }
@@ -263,6 +287,7 @@ impl<G> Task<G> {
         };
         let invocation = Invocation {
             operations: &self.operations,
+            sleeps: &self.sleeps,
             fault: Cell::new(None),
         };
         let (next, value) = {
@@ -284,8 +309,7 @@ impl<G> Task<G> {
         if next == 0 {
             let cancelled = self.cancelled.get();
             self.state.replace(State::Complete { value, cancelled });
-            self.frame.borrow_mut().take();
-            self.operations.borrow_mut().clear();
+            self.release_operations();
             return Ok(Progress::Complete { value, cancelled });
         }
         let Ok(segment) = usize::try_from(next) else {
@@ -321,9 +345,29 @@ impl<G> Task<G> {
 
     fn fail(&self, error: Error) -> Result<Progress, Error> {
         self.state.replace(State::Failed(error));
+        self.release_operations();
+        Err(error)
+    }
+
+    /// Drop the frame and every registration of a task that will not run again.
+    fn release_operations(&self) {
         self.frame.borrow_mut().take();
         self.operations.borrow_mut().clear();
-        Err(error)
+        self.sleeps.borrow_mut().clear();
+    }
+
+    /// The duration, in milliseconds, requested by the sleep that `ticket`
+    /// names, or `None` if that operation is not a sleep, the ticket is not
+    /// the task's current suspension, or the request was already taken. The
+    /// host that completes the sleep reads this once, right after the poll
+    /// that returned the ticket.
+    pub fn take_sleep(&self, ticket: Ticket) -> Option<u64> {
+        if ticket.owner != self.owner || ticket.generation != self.generation.get() {
+            return None;
+        }
+        let mut sleeps = self.sleeps.borrow_mut();
+        let position = sleeps.iter().position(|(id, _)| *id == ticket.pending)?;
+        Some(sleeps.remove(position).1)
     }
 
     pub fn retains_frame(&self) -> bool {

@@ -4,8 +4,17 @@
 //! make progress. The host announces events (a start, a delivery, a
 //! cancellation) and the broker runs the task at the front of the queue, one
 //! segment per [`Broker::step`]. The sequence of steps depends only on the
-//! sequence of announcements: the broker reads no clock, no thread and no
+//! sequence of announcements: the broker reads no real clock, no thread and no
 //! randomness, and it iterates no hashed collection.
+//!
+//! The broker owns a virtual clock that starts at zero and moves only when the
+//! host calls [`Broker::advance`]. A sleep begun by a task is an ordinary
+//! pending operation. The broker notes its deadline (the clock when the sleep
+//! was begun plus the requested milliseconds) and completes it with a success
+//! when the clock reaches the deadline: sleeps due at one `advance` complete in
+//! deadline order, and sleeps with equal deadlines in the order they began.
+//! Completion queues the task like any other delivery. Virtual time is a `u64`
+//! count of milliseconds that stops at `u64::MAX`.
 //!
 //! The rule is a property of this test runtime. It is not a promise of the
 //! language: Fe code cannot observe which other task ran in between.
@@ -43,6 +52,17 @@ pub struct Broker<G> {
     /// `queued[i]` is true exactly when task `i` is in `ready`.
     queued: Vec<bool>,
     ready: VecDeque<usize>,
+    /// Virtual time in milliseconds.
+    now: u64,
+    /// Sleeps that have not completed, in the order they began.
+    sleeping: Vec<Sleep>,
+}
+
+#[derive(Clone, Copy)]
+struct Sleep {
+    deadline: u64,
+    task: usize,
+    ticket: Ticket,
 }
 
 impl<G> Broker<G> {
@@ -52,6 +72,8 @@ impl<G> Broker<G> {
             tasks: Vec::new(),
             queued: Vec::new(),
             ready: VecDeque::new(),
+            now: 0,
+            sleeping: Vec::new(),
         })
     }
 
@@ -81,6 +103,9 @@ impl<G> Broker<G> {
     ) -> Result<(), Error> {
         let index = self.index(task).ok_or(Error::Foreign)?;
         self.tasks[index].deliver(ticket, delivery)?;
+        // The operation is resolved, so a sleep that it was must not complete.
+        self.sleeping
+            .retain(|sleep| !(sleep.task == index && sleep.ticket == ticket));
         self.enqueue(index);
         Ok(())
     }
@@ -94,9 +119,52 @@ impl<G> Broker<G> {
         };
         let changed = self.tasks[index].cancel();
         if changed {
+            // A cancelled task is resumed with `Cancelled`; its sleeps never
+            // complete.
+            self.sleeping.retain(|sleep| sleep.task != index);
             self.enqueue(index);
         }
         changed
+    }
+
+    /// The virtual time in milliseconds.
+    pub fn now(&self) -> u64 {
+        self.now
+    }
+
+    /// The number of sleeps that have not completed.
+    pub fn sleeping(&self) -> usize {
+        self.sleeping.len()
+    }
+
+    /// Move the virtual clock forward and complete every sleep whose deadline
+    /// has been reached, in deadline order and, for equal deadlines, in the
+    /// order the sleeps began. Each completion is a success carrying 0 and
+    /// queues its task behind every task that is already queued. No task runs
+    /// here. Returns the tasks that were woken, in that order. Only `advance`
+    /// completes a sleep, so a sleep of zero milliseconds is completed by the
+    /// next `advance`, even `advance(0)`.
+    pub fn advance(&mut self, milliseconds: u64) -> Result<Vec<TaskId>, Error> {
+        self.now = self.now.saturating_add(milliseconds);
+        let now = self.now;
+        let (mut due, waiting): (Vec<Sleep>, Vec<Sleep>) = std::mem::take(&mut self.sleeping)
+            .into_iter()
+            .partition(|sleep| sleep.deadline <= now);
+        self.sleeping = waiting;
+        // A stable sort keeps the order in which equal deadlines began.
+        due.sort_by_key(|sleep| sleep.deadline);
+        let mut woken = Vec::with_capacity(due.len());
+        for sleep in due {
+            // Deliveries and cancellations remove their sleeps, so a due
+            // sleep always names a live suspension.
+            self.tasks[sleep.task].deliver(sleep.ticket, Delivery::Success(0))?;
+            self.enqueue(sleep.task);
+            woken.push(TaskId {
+                broker: self.id,
+                index: sleep.task,
+            });
+        }
+        Ok(woken)
     }
 
     /// Run one segment of the task at the front of the queue. A task whose
@@ -107,8 +175,18 @@ impl<G> Broker<G> {
         let index = self.ready.pop_front()?;
         self.queued[index] = false;
         let result = self.tasks[index].poll();
-        if result == Ok(Progress::Cancelling) {
-            self.enqueue(index);
+        match result {
+            Ok(Progress::Cancelling) => self.enqueue(index),
+            Ok(Progress::Suspended(ticket)) => {
+                if let Some(milliseconds) = self.tasks[index].take_sleep(ticket) {
+                    self.sleeping.push(Sleep {
+                        deadline: self.now.saturating_add(milliseconds),
+                        task: index,
+                        ticket,
+                    });
+                }
+            }
+            _ => {}
         }
         Some(Step {
             task: TaskId {
@@ -131,6 +209,8 @@ impl<G> Broker<G> {
         steps
     }
 
+    /// Whether no task is queued. A task that waits for a delivery or a sleep
+    /// is not queued.
     pub fn is_idle(&self) -> bool {
         self.ready.is_empty()
     }
@@ -161,7 +241,7 @@ impl<G> Broker<G> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Segment, native_task_begin};
+    use super::super::{Segment, native_task_begin, native_timer_begin};
     use super::*;
     use std::cell::{Cell, RefCell};
 
@@ -174,6 +254,7 @@ mod tests {
     thread_local! {
         static LOG: RefCell<Vec<Entry>> = const { RefCell::new(Vec::new()) };
         static NEXT_TAG: Cell<u64> = const { Cell::new(0) };
+        static NEXT_SLEEP: Cell<u64> = const { Cell::new(0) };
     }
     fn weight(kind: u64, payload: u64) -> u64 {
         match kind {
@@ -216,9 +297,48 @@ mod tests {
         let entries: Vec<Segment> = vec![start, resume_first, resume_second];
         Rc::new(unsafe { NativeCode::new(entries, 3, ()) }.unwrap())
     }
+    // A task with one cut that sleeps for NEXT_SLEEP milliseconds, read when
+    // the task starts. Its result is 1 plus the weight of the delivery.
+    unsafe extern "C" fn sleep_start(frame: *mut u64, kind: u64, payload: u64) -> u64 {
+        let tag = NEXT_TAG.replace(NEXT_TAG.get() + 1);
+        LOG.with_borrow_mut(|log| log.push((tag, 0, kind, payload)));
+        unsafe {
+            *word(frame, 2) = tag;
+            *word(frame, 0) = native_timer_begin(NEXT_SLEEP.get());
+        }
+        1
+    }
+    unsafe extern "C" fn sleep_resume(frame: *mut u64, kind: u64, payload: u64) -> u64 {
+        unsafe {
+            let tag = *word(frame, 2);
+            LOG.with_borrow_mut(|log| log.push((tag, 1, kind, payload)));
+            *word(frame, 0) = 1 + weight(kind, payload);
+        }
+        0
+    }
+    fn sleeper() -> Rc<NativeCode<()>> {
+        let entries: Vec<Segment> = vec![sleep_start, sleep_resume];
+        Rc::new(unsafe { NativeCode::new(entries, 3, ()) }.unwrap())
+    }
+    /// Start one sleeper per duration, in order, and run each to its sleep.
+    fn sleepers(milliseconds: &[u64]) -> (Broker<()>, Vec<TaskId>) {
+        let code = sleeper();
+        let mut broker = Broker::new().unwrap();
+        let ids = milliseconds
+            .iter()
+            .map(|ms| {
+                NEXT_SLEEP.set(*ms);
+                let id = broker.spawn(code.clone()).unwrap();
+                assert_eq!(brief(&broker.run(100)), [(id.index(), Brief::Suspended)]);
+                id
+            })
+            .collect();
+        (broker, ids)
+    }
     fn reset() {
         LOG.with_borrow_mut(Vec::clear);
         NEXT_TAG.set(0);
+        NEXT_SLEEP.set(0);
     }
     fn log() -> Vec<Entry> {
         LOG.with_borrow(Clone::clone)
@@ -467,5 +587,145 @@ mod tests {
         let second = script();
         assert_eq!(first, second);
         assert!(first.0.len() > 4);
+    }
+
+    #[test]
+    fn a_sleep_completes_when_the_scripted_clock_reaches_its_deadline() {
+        reset();
+        let (mut broker, ids) = sleepers(&[30]);
+        assert_eq!((broker.now(), broker.sleeping()), (0, 1));
+        assert_eq!(broker.registrations(ids[0]), Some(1));
+        assert_eq!(broker.advance(29), Ok(vec![]));
+        assert!(broker.is_idle());
+        assert_eq!(broker.run(100), []);
+        assert_eq!(broker.advance(1), Ok(vec![ids[0]]));
+        assert_eq!(broker.now(), 30);
+        assert_eq!(log().len(), 1, "advance must not run code");
+        assert_eq!(brief(&broker.run(100)), [(0, Brief::Complete(1, false))]);
+        assert_eq!(log()[1], (0, 1, 1, 0), "a sleep succeeds with 0");
+        assert_eq!(broker.sleeping(), 0);
+        assert_eq!(broker.retains_frame(ids[0]), Some(false));
+        assert_eq!(broker.registrations(ids[0]), Some(0));
+    }
+
+    #[test]
+    fn sleeps_complete_in_deadline_order_and_equal_deadlines_in_start_order() {
+        reset();
+        let (mut broker, ids) = sleepers(&[50, 20, 20, 70]);
+        assert_eq!(broker.advance(60), Ok(vec![ids[1], ids[2], ids[0]]));
+        assert_eq!(broker.sleeping(), 1);
+        assert_eq!(
+            brief(&broker.run(100)),
+            [
+                (1, Brief::Complete(1, false)),
+                (2, Brief::Complete(1, false)),
+                (0, Brief::Complete(1, false)),
+            ]
+        );
+        assert_eq!(broker.advance(9), Ok(vec![]));
+        assert_eq!(broker.advance(1), Ok(vec![ids[3]]));
+        assert_eq!(brief(&broker.run(100)), [(3, Brief::Complete(1, false))]);
+    }
+
+    #[test]
+    fn a_deadline_counts_from_the_clock_when_the_sleep_began() {
+        reset();
+        let code = sleeper();
+        let mut broker = Broker::new().unwrap();
+        NEXT_SLEEP.set(40);
+        let early = broker.spawn(code.clone()).unwrap();
+        broker.run(100);
+        assert_eq!(broker.advance(25), Ok(vec![]));
+        NEXT_SLEEP.set(10);
+        let late = broker.spawn(code).unwrap();
+        broker.run(100);
+        // The second sleep began at 25, so it is due at 35 and wakes first.
+        assert_eq!(broker.advance(9), Ok(vec![]));
+        assert_eq!(broker.advance(1), Ok(vec![late]));
+        assert_eq!(broker.advance(5), Ok(vec![early]));
+    }
+
+    #[test]
+    fn a_sleeping_task_that_is_cancelled_never_completes_its_sleep() {
+        reset();
+        let (mut broker, ids) = sleepers(&[100, 100]);
+        assert!(broker.cancel(ids[0]));
+        assert_eq!(broker.sleeping(), 1);
+        assert_eq!(brief(&broker.run(100)), [(0, Brief::Complete(1001, true))]);
+        assert_eq!(log()[2], (0, 1, 2, 0), "the sleeper sees a cancellation");
+        assert_eq!(broker.advance(100), Ok(vec![ids[1]]));
+        assert_eq!(brief(&broker.run(100)), [(1, Brief::Complete(1, false))]);
+        assert_eq!(broker.retains_frame(ids[0]), Some(false));
+        assert_eq!(broker.registrations(ids[0]), Some(0));
+        assert_eq!(broker.sleeping(), 0);
+    }
+
+    #[test]
+    fn a_task_cancelled_before_it_sleeps_registers_no_sleep() {
+        reset();
+        let code = sleeper();
+        let mut broker = Broker::new().unwrap();
+        NEXT_SLEEP.set(5);
+        let id = broker.spawn(code).unwrap();
+        assert!(broker.cancel(id));
+        assert_eq!(brief(&broker.run(100)), [(0, Brief::Complete(0, true))]);
+        assert_eq!((log().len(), broker.sleeping()), (0, 0));
+        assert_eq!(broker.advance(5), Ok(vec![]));
+    }
+
+    #[test]
+    fn a_delivery_to_a_sleep_resolves_it() {
+        reset();
+        let code = sleeper();
+        let mut broker = Broker::new().unwrap();
+        NEXT_SLEEP.set(10);
+        let id = broker.spawn(code).unwrap();
+        let ticket = ticket(&broker.step().unwrap());
+        broker.deliver(id, ticket, Delivery::Failure(3)).unwrap();
+        assert_eq!(broker.sleeping(), 0);
+        assert_eq!(broker.advance(10), Ok(vec![]));
+        assert_eq!(brief(&broker.run(100)), [(0, Brief::Complete(101, false))]);
+        assert_eq!(
+            broker.deliver(id, ticket, Delivery::Success(0)),
+            Err(Error::Duplicate)
+        );
+    }
+
+    #[test]
+    fn a_zero_sleep_waits_for_the_next_advance_and_time_stops_at_the_maximum() {
+        reset();
+        let (mut broker, ids) = sleepers(&[0, u64::MAX]);
+        assert!(broker.is_idle());
+        assert_eq!(broker.advance(0), Ok(vec![ids[0]]));
+        assert_eq!(broker.advance(u64::MAX - 1), Ok(vec![]));
+        assert_eq!(broker.advance(u64::MAX), Ok(vec![ids[1]]));
+        assert_eq!(broker.now(), u64::MAX);
+    }
+
+    fn sleep_script() -> (Vec<(usize, Brief)>, Vec<Entry>, Vec<Vec<usize>>, u64) {
+        reset();
+        let (mut broker, ids) = sleepers(&[40, 10, 40, 25]);
+        let mut steps = Vec::new();
+        let mut woken = Vec::new();
+        let mut wake = |broker: &mut Broker<()>, ms| {
+            let ids = broker.advance(ms).unwrap();
+            woken.push(ids.iter().map(|id| id.index()).collect());
+        };
+        wake(&mut broker, 10);
+        steps.extend(broker.run(1));
+        broker.cancel(ids[2]);
+        wake(&mut broker, 20);
+        steps.extend(broker.run(100));
+        wake(&mut broker, 20);
+        steps.extend(broker.run(100));
+        (brief(&steps), log(), woken, broker.now())
+    }
+
+    #[test]
+    fn the_same_clock_script_gives_the_same_wakeups_steps_and_code_order() {
+        let first = sleep_script();
+        let second = sleep_script();
+        assert_eq!(first, second);
+        assert_eq!(first.2, [vec![1], vec![3], vec![0]]);
     }
 }
