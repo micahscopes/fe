@@ -1,0 +1,88 @@
+// `#[generate(abi_size)]` gives a record its ABI layout facts: the head size is
+// the sum of the field head sizes, and the record is dynamic if any field is.
+// The expected numbers below are written from the ABI rules (one 32-byte word
+// per scalar, one head word for a dynamic field) and not from the generator.
+
+use core::abi::{AbiSize, DynString}
+use std::derive::abi_size
+
+#[generate(abi_size)]
+struct Point { x: u256, y: u256 }
+
+#[generate(abi_size)]
+struct Mixed { a: u256, b: bool, c: u256 }
+
+// A field that is itself generated: the outer layout reads the inner one.
+#[generate(abi_size)]
+struct Outer { inner: Point, flag: bool }
+
+// A dynamic field adds one head word and makes the record dynamic.
+#[generate(abi_size)]
+struct WithText { tag: u256, text: DynString }
+
+// A handwritten implementation is interchangeable with a generated one.
+struct HandwrittenPoint { x: u256, y: u256 }
+
+impl AbiSize for HandwrittenPoint {
+    const HEAD_SIZE: u256 = 64
+    const IS_DYNAMIC: bool = false
+}
+
+fn head_size_of<T: AbiSize>(_ value: T) -> u256 {
+    T::HEAD_SIZE
+}
+
+#[test]
+fn the_head_size_is_the_sum_of_the_field_head_sizes() {
+    assert!(Point::HEAD_SIZE == 64)
+    assert!(!Point::IS_DYNAMIC)
+    assert!(Mixed::HEAD_SIZE == 96)
+    assert!(!Mixed::IS_DYNAMIC)
+}
+
+#[test]
+fn a_generated_layout_composes_with_another_generated_layout() {
+    assert!(Outer::HEAD_SIZE == 96)
+    assert!(!Outer::IS_DYNAMIC)
+}
+
+#[test]
+fn a_dynamic_field_makes_the_record_dynamic() {
+    assert!(WithText::HEAD_SIZE == 64)
+    assert!(WithText::IS_DYNAMIC)
+}
+
+#[test]
+fn the_generated_implementation_satisfies_a_generic_bound() {
+    assert!(head_size_of(Point { x: 0, y: 0 }) == 64)
+    assert!(head_size_of(Mixed { a: 0, b: false, c: 0 }) == 96)
+    let handwritten = head_size_of(HandwrittenPoint { x: 0, y: 0 })
+    assert!(handwritten == head_size_of(Point { x: 0, y: 0 }))
+}
+
+#[test]
+fn the_payload_size_of_a_static_record_is_its_head_size() {
+    let point = Point { x: 1, y: 2 }
+    assert!(point.payload_size() == 64)
+}
+
+// A generic container whose own layout is handwritten: it states the bound on
+// its implementation and not on the struct, because a generated target is
+// checked before any generated implementation exists, so a bound on the struct
+// that only a generated implementation satisfies is refused there.
+struct Pair<A> { first: A, second: A }
+
+impl<A: AbiSize> AbiSize for Pair<A> {
+    const HEAD_SIZE: u256 = A::HEAD_SIZE * 2
+    const IS_DYNAMIC: bool = A::IS_DYNAMIC
+}
+
+#[generate(abi_size)]
+struct Tree { pairs: Pair<Pair<Point>>, count: u256 }
+
+#[test]
+fn a_generated_record_holds_a_generic_container_of_generated_records() {
+    // Four points of two words each, then one word.
+    assert!(Tree::HEAD_SIZE == 4 * 64 + 32)
+    assert!(!Tree::IS_DYNAMIC)
+}
