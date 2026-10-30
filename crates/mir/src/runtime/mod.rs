@@ -15,9 +15,12 @@ pub use layout_utils::*;
 pub use lower::*;
 pub(crate) use package::runtime_instance_display_name;
 pub use package::{
-    LowerError, build_ingot_module_runtime_package, build_native_executable_package,
-    build_native_test_runtime_package, build_runtime_package, build_test_runtime_package,
-    native_executable_entry, runtime_instance_stable_key, runtime_instance_symbol_key,
+    LowerError, TestFunc, WASM_ALLOCATOR_EXPORTS, WASM_MEMORY_EXPORT, WasmExport,
+    WasmExportPackage, WasmParamShape, WasmResultShape, build_ingot_module_runtime_package,
+    build_native_executable_package, build_native_test_runtime_package, build_runtime_package,
+    build_test_runtime_package, build_wasm_export_package, build_wasm_test_runtime_package,
+    collect_test_funcs, native_executable_entry, runtime_instance_stable_key,
+    runtime_instance_symbol_key,
 };
 pub use pretty::{
     format_runtime_body, format_runtime_body_excerpt, format_runtime_package,

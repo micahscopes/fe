@@ -9,16 +9,19 @@ pub enum Target {
     #[default]
     Evm,
     Native,
+    /// WebAssembly: a 32-bit address space with native-style semantics.
+    Wasm,
 }
 
 impl Target {
-    pub const ALL: [Target; 2] = [Target::Evm, Target::Native];
+    pub const ALL: [Target; 3] = [Target::Evm, Target::Native, Target::Wasm];
 
     /// The width of `usize`, `isize` and memory addresses.
     pub fn usize_bits(self) -> usize {
         match self {
             Target::Evm => 256,
             Target::Native => 64,
+            Target::Wasm => 32,
         }
     }
 }

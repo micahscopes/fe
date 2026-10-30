@@ -56,3 +56,9 @@ error[8-0074]: integer literal out of range
    │
 23 │     0x8000000000000000
    │     ^^^^^^^^^^^^^^^^^^ `9223372036854775808` is not representable in `isize`
+
+error[8-0074]: integer literal out of range
+   ┌─ int_literal_out_of_range.fe:27:5
+   │
+27 │     0x100000000
+   │     ^^^^^^^^^^^ `4294967296` is not representable in `usize`

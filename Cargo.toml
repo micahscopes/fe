@@ -61,6 +61,7 @@ sonatina-ir = { git = "https://github.com/fe-lang/sonatina", rev = "92df01a623ec
 sonatina-triple = { git = "https://github.com/fe-lang/sonatina", rev = "92df01a623ec87927452d884131d93589a711c3d" }
 sonatina-codegen = { git = "https://github.com/fe-lang/sonatina", rev = "92df01a623ec87927452d884131d93589a711c3d" }
 sonatina-cranelift = { git = "https://github.com/fe-lang/sonatina", rev = "92df01a623ec87927452d884131d93589a711c3d" }
+sonatina-wasm = { git = "https://github.com/fe-lang/sonatina", rev = "92df01a623ec87927452d884131d93589a711c3d" }
 sonatina-verifier = { git = "https://github.com/fe-lang/sonatina", rev = "92df01a623ec87927452d884131d93589a711c3d" }
 sonatina-sp1 = { git = "https://github.com/fe-lang/sonatina", rev = "92df01a623ec87927452d884131d93589a711c3d" }
 
